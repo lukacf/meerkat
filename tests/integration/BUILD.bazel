@@ -176,6 +176,8 @@ rust_test(
         "//:repo_governance_files",
         "//:workspace_cargo_manifests",
         "//:workspace_metadata",
+        "//crates/meerkat-authorization:cargo_manifest",
+        "//crates/meerkat-authorization:package_runfiles",
         "//crates/meerkat-cli:cargo_manifest",
         "//crates/meerkat-cli:package_runfiles",
         "//crates/meerkat-comms:cargo_manifest",

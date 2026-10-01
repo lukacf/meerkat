@@ -37,6 +37,8 @@ fn make_progress_input(label: &str) -> Input {
         injected_context: Vec::new(),
         sender_taint: None,
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Peer {

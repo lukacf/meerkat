@@ -6240,6 +6240,7 @@ async fn execute_openai_live_command_with_budget(
                 tool_use_id: result.call_id.0,
                 content: result.content,
                 is_error: result.is_error,
+                settlement_failures: Vec::new(),
             };
             session.submit_tool_result(tool_result).await?;
             Ok(())
@@ -7563,6 +7564,7 @@ mod tests {
                         "{\"token\":\"birch seventeen\"}".to_string(),
                     ),
                     is_error: false,
+                    settlement_failures: Vec::new(),
                 }],
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
@@ -14811,6 +14813,73 @@ mod tests {
                 assert_eq!(arguments["q"], serde_json::json!("meerkat"));
             }
             other => panic!("expected ToolCallRequested, got {other:?}"),
+        }
+    }
+    #[tokio::test]
+    async fn successful_settlement_companion_keeps_semantic_provider_output() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        let semantic = serde_json::json!({"status":"completed","value":1});
+        let mut result = ToolResult::new("completed-effect".into(), semantic.to_string(), false);
+        result.settlement_failures = vec![meerkat_core::ToolDispatchSettlementFailure {
+            admission_source: meerkat_core::ToolDispatchAdmissionSource::AuthorizationAudit,
+            effect_kind: meerkat_core::LiveBridgeEffectKind::ExternalIo,
+            physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Committed,
+            failure_kind:
+                meerkat_core::ToolDispatchTerminalErrorKind::OperationObservationUnavailable,
+        }];
+        session.submit_tool_result(result).await.unwrap();
+        assert_eq!(
+            session.response_state,
+            RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 }
+        );
+        session
+            .submit_tool_result(ToolResult::new(
+                "healthy-next-effect".into(),
+                "next completed".into(),
+                false,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            session.response_state,
+            RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 }
+        );
+
+        let seen = seen.lock().await;
+        assert_eq!(
+            seen.len(),
+            4,
+            "one output and one continuation per result, no retries"
+        );
+        for (index, expected_call) in [(0, "completed-effect"), (2, "healthy-next-effect")] {
+            let ClientEvent::ConversationItemCreate { item, .. } = &seen[index] else {
+                panic!("expected semantic function output");
+            };
+            let Item::FunctionCallOutput {
+                call_id, output, ..
+            } = item.as_ref()
+            else {
+                panic!("expected function call output item");
+            };
+            assert_eq!(call_id, expected_call);
+            if index == 0 {
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(output).unwrap(),
+                    semantic
+                );
+            } else {
+                assert_eq!(output, "next completed");
+            }
+            assert!(!output.contains("settlement_failures"));
+            assert!(!output.contains("operation_observation_unavailable"));
+            assert_response_create_requests_audio(&seen[index + 1]);
         }
     }
 }

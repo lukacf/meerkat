@@ -10269,6 +10269,7 @@ impl super::upcall_responder::UpcallServeSeams for OperatorExecutionRaceSeams {
                 Ok(super::member_upcall::UpcallToolOutcome::Ok {
                     content: "{\"effect\":true}".to_string(),
                     is_error: false,
+                    settlement_failures: Vec::new(),
                 })
             }
             Err(error) => {
@@ -83480,6 +83481,7 @@ impl SessionAgent for StopBoundaryProbeAgent {
         transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
         execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
         request_contexts: Vec<meerkat_core::lifecycle::TurnRequestContext>,
+        work_authorization: Option<meerkat_core::WorkAuthorizationContext>,
         event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         let result = self
@@ -83488,6 +83490,7 @@ impl SessionAgent for StopBoundaryProbeAgent {
                 transcript_identity,
                 execution_kind,
                 request_contexts,
+                work_authorization,
                 event_tx,
             )
             .await;

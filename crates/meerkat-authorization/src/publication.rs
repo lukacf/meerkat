@@ -193,6 +193,12 @@ impl fmt::Debug for LocalPublicationStamp {
 }
 
 impl LocalPublicationStamp {
+    /// Historical process-local diagnostic data only. Not a permission,
+    /// durable policy epoch, or cross-process freshness proof.
+    pub(crate) fn observation_sequence(&self) -> u64 {
+        self.sequence
+    }
+
     /// One allocation-free local atomic read at the final operation boundary.
     /// The prepared operation must separately retain its exact binding and
     /// deadline. No awaited preparation may follow the final entry check.

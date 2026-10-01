@@ -1736,6 +1736,11 @@ async fn apply_runtime_turn_under_runtime_turn_boundary(
                 .and_then(|meta| meta.turn_tool_overlay.clone()),
             primitive.turn_metadata().cloned(),
         )
+        .with_work_authorization(
+            primitive
+                .turn_metadata()
+                .and_then(|meta| meta.work_authorization.clone()),
+        )
         .with_typed_turn_appends(typed_turn_appends.clone()),
     };
     meerkat::surface::inject_workgraph_attention_turn_overlay(
@@ -1839,6 +1844,9 @@ async fn apply_runtime_turn(
 
 #[async_trait::async_trait]
 impl CoreExecutor for RestSessionRuntimeExecutor {
+    fn supports_work_authorization(&self) -> bool {
+        true
+    }
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(RestSessionRuntimeBoundaryHandle {
             context: self.context.clone(),
@@ -3676,6 +3684,8 @@ fn make_runtime_external_event_input(
         meerkat_runtime::ExternalEventInput {
             objective_id: None,
             header: meerkat_runtime::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: meerkat_runtime::InputOrigin::External {
@@ -4521,6 +4531,7 @@ fn callback_pending_api_error(
             tool_use_id,
             tool_name,
             args,
+            settlement_failures: Vec::new(),
         }],
         session_created,
     )
@@ -5445,6 +5456,7 @@ async fn create_session_inner(
         mob_tools: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
         initial_turn_metadata: None,
+        initial_work_authorization: None,
     };
     build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
         req.enable_mob,
@@ -6676,6 +6688,7 @@ async fn continue_session_inner(
             mob_tools: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
             initial_turn_metadata: None,
+            initial_work_authorization: None,
         };
         build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Inherit);
         let model = match req.model.clone() {
@@ -15439,6 +15452,12 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         assert_eq!(code, "CALLBACK_PENDING");
         assert_eq!(details["session_id"], session_id.to_string());
         assert_eq!(details["pending_tool_calls"][0]["tool_use_id"], "call-1");
+        assert!(
+            details["pending_tool_calls"][0]
+                .get("settlement_failures")
+                .is_none(),
+            "legacy callback has no diagnostics and keeps its existing wire shape"
+        );
         assert_eq!(
             details["session_ref"],
             format_session_ref(&realm, &session_id)
@@ -15446,6 +15465,45 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         assert_eq!(details["resumable"], true);
         assert_eq!(details["tool_name"], "external_mock");
         assert_eq!(details["args"], json!({ "value": "browser" }));
+    }
+
+    #[test]
+    fn completion_outcome_to_api_result_preserves_callback_settlement_diagnostics() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("realm");
+        let pending = vec![meerkat_core::error::PendingCallbackToolCall {
+            tool_use_id: "call-with-diagnostic".into(),
+            tool_name: "external_mock".into(),
+            args: json!({"value": "browser"}),
+            settlement_failures: vec![meerkat_core::ToolDispatchSettlementFailure {
+                admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
+                effect_kind: meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+                physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Unknown,
+                failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Unavailable,
+            }],
+        }];
+        let expected = serde_json::to_value(&pending).expect("typed pending calls");
+        let error = completion_outcome_to_api_result(
+            meerkat_runtime::completion::CompletionOutcome::CallbackBatchPending {
+                pending_tool_calls: pending,
+            },
+            &session_id,
+            &realm,
+            true,
+        )
+        .expect_err("callback remains pending despite settlement diagnostics");
+        let ApiError::InternalWithData { code, details, .. } = error else {
+            panic!("expected callback data");
+        };
+        assert_eq!(code, "CALLBACK_PENDING");
+        assert_eq!(details["pending_tool_calls"], expected);
+        assert_eq!(details["session_id"], session_id.to_string());
+        assert_eq!(
+            details["session_ref"],
+            format_session_ref(&realm, &session_id)
+        );
+        assert_eq!(details["session_created"], true);
+        assert_eq!(details["resumable"], true);
     }
 
     #[test]

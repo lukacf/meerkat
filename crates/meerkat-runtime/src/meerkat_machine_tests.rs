@@ -753,6 +753,8 @@ async fn assert_fenced_registration_target_and_authority_contract(
     let input = crate::input::Input::Prompt(crate::input::PromptInput {
         injected_context: Vec::new(),
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: input_id.clone(),
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::Operator,
@@ -1622,7 +1624,9 @@ fn oauth_lifecycle_shares_auth_machine_release_authority() {
 fn oauth_lifecycle_release_stays_paired_after_runtime_auth_handle_install() {
     let machine = MeerkatMachine::ephemeral();
     let external_auth = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
-    machine.set_auth_lease_handle(external_auth);
+    machine
+        .set_auth_lease_handle(external_auth)
+        .expect("initial runtime authority installation");
     let target = oauth_target();
     let redirect_uri = "http://127.0.0.1/callback";
     let state = machine
@@ -2235,6 +2239,8 @@ fn make_prompt(text: &str) -> Input {
     Input::Prompt(crate::input::PromptInput {
         injected_context: Vec::new(),
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::Operator,
@@ -2254,6 +2260,8 @@ fn make_queued_external_event(label: &str) -> Input {
     Input::ExternalEvent(crate::input::ExternalEventInput {
         objective_id: None,
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::External {
@@ -4881,6 +4889,8 @@ async fn idle_explicit_steer_peer_request_runs_through_runtime_loop() {
         injected_context: Vec::new(),
         sender_taint: None,
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::Peer {
@@ -5170,6 +5180,8 @@ fn make_progress_input(label: &str) -> Input {
         injected_context: Vec::new(),
         sender_taint: None,
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::Peer {
@@ -20350,6 +20362,8 @@ async fn apply_input_intermediate_peer_input_during_running_turn_wakes_without_b
         injected_context: Vec::new(),
         sender_taint: None,
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::Peer {
@@ -20617,6 +20631,8 @@ async fn service_peer_admission_wakes_without_live_cancel_after_boundary() {
         injected_context: Vec::new(),
         sender_taint: None,
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::Peer {
@@ -21053,6 +21069,8 @@ fn interrupt_yielding_peer_input(
         injected_context: Vec::new(),
         sender_taint: None,
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::Peer {
@@ -21086,6 +21104,8 @@ fn directed_interrupt_yielding_peer_input(body: &str) -> (Input, InputId) {
         injected_context: Vec::new(),
         sender_taint: None,
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: input_id.clone(),
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::Peer {
@@ -32721,6 +32741,8 @@ async fn runtime_input_hooks_follow_committed_accept_dedup_and_reject_outcomes()
     let peer_id = meerkat_core::comms::PeerId::new();
     let valid_peer = Input::Peer(crate::input::PeerInput {
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: meerkat_core::InputId::new(),
             timestamp: chrono::Utc::now(),
             source: crate::input::InputOrigin::Peer {
@@ -32755,6 +32777,8 @@ async fn runtime_input_hooks_follow_committed_accept_dedup_and_reject_outcomes()
 
     let invalid_peer = Input::Peer(crate::input::PeerInput {
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: meerkat_core::InputId::new(),
             timestamp: chrono::Utc::now(),
             source: crate::input::InputOrigin::Peer {
@@ -42307,6 +42331,8 @@ fn runtime_parity_peer_message(text: &str) -> Input {
         injected_context: Vec::new(),
         sender_taint: None,
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::Peer {
@@ -42595,6 +42621,8 @@ async fn wake_runtime_if_active_inputs_drains_existing_attached_queue() {
                 injected_context: Vec::new(),
                 sender_taint: None,
                 header: crate::input::InputHeader {
+                    ingress_context: None,
+                    authority_association: None,
                     id: InputId::new(),
                     timestamp: Utc::now(),
                     source: crate::input::InputOrigin::Peer {
@@ -44052,6 +44080,10 @@ fn summarize_runtime_parity_command_result(result: &MeerkatMachineCommandResult)
 
 fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
     match error {
+        RuntimeDriverError::ControllerReadinessUnavailable { reason } => {
+            format!("controller_readiness:{reason:?}")
+        }
+        RuntimeDriverError::ControllerInUse => "controller_in_use".into(),
         RuntimeDriverError::NotReady { state } => {
             format!("not_ready:{}", runtime_parity_state_label(*state))
         }
@@ -44114,6 +44146,9 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
 
 fn summarize_runtime_parity_control_error(error: &RuntimeControlPlaneError) -> String {
     match error {
+        RuntimeControlPlaneError::ControllerReadinessUnavailable { reason } => {
+            format!("controller_readiness:{reason:?}")
+        }
         RuntimeControlPlaneError::NotFound(runtime_id) => format!("not_found:{runtime_id}"),
         RuntimeControlPlaneError::InvalidState { state } => {
             format!("invalid_state:{}", runtime_parity_state_label(*state))

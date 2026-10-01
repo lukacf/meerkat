@@ -34,6 +34,17 @@ use meerkat_core::types::RenderMetadata;
 /// Common header for all input variants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputHeader {
+    /// Actual process-only ingress observation from the trusted transport.
+    /// Wire decoding never constructs it; retained rows keep only historical
+    /// association data and accepted native custody.
+    #[serde(skip)]
+    pub ingress_context: Option<std::sync::Arc<crate::input_authority::NativeIngressContext>>,
+    /// Untrusted native attribution claims. Only the installed host ingress
+    /// authenticator can bind them to actual accepted work. Absence never
+    /// inherits another input's requester or an external account owner's rights.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_association:
+        Option<meerkat_authorization_contracts::work_association::InputAuthorityAssociation>,
     /// Unique ID for this input.
     pub id: InputId,
     /// When the input was created.
@@ -160,6 +171,17 @@ impl Input {
             Input::Continuation(i) => &mut i.header,
             Input::Operation(i) => &mut i.header,
         }
+    }
+
+    /// Attach the trusted producer's observation for this exact final input.
+    /// This does not authenticate a wire association or admit the work.
+    pub fn with_ingress_context(
+        mut self,
+        ingress: crate::input_authority::NativeIngressContext,
+    ) -> Result<Self, crate::RuntimeDriverError> {
+        ingress.verify_submission(&self)?;
+        self.header_mut().ingress_context = Some(std::sync::Arc::new(ingress));
+        Ok(self)
     }
 
     /// Get the input ID.
@@ -328,6 +350,8 @@ impl PromptInput {
     pub fn new(text: impl Into<String>, turn_metadata: Option<RuntimeTurnMetadata>) -> Self {
         Self {
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: InputOrigin::Operator,
@@ -362,6 +386,8 @@ impl PromptInput {
     ) -> Self {
         Self {
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: InputOrigin::System,
@@ -394,6 +420,8 @@ impl PromptInput {
     ) -> Self {
         Self {
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: InputOrigin::Operator,
@@ -548,6 +576,8 @@ pub fn peer_response_terminal_input(
         system_prompts: Vec::new(),
         injected_context: Vec::new(),
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Peer {
@@ -792,6 +822,8 @@ impl ContinuationInput {
     pub fn detached_background_op_completed() -> Self {
         Self {
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: InputOrigin::System,
@@ -1518,6 +1550,8 @@ mod tests {
 
     fn make_header() -> InputHeader {
         InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Operator,
@@ -2679,6 +2713,8 @@ mod tests {
             injected_context: vec![ContentInput::Text("ambient context".to_string())],
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::from_uuid(stable),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {

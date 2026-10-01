@@ -271,6 +271,7 @@ macro_rules! e2e_smoke_lane_entries {
             suite(e2e_smoke_turbo_s_turn_latency, "mob-turn-latency");
             suite(e2e_smoke_model_fallback_boundaries, "model-fallback-boundaries");
             suite(e2e_smoke_model_fallback_context, "model-fallback-context");
+            suite(e2e_smoke_adr_infrastructure_policy_control, "adr-infrastructure-policy-control");
         }
     };
 }
@@ -2736,6 +2737,9 @@ fn bazel_rust_bin_path(
 
 fn bazel_rust_test_relative(key: &str) -> Result<&'static str, String> {
     match key {
+        "meerkat-authorization:native_governed_loop" => {
+            Ok("crates/meerkat-authorization/native_governed_loop_test")
+        }
         "meerkat-integration-tests:smoke_shared_realm" => {
             Ok("tests/integration/smoke_shared_realm_test")
         }
@@ -5074,6 +5078,25 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
 
 fn suite_spec(name: &str) -> Option<&'static Spec> {
     match name {
+        "adr-infrastructure-policy-control" => Some(&Spec {
+            id: None,
+            lane: Lane::Smoke,
+            title: "E1: native policy refusal preserves same-batch permitted sibling",
+            timeout_secs: 900,
+            required_env: &[],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-authorization",
+                test_target: "native_governed_loop",
+                test_name: "adr_e1_policy_control_same_batch_native_run",
+                features: &[],
+                all_features: false,
+            },
+        }),
         "fixture-embedded-min" => Some(&Spec {
             id: None,
             lane: Lane::Build,
@@ -7541,5 +7564,117 @@ mod tests {
             "node setup should move to materialization in prebuilt mode: {:?}",
             prebuilt.pre_commands
         );
+    }
+    // Proposed E1-only registration. This does not register the full E story.
+    #[test]
+    fn adr_e1_registration_selects_exact_native_sibling_control() {
+        const SUITE: &str = "adr-infrastructure-policy-control";
+        const WRAPPER: &str = "e2e_smoke_adr_infrastructure_policy_control";
+        const INNER: &str = "adr_e1_policy_control_same_batch_native_run";
+        let spec = suite_spec(SUITE).expect("E1-only suite must be registered");
+        assert_eq!(spec.lane, Lane::Smoke);
+        assert_eq!(spec.timeout_secs, 900);
+        assert!(
+            spec.required_env.is_empty(),
+            "scripted E1 needs no provider secret"
+        );
+        assert!(
+            spec.pre_commands.is_empty(),
+            "E1 body must not build artifacts"
+        );
+        assert!(spec.cargo_bin_env.is_empty());
+        assert!(matches!(
+            spec.command,
+            CommandSpec::CargoTest {
+                package: "meerkat-authorization",
+                test_target: "native_governed_loop",
+                test_name: INNER,
+                features: [],
+                all_features: false,
+            }
+        ));
+        assert_eq!(
+            smoke_test_filter_for_selection(&E2eSelection::Suite(SUITE.into())).unwrap(),
+            Some(WRAPPER.into()),
+        );
+        let suite_plan = plan_for_selection(&E2eSelection::Suite(SUITE.into())).unwrap();
+        let wrapper_plan = plan_for_selection(&E2eSelection::SmokeTest(WRAPPER.into())).unwrap();
+        assert_eq!(suite_plan, wrapper_plan);
+        assert_eq!(suite_plan.specs.len(), 1);
+        assert_eq!(suite_plan.requirements.len(), 1);
+        assert!(
+            matches!(&suite_plan.requirements[0], ArtifactRequirement::RustTest(requirement)
+                if requirement.package == "meerkat-authorization"
+                    && requirement.test_target == "native_governed_loop"
+                    && requirement.features.is_empty()
+                    && !requirement.all_features)
+        );
+        let cargo = build_commands_for_mode(spec, ExecutionMode::Cargo, None).unwrap();
+        assert_eq!(
+            cargo.command,
+            [
+                "cargo",
+                "test",
+                "-p",
+                "meerkat-authorization",
+                "--test",
+                "native_governed_loop",
+                INNER,
+                "--",
+                "--ignored",
+                "--nocapture",
+            ]
+        );
+    }
+
+    #[test]
+    fn adr_e1_registration_requires_exact_prebuilt_artifact() {
+        let spec = suite_spec("adr-infrastructure-policy-control")
+            .expect("E1-only suite must be registered");
+        let empty = ArtifactManifest::default();
+        assert!(build_commands_for_mode(spec, ExecutionMode::Prebuilt, Some(&empty)).is_err());
+        let manifest = ArtifactManifest::from_json_str(
+                r#"{"rust_tests":{"meerkat-authorization:native_governed_loop":"/tmp/native_governed_loop"}}"#,
+            ).unwrap();
+        let prebuilt =
+            build_commands_for_mode(spec, ExecutionMode::Prebuilt, Some(&manifest)).unwrap();
+        assert!(prebuilt.pre_commands.is_empty());
+        assert_eq!(
+            prebuilt.command,
+            [
+                "/tmp/native_governed_loop",
+                "adr_e1_policy_control_same_batch_native_run",
+                "--ignored",
+                "--nocapture",
+            ]
+        );
+        assert_eq!(
+            super::bazel_rust_test_relative("meerkat-authorization:native_governed_loop").unwrap(),
+            "crates/meerkat-authorization/native_governed_loop_test",
+        );
+    }
+
+    #[test]
+    fn adr_e1_runner_requires_a_nonzero_inner_test_result() {
+        for output in [
+            "running 0 tests\ntest result: ok. 0 passed; 0 failed; 1 ignored;",
+            "running 1 test\ntest result: ok. 0 passed; 0 failed; 1 ignored;",
+            "e2e lane done: E1",
+        ] {
+            assert!(
+                super::analyze_success_output(super::OutputPolicy::CargoTest, output).is_some()
+            );
+        }
+        let actual_shape = concat!(
+            "running 1 test\n",
+            "test adr_e1_policy_control_same_batch_native_run ... ok\n",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 3 filtered out;\n",
+        );
+        assert!(
+            super::analyze_success_output(super::OutputPolicy::CargoTest, actual_shape).is_none()
+        );
+        // This only tests the existing nonzero-count gate. Exit status,
+        // exact selected name, checkpoint evidence, and native correctness
+        // require their separate runner/fixture checks.
     }
 }

@@ -210,6 +210,57 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait AgentLlmClient: Send + Sync {
+    /// Exact factory-selected target of this client, when available. A mutable
+    /// selector must return only its currently selected target; callers must
+    /// retain a stable client rather than treating this data as a runnable pin.
+    fn controller_model_selection(&self) -> Option<crate::ControllerModelSelection> {
+        None
+    }
+
+    /// Request-free route facts from the actual immutable selected client.
+    /// Implementations must not perform I/O, resolve credentials or manufacture
+    /// a model request. Unsupported wrappers must refuse rather than guess.
+    fn controller_model_facts(
+        &self,
+    ) -> Result<crate::ControllerModelFacts, crate::ControllerFactsUnavailable> {
+        Err(crate::ControllerFactsUnavailable)
+    }
+
+    /// Retain an actual immutable selected client for controller feedback.
+    /// Mutable selectors must delegate to the selected child once. Unsupported
+    /// clients return none; a retained selection DTO alone cannot replace this
+    /// runnable handle at governed admission.
+    fn pin_controller(self: Arc<Self>) -> Option<crate::ControllerModelClient> {
+        None
+    }
+
+    /// Prepare an exact request with its admitted work authorization context.
+    ///
+    /// A decorator must forward this companion with the request it lowers.
+    /// Legacy clients keep their existing behavior for `None`; they explicitly
+    /// refuse `Some` rather than silently discarding a governed association.
+    fn prepare_request_attempt_authorized(
+        self: Arc<Self>,
+        messages: Arc<Vec<Message>>,
+        tools: Arc<[Arc<ToolDef>]>,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<ProviderParamsOverride>,
+        authorization: Option<crate::LlmRequestAuthorization>,
+    ) -> Result<Arc<dyn AgentLlmRequestAttempt>, AgentError>
+    where
+        Self: 'static,
+    {
+        if authorization.is_some() {
+            return Err(AgentError::OperationRefused {
+                refusal: crate::authorization::OperationRefused::new(
+                    crate::authorization::OperationRefusalKind::MalformedFacts,
+                ),
+            });
+        }
+        self.prepare_request_attempt(messages, tools, max_tokens, temperature, provider_params)
+    }
+
     /// Prepare one owned request attempt. Adapters with dynamic routing return
     /// a handle that binds all request-derived facts to one route witness.
     ///
@@ -257,6 +308,29 @@ pub trait AgentLlmClient: Send + Sync {
         temperature: Option<f32>,
         provider_params: Option<&ProviderParamsOverride>,
     ) -> Result<LlmStreamResult, AgentError>;
+
+    /// Collect a request-local authorized response without publishing a new
+    /// transcript assistant message, for example during compaction.
+    /// Unsupported custom clients must refuse the supplied context explicitly.
+    async fn stream_response_authorized(
+        &self,
+        messages: &[Message],
+        tools: &[Arc<ToolDef>],
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<&ProviderParamsOverride>,
+        authorization: Option<crate::LlmRequestAuthorization>,
+    ) -> Result<LlmStreamResult, AgentError> {
+        if authorization.is_some() {
+            return Err(AgentError::OperationRefused {
+                refusal: crate::authorization::OperationRefused::new(
+                    crate::authorization::OperationRefusalKind::MalformedFacts,
+                ),
+            });
+        }
+        self.stream_response(messages, tools, max_tokens, temperature, provider_params)
+            .await
+    }
 
     /// Measure the exact provider-lowered JSON request body for this invocation.
     ///
@@ -719,6 +793,8 @@ pub struct ToolDispatchContext {
     run_id: Option<crate::RunId>,
     streaming: Option<crate::ToolStreamingDispatchContext>,
     live_bridge_admission: Option<LiveBridgeToolDispatchAdmission>,
+    work_authorization: Option<crate::WorkAuthorizationContext>,
+    prepared_authorization: Option<crate::authorization::PreparedOperationCheck>,
 }
 
 /// Process-local live bridge authority carried to the last actual tool
@@ -984,6 +1060,8 @@ impl std::fmt::Debug for ToolDispatchContext {
             .field("run_id", &self.run_id)
             .field("streaming", &self.streaming)
             .field("live_bridge_admission", &self.live_bridge_admission)
+            .field("work_authorization", &self.work_authorization)
+            .field("prepared_authorization", &self.prepared_authorization)
             .finish()
     }
 }
@@ -997,6 +1075,16 @@ impl PartialEq for ToolDispatchContext {
             && self.run_id == other.run_id
             && self.streaming == other.streaming
             && self.live_bridge_admission == other.live_bridge_admission
+            && match (&self.work_authorization, &other.work_authorization) {
+                (Some(left), Some(right)) => left.same_context(right),
+                (None, None) => true,
+                _ => false,
+            }
+            && match (&self.prepared_authorization, &other.prepared_authorization) {
+                (Some(left), Some(right)) => left.same_check(right),
+                (None, None) => true,
+                _ => false,
+            }
     }
 }
 
@@ -1019,6 +1107,8 @@ impl ToolDispatchContext {
             run_id: None,
             streaming: None,
             live_bridge_admission: None,
+            work_authorization: None,
+            prepared_authorization: None,
         }
     }
 
@@ -1029,6 +1119,127 @@ impl ToolDispatchContext {
         match input {
             crate::types::RunInput::Content { content } => Self::from_current_turn_input(content),
             crate::types::RunInput::PendingToolResults => Self::default(),
+        }
+    }
+
+    /// Attach the exact admitted work context without selecting a new scope.
+    #[must_use]
+    pub fn with_work_authorization(
+        mut self,
+        context: Option<crate::WorkAuthorizationContext>,
+    ) -> Self {
+        self.work_authorization = context;
+        // A decision prepared for a prior work context cannot be retained.
+        self.prepared_authorization = None;
+        self
+    }
+
+    pub fn work_authorization(&self) -> Option<&crate::WorkAuthorizationContext> {
+        self.work_authorization.as_ref()
+    }
+
+    /// Retain one check with the exact immutable operation prepared upstream.
+    #[must_use]
+    pub(crate) fn with_prepared_authorization(
+        mut self,
+        check: crate::authorization::PreparedOperationCheck,
+    ) -> Self {
+        self.prepared_authorization = Some(check);
+        self
+    }
+
+    /// Prepared payload custody stays inside core. An adapter receives the
+    /// exact borrowed call during dispatch, not a transferable payload handle.
+    pub(crate) fn prepared_authorization(
+        &self,
+    ) -> Option<&crate::authorization::PreparedOperationCheck> {
+        self.prepared_authorization.as_ref()
+    }
+
+    /// Check the actual borrowed tool call after an adapter's preparation waits.
+    /// Use the returned context when present; it retains a refreshed decision
+    /// for this same immutable call. `None` needs no replacement allocation.
+    /// This does not expose the binding-owned payload for later replay.
+    ///
+    /// ```compile_fail
+    /// use meerkat_core::ToolDispatchContext;
+    /// let captured = ToolDispatchContext::default();
+    /// let _ = captured.prepared_authorization();
+    /// ```
+    pub fn check_tool_authorization(
+        &self,
+        call: ToolCallView<'_>,
+        plan: Option<&crate::ResolvedToolExecutionPlan>,
+    ) -> Result<Option<Self>, crate::ToolError> {
+        match (self.work_authorization(), self.prepared_authorization()) {
+            (None, None) => Ok(None),
+            (Some(work), Some(prepared)) => prepared
+                .current_tool(work, call, plan, self.run_id())
+                .map(|current| {
+                    if current.same_check(prepared) {
+                        None
+                    } else {
+                        Some(self.clone().with_prepared_authorization(current))
+                    }
+                })
+                .map_err(crate::ToolError::from),
+            _ => Err(crate::ToolError::AuthorizationRefused {
+                refusal: crate::authorization::OperationRefused::new(
+                    crate::authorization::OperationRefusalKind::MalformedFacts,
+                ),
+            }),
+        }
+    }
+
+    /// Record an entry attempt, then check actual currentness after that
+    /// synchronous staging work. Adapters call this after their own awaits.
+    /// Several adapter boundaries may observe the same operation ID; these
+    /// observations do not count physical effects or authorize another call.
+    pub fn observe_tool_entry(
+        &self,
+        call: ToolCallView<'_>,
+        plan: Option<&crate::ResolvedToolExecutionPlan>,
+    ) -> Result<Option<Self>, crate::ToolError> {
+        let first = self.check_tool_authorization(call, plan)?;
+        let current = first.as_ref().unwrap_or(self);
+        if let Some(prepared) = current.prepared_authorization() {
+            prepared.observe_entry().map_err(crate::ToolError::from)?;
+        }
+        let final_context = current.check_tool_authorization(call, plan)?;
+        Ok(final_context.or(first))
+    }
+
+    /// Keep an audit staging failure beside the original dispatch result.
+    /// This observation makes no physical completion claim for an async job.
+    pub fn observe_tool_outcome(
+        &self,
+        effect_kind: crate::LiveBridgeEffectKind,
+        result: Result<crate::ops::ToolDispatchOutcome, crate::ToolError>,
+    ) -> Result<crate::ops::ToolDispatchOutcome, crate::ToolError> {
+        let Some(prepared) = self.prepared_authorization() else {
+            return result;
+        };
+        if prepared
+            .observe_outcome(
+                crate::authorization::OperationObservedOutcome::from_tool_dispatch(&result),
+            )
+            .is_ok()
+        {
+            return result;
+        }
+        let failure = crate::ops::ToolDispatchSettlementFailure {
+            admission_source: crate::ops::ToolDispatchAdmissionSource::AuthorizationAudit,
+            effect_kind,
+            physical_outcome: crate::LiveBridgeEffectOutcome::Unknown,
+            failure_kind:
+                crate::ops::ToolDispatchTerminalErrorKind::OperationObservationUnavailable,
+        };
+        match result {
+            Ok(mut outcome) => {
+                outcome.extend_settlement_failures(vec![failure]);
+                Ok(outcome)
+            }
+            Err(error) => Err(error.with_settlement_failures(vec![failure])),
         }
     }
 
@@ -1549,7 +1760,53 @@ pub async fn dispatch_tool_execution_plan_fenced<T: AgentToolDispatcher + ?Sized
             crate::ToolUnavailableReason::ExecutionOwnerChanged,
         ));
     }
-    match plan.kind() {
+    // Retain one binding with the actual resolved call. Its generation is
+    // checked here after the dispatch queue, and again by adapters after any
+    // further preparation waits, such as application consequence policy.
+    let governed_context = if let Some(work) = context.work_authorization() {
+        let binding = crate::authorization::PreparedAuthorizationBinding::new(
+            crate::authorization::OperationAuthorizationFacts {
+                operation_id: crate::OperationId::new(),
+                execution_scope: work.execution_scope().clone(),
+                run_id: context.run_id().cloned(),
+                context_revision: None,
+                operation: crate::authorization::AuthorizationOperation::Tool(
+                    crate::authorization::ToolAuthorizationFacts {
+                        call_id: Arc::from(call.id),
+                        name: call.name.into(),
+                        arguments: Arc::from(call.args.to_owned()),
+                        target: crate::authorization::ToolAuthorizationTarget::Dispatcher(
+                            Arc::new(plan.clone()),
+                        ),
+                    },
+                ),
+            },
+        );
+        let prepared = crate::authorization::PreparedOperationCheck::prepare(work.clone(), binding)
+            .and_then(|prepared| prepared.current())
+            .map_err(crate::ToolError::from)?;
+        Some(context.clone().with_prepared_authorization(prepared))
+    } else {
+        None
+    };
+    let context = governed_context.as_ref().unwrap_or(context);
+    // Forward the binding's own immutable payload and plan all the way to the
+    // body. Adapters can then validate exact custody by pointer identity after
+    // a wait, without rehashing arguments or scanning policy dependencies.
+    let (call, plan) = if let Some(prepared) = context.prepared_authorization() {
+        prepared
+            .tool_dispatch_parts()
+            .ok_or_else(|| crate::ToolError::AuthorizationRefused {
+                refusal: crate::authorization::OperationRefused::new(
+                    crate::authorization::OperationRefusalKind::MalformedFacts,
+                ),
+            })?
+    } else {
+        (call, plan)
+    };
+    let entry_context = context.observe_tool_entry(call, Some(plan))?;
+    let context = entry_context.as_ref().unwrap_or(context);
+    let result = match plan.kind() {
         crate::ResolvedExecutionKind::Streaming(policy) => {
             let absolute_timeout = plan
                 .deadlines()
@@ -1575,7 +1832,8 @@ pub async fn dispatch_tool_execution_plan_fenced<T: AgentToolDispatcher + ?Sized
                 .dispatch_resolved_with_context(call, context, plan)
                 .await
         }
-    }
+    };
+    context.observe_tool_outcome(dispatcher.live_bridge_effect_kind(call.name), result)
 }
 
 /// Compute whether the current exact catalog should stay inline or switch to deferred mode.
@@ -2873,6 +3131,24 @@ where
     /// composition seam via `AgentBuilder::with_tools_config`; defaults to
     /// `ToolsConfig::default()` for standalone/test construction.
     pub(crate) tools_config: crate::config::ToolsConfig,
+}
+
+impl<C, T, S> Agent<C, T, S>
+where
+    C: AgentLlmClient + ?Sized,
+    T: AgentToolDispatcher + ?Sized,
+    S: AgentSessionStore + ?Sized,
+{
+    /// Retain the existing selection owner's actual immutable client for
+    /// native setup. This is process resource custody, never admission.
+    /// Mutable selectors must pin their selected child, not themselves.
+    pub fn pin_controller_client(&self) -> Option<crate::ControllerModelClient> {
+        let controller = Arc::clone(&self.client).pin_controller()?;
+        (self.client.controller_model_selection().as_ref() == Some(controller.selection())
+            && controller.client().controller_model_selection().as_ref()
+                == Some(controller.selection()))
+        .then_some(controller)
+    }
 }
 
 #[derive(Clone)]

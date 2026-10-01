@@ -691,6 +691,7 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
         let admission = self.ensure_runtime_session_registered(session_id).await?;
 
         let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            work_authorization: None,
             handling_mode: None,
             keep_alive: None,
             skill_references: (!dispatch.skill_refs.is_empty()).then(|| {
@@ -771,6 +772,8 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
         let input = meerkat_runtime::Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
             objective_id: None,
             header: meerkat_runtime::input::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: meerkat_runtime::InputOrigin::External {

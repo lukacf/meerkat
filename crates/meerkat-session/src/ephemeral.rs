@@ -1897,6 +1897,11 @@ impl SessionTurnExecutionOutcome {
 
 /// Commands sent from the service to a session task.
 enum SessionCommand {
+    /// Setup-only query against the exact actor already owning the client.
+    PinControllerClient {
+        expected_actor: LiveSessionActorWitness,
+        reply_tx: oneshot::Sender<Result<meerkat_core::ControllerModelClient, AgentError>>,
+    },
     /// Execute through the already-materialized agent without committing the
     /// bridge request or result to its canonical Session document.
     StartLiveBridgeOperation {
@@ -2220,6 +2225,7 @@ impl SessionCommand {
     fn advances_transcript_authority_generation(&self) -> bool {
         match self {
             Self::StartLiveBridgeOperation { .. }
+            | Self::PinControllerClient { .. }
             | Self::ValidateLiveBridgeMemberEligibility { .. }
             | Self::ExportSession { .. }
             | Self::ObserveSessionTranscriptAuthority { .. }
@@ -2640,6 +2646,7 @@ pub trait SessionAgentBuilder: Send + Sync {
 
 /// Trait abstracting over the agent's run/cancel interface.
 pub struct SessionAgentTurnInput {
+    pub work_authorization: Option<meerkat_core::WorkAuthorizationContext>,
     pub prompt: meerkat_core::types::ContentInput,
     /// Host-attached injected context for this turn. Each entry materializes
     /// as a separate typed injected-context user message immediately before
@@ -2799,6 +2806,11 @@ pub trait SessionAgent: Send {
         input: SessionAgentTurnInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        if input.work_authorization.is_some() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "work authorization is not supported by this session agent".to_string(),
+            ));
+        }
         if input.handling_mode != meerkat_core::types::HandlingMode::Queue {
             return Err(meerkat_core::error::AgentError::ConfigError(format!(
                 "handling_mode {:?} requires a runtime-backed surface",
@@ -2844,8 +2856,14 @@ pub trait SessionAgent: Send {
         transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
         _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
         request_contexts: Vec<meerkat_core::lifecycle::TurnRequestContext>,
+        work_authorization: Option<meerkat_core::WorkAuthorizationContext>,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        if work_authorization.is_some() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "work authorization is not supported by this session agent".to_string(),
+            ));
+        }
         if transcript_identity.is_some() {
             return Err(meerkat_core::error::AgentError::ConfigError(
                 "transcript identity requires a runtime-backed surface".to_string(),
@@ -2864,6 +2882,11 @@ pub trait SessionAgent: Send {
     /// Stage skill references to resolve and inject on the next turn.
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>);
 
+    /// Infallible cleanup after the run future is dropped. Implementations
+    /// accepting a work context must release their active reference here as
+    /// well as on normal return; it must not survive into another invocation.
+    fn clear_work_authorization(&mut self) {}
+
     /// Apply or clear a per-turn tool overlay.
     fn set_turn_tool_overlay(
         &mut self,
@@ -2881,6 +2904,13 @@ pub trait SessionAgent: Send {
         Err(meerkat_core::error::AgentError::ConfigError(
             "staged tool-result continuations are not supported by this session agent".to_string(),
         ))
+    }
+
+    /// Retain this actor's actual immutable selected client during native
+    /// setup. No serialized identity can provide a client. Custom builders
+    /// that do not support pinning remain unavailable for governed setup.
+    fn pin_controller_client(&self) -> Option<meerkat_core::ControllerModelClient> {
+        None
     }
 
     /// Replace the LLM client for subsequent turns after proving that its
@@ -6157,6 +6187,43 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .map(|h| h.transient_turn_context_state.clone())
     }
 
+    /// Query the actual selected client of this exact actor during setup.
+    ///
+    /// This is a command to the owning actor, not a cached identity lookup.
+    /// It is intended for first/recovered governed setup before accepting its
+    /// input. An active actor serves commands only after its current turn;
+    /// callers must retain the returned pin, not repeat this query per call.
+    pub async fn pin_controller_client_for_actor(
+        &self,
+        expected_actor: &LiveSessionActorWitness,
+    ) -> Result<meerkat_core::ControllerModelClient, SessionError> {
+        let id = expected_actor.session_id();
+        let command_tx = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(id)
+                .filter(|handle| expected_actor.is_handle(handle) && expected_actor.is_live())
+                .map(|handle| handle.command_tx.clone())
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::PinControllerClient {
+                expected_actor: expected_actor.clone(),
+                reply_tx,
+            })
+            .await
+            .map_err(|_| SessionError::NotFound { id: id.clone() })?;
+        let controller = reply_rx
+            .await
+            .map_err(|_| SessionError::NotFound { id: id.clone() })?
+            .map_err(SessionError::Agent)?;
+        if !expected_actor.is_live() {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        Ok(controller)
+    }
+
     /// Get the current live durable LLM identity for a session.
     pub async fn live_session_llm_identity(
         &self,
@@ -6465,10 +6532,23 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     #[doc(hidden)]
     pub async fn create_session_with_admission_and_witness(
         &self,
-        req: CreateSessionRequest,
+        mut req: CreateSessionRequest,
         reserved_create_admission: Option<RuntimeContextAdmissionGuard>,
         actor_witness_slot: Option<&LiveSessionActorWitnessSlot>,
     ) -> Result<(RunResult, LiveSessionActorWitness), SessionError> {
+        // Remove the one-shot carrier before any builder or reusable build
+        // options can retain it. Deferred creation has no admitted first work.
+        let initial_work_authorization = req
+            .build
+            .as_mut()
+            .and_then(|build| build.initial_work_authorization.take());
+        if req.initial_turn == meerkat_core::service::InitialTurnPolicy::Defer
+            && initial_work_authorization.is_some()
+        {
+            return Err(SessionError::Unsupported(
+                "initial work authorization requires an eager turn; attach deferred work to its StartTurnRequest".to_string(),
+            ));
+        }
         let prompt = req.prompt.clone();
         let injected_context = req.injected_context.clone();
         let caller_event_tx = req.event_tx.clone();
@@ -6856,7 +6936,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             initial_handling_mode,
             initial_turn_tool_overlay,
             initial_turn_metadata,
-        );
+        )
+        .with_work_authorization(initial_work_authorization);
 
         // Run the first turn
         let (result_tx, result_rx) = oneshot::channel();
@@ -7970,6 +8051,13 @@ async fn drain_session_task_commands<A: SessionAgent>(
             *transcript_authority_generation = (*transcript_authority_generation).saturating_add(1);
         }
         match cmd {
+            SessionCommand::PinControllerClient { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(AgentError::OperationRefused {
+                    refusal: meerkat_core::authorization::OperationRefused::new(
+                        meerkat_core::authorization::OperationRefusalKind::ReprepareRequired,
+                    ),
+                }));
+            }
             SessionCommand::StartLiveBridgeOperation { accepted_tx, .. } => {
                 let _ = accepted_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
             }
@@ -8250,6 +8338,24 @@ async fn session_task<A: SessionAgent>(
         }
 
         match cmd {
+            SessionCommand::PinControllerClient {
+                expected_actor,
+                reply_tx,
+            } => {
+                let controller = if expected_actor.is_live()
+                    && expected_actor.same_incarnation(&control.actor_witness)
+                {
+                    agent.pin_controller_client()
+                } else {
+                    None
+                };
+                let _ = reply_tx.send(controller.ok_or_else(|| AgentError::OperationRefused {
+                    refusal: meerkat_core::authorization::OperationRefused::new(
+                        meerkat_core::authorization::OperationRefusalKind::MalformedFacts,
+                    ),
+                }));
+                continue;
+            }
             SessionCommand::ValidateLiveBridgeMemberEligibility { reply_tx } => {
                 let _ = reply_tx.send(agent.validate_live_bridge_member_eligibility());
                 continue;
@@ -8352,6 +8458,7 @@ async fn session_task<A: SessionAgent>(
                 active_admission,
             } => {
                 let runtime = *runtime;
+                let work_authorization = runtime.work_authorization;
                 let metadata = runtime.turn_metadata;
                 let render_metadata = metadata
                     .as_ref()
@@ -8780,6 +8887,7 @@ async fn session_task<A: SessionAgent>(
                         StartTurnDisposition::RunContentTurn => {
                             Box::pin(agent.run_turn_with_events(
                                 SessionAgentTurnInput {
+                                    work_authorization,
                                     prompt,
                                     injected_context,
                                     handling_mode,
@@ -8797,6 +8905,7 @@ async fn session_task<A: SessionAgent>(
                                 transcript_identity,
                                 execution_kind,
                                 request_contexts,
+                                work_authorization,
                                 agent_event_tx.clone(),
                             ))
                         }
@@ -8857,6 +8966,9 @@ async fn session_task<A: SessionAgent>(
                         }
                     };
                     drop(run_fut);
+                    // Clear the exact work context synchronously before custom
+                    // cancellation callbacks or event publication can suspend.
+                    agent.clear_work_authorization();
                     let mut dropped_run_terminal = if interrupted {
                         agent.cancel_dropped_run()
                     } else {
@@ -10591,6 +10703,8 @@ mod injected_context_turn_tests {
     };
     use std::sync::{Arc, Mutex};
 
+    type WorkContextObservations = Arc<Mutex<Vec<Option<meerkat_core::WorkAuthorizationContext>>>>;
+
     fn probe_llm_identity(model: &str) -> SessionLlmIdentity {
         SessionLlmIdentity {
             model: model.to_string(),
@@ -10608,6 +10722,7 @@ mod injected_context_turn_tests {
     #[derive(Clone)]
     struct InjectedContextProbeBuilder {
         observed_turns: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+        observed_work_contexts: Option<WorkContextObservations>,
     }
 
     struct InjectedContextProbeAgent {
@@ -10615,6 +10730,7 @@ mod injected_context_turn_tests {
         session: meerkat_core::Session,
         identity: SessionLlmIdentity,
         observed_turns: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+        observed_work_contexts: Option<WorkContextObservations>,
         transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
     }
 
@@ -10628,6 +10744,13 @@ mod injected_context_turn_tests {
             req: &CreateSessionRequest,
             _event_tx: mpsc::Sender<AgentEvent>,
         ) -> Result<Self::Agent, SessionError> {
+            assert!(
+                req.build
+                    .as_ref()
+                    .and_then(|build| build.initial_work_authorization.as_ref())
+                    .is_none(),
+                "one-shot work context must be consumed before agent construction"
+            );
             let session = req
                 .build
                 .as_ref()
@@ -10639,6 +10762,7 @@ mod injected_context_turn_tests {
                 session,
                 identity: probe_llm_identity(&req.model),
                 observed_turns: Arc::clone(&self.observed_turns),
+                observed_work_contexts: self.observed_work_contexts.clone(),
                 transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
             })
         }
@@ -10686,6 +10810,12 @@ mod injected_context_turn_tests {
             input: SessionAgentTurnInput,
             _event_tx: mpsc::Sender<AgentEvent>,
         ) -> Result<RunResult, AgentError> {
+            if let Some(observed) = &self.observed_work_contexts {
+                observed
+                    .lock()
+                    .expect("work contexts")
+                    .push(input.work_authorization);
+            }
             self.session.push(meerkat_core::types::Message::User(
                 meerkat_core::types::UserMessage::text(input.prompt.text_content()),
             ));
@@ -10700,6 +10830,23 @@ mod injected_context_turn_tests {
                         .map(ContentInput::text_content)
                         .collect(),
                 ));
+            Ok(self.ok_result())
+        }
+
+        async fn run_pending_with_events(
+            &mut self,
+            _transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
+            _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+            _request_contexts: Vec<meerkat_core::lifecycle::TurnRequestContext>,
+            work_authorization: Option<meerkat_core::WorkAuthorizationContext>,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<RunResult, AgentError> {
+            if let Some(observed) = &self.observed_work_contexts {
+                observed
+                    .lock()
+                    .expect("work contexts")
+                    .push(work_authorization);
+            }
             Ok(self.ok_result())
         }
 
@@ -10787,6 +10934,102 @@ mod injected_context_turn_tests {
         }
     }
 
+    struct AttachmentOnlyAuthorization;
+
+    impl meerkat_core::WorkAuthorization for AttachmentOnlyAuthorization {
+        fn prepare(
+            &self,
+            _binding: &meerkat_core::PreparedAuthorizationBinding,
+        ) -> Result<
+            Arc<dyn meerkat_core::PreparedOperationAuthorization>,
+            meerkat_core::OperationAuthorizationError,
+        > {
+            Err(
+                meerkat_core::OperationRefused::new(meerkat_core::OperationRefusalKind::Denied)
+                    .into(),
+            )
+        }
+    }
+
+    fn attachment_context() -> meerkat_core::WorkAuthorizationContext {
+        meerkat_core::WorkAuthorizationContext::new(
+            Arc::new(AttachmentOnlyAuthorization),
+            meerkat_core::OperationExecutionScope::Domain,
+        )
+    }
+
+    #[tokio::test]
+    async fn eager_work_context_is_consumed_before_build_and_followup_none_is_explicit() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let service = EphemeralSessionService::new(
+            InjectedContextProbeBuilder {
+                observed_turns: Arc::new(Mutex::new(Vec::new())),
+                observed_work_contexts: Some(Arc::clone(&observed)),
+            },
+            1,
+        );
+        let selected = attachment_context();
+        let mut request = create_request("initial", Vec::new(), InitialTurnPolicy::RunImmediately);
+        request
+            .build
+            .as_mut()
+            .expect("build options")
+            .initial_work_authorization = Some(selected.clone());
+        let created = service.create_session(request).await.expect("eager create");
+        service
+            .start_turn(
+                &created.session_id,
+                StartTurnRequest {
+                    prompt: "next caller".into(),
+                    injected_context: Vec::new(),
+                    system_prompt: None,
+                    event_tx: None,
+                    runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
+                },
+            )
+            .await
+            .expect("follow-up turn");
+        let observed = observed.lock().expect("work contexts");
+        assert_eq!(observed.len(), 2);
+        assert!(
+            observed[0]
+                .as_ref()
+                .expect("initial context")
+                .same_context(&selected)
+        );
+        assert!(
+            observed[1].is_none(),
+            "a new caller must not inherit the initial context"
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_create_refuses_a_one_shot_work_context_before_building() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let service = EphemeralSessionService::new(
+            InjectedContextProbeBuilder {
+                observed_turns: Arc::clone(&observed),
+                observed_work_contexts: None,
+            },
+            1,
+        );
+        let mut request = create_request("deferred", Vec::new(), InitialTurnPolicy::Defer);
+        request
+            .build
+            .as_mut()
+            .expect("build options")
+            .initial_work_authorization = Some(attachment_context());
+        let error = service
+            .create_session(request)
+            .await
+            .expect_err("no first work to bind");
+        assert!(matches!(error, SessionError::Unsupported(_)));
+        assert!(observed.lock().expect("observed turns").is_empty());
+        service
+            .ensure_active_capacity_available()
+            .expect("refusal reserves no session capacity");
+    }
+
     /// Eager create threads `CreateSessionRequest.injected_context` through
     /// the session task into the first turn's `SessionAgentTurnInput`, in
     /// delivery order (prompt-bearing create is submit-work).
@@ -10795,6 +11038,7 @@ mod injected_context_turn_tests {
         let observed_turns = Arc::new(Mutex::new(Vec::new()));
         let service = EphemeralSessionService::new(
             InjectedContextProbeBuilder {
+                observed_work_contexts: None,
                 observed_turns: Arc::clone(&observed_turns),
             },
             1,
@@ -10829,6 +11073,7 @@ mod injected_context_turn_tests {
         let observed_turns = Arc::new(Mutex::new(Vec::new()));
         let service = EphemeralSessionService::new(
             InjectedContextProbeBuilder {
+                observed_work_contexts: None,
                 observed_turns: Arc::clone(&observed_turns),
             },
             1,
@@ -10869,6 +11114,7 @@ mod injected_context_turn_tests {
         let observed_turns = Arc::new(Mutex::new(Vec::new()));
         let service = EphemeralSessionService::new(
             InjectedContextProbeBuilder {
+                observed_work_contexts: None,
                 observed_turns: Arc::clone(&observed_turns),
             },
             1,
@@ -10972,6 +11218,7 @@ mod injected_context_turn_tests {
         let observed_turns = Arc::new(Mutex::new(Vec::new()));
         let service = EphemeralSessionService::new(
             InjectedContextProbeBuilder {
+                observed_work_contexts: None,
                 observed_turns: Arc::clone(&observed_turns),
             },
             1,
@@ -11070,6 +11317,7 @@ mod injected_context_turn_tests {
     async fn default_turn_entry_rejects_injected_context() {
         let observed_turns = Arc::new(Mutex::new(Vec::new()));
         let mut agent = DefaultGuardAgent(InjectedContextProbeAgent {
+            observed_work_contexts: None,
             session_id: SessionId::new(),
             session: meerkat_core::Session::new(),
             identity: probe_llm_identity("default-guard"),
@@ -11081,6 +11329,7 @@ mod injected_context_turn_tests {
         let err = agent
             .run_turn_with_events(
                 SessionAgentTurnInput {
+                    work_authorization: None,
                     prompt: ContentInput::Text("prompt".to_string()),
                     injected_context: vec![ContentInput::Text("ambient".to_string())],
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
@@ -11111,6 +11360,7 @@ mod injected_context_turn_tests {
     async fn default_turn_entry_rejects_unsupported_transient_context() {
         let observed_turns = Arc::new(Mutex::new(Vec::new()));
         let mut agent = DefaultGuardAgent(InjectedContextProbeAgent {
+            observed_work_contexts: None,
             session_id: SessionId::new(),
             session: meerkat_core::Session::new(),
             identity: probe_llm_identity("default-guard"),
@@ -11123,6 +11373,7 @@ mod injected_context_turn_tests {
         let err = agent
             .run_turn_with_events(
                 SessionAgentTurnInput {
+                    work_authorization: None,
                     prompt: ContentInput::Text("prompt".to_string()),
                     injected_context: Vec::new(),
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
@@ -11271,6 +11522,7 @@ mod admission_window_tests {
         cancel_after_boundary_tx: CancelAfterBoundarySender,
         turn_admission_for_run: Arc<Mutex<Option<Arc<Mutex<TurnAdmissionSlot>>>>>,
         interrupt_before_success: bool,
+        active_work_authorization: Option<meerkat_core::WorkAuthorizationContext>,
         transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
     }
 
@@ -11293,6 +11545,7 @@ mod admission_window_tests {
                 cancel_after_boundary_tx: self.cancel_after_boundary_tx.clone(),
                 turn_admission_for_run: Arc::clone(&self.turn_admission_for_run),
                 interrupt_before_success: self.interrupt_before_success,
+                active_work_authorization: None,
                 transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
             })
         }
@@ -11334,6 +11587,21 @@ mod admission_window_tests {
             })
         }
 
+        async fn run_turn_with_events(
+            &mut self,
+            input: SessionAgentTurnInput,
+            event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<RunResult, AgentError> {
+            // Deliberately retain the context across future completion/drop:
+            // this custom host relies on the session's cleanup contract.
+            self.active_work_authorization = input.work_authorization;
+            self.run_with_events(input.prompt, event_tx).await
+        }
+
+        fn clear_work_authorization(&mut self) {
+            self.active_work_authorization = None;
+        }
+
         fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
         fn set_turn_tool_overlay(
@@ -11353,6 +11621,10 @@ mod admission_window_tests {
         }
 
         fn cancel(&mut self) {
+            assert!(
+                self.active_work_authorization.is_none(),
+                "work context must clear before the cancellation/terminal callback"
+            );
             self.cancel_calls.fetch_add(1, Ordering::SeqCst);
         }
 
@@ -11598,9 +11870,27 @@ mod admission_window_tests {
                 Some(Arc::clone(&handle.turn_admission));
         }
 
-        let result = service
-            .start_turn(&result.session_id, start_turn_request())
-            .await;
+        struct RejectingAuthorization;
+        impl meerkat_core::WorkAuthorization for RejectingAuthorization {
+            fn prepare(
+                &self,
+                _binding: &meerkat_core::PreparedAuthorizationBinding,
+            ) -> Result<
+                Arc<dyn meerkat_core::PreparedOperationAuthorization>,
+                meerkat_core::OperationAuthorizationError,
+            > {
+                Err(
+                    meerkat_core::OperationRefused::new(meerkat_core::OperationRefusalKind::Denied)
+                        .into(),
+                )
+            }
+        }
+        let mut request = start_turn_request();
+        request.runtime.work_authorization = Some(meerkat_core::WorkAuthorizationContext::new(
+            Arc::new(RejectingAuthorization),
+            meerkat_core::OperationExecutionScope::Domain,
+        ));
+        let result = service.start_turn(&result.session_id, request).await;
 
         assert!(matches!(
             result,

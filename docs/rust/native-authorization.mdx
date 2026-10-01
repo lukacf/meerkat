@@ -1,0 +1,125 @@
+---
+title: "Native governed embedding"
+description: "Wire the selected storeless Rust authorization path to real identity, grant, resource, and controller owners."
+icon: "shield-check"
+---
+
+This checkpoint supports explicitly configured, storeless native Rust sessions.
+The embedding application is trusted code: it authenticates callers, supplies
+current policy owners, and attaches the actual controller and executor. Merely
+enabling a Cargo feature or calling `agent.run(...)` does not establish this
+integration.
+
+<Note>
+The stock persistent CLI, REST, RPC and MCP paths do not acquire governed
+activation from this API. Persistent admission and restart, full surface
+coverage, human consent and OS confinement remain separate integration work.
+This page makes no performance or live-provider coverage claim.
+</Note>
+
+## Install the real owners before sharing the machine
+
+Enable `meerkat-runtime`'s `local-authorization` feature in the matching checkout
+or dependency release. Compose `NativeGrantWorkConfiguration` from these owners:
+
+| Field | Required host behavior |
+| --- | --- |
+| `grants` | A `LocalGrantAuthority` with qualified principals and real issued controller and operation grants. Credential possession supplies neither grant. |
+| `ingress` | A `NativeIngressCheck` that validates the authenticated submission and the requester's right to invoke this executor and represented subject. |
+| `invocation_owner` | An `AdmittedWorkPolicyOwner` that checks current caller and mandate permissions. Native composition also checks the actual accepted batch. |
+| `operation_owner` | An `OperationPolicyOwner` that checks exact resources, accounts, endpoints and recipients. Implement `authorize_controller_admission`; its default is unavailable. |
+
+The policy callbacks read current local owner facts without I/O. Relevant owner
+mutations participate in the grant authority's publication. Preserve correlated
+principal/action/resource rules; independent lists must not grant extra pairs.
+
+```rust
+use meerkat_runtime::{MeerkatMachine, RuntimeDriverError};
+use meerkat_runtime::meerkat_machine::NativeGrantWorkConfiguration;
+
+fn install_governance(
+    owners: NativeGrantWorkConfiguration,
+) -> Result<MeerkatMachine, RuntimeDriverError> {
+    MeerkatMachine::ephemeral().with_local_grant_authorization(owners)
+}
+```
+
+Install before wrapping the machine in `Arc`, cloning it, or registering sessions.
+The current installer refuses persistent stores and already shared or populated
+machines. Do not suppress that refusal or substitute a different machine after
+constructing a persistent service.
+
+## Attach and pin the controller before submitting work
+
+Use `FactoryAgentBuilder` and `EphemeralSessionService`, then
+`meerkat::surface::materialize_ephemeral_runtime_session` to attach the session to
+that same machine. Start with `InitialTurnPolicy::Defer` and
+`DeferredPromptPolicy::Discard`; the first prompt will enter through native
+admission.
+
+When supplying a registry-selected client override, also set
+`SessionBuildOptions.auth_binding` from that client's actual
+`ControllerModelSelection::auth_binding()`. Obtain the actor with
+`live_session_actor_witness` and its real client with
+`pin_controller_client_for_actor`. A copied model name is not a pinned client.
+The selected credential must be usable in this machine's generated auth owner;
+use the normal credential lifecycle, not a fabricated Ready flag.
+
+## Bind the final input to authenticated ingress
+
+Issue the controller and operation grants through `LocalGrantAuthority` and
+construct the `InputAuthorityAssociation` for the actual runtime, identities,
+mandate, grant references and pinned selection. It remains a claim until the
+installed owners validate it.
+
+The following excerpt assumes the host already has those values and `pin` from
+the attached actor. Authenticate `requester`, `ingress_actor`, `realm` and
+`authentication` outside the request body. Set any idempotency key before binding:
+
+```rust
+use meerkat_runtime::input::{Input, PromptInput};
+use meerkat_runtime::input_authority::NativeIngressContext;
+
+let mut prompt = PromptInput::new("Read the permitted record", None);
+prompt.header.authority_association = Some(association);
+let input = Input::Prompt(prompt);
+let ingress = NativeIngressContext::from_trusted_ingress(
+    &input, requester, ingress_actor, realm, authentication,
+)?.with_controller_client(&input, pin)?;
+let input = input.with_ingress_context(ingress)?;
+let (accepted, completion) = machine
+    .accept_input_with_completion(&session_id, input)
+    .await?;
+```
+
+Inspect the `AcceptOutcome` and optional completion handle. Finalizing this
+context does not itself admit work. Do not mutate the bound payload, manufacture
+a `WorkAuthorizationContext`, or reuse one from a prior turn; the native owner
+builds it from the admitted contributors.
+
+## Preserve the result and test the actual effect
+
+An operation-local `OperationAuthorizationError::Refused` can become safe model
+feedback while permitted work continues. `Unavailable` and
+`ObservationUnavailable` are distinct infrastructure outcomes, not permission
+denials. Admission readiness is reported separately through
+`RuntimeDriverError::ControllerReadinessUnavailable`.
+
+Retain `settlement_failures` alongside the physical result. A diagnostic after a
+successful effect does not authorize repeating it. Use native input audit
+records for this process-lifetime path; they do not prove crash-safe recovery.
+Route controller grant/policy removal and credential maintenance through their
+custody-aware owners so unfinished work retains its controller.
+
+The repository fixture
+`crates/meerkat-authorization/tests/native_governed_loop/e1_policy_control.rs`
+shows the complete factory, native admission, loopback HTTP and tool path. Its
+E1/E3 cases distinguish refusal before body entry from diagnostics after an
+effect. The A2/A3/A8 children cover resource-specific permissions, queued work and
+requester revocation. These are deterministic fixtures, not live model or full
+ADR acceptance. For an application, require zero forbidden body entries, one
+permitted effect, the same admitted run's feedback and normal completion.
+
+Read the broader [integration contract](/guides/authorization-integration) and
+[authorization concepts](/concepts/authorization) before extending the protected
+operation inventory.

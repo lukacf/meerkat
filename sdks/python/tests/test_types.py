@@ -8119,3 +8119,269 @@ def test_run_result_carries_cache_reasoning_run_and_request_usage():
     assert bare.run_usage is None
     assert bare.request_usage is None
     assert bare.usage.reasoning_tokens is None
+
+
+def test_operation_observation_provider_kind_remains_nonretryable_wire_reason():
+    from meerkat.generated.event_types import LlmProviderErrorKind
+
+    kinds = {
+        value
+        for member in get_args(LlmProviderErrorKind)
+        for value in (get_args(member) if get_origin(member) is Literal else (member,))
+    }
+    assert "operation_observation_unavailable" in kinds
+    assert "operation_authorization_unavailable" in kinds
+    assert "operation_refused" in kinds
+    for kind, retryability in [
+        ("operation_observation_unavailable", "non_retryable"),
+        ("operation_authorization_unavailable", "non_retryable"),
+        ("operation_refused", "non_retryable"),
+        ("server_overloaded", "retryable"),
+    ]:
+        reason = {
+            "reason_type": "llm_provider_error",
+            "provider_error_kind": kind,
+            "provider_error_retryability": retryability,
+            "provider_error": None,
+        }
+        event = parse_event({
+            "type": "run_failed",
+            "session_id": "s1",
+            "terminal_cause_kind": "llm_failure",
+            "error_report": {"class": "llm", "message": "diagnostic", "reason": reason},
+        })
+        assert isinstance(event, RunFailed)
+        assert event.error_report.reason.provider_error_kind == kind
+        assert event.error_report.reason.provider_error_retryability == retryability
+        assert event.error_report.reason.provider_error is None
+
+
+def test_operation_observation_diagnostic_is_known_and_retains_exact_payload():
+    from meerkat.generated.event_inventory import KNOWN_AGENT_EVENT_TYPES
+
+    raw = {
+        "type": "operation_observation_failed",
+        "operation_id": "01900000-0000-7000-8000-000000000001",
+        "phase": "outcome",
+    }
+    assert raw["type"] in KNOWN_AGENT_EVENT_TYPES
+    event = parse_event(raw)
+    # No specialized adapter class is required. The declared raw-event path
+    # preserves a newly schema-known diagnostic without treating it as failure.
+    assert isinstance(event, UnknownEvent)
+    assert event.type == raw["type"]
+    assert event.data == raw
+    control = parse_event({"type": "text_delta", "delta": "continued"})
+    assert isinstance(control, TextDelta)
+    assert control.delta == "continued"
+
+
+def test_wire_tool_result_retains_typed_observation_settlement_companions():
+    from dataclasses import asdict
+    import json
+    from typing import get_type_hints
+    from meerkat.generated import types as generated
+
+    hints = get_type_hints(generated.WireToolResult)
+    assert "settlement_failures" in hints
+    assert hints["settlement_failures"] == list[generated.ToolDispatchSettlementFailure]
+    markers = [
+        generated.ToolDispatchSettlementFailure(
+            admission_source="authorization_audit",
+            effect_kind="tool_dispatch",
+            physical_outcome=outcome,
+            failure_kind="operation_observation_unavailable",
+        )
+        for outcome in ("committed", "failed")
+    ]
+    result = generated.WireToolResult(
+        tool_use_id="call-1", content="physical result", is_error=False,
+        settlement_failures=markers,
+    )
+    wire = json.loads(json.dumps(asdict(result)))
+    assert wire["content"] == "physical result"
+    assert wire["is_error"] is False
+    assert [item["physical_outcome"] for item in wire["settlement_failures"]] == [
+        "committed", "failed",
+    ]
+    assert all(item["failure_kind"] == "operation_observation_unavailable"
+               for item in wire["settlement_failures"])
+    legacy = generated.WireToolResult("legacy", "unchanged", False)
+    other = generated.WireToolResult("other", "unchanged", False)
+    assert legacy.settlement_failures == []
+    legacy.settlement_failures.append(markers[0])
+    assert other.settlement_failures == []
+
+
+def test_operation_authorization_unavailable_retains_ordered_typed_wire_companions():
+    from dataclasses import asdict
+    import json
+    from meerkat.generated import types as generated
+
+    kinds = {
+        value
+        for member in get_args(generated.ToolDispatchTerminalErrorKind)
+        for value in (get_args(member) if get_origin(member) is Literal else (member,))
+    }
+    assert "operation_authorization_unavailable" in kinds
+    assert "operation_observation_unavailable" in kinds
+    assert "authorization_refused" in kinds
+    markers = [
+        generated.ToolDispatchSettlementFailure(
+            admission_source=source,
+            effect_kind="tool_dispatch",
+            physical_outcome=outcome,
+            failure_kind=kind,
+        )
+        for source, outcome, kind in [
+            ("configured_gate", "failed", "operation_authorization_unavailable"),
+            ("authorization_audit", "committed", "operation_observation_unavailable"),
+            ("context_gate", "unknown", "authorization_refused"),
+        ]
+    ]
+    # Wire carriers preserve observed physical results and ordered companions.
+    # The SDK does not infer permissions or retryability from these diagnostics.
+    result = generated.WireToolResult(
+        tool_use_id="ordered-wire", content="retained physical result", is_error=False,
+        settlement_failures=markers,
+    )
+    wire = json.loads(json.dumps(asdict(result)))
+    restored = generated.WireToolResult(
+        **{key: value for key, value in wire.items() if key != "settlement_failures"},
+        settlement_failures=[generated.ToolDispatchSettlementFailure(**item)
+                             for item in wire["settlement_failures"]],
+    )
+    assert asdict(restored) == wire
+    assert restored.content == "retained physical result"
+    assert restored.is_error is False
+    assert [item.failure_kind for item in restored.settlement_failures] == [
+        "operation_authorization_unavailable", "operation_observation_unavailable",
+        "authorization_refused",
+    ]
+    assert [item.physical_outcome for item in restored.settlement_failures] == [
+        "failed", "committed", "unknown",
+    ]
+
+
+def _settlement_history_wire_row():
+    return {
+        "role": "tool_results", "created_at": "2026-10-01T12:00:00Z",
+        "results": [{
+            "tool_use_id": "observed-effect", "content": "physical result retained",
+            "is_error": False, "settlement_failures": [
+                {"admission_source": "configured_gate", "effect_kind": "tool_dispatch",
+                 "physical_outcome": "failed", "failure_kind": "operation_authorization_unavailable"},
+                {"admission_source": "authorization_audit", "effect_kind": "tool_dispatch",
+                 "physical_outcome": "committed", "failure_kind": "operation_observation_unavailable"},
+                {"admission_source": "context_gate", "effect_kind": "tool_dispatch",
+                 "physical_outcome": "unknown", "failure_kind": "authorization_refused"},
+            ],
+        }],
+    }
+
+
+def test_settlement_history_decoder_preserves_ordered_typed_companions():
+    from dataclasses import asdict
+    from meerkat.generated.types import ToolDispatchSettlementFailure
+
+    row = _settlement_history_wire_row()
+    message = MeerkatClient._parse_session_message(row)
+    result = message.results[0]
+    companions = getattr(result, "settlement_failures", None)
+    assert companions is not None, "the public history result must expose settlement facts"
+    assert all(isinstance(item, ToolDispatchSettlementFailure) for item in companions)
+    assert [asdict(item) for item in companions] == row["results"][0]["settlement_failures"]
+    assert result.content == "physical result retained"
+    assert result.is_error is False
+
+
+def test_settlement_history_rewrite_preserves_the_observed_wire_result():
+    row = _settlement_history_wire_row()
+    message = MeerkatClient._parse_session_message(row)
+    rewritten = MeerkatClient._serialize_transcript_rewrite_message(message)
+    assert rewritten == row, "rewriting a decoded history row cannot erase settlement facts"
+
+
+def test_settlement_history_legacy_result_roundtrip_stays_compatible():
+    row = _settlement_history_wire_row()
+    row["results"][0].pop("settlement_failures")
+    message = MeerkatClient._parse_session_message(row)
+    assert not getattr(message.results[0], "settlement_failures", [])
+    assert MeerkatClient._serialize_transcript_rewrite_message(message) == row
+
+
+def _settlement_history_known_companion():
+    # Existing generated values keep these tests independent of the pending
+    # operation_authorization_unavailable schema regeneration.
+    return {
+        "admission_source": "configured_gate",
+        "effect_kind": "tool_dispatch",
+        "physical_outcome": "committed",
+        "failure_kind": "operation_observation_unavailable",
+    }
+
+
+def _settlement_history_malformed_cases():
+    cases = [
+        pytest.param(None, id="null-vector"),
+        pytest.param({}, id="object-vector"),
+        pytest.param("not-a-vector", id="string-vector"),
+        pytest.param([None], id="null-entry"),
+        pytest.param([[]], id="array-entry"),
+        pytest.param([False], id="boolean-entry"),
+    ]
+    for field in _settlement_history_known_companion():
+        missing = _settlement_history_known_companion()
+        missing.pop(field)
+        cases.append(pytest.param([missing], id=f"missing-{field}"))
+        non_string = _settlement_history_known_companion()
+        non_string[field] = False
+        cases.append(pytest.param([non_string], id=f"non-string-{field}"))
+        unknown = _settlement_history_known_companion()
+        unknown[field] = "not_a_canonical_value"
+        cases.append(pytest.param([unknown], id=f"unknown-{field}"))
+    extra = _settlement_history_known_companion()
+    extra["invented_authority"] = True
+    cases.append(pytest.param([extra], id="unknown-record-field"))
+    cases.append(pytest.param(
+        [_settlement_history_known_companion(), None],
+        id="malformed-after-valid-prefix",
+    ))
+    return cases
+
+
+@pytest.mark.parametrize("malformed", _settlement_history_malformed_cases())
+def test_settlement_history_rejects_malformed_companions(malformed):
+    row = _settlement_history_wire_row()
+    row["results"][0]["settlement_failures"] = malformed
+    with pytest.raises(MeerkatError) as raised:
+        MeerkatClient._parse_session_message(row)
+    assert raised.value.code == "INVALID_RESPONSE"
+
+
+def test_settlement_history_preserves_known_order_and_duplicates():
+    from dataclasses import asdict
+    from meerkat.generated.types import ToolDispatchSettlementFailure
+
+    first = _settlement_history_known_companion()
+    second = {**first, "physical_outcome": "unknown", "failure_kind": "authorization_refused"}
+    companions = [first, second, dict(first)]
+    row = _settlement_history_wire_row()
+    row["results"][0]["settlement_failures"] = companions
+    message = MeerkatClient._parse_session_message(row)
+    retained = getattr(message.results[0], "settlement_failures", None)
+    assert retained is not None
+    assert all(isinstance(item, ToolDispatchSettlementFailure) for item in retained)
+    assert [asdict(item) for item in retained] == companions
+    assert MeerkatClient._serialize_transcript_rewrite_message(message) == row
+
+
+def test_settlement_history_explicit_empty_vector_stays_empty():
+    row = _settlement_history_wire_row()
+    row["results"][0]["settlement_failures"] = []
+    message = MeerkatClient._parse_session_message(row)
+    assert not getattr(message.results[0], "settlement_failures", [])
+    rewritten = MeerkatClient._serialize_transcript_rewrite_message(message)
+    assert rewritten["results"][0].get("settlement_failures", []) == []
+    assert rewritten["results"][0]["content"] == "physical result retained"
+    assert rewritten["results"][0]["is_error"] is False

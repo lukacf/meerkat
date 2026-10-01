@@ -65,6 +65,8 @@ pub mod host_stack;
 pub mod identifiers;
 pub mod ingress_types;
 pub mod input;
+pub mod input_audit;
+pub mod input_authority;
 pub mod input_ledger;
 pub mod input_scope;
 pub mod input_state;
@@ -994,6 +996,8 @@ fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::Runtim
     let transition = meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut authority,
         meerkat_machine::dsl::MeerkatMachineInput::ResolveAdmissionPlan {
+            authority_binding: None,
+            authority_batch_key: None,
             input_id: input.id().to_string(),
             input_kind: meerkat_machine::dsl::AdmissionInputKind::from(input.kind()),
             requested_lane: input

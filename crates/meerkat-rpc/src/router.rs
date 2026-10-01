@@ -7844,6 +7844,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: meerkat_runtime::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: meerkat_runtime::InputOrigin::Peer {
@@ -7898,6 +7900,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: meerkat_runtime::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: meerkat_runtime::InputOrigin::Peer {

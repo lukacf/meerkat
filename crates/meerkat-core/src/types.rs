@@ -3365,6 +3365,10 @@ pub struct ToolResult {
     /// Whether this is an error result
     #[serde(default)]
     pub is_error: bool,
+    /// Admission settlement diagnostics. These do not change the tool result
+    /// or authorize retry of a tool whose body already ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settlement_failures: Vec<crate::ops::ToolDispatchSettlementFailure>,
 }
 
 impl ToolResult {
@@ -3374,6 +3378,7 @@ impl ToolResult {
             tool_use_id,
             content: ContentBlock::text_vec(content),
             is_error,
+            settlement_failures: Vec::new(),
         }
     }
 
@@ -3383,6 +3388,7 @@ impl ToolResult {
             tool_use_id: tool_call.id.clone(),
             content: ContentBlock::text_vec(content),
             is_error,
+            settlement_failures: Vec::new(),
         }
     }
 
@@ -3392,6 +3398,7 @@ impl ToolResult {
             tool_use_id,
             content,
             is_error,
+            settlement_failures: Vec::new(),
         }
     }
 

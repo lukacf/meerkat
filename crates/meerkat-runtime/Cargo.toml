@@ -20,6 +20,8 @@ meerkat-machine-dsl = { workspace = true }
 meerkat-machine-kernels = { workspace = true }
 meerkat-machine-schema = { workspace = true }
 meerkat-contracts = { workspace = true }
+meerkat-authorization-contracts = { workspace = true }
+meerkat-authorization = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -44,6 +46,7 @@ tokio_with_wasm = { workspace = true }
 
 [features]
 default = []
+local-authorization = ["dep:meerkat-authorization"]
 live = [
     "dep:meerkat-live",
     "dep:meerkat-llm-core",
@@ -67,7 +70,7 @@ test-support = []
 # execution authority are compiled only with `live`, and their unit tests
 # must run in a package-scoped lane too, not only when a sibling crate
 # (meerkat-rpc, meerkat-session/live) happens to enable it.
-meerkat-runtime = { path = ".", features = ["test-support", "sqlite-store", "live"] }
+meerkat-runtime = { path = ".", features = ["test-support", "sqlite-store", "live", "local-authorization"] }
 meerkat-core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

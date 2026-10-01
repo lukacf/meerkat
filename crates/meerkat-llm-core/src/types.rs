@@ -30,6 +30,54 @@ pub type LlmStream<'a> = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> +
 #[cfg(target_arch = "wasm32")]
 pub type LlmStream<'a> = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + 'a>>;
 
+/// Request-free transport route data. No permission or credential observation.
+#[derive(Clone)]
+pub struct PlainModelRoute {
+    endpoint: Arc<str>,
+    wire_model: Arc<str>,
+}
+
+impl PlainModelRoute {
+    /// Use the same URL normalization as actual prepared request authorization.
+    /// Concrete providers first validate their configured base URL separately.
+    pub fn new(
+        endpoint: &str,
+        wire_model: &str,
+    ) -> Result<Self, meerkat_core::ControllerFactsUnavailable> {
+        let endpoint = authorization_endpoint(endpoint)?;
+        if wire_model.is_empty() {
+            return Err(meerkat_core::ControllerFactsUnavailable);
+        }
+        Ok(Self {
+            endpoint: Arc::from(endpoint.as_str()),
+            wire_model: Arc::from(wire_model),
+        })
+    }
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+    pub fn wire_model(&self) -> &str {
+        &self.wire_model
+    }
+}
+
+impl fmt::Debug for PlainModelRoute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PlainModelRoute([REDACTED])")
+    }
+}
+
+fn authorization_endpoint(
+    endpoint: &str,
+) -> Result<reqwest::Url, meerkat_core::ControllerFactsUnavailable> {
+    let endpoint =
+        reqwest::Url::parse(endpoint).map_err(|_| meerkat_core::ControllerFactsUnavailable)?;
+    if !endpoint.username().is_empty() || endpoint.password().is_some() {
+        return Err(meerkat_core::ControllerFactsUnavailable);
+    }
+    Ok(endpoint)
+}
+
 /// Abstraction over LLM providers
 ///
 /// Each provider implementation normalizes its streaming response
@@ -37,6 +85,22 @@ pub type LlmStream<'a> = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> +
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait LlmClient: Send + Sync {
+    /// Non-authoritative projection of this exact factory-selected target.
+    /// The registry decorator supplies it; unsupported raw clients return none.
+    fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
+        None
+    }
+
+    /// Return the actual configured plain-model transport route without I/O.
+    /// The selected-target wrapper validates the logical model; the provider
+    /// applies the same remote-model/endpoint lowering as its real request.
+    fn plain_model_route(
+        &self,
+        _logical_model: &str,
+    ) -> Result<PlainModelRoute, meerkat_core::ControllerFactsUnavailable> {
+        Err(meerkat_core::ControllerFactsUnavailable)
+    }
+
     /// Prepare replay messages together with any opaque, request-scoped route
     /// witness required to keep later lowering and dispatch coherent.
     fn project_replay_request(
@@ -114,6 +178,13 @@ pub trait LlmClient: Send + Sync {
     /// Dispatch through the exact route witness captured while this request
     /// was projected.
     fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
+        if request.authorization().is_some() {
+            return Box::pin(futures::stream::once(async {
+                Err(LlmError::operation_refused(
+                    meerkat_core::authorization::OperationRefusalKind::MalformedFacts,
+                ))
+            }));
+        }
         self.stream(request.request())
     }
 
@@ -190,21 +261,95 @@ impl LlmReplayProjection {
 /// projection.
 #[derive(Debug, Clone)]
 pub struct PreparedLlmRequest {
-    request: LlmRequest,
+    request: Arc<LlmRequest>,
     route_witness: Option<LlmRequestRouteWitness>,
+    authorization: Option<meerkat_core::LlmRequestAuthorization>,
+    authorization_target:
+        Option<Arc<crate::request_authorization::ResolvedModelAuthorizationTarget>>,
 }
 
 impl PreparedLlmRequest {
     pub fn from_projection(mut request: LlmRequest, projection: LlmReplayProjection) -> Self {
         request.messages = projection.messages;
         Self {
-            request,
+            request: Arc::new(request),
             route_witness: projection.route_witness,
+            authorization: None,
+            authorization_target: None,
         }
     }
 
     pub fn request(&self) -> &LlmRequest {
         &self.request
+    }
+
+    /// Attach the current work only to this immutable request. There is no
+    /// client-global default; rebuilding a request must explicitly forward it.
+    pub fn with_authorization(
+        mut self,
+        authorization: Option<meerkat_core::LlmRequestAuthorization>,
+    ) -> Self {
+        self.authorization = authorization;
+        self
+    }
+
+    pub fn authorization(&self) -> Option<&meerkat_core::LlmRequestAuthorization> {
+        self.authorization.as_ref()
+    }
+
+    pub(crate) fn with_authorization_target(
+        mut self,
+        target: Arc<crate::request_authorization::ResolvedModelAuthorizationTarget>,
+    ) -> Self {
+        self.authorization_target = Some(target);
+        self
+    }
+
+    /// Provider-owned lowering creates fresh immutable request data while
+    /// retaining the work and factory target. No prepared policy check survives
+    /// a payload change; the final adapter prepares again for its actual send.
+    pub fn with_lowered_request(&self, request: LlmRequest) -> Self {
+        Self {
+            request: Arc::new(request),
+            route_witness: self.route_witness.clone(),
+            authorization: self.authorization.clone(),
+            authorization_target: self.authorization_target.clone(),
+        }
+    }
+
+    /// Resolve the actual provider facts into the owning feature's policy.
+    /// Endpoint must exclude credentials. A binding identity is preserved as
+    /// a binding; it is never promoted into an observed external account.
+    pub fn prepare_model_authorization(
+        &self,
+        endpoint: &str,
+        wire_model: &str,
+        hosted_capabilities: Vec<meerkat_core::ServerToolKind>,
+    ) -> Result<Option<meerkat_core::authorization::PreparedOperationCheck>, LlmError> {
+        let Some(authorization) = &self.authorization else {
+            return Ok(None);
+        };
+        let target = self.authorization_target.as_ref().ok_or_else(|| {
+            LlmError::operation_refused(
+                meerkat_core::authorization::OperationRefusalKind::MalformedFacts,
+            )
+        })?;
+        // Use the same URL parser as the request transport. Credentials in
+        // URL user-info cannot be projected as nonsecret operation facts.
+        let endpoint = authorization_endpoint(endpoint).map_err(|_| {
+            LlmError::operation_refused(
+                meerkat_core::authorization::OperationRefusalKind::MalformedFacts,
+            )
+        })?;
+        authorization
+            .prepare(target.facts(
+                endpoint.as_str(),
+                wire_model,
+                hosted_capabilities,
+                authorization.usage(),
+            ))
+            .map(Some)
+            .map_err(LlmError::from_operation_authorization)
     }
 
     pub fn route_witness<T: Any>(&self) -> Option<&T> {
@@ -533,6 +678,13 @@ pub enum LlmEvent {
 
     /// Token usage update
     UsageUpdate { usage: meerkat_core::TurnUsage },
+
+    /// Nonterminal observation failure beside the unchanged physical result.
+    /// Contains no request payload, target, credential, or raw audit error.
+    OperationObservationFailed {
+        operation_id: meerkat_core::OperationId,
+        phase: meerkat_core::authorization::OperationObservationPhase,
+    },
 
     /// Wire-level liveness: the provider connection delivered at least one
     /// complete line that produced no other event (SSE keepalive comments,

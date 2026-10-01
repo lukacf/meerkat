@@ -486,6 +486,8 @@ fn make_prompt(text: &str) -> Input {
     Input::Prompt(PromptInput {
         injected_context: Vec::new(),
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Operator,
@@ -505,6 +507,8 @@ fn make_multimodal_prompt(text: &str, label: &str) -> Input {
     Input::Prompt(PromptInput {
         injected_context: Vec::new(),
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Operator,

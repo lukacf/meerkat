@@ -13,6 +13,8 @@ pub mod tokio {
     pub use tokio_with_wasm::alias::*;
 }
 
+#[cfg(test)]
+mod authorization_tests;
 pub mod client;
 pub(crate) mod output_format_schema;
 pub(crate) mod request_support;

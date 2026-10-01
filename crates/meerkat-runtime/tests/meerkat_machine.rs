@@ -37,6 +37,8 @@ fn make_prompt(text: &str) -> Input {
     Input::Prompt(PromptInput {
         injected_context: Vec::new(),
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Operator,
@@ -2044,6 +2046,8 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {

@@ -424,6 +424,10 @@ struct MachineManagedPostStopExecutor {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl meerkat_core::lifecycle::CoreExecutor for MachineManagedPostStopExecutor {
+    fn supports_work_authorization(&self) -> bool {
+        self.inner.supports_work_authorization()
+    }
+
     fn boundary_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>> {

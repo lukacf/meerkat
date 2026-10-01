@@ -104,6 +104,107 @@ impl ResolvedGrant {
 }
 
 impl LocalGrantAuthority {
+    /// Keep admission observations on this exact grant owner's publication and
+    /// local clock. The caller must not recursively acquire the writer here.
+    pub(crate) fn observe_controller_admission<T>(
+        &self,
+        evaluate: impl FnOnce(u64) -> Result<T, meerkat_core::OperationAuthorizationError>,
+    ) -> Result<T, meerkat_core::OperationAuthorizationError> {
+        use meerkat_core::{OperationAuthorizationError, OperationRefusalKind, OperationRefused};
+        let mut known_failure = None;
+        let observed = self.publication.observe(|| {
+            let result = self
+                .clock
+                .now()
+                .map_err(|_| OperationAuthorizationError::Unavailable)
+                .and_then(|now| evaluate(now.unix_ms));
+            if matches!(
+                result,
+                Err(OperationAuthorizationError::Unavailable
+                    | OperationAuthorizationError::ObservationUnavailable(_))
+            ) {
+                known_failure = result.as_ref().err().copied();
+            }
+            result
+        });
+        if let Some(error) = known_failure {
+            return Err(error);
+        }
+        observed
+            .map_err(|error| match error {
+                crate::publication::PublicationError::Changed => {
+                    OperationRefused::new(OperationRefusalKind::ReprepareRequired).into()
+                }
+                crate::publication::PublicationError::Unavailable => {
+                    OperationAuthorizationError::Unavailable
+                }
+            })?
+            .0
+    }
+
+    pub(crate) fn reserve_controller_policy_change(
+        &self,
+    ) -> Result<crate::publication::LocalPublicationGuard<'_>, crate::publication::PublicationError>
+    {
+        self.publication.reserve_owner_change()
+    }
+
+    pub(crate) fn audited_work_context(
+        &self,
+        associations: Arc<
+            [meerkat_authorization_contracts::work_association::InputAuthorityAssociation],
+        >,
+        execution_scope: meerkat_core::exact_operation::OperationExecutionScope,
+        policy: Arc<dyn crate::policy::LocalWorkPolicy>,
+        sink: Arc<dyn meerkat_authorization_contracts::audit::AuthorizationAuditSink>,
+    ) -> Result<
+        meerkat_core::authorization::WorkAuthorizationContext,
+        meerkat_core::authorization::OperationRefused,
+    > {
+        let inner = crate::work::LocalWorkAuthorization::new_batch(
+            Arc::clone(&associations),
+            policy,
+            self.publication.clone(),
+            Arc::clone(&self.clock),
+        )?;
+        let authorization = crate::audit::AuditedWorkAuthorization {
+            inner: Arc::new(inner),
+            associations,
+            publication: self.publication.clone(),
+            clock: Arc::clone(&self.clock),
+            sink,
+        };
+        Ok(meerkat_core::authorization::WorkAuthorizationContext::new(
+            Arc::new(authorization),
+            execution_scope,
+        ))
+    }
+
+    /// Internal composition retains this exact owner's invalidation/time
+    /// sources. This is data reconstruction, never accepted native admission.
+    pub(crate) fn work_context(
+        &self,
+        associations: Arc<
+            [meerkat_authorization_contracts::work_association::InputAuthorityAssociation],
+        >,
+        execution_scope: meerkat_core::exact_operation::OperationExecutionScope,
+        policy: Arc<dyn crate::policy::LocalWorkPolicy>,
+    ) -> Result<
+        meerkat_core::authorization::WorkAuthorizationContext,
+        meerkat_core::authorization::OperationRefused,
+    > {
+        let authorization = crate::work::LocalWorkAuthorization::new_batch(
+            associations,
+            policy,
+            self.publication.clone(),
+            Arc::clone(&self.clock),
+        )?;
+        Ok(meerkat_core::authorization::WorkAuthorizationContext::new(
+            Arc::new(authorization),
+            execution_scope,
+        ))
+    }
+
     /// Select a new process-local authority from trusted embedding configuration.
     /// Every new owner mints a fresh incarnation; configured generation reuse
     /// cannot revive a reference from an earlier owner.

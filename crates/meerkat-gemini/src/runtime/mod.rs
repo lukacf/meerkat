@@ -142,6 +142,19 @@ impl GeminiCopilotChatClient {
 #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
 #[async_trait]
 impl LlmClient for GeminiCopilotChatClient {
+    fn stream_prepared<'a>(
+        &'a self,
+        request: &'a meerkat_llm_core::PreparedLlmRequest,
+    ) -> meerkat_llm_core::LlmStream<'a> {
+        Box::pin(async_stream::try_stream! {
+            let lowered = request.with_lowered_request(self.lower_request(request.request())?);
+            let mut stream = self.inner.stream_prepared(&lowered);
+            while let Some(event) = futures::StreamExt::next(&mut stream).await {
+                yield event?;
+            }
+        })
+    }
+
     fn project_replay_messages(
         &self,
         messages: &[meerkat_core::Message],
@@ -494,6 +507,14 @@ fn google_code_assist_oauth_refresh_error(
     error: oauth::GoogleCodeAssistOAuthError,
     authmachine_failure: String,
 ) -> ProviderAuthError {
+    if matches!(
+        &error,
+        oauth::GoogleCodeAssistOAuthError::Refresh(
+            meerkat_auth_core::RefreshError::StalePreparation
+        )
+    ) {
+        return ProviderAuthError::Auth(AuthError::StaleCredential);
+    }
     let detail = if authmachine_failure.is_empty() {
         error.to_string()
     } else {
@@ -742,8 +763,8 @@ impl ProviderRuntime for GoogleProviderRuntime {
                             );
                             let prepare_env = env.clone();
                             let prepare_binding = binding.clone();
-                            let prepare: oauth::TokenPrepareFn =
-                                Box::new(move |locked_baseline, mode| {
+                            let prepare: oauth::TokenPrepareFn = Box::new(
+                                move |locked_baseline, mode| {
                                     Box::pin(async move {
                                         prepare_managed_store_oauth_refresh_under_lock(
                                             &prepare_env,
@@ -753,13 +774,10 @@ impl ProviderRuntime for GoogleProviderRuntime {
                                             mode,
                                         )
                                         .await
-                                        .map_err(|error| {
-                                            meerkat_auth_core::RefreshError::Refresh(
-                                                error.to_string(),
-                                            )
-                                        })
+                                        .map_err(meerkat_auth_core::resolver::refresh_error_from_provider)
                                     })
-                                });
+                                },
+                            );
                             runtime
                                 .refresh_tokens_with_locked_preparation(prepare, env.force_refresh)
                                 .await
@@ -1398,4 +1416,19 @@ mod tests {
             .build_client(connection)
             .expect("Google OAuth Code Assist should use the default cloudcode base URL");
     }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "oauth"))]
+#[test]
+fn ce_stale_refresh_remains_stale_credential() {
+    let result = google_code_assist_oauth_refresh_error(
+        oauth::GoogleCodeAssistOAuthError::Refresh(
+            meerkat_auth_core::RefreshError::StalePreparation,
+        ),
+        String::new(),
+    );
+    assert!(matches!(
+        result,
+        ProviderAuthError::Auth(AuthError::StaleCredential)
+    ));
 }

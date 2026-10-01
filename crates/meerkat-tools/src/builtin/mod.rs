@@ -220,6 +220,12 @@ pub enum BuiltinToolError {
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
 
+    /// Required operation observation could not be recorded.
+    #[error("operation observation unavailable")]
+    OperationObservationUnavailable,
+    #[error("operation authorization unavailable")]
+    OperationAuthorizationUnavailable,
+
     /// An async task error occurred
     #[error("Task error: {0}")]
     TaskError(String),

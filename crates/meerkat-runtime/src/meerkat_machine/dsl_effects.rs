@@ -380,6 +380,8 @@ impl MeerkatMachine {
                 reason: dsl_authority::map_error(error.clone(), context),
                 error,
             })?;
+        #[cfg(test)]
+        ingest_test_observer::record(authority.state(), &effects);
         let committed_snapshot = authority.snapshot();
         Ok(StagedSessionDslInput {
             previous_snapshot,
@@ -534,6 +536,8 @@ impl MeerkatMachine {
             let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
                 .map(|transition| DslTransitionEffects::new(transition.into_effects()))
                 .map_err(|err| dsl_authority::map_error(err, context))?;
+            #[cfg(test)]
+            ingest_test_observer::record(authority.state(), &effects);
             #[cfg(feature = "live")]
             self.realize_live_context_preparation_cancellation(
                 session_id,
@@ -805,6 +809,80 @@ mod tests {
                 routed_runtime_epoch(&input),
                 Some(&stated),
                 "routed `{name}` must keep the epoch its producer stated"
+            );
+        }
+    }
+}
+
+// Test-only observation of effects returned by the real authority. Previews
+// do not call this hook. It never supplies an effect or drives a decision.
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+pub(super) mod ingest_test_observer {
+    use super::*;
+    use std::sync::{Mutex, OnceLock, Weak};
+
+    type EffectLog = Mutex<Vec<dsl::MeerkatMachineEffect>>;
+    type ObserverList = Vec<(dsl::SessionId, Weak<EffectLog>)>;
+
+    fn observers() -> &'static Mutex<ObserverList> {
+        static OBSERVERS: OnceLock<Mutex<ObserverList>> = OnceLock::new();
+        OBSERVERS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub(in crate::meerkat_machine) struct Observation {
+        log: Arc<EffectLog>,
+    }
+
+    impl Observation {
+        pub(in crate::meerkat_machine) fn install(session: dsl::SessionId) -> Self {
+            let log = Arc::new(Mutex::new(Vec::new()));
+            observers()
+                .lock()
+                .expect("test observer lock")
+                .push((session, Arc::downgrade(&log)));
+            Self { log }
+        }
+
+        pub(in crate::meerkat_machine) fn effects(&self) -> Vec<dsl::MeerkatMachineEffect> {
+            self.log.lock().expect("test effect log").clone()
+        }
+    }
+
+    impl Drop for Observation {
+        fn drop(&mut self) {
+            let own = Arc::downgrade(&self.log);
+            observers()
+                .lock()
+                .expect("test observer cleanup")
+                .retain(|(_, log)| !log.ptr_eq(&own) && log.strong_count() > 0);
+        }
+    }
+
+    pub(super) fn record(state: &dsl::MeerkatMachineState, effects: &DslTransitionEffects) {
+        let Some(session) = &state.session_id else {
+            return;
+        };
+        let logs: Vec<_> = observers()
+            .lock()
+            .expect("test observer lock")
+            .iter()
+            .filter(|(key, _)| key == session)
+            .filter_map(|(_, log)| log.upgrade())
+            .collect();
+        for log in logs {
+            log.lock().expect("test effect log").extend(
+                effects
+                    .as_slice()
+                    .iter()
+                    .filter(|effect| {
+                        matches!(
+                            effect,
+                            dsl::MeerkatMachineEffect::ResolveAdmission
+                                | dsl::MeerkatMachineEffect::IngressAccepted
+                        )
+                    })
+                    .cloned(),
             );
         }
     }

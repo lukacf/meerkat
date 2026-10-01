@@ -32,6 +32,7 @@ pub const KNOWN_AGENT_EVENT_TYPES: &[&str] = &[
     "compaction_completed",
     "compaction_failed",
     "budget_warning",
+    "operation_observation_failed",
     "retrying",
     "model_fallback_staged",
     "model_fallback_committed",

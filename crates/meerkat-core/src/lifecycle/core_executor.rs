@@ -1796,6 +1796,12 @@ pub trait CoreExecutorTranscriptNoticeHandle: Send + Sync {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait CoreExecutor: Send + Sync {
+    /// Explicit support for forwarding the native work context into every
+    /// model/tool boundary. The runtime refuses governed admission when the
+    /// selected executor does not implement this contract.
+    fn supports_work_authorization(&self) -> bool {
+        false
+    }
     /// Optional live cooperative-boundary endpoint.
     ///
     /// Implementations return this only when the underlying live turn can be

@@ -394,6 +394,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
 
         let turn_metadata = Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                work_authorization: None,
                 handling_mode: None,
                 keep_alive: None,
                 skill_references: (!dispatch.skill_refs.is_empty()).then(|| {
@@ -473,6 +474,8 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
         let input = Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
             objective_id: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: InputOrigin::External {

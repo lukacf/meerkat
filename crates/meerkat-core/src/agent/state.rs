@@ -30,7 +30,6 @@ use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, RunResult, StopReason, SystemNoticeKind,
     SystemNoticeMessage, ToolCallView, ToolDef, ToolNameSet, TurnUsage, UserMessage,
 };
-use serde_json::Value;
 use serde_json::value::RawValue;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -94,6 +93,10 @@ struct LlmRetryRequest<'a> {
     temperature: Option<f32>,
     provider_params: Option<&'a ProviderParamsOverride>,
     prepared_attempt: Arc<dyn crate::AgentLlmRequestAttempt>,
+    authorization: Option<crate::LlmRequestAuthorization>,
+    /// Once feedback selects the retained controller, later turns and retries
+    /// must not revive the refused route or its hosted capability defaults.
+    controller_feedback: &'a mut bool,
     extraction_output_schema: Option<crate::types::OutputSchema>,
     allow_empty_success: bool,
     durable_visibility_parent: &'a mut Option<crate::SessionToolVisibilityState>,
@@ -105,6 +108,65 @@ enum LlmRetryOutcome {
     /// path committed a rewrite. The caller must rebuild every request-owned
     /// projection from the new canonical session before dispatch.
     RepollAfterCompaction,
+}
+
+fn model_operation_unavailable_notice() -> Message {
+    synthetic_notice_block_message(
+        SystemNoticeKind::Generic,
+        "Current authority for the requested operation could not be obtained. Continue with the retained controller or choose another action; no permission decision was made.",
+        crate::SystemNoticeBlock::RuntimeNotice {
+            category: "operation_authorization_unavailable".into(),
+            detail: None,
+            payload: Some(serde_json::json!({"code": "operation_authorization_unavailable"})),
+        },
+    )
+}
+
+fn model_operation_refusal_notice() -> Message {
+    synthetic_notice_block_message(
+        SystemNoticeKind::Generic,
+        "The requested model operation is unavailable under current authorization. Continue with the authorized controller without provider-hosted capabilities, or choose another permitted action.",
+        crate::SystemNoticeBlock::RuntimeNotice {
+            category: "operation_refused".into(),
+            detail: None,
+            payload: Some(serde_json::json!({"code": "operation_refused"})),
+        },
+    )
+}
+
+/// A concrete empty tag overrides the adapter's configured hosted defaults.
+/// Passing no tag would re-enable those defaults during provider lowering.
+fn controller_feedback_params(
+    provider: crate::Provider,
+    current: Option<&ProviderParamsOverride>,
+) -> Option<ProviderParamsOverride> {
+    use crate::lifecycle::run_primitive::{
+        AnthropicProviderTag, GeminiProviderTag, OpenAiProviderTag, ProviderTag,
+    };
+    let tag = match (
+        provider,
+        current.and_then(|params| params.provider_tag.as_ref()),
+    ) {
+        (crate::Provider::Anthropic, Some(ProviderTag::Anthropic(tag))) => {
+            ProviderTag::Anthropic(tag.clone())
+        }
+        (crate::Provider::OpenAI | crate::Provider::SelfHosted, Some(ProviderTag::OpenAi(tag))) => {
+            ProviderTag::OpenAi(tag.clone())
+        }
+        (crate::Provider::Gemini, Some(ProviderTag::Gemini(tag))) => {
+            ProviderTag::Gemini(tag.clone())
+        }
+        (crate::Provider::Anthropic, _) => ProviderTag::Anthropic(AnthropicProviderTag::default()),
+        (crate::Provider::OpenAI | crate::Provider::SelfHosted, _) => {
+            ProviderTag::OpenAi(OpenAiProviderTag::default())
+        }
+        (crate::Provider::Gemini, _) => ProviderTag::Gemini(GeminiProviderTag::default()),
+        (crate::Provider::Other, _) => return None,
+    };
+    let mut params = current.cloned().unwrap_or_default();
+    params.provider_tag = Some(tag);
+    params.clear_provider_native_tools();
+    Some(params)
 }
 
 /// Promote this turn's provider claims into authored evidence, discarding any
@@ -582,6 +644,8 @@ struct CallingLlmTurnCtx<'a> {
     /// and cleared exactly once when the turn commits. Run-local; never
     /// persisted.
     reserved_assistant_message: &'a mut Option<crate::types::AssistantMessageId>,
+    controller_feedback: &'a mut bool,
+    deferred_tool_failure: &'a mut Option<crate::session::DeferredToolBatchFailure>,
     turn_count: u32,
     tool_call_count: u32,
 }
@@ -649,7 +713,8 @@ struct CallingLlmToolBatch {
     tool_results: Vec<crate::types::ToolResult>,
     pending_op_refs: Vec<crate::ops::AsyncOpRef>,
     accumulated_session_effects: Vec<crate::ops::SessionEffect>,
-    callback_pending: Vec<(String, String, Value)>,
+    callback_pending: Vec<crate::error::PendingCallbackToolCall>,
+    deferred_failure: Option<crate::session::DeferredToolBatchFailureKind>,
 }
 
 /// Whether a session save may fail quietly.
@@ -673,6 +738,134 @@ where
     T: AgentToolDispatcher + ?Sized + 'static,
     S: AgentSessionStore + ?Sized + 'static,
 {
+    fn model_request_authorization(
+        &self,
+        run_id: Option<RunId>,
+        usage: crate::authorization::ModelAuthorizationUse,
+    ) -> Option<crate::LlmRequestAuthorization> {
+        self.tool_dispatch_context.work_authorization().map(|work| {
+            let usage = if usage == crate::authorization::ModelAuthorizationUse::Inference
+                && work.controller_client().is_some_and(|controller| {
+                    self.client.controller_model_selection().as_ref()
+                        == Some(controller.selection())
+                }) {
+                crate::authorization::ModelAuthorizationUse::ControllerInference
+            } else {
+                usage
+            };
+            crate::LlmRequestAuthorization::new(work.clone(), crate::OperationId::new(), usage)
+                .with_coordinates(run_id, None)
+        })
+    }
+
+    fn prepare_authorized_model_attempt(
+        &self,
+        messages: Arc<Vec<Message>>,
+        tools: Arc<[Arc<crate::ToolDef>]>,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<ProviderParamsOverride>,
+        authorization: Option<crate::LlmRequestAuthorization>,
+    ) -> Result<Arc<dyn crate::AgentLlmRequestAttempt>, AgentError> {
+        if authorization.as_ref().is_some_and(|authorization| {
+            authorization.usage()
+                == crate::authorization::ModelAuthorizationUse::ControllerInference
+        }) {
+            let controller = self
+                .tool_dispatch_context
+                .work_authorization()
+                .and_then(|work| work.controller_client())
+                .ok_or(AgentError::OperationRefused {
+                    refusal: crate::OperationRefused::new(
+                        crate::OperationRefusalKind::MalformedFacts,
+                    ),
+                })?;
+            // Use the admitted immutable provider client. A mutable fallback
+            // wrapper cannot silently move the controller to another route.
+            return Arc::clone(controller.client()).prepare_request_attempt_authorized(
+                messages,
+                tools,
+                max_tokens,
+                temperature,
+                provider_params,
+                authorization,
+            );
+        }
+        Arc::clone(&self.client).prepare_request_attempt_authorized(
+            messages,
+            tools,
+            max_tokens,
+            temperature,
+            provider_params,
+            authorization,
+        )
+    }
+
+    /// Return to the actual client retained by admitted work, never a fresh
+    /// selection from the possibly changed fallback wrapper. The flag is
+    /// run-local request state, not another authorization or lifecycle owner.
+    fn recover_local_model_operation(
+        &mut self,
+        error: &AgentError,
+        run_id: &RunId,
+        messages: &mut Arc<Vec<Message>>,
+        provider_params: &mut Option<ProviderParamsOverride>,
+        authorization: &mut Option<crate::LlmRequestAuthorization>,
+        controller_feedback: &mut bool,
+    ) -> bool {
+        if (error.operation_refusal().is_none() && !error.operation_authorization_unavailable())
+            || *controller_feedback
+        {
+            return false;
+        }
+        let Some(controller) = self
+            .tool_dispatch_context
+            .work_authorization()
+            .and_then(|work| work.controller_client())
+        else {
+            return false;
+        };
+        let Some(params) =
+            controller_feedback_params(controller.selection().provider(), provider_params.as_ref())
+        else {
+            return false;
+        };
+        let notice = if error.operation_authorization_unavailable() {
+            model_operation_unavailable_notice()
+        } else {
+            model_operation_refusal_notice()
+        };
+        self.session.push(notice.clone());
+        Arc::make_mut(messages).push(notice);
+        *provider_params = Some(params);
+        *authorization = self.model_request_authorization(
+            Some(run_id.clone()),
+            crate::authorization::ModelAuthorizationUse::ControllerInference,
+        );
+        *controller_feedback = true;
+        true
+    }
+
+    fn request_model_profile(
+        &self,
+        controller_feedback: bool,
+    ) -> Option<crate::ModelProfileWitness> {
+        if controller_feedback {
+            let controller = self
+                .tool_dispatch_context
+                .work_authorization()?
+                .controller_client()?;
+            self.effective_model_registry
+                .as_ref()?
+                .profile_witness_for_provider(
+                    controller.selection().provider(),
+                    controller.selection().model(),
+                )
+        } else {
+            self.active_model_profile.clone()
+        }
+    }
+
     /// Best-effort intra-loop session checkpoint.
     ///
     /// This is not the authoritative runtime-boundary commit. WholeBlob keeps
@@ -1076,7 +1269,7 @@ where
                         ))
                     },
                 )?;
-                Ok(lowered)
+                Ok::<_, AgentError>(lowered)
             })
             .transpose()?;
         let (visibility_plan, next_tools) = self
@@ -1737,6 +1930,14 @@ where
     ///
     /// `Disabled` suppresses ALL lower-layer defaults (profile and retry policy).
     fn resolve_effective_call_timeout(&self) -> Option<std::time::Duration> {
+        self.resolve_call_timeout_for(self.client.provider(), self.client.model())
+    }
+
+    fn resolve_call_timeout_for(
+        &self,
+        provider: crate::Provider,
+        model: &str,
+    ) -> Option<std::time::Duration> {
         use crate::config::CallTimeoutOverride;
         match &self.call_timeout_override {
             CallTimeoutOverride::Value(d) => Some(*d),
@@ -1746,7 +1947,7 @@ where
                 // identity — no string boundary to re-parse.
                 self.model_defaults_resolver
                     .as_ref()
-                    .and_then(|r| r.call_timeout_for(self.client.provider(), self.client.model()))
+                    .and_then(|r| r.call_timeout_for(provider, model))
                     // Fall through to RetryPolicy.call_timeout for direct builder users.
                     .or(self.retry_policy.call_timeout)
             }
@@ -1850,6 +2051,8 @@ where
             temperature,
             provider_params,
             prepared_attempt,
+            mut authorization,
+            controller_feedback,
             extraction_output_schema,
             allow_empty_success,
             durable_visibility_parent,
@@ -1864,12 +2067,14 @@ where
         let mut attempt = 0u32;
         let mut retry_request_pressure_recheck = false;
         let mut next_request_attempt = Some(prepared_attempt);
+        let mut authorization_reprepared = false;
 
         loop {
-            if let Some(metadata) = self
-                .session
-                .try_session_metadata()
-                .map_err(|error| AgentError::ConfigError(error.to_string()))?
+            if !*controller_feedback
+                && let Some(metadata) = self
+                    .session
+                    .try_session_metadata()
+                    .map_err(|error| AgentError::ConfigError(error.to_string()))?
                 && let Some(provenance) = metadata.model_fallback.as_ref()
                 && provenance.target == metadata.llm_identity()
             {
@@ -1929,7 +2134,21 @@ where
             }
 
             // 2. Compute effective timeout for this call
-            let effective_call_timeout = self.resolve_effective_call_timeout();
+            let controller = if *controller_feedback {
+                self.tool_dispatch_context
+                    .work_authorization()
+                    .and_then(|work| work.controller_client())
+                    .cloned()
+            } else {
+                None
+            };
+            let effective_call_timeout = match controller.as_ref() {
+                Some(controller) => self.resolve_call_timeout_for(
+                    controller.selection().provider(),
+                    controller.selection().model(),
+                ),
+                None => self.resolve_effective_call_timeout(),
+            };
             let remaining_turn = self.budget.remaining_duration();
 
             // If remaining turn budget is zero, surface immediately
@@ -1941,35 +2160,73 @@ where
 
             let mut request_attempt = match next_request_attempt.take() {
                 Some(attempt) => attempt,
-                None => Arc::clone(&self.client).prepare_request_attempt(
+                None => match self.prepare_authorized_model_attempt(
                     Arc::clone(&current_messages),
                     Arc::clone(&current_tools),
                     current_max_tokens,
                     temperature,
                     current_provider_params.clone(),
-                )?,
+                    authorization.clone(),
+                ) {
+                    Ok(attempt) => attempt,
+                    Err(error) => {
+                        if self.recover_local_model_operation(
+                            &error,
+                            run_id,
+                            &mut current_messages,
+                            &mut current_provider_params,
+                            &mut authorization,
+                            controller_feedback,
+                        ) {
+                            retry_request_pressure_recheck = true;
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                },
             };
 
             if std::mem::take(&mut retry_request_pressure_recheck) {
                 let mut route_stabilization_attempt = 0_u8;
-                let request_pressure = loop {
+                let request_pressure_result = loop {
                     match request_attempt.request_pressure() {
-                        Ok(pressure) => break pressure,
+                        Ok(pressure) => break Ok(pressure),
                         Err(error)
                             if agent_error_is_authorization_route_changed(&error)
                                 && route_stabilization_attempt
                                     < MAX_REQUEST_ROUTE_STABILIZATION_RETRIES =>
                         {
                             route_stabilization_attempt += 1;
-                            request_attempt = Arc::clone(&self.client).prepare_request_attempt(
+                            request_attempt = match self.prepare_authorized_model_attempt(
                                 Arc::clone(&current_messages),
                                 Arc::clone(&current_tools),
                                 current_max_tokens,
                                 temperature,
                                 current_provider_params.clone(),
-                            )?;
+                                authorization.clone(),
+                            ) {
+                                Ok(attempt) => attempt,
+                                Err(error) => break Err(error),
+                            };
                         }
-                        Err(error) => return Err(error),
+                        Err(error) => break Err(error),
+                    }
+                };
+                let request_pressure = match request_pressure_result {
+                    Ok(pressure) => pressure,
+                    Err(error) => {
+                        if self.recover_local_model_operation(
+                            &error,
+                            run_id,
+                            &mut current_messages,
+                            &mut current_provider_params,
+                            &mut authorization,
+                            controller_feedback,
+                        ) {
+                            retry_request_pressure_recheck = true;
+                            continue;
+                        }
+                        return Err(error);
                     }
                 };
                 let request_byte_error = request_pressure.and_then(|pressure| {
@@ -1988,11 +2245,13 @@ where
                         None
                     }
                 });
-                let request_context_budget = self.context_budget_fact_for_request(
+                let profile = self.request_model_profile(*controller_feedback);
+                let request_context_budget = self.context_budget_fact_for_profile(
                     &current_messages,
                     &current_tools,
                     current_max_tokens,
                     request_pressure,
+                    profile.as_ref(),
                 )?;
                 let context_budget_error =
                     self.context_budget_refusal_error(request_context_budget.as_ref());
@@ -2031,7 +2290,15 @@ where
             }
 
             // 4. Determine whether to wrap the call and select timeout source
-            self.client.begin_stream_output_observation();
+            if let Some(controller) = controller.as_ref() {
+                controller.client().begin_stream_output_observation();
+            } else {
+                self.client.begin_stream_output_observation();
+            }
+            let stream_activity_count = || match controller.as_ref() {
+                Some(controller) => controller.client().stream_activity_count(),
+                None => self.client.stream_activity_count(),
+            };
             let hard_timeout = match (effective_call_timeout, remaining_turn) {
                 (None, None) => None,
                 (Some(ct), None) => Some((ct, CallTimeoutSource::CallBudget)),
@@ -2047,22 +2314,19 @@ where
             // The inactivity watchdog applies only when the client reports
             // stream liveness; clients without a probe keep the pre-watchdog
             // contract (hard timeouts only).
-            let stall_window = self
-                .client
-                .stream_activity_count()
-                .and(self.retry_policy.stream_inactivity_timeout);
+            let stall_window =
+                stream_activity_count().and(self.retry_policy.stream_inactivity_timeout);
 
             // Await the call under both deadlines. Each observed stream event
             // re-arms the stall window; the hard deadline is fixed at call
             // start. Timers route through the crate tokio alias, so this works
             // identically on wasm32 (tokio_with_wasm) and native.
             let wait_outcome = {
-                let probe_client = Arc::clone(&self.client);
                 let call_fut = request_attempt.stream_response(assistant_message_id);
                 let mut call_fut = std::pin::pin!(call_fut);
                 let call_started = crate::time_compat::Instant::now();
                 let mut last_activity = call_started;
-                let mut last_count = probe_client.stream_activity_count();
+                let mut last_count = stream_activity_count();
                 loop {
                     let now = crate::time_compat::Instant::now();
                     let hard_remaining = match hard_timeout {
@@ -2094,7 +2358,7 @@ where
                     match tokio::time::timeout(wait, call_fut.as_mut()).await {
                         Ok(result) => break LlmCallWait::Completed(result),
                         Err(_elapsed) => {
-                            let count = probe_client.stream_activity_count();
+                            let count = stream_activity_count();
                             if count != last_count {
                                 last_count = count;
                                 last_activity = crate::time_compat::Instant::now();
@@ -2113,7 +2377,12 @@ where
                     let timeout_ms = limit.as_millis() as u64;
                     match self.classify_call_timeout(source, timeout_ms)? {
                         CallTimeoutVerdict::RetryableCallTimeout => Err(AgentError::Llm {
-                            provider: self.client.provider().as_str(),
+                            provider: controller
+                                .as_ref()
+                                .map_or(self.client.provider(), |client| {
+                                    client.selection().provider()
+                                })
+                                .as_str(),
                             reason: crate::error::LlmFailureReason::CallTimeout {
                                 duration_ms: timeout_ms,
                             },
@@ -2140,7 +2409,12 @@ where
                     // one stall retries, repeated stalls exhaust the retry
                     // budget and terminalize the turn.
                     Err(AgentError::Llm {
-                        provider: self.client.provider().as_str(),
+                        provider: controller
+                            .as_ref()
+                            .map_or(self.client.provider(), |client| {
+                                client.selection().provider()
+                            })
+                            .as_str(),
                         reason: crate::error::LlmFailureReason::StreamStalled {
                             inactivity_ms: idle.as_millis() as u64,
                         },
@@ -2163,7 +2437,12 @@ where
                         if allow_empty_success {
                             return Ok(LlmRetryOutcome::Completed(result));
                         }
-                        let error = AgentError::llm_empty_response(self.client.provider().as_str());
+                        let provider = controller
+                            .as_ref()
+                            .map_or(self.client.provider(), |client| {
+                                client.selection().provider()
+                            });
+                        let error = AgentError::llm_empty_response(provider.as_str());
                         // P0 Dogma Invariant 1: MeerkatMachine — not the shell —
                         // owns the recoverable-vs-fatal/exhaustion verdict. Only
                         // a machine `Recover` verdict drives the retry path;
@@ -2180,10 +2459,11 @@ where
                             // mutation happens. Keep this as a boolean
                             // precondition only; the actual candidate proposal
                             // is requested after the machine accepts recovery.
-                            let may_activate_fallback = fallback_activation_is_pre_stream_safe(
-                                &error,
-                                self.client.stream_output_observed(),
-                            );
+                            let may_activate_fallback = !*controller_feedback
+                                && fallback_activation_is_pre_stream_safe(
+                                    &error,
+                                    self.client.stream_output_observed(),
+                                );
                             let retry_schedule = self
                                 .retry_policy
                                 .schedule_retry(&error, attempt, self.budget.remaining_duration())
@@ -2306,6 +2586,32 @@ where
                     }
                     return Ok(LlmRetryOutcome::Completed(result));
                 }
+                Err(error)
+                    if error.operation_refusal().is_some()
+                        || error.operation_authorization_unavailable() =>
+                {
+                    if error.operation_refusal().is_some_and(|refusal| {
+                        refusal.kind() == crate::OperationRefusalKind::ReprepareRequired
+                    }) && !authorization_reprepared
+                    {
+                        // The final check observed a relevant owner change.
+                        // Rebuild once from that owner; never retag old facts.
+                        authorization_reprepared = true;
+                        continue;
+                    }
+                    if self.recover_local_model_operation(
+                        &error,
+                        run_id,
+                        &mut current_messages,
+                        &mut current_provider_params,
+                        &mut authorization,
+                        controller_feedback,
+                    ) {
+                        retry_request_pressure_recheck = true;
+                        continue;
+                    }
+                    return Err(error);
+                }
                 Err(e) => {
                     // P0 Dogma Invariant 1: MeerkatMachine — not the shell —
                     // owns the recoverable-vs-fatal/exhaustion verdict. Only a
@@ -2341,10 +2647,11 @@ where
                         // mutation happens. Keep this as a boolean precondition
                         // only; the actual candidate proposal is requested
                         // after the machine accepts recovery.
-                        let may_activate_fallback = fallback_activation_is_pre_stream_safe(
-                            &e,
-                            self.client.stream_output_observed(),
-                        );
+                        let may_activate_fallback = !*controller_feedback
+                            && fallback_activation_is_pre_stream_safe(
+                                &e,
+                                self.client.stream_output_observed(),
+                            );
                         let retry_schedule = self
                             .retry_policy
                             .schedule_retry(&e, attempt, self.budget.remaining_duration())
@@ -2874,6 +3181,10 @@ where
                                     &compactor,
                                     self.compaction_curator.as_ref(),
                                     crate::agent::compact::CompactionInvocation {
+                                        authorization: self.model_request_authorization(
+                                            self.tool_dispatch_context.run_id().cloned(),
+                                            crate::authorization::ModelAuthorizationUse::Compaction,
+                                        ),
                                         model_messages: &model_messages,
                                         observation_source,
                                         window: crate::compact::CompactionWindow {
@@ -2920,6 +3231,28 @@ where
                             }
                         };
 
+                        if matches!(
+                            &outcome,
+                            Err(crate::agent::compact::CompactionError::LlmFailed(error))
+                                if error.operation_refusal().is_some()
+                        ) {
+                            // A denied optional summary preserves the original
+                            // history and informs the existing controller.
+                            self.session.push(synthetic_notice_block_message(
+                                SystemNoticeKind::Generic,
+                                "Context compaction is unavailable under current authorization. Continue using the existing conversation.",
+                                crate::SystemNoticeBlock::RuntimeNotice {
+                                    category: "operation_refused".into(),
+                                    detail: None,
+                                    payload: Some(serde_json::json!({"code": "operation_refused"})),
+                                },
+                            ));
+                        }
+                        if matches!(&outcome, Err(crate::agent::compact::CompactionError::LlmFailed(error))
+                            if error.operation_authorization_unavailable())
+                        {
+                            self.session.push(model_operation_unavailable_notice());
+                        }
                         let outcome = match outcome {
                             Err(crate::agent::compact::CompactionError::LlmFailed(error))
                                 if agent_error_is_policy_stop(&error) =>
@@ -4066,11 +4399,13 @@ where
         if self.turn_terminal()? {
             return Ok(());
         }
+        let failure = TurnFailureSource::from_agent_error(error)
+            .map_err(|refusal| AgentError::OperationRefused { refusal })?;
         self.terminal_error_detail = Some(error.to_string());
         self.terminal_error_metadata = crate::TurnErrorMetadata::from_agent_error(error);
         let transition = self.apply_turn_input(TurnExecutionInput::FatalFailure {
             run_id: run_id.clone(),
-            failure: TurnFailureSource::from_agent_error(error),
+            failure,
         })?;
         self.execute_turn_effects(&transition, turn_count, event_tx)
             .await?;
@@ -4102,6 +4437,32 @@ where
             self.terminal_error_metadata = Some(metadata);
         }
         Ok(())
+    }
+
+    /// Report an engine observation failure only after the complete tool
+    /// batch and any real barrier have settled. This is never model feedback.
+    async fn terminalize_deferred_tool_failure(
+        &mut self,
+        run_id: &RunId,
+        turn_count: u32,
+        event_tx: &Option<mpsc::Sender<AgentEvent>>,
+        failure: &crate::session::DeferredToolBatchFailure,
+    ) -> Result<AgentError, AgentError> {
+        let error = match failure.kind {
+            crate::session::DeferredToolBatchFailureKind::OperationObservationUnavailable => {
+                AgentError::operation_observation_unavailable()
+            }
+        };
+        self.terminalize_fatal_error(run_id, turn_count, event_tx, &error)
+            .await?;
+        self.session
+            .complete_deferred_callback_failure(failure)
+            .map_err(|error| {
+                AgentError::InternalError(format!(
+                    "failed to settle exact callback failure receipt: {error}"
+                ))
+            })?;
+        Ok(error)
     }
 
     async fn complete_extraction_failed(
@@ -4209,6 +4570,7 @@ where
         &mut self,
         run_input: Option<crate::types::RunInput>,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
+        deferred_callback: Option<crate::session::DeferredCallbackContinuation>,
     ) -> Result<RunResult, AgentError> {
         let mut turn_count = 0u32;
         // The turn cap is resolved once at the build/composition seam
@@ -4226,6 +4588,10 @@ where
         let mut event_stream_open = true;
         let mut run_has_visible_or_actionable_output = false;
         let mut reserved_assistant_message: Option<crate::types::AssistantMessageId> = None;
+        let mut controller_feedback = false;
+        let mut deferred_tool_failure = deferred_callback
+            .as_ref()
+            .map(|value| value.failure.clone());
         // Arm the per-turn aggregate horizon. Every segment of a turn is
         // separately bounded (per-call LLM timeout, stream-inactivity
         // watchdog, per-tool-call timeout); this is the only owner of their
@@ -4349,7 +4715,11 @@ where
             };
         }
 
-        if let Some(pending_op_refs) = self.pending_callback_async_ops.take() {
+        let staged_callback_ops = self.pending_callback_async_ops.take();
+        let callback_ops = deferred_callback
+            .map(|value| value.async_ops)
+            .or(staged_callback_ops);
+        if let Some(pending_op_refs) = callback_ops {
             let barrier_operation_ids = pending_op_refs
                 .iter()
                 .filter(|op_ref| op_ref.wait_policy == crate::ops::WaitPolicy::Barrier)
@@ -4365,6 +4735,17 @@ where
                 self.pending_callback_async_ops = Some(pending_op_refs);
                 return Err(error);
             }
+        }
+
+        // A callback with no barrier still settles its complete result batch
+        // before surfacing the retained engine failure, without a model call.
+        if deferred_tool_failure.is_some()
+            && !self.turn_has_barrier_ops()?
+            && let Some(failure) = deferred_tool_failure.take()
+        {
+            return Err(self
+                .terminalize_deferred_tool_failure(&run_id, turn_count, &event_tx, &failure)
+                .await?);
         }
 
         loop {
@@ -4419,6 +4800,8 @@ where
                         sticky_fallback_durable_visibility_parent:
                             &mut sticky_fallback_durable_visibility_parent,
                         reserved_assistant_message: &mut reserved_assistant_message,
+                        controller_feedback: &mut controller_feedback,
+                        deferred_tool_failure: &mut deferred_tool_failure,
                         turn_count,
                         tool_call_count,
                     };
@@ -4518,6 +4901,13 @@ where
                     self.apply_turn_input(TurnExecutionInput::ToolCallsResolved {
                         run_id: run_id.clone(),
                     })?;
+                    if let Some(failure) = deferred_tool_failure.take() {
+                        return Err(self
+                            .terminalize_deferred_tool_failure(
+                                &run_id, turn_count, &event_tx, &failure,
+                            )
+                            .await?);
+                    }
                     if let Err(error) = self
                         .drain_turn_boundary(turn_count, event_tx.as_ref())
                         .await
@@ -5169,7 +5559,7 @@ where
 
         let configured_max_tokens = self.config.resolved_max_tokens_per_turn();
         let effective_max_tokens = self
-            .active_model_profile
+            .request_model_profile(*ctx.controller_feedback)
             .as_ref()
             .and_then(crate::ModelProfileWitness::max_output_tokens)
             .map(|limit| configured_max_tokens.min(limit))
@@ -5259,9 +5649,25 @@ where
             // prompt-based and the schema is enforced at the
             // validation seam below.
             if let Some(output_schema) = self.config.output_schema.clone() {
-                match effective_provider_params
-                    .set_structured_output(self.client.provider(), output_schema)
+                let provider = if *ctx.controller_feedback {
+                    self.tool_dispatch_context
+                        .work_authorization()
+                        .and_then(|work| work.controller_client())
+                        .map_or(self.client.provider(), |controller| {
+                            controller.selection().provider()
+                        })
+                } else {
+                    self.client.provider()
+                };
+                // Rebuild the tag before injecting a provider-specific output
+                // format when feedback returned to another provider family.
+                if *ctx.controller_feedback
+                    && let Some(params) =
+                        controller_feedback_params(provider, Some(&effective_provider_params))
                 {
+                    effective_provider_params = params;
+                }
+                match effective_provider_params.set_structured_output(provider, output_schema) {
                     Ok(_injection) => {}
                     Err(error) => {
                         return Ok(CallingLlmGate::Done(
@@ -5375,16 +5781,36 @@ where
                     .await;
             }
         };
-        let request_messages = Arc::new(request_messages);
+        let mut request_messages = Arc::new(request_messages);
         let call_tool_defs: Arc<[Arc<ToolDef>]> = call_tool_defs.to_vec().into();
+        let mut authorization = self.model_request_authorization(
+            Some(ctx.run_id.clone()),
+            if *ctx.controller_feedback {
+                crate::authorization::ModelAuthorizationUse::ControllerInference
+            } else {
+                crate::authorization::ModelAuthorizationUse::Inference
+            },
+        );
+        let mut provider_params = prepared.typed_provider_params.clone();
+        if *ctx.controller_feedback {
+            let provider = self
+                .tool_dispatch_context
+                .work_authorization()
+                .and_then(|work| work.controller_client())
+                .map(|controller| controller.selection().provider());
+            provider_params = provider.and_then(|provider| {
+                controller_feedback_params(provider, provider_params.as_ref())
+            });
+        }
         let mut route_stabilization_attempt = 0_u8;
         let (prepared_attempt, request_pressure) = loop {
-            let attempt = match Arc::clone(&self.client).prepare_request_attempt(
+            let attempt = match self.prepare_authorized_model_attempt(
                 Arc::clone(&request_messages),
                 Arc::clone(&call_tool_defs),
                 prepared.effective_max_tokens,
                 prepared.effective_temperature,
-                prepared.typed_provider_params.clone(),
+                provider_params.clone(),
+                authorization.clone(),
             ) {
                 Ok(attempt) => attempt,
                 Err(error)
@@ -5396,6 +5822,16 @@ where
                     continue;
                 }
                 Err(error) => {
+                    if self.recover_local_model_operation(
+                        &error,
+                        ctx.run_id,
+                        &mut request_messages,
+                        &mut provider_params,
+                        &mut authorization,
+                        ctx.controller_feedback,
+                    ) {
+                        continue;
+                    }
                     return self
                         .complete_calling_llm_request_failure(ctx, prepared.in_extraction, error)
                         .await;
@@ -5411,6 +5847,16 @@ where
                     route_stabilization_attempt += 1;
                 }
                 Err(error) => {
+                    if self.recover_local_model_operation(
+                        &error,
+                        ctx.run_id,
+                        &mut request_messages,
+                        &mut provider_params,
+                        &mut authorization,
+                        ctx.controller_feedback,
+                    ) {
+                        continue;
+                    }
                     return self
                         .complete_calling_llm_request_failure(ctx, prepared.in_extraction, error)
                         .await;
@@ -5464,15 +5910,18 @@ where
         // and replace its typed `RequestTooLarge` cause with an internal error.
         // The trigger sees an absent budget for that boundary and falls back to
         // its other measures.
-        let request_context_budget_result = self.context_budget_fact_for_request(
+        let profile = self.request_model_profile(*ctx.controller_feedback);
+        let request_context_budget_result = self.context_budget_fact_for_profile(
             &request_messages,
             &call_tool_defs,
             prepared.effective_max_tokens,
             request_pressure,
+            profile.as_ref(),
         );
 
         if self.pending_compaction_boundary_index.is_some() {
             let prior_completed_boundary = self.compaction_cadence.last_compaction_boundary_index;
+            let prior_message_count = self.session.messages().len();
             self.pending_compaction_request_pressure = request_pressure;
             self.pending_compaction_request_budget = request_context_budget_result
                 .as_ref()
@@ -5492,11 +5941,13 @@ where
                     .complete_calling_llm_request_failure(ctx, prepared.in_extraction, error)
                     .await;
             }
-            if self.compaction_cadence.last_compaction_boundary_index != prior_completed_boundary {
+            if self.compaction_cadence.last_compaction_boundary_index != prior_completed_boundary
+                || self.session.messages().len() != prior_message_count
+            {
                 // The request composed above belongs to the old transcript.
                 // Re-enter the boundary so system overlays, blobs,
                 // tools, provider parameters, and provider JSON are all
-                // recomposed from the committed rewrite.
+                // recomposed from the committed rewrite or local refusal notice.
                 return Ok(CallingLlmGate::Repoll);
             }
         }
@@ -5550,8 +6001,10 @@ where
                 tools: call_tool_defs,
                 max_tokens: prepared.effective_max_tokens,
                 temperature: prepared.effective_temperature,
-                provider_params: prepared.typed_provider_params.as_ref(),
+                provider_params: provider_params.as_ref(),
                 prepared_attempt,
+                authorization,
+                controller_feedback: ctx.controller_feedback,
                 extraction_output_schema: if prepared.in_extraction {
                     self.config.output_schema.clone()
                 } else {
@@ -5584,6 +6037,14 @@ where
         error: AgentError,
     ) -> Result<CallingLlmGate<LlmStreamResult>, AgentError> {
         if error.requires_session_teardown() {
+            return Err(error);
+        }
+        if error.operation_refusal().is_some() || error.operation_authorization_unavailable() {
+            // Reachable alternate/hosted refusals have already been returned
+            // to the retained controller. A refusal here means its admitted
+            // route is unusable (or no pin was admitted). Preserve that typed
+            // owner invariant failure; never manufacture a fatal lifecycle
+            // transition, successful model output, or an unbounded retry.
             return Err(error);
         }
         // Extraction runs after the main run has already completed. Every
@@ -5645,6 +6106,7 @@ where
             TurnFailureSource::llm_retry_exhausted(error)
         } else {
             TurnFailureSource::from_agent_error(error)
+                .map_err(|refusal| AgentError::OperationRefused { refusal })?
         };
         self.terminal_error_detail = Some(error.to_string());
         // Diagnostic fidelity is safe to retain only when the generated cause
@@ -5789,7 +6251,24 @@ where
         max_output_tokens: u32,
         provider_request_pressure: Option<crate::ProviderRequestPressure>,
     ) -> Result<Option<crate::ContextBudgetFact>, AgentError> {
-        let Some(active_model_profile) = self.active_model_profile.as_ref() else {
+        self.context_budget_fact_for_profile(
+            messages,
+            tools,
+            max_output_tokens,
+            provider_request_pressure,
+            self.active_model_profile.as_ref(),
+        )
+    }
+
+    fn context_budget_fact_for_profile(
+        &self,
+        messages: &[Message],
+        tools: &[Arc<ToolDef>],
+        max_output_tokens: u32,
+        provider_request_pressure: Option<crate::ProviderRequestPressure>,
+        profile: Option<&crate::ModelProfileWitness>,
+    ) -> Result<Option<crate::ContextBudgetFact>, AgentError> {
+        let Some(active_model_profile) = profile else {
             return Ok(None);
         };
         let fact_result = match provider_request_pressure {
@@ -5861,6 +6340,23 @@ where
         // ends the run, so the next provider turn always mints a fresh id and
         // an id is never on two committed rows.
         *ctx.reserved_assistant_message = None;
+        let response_controller = if *ctx.controller_feedback {
+            self.tool_dispatch_context
+                .work_authorization()
+                .and_then(|work| work.controller_client())
+                .cloned()
+        } else {
+            None
+        };
+        let (response_provider, response_model) = response_controller
+            .as_ref()
+            .map(|controller| {
+                (
+                    controller.selection().provider(),
+                    controller.selection().model().to_owned(),
+                )
+            })
+            .unwrap_or_else(|| (self.client.provider(), self.client.model().to_owned()));
         // A request carrying the structured-output instruction projection has
         // a leading system prompt the canonical transcript does not contain,
         // so a breakpoint the provider authored over it is evidence about that
@@ -5875,8 +6371,8 @@ where
         let (authored_cache_breakpoints, mut cache_breakpoint_discards) =
             promote_cache_breakpoint_claims(
                 turn_cache_breakpoint_claims,
-                self.client.provider(),
-                self.client.model(),
+                response_provider,
+                &response_model,
             );
         // A FAULT MAY ONLY TERMINALIZE WHAT IT ACTUALLY INVALIDATES.
         //
@@ -5908,8 +6404,8 @@ where
             Ok(turn_usage) => Some(turn_usage),
             Err(error) => {
                 let unmeasured = crate::provider_evidence::UnmeasuredTurnUsageAccounting::new(
-                    self.client.provider(),
-                    self.client.model(),
+                    response_provider,
+                    &response_model,
                 );
                 tracing::warn!(
                     session_id = %self.session.id(),
@@ -5944,8 +6440,8 @@ where
             && let TurnUsageIdentityVerdict::Disputed(dispute) =
                 classify_provider_turn_usage_identity(
                     turn_usage,
-                    self.client.provider(),
-                    self.client.model(),
+                    response_provider,
+                    &response_model,
                 )
         {
             tracing::warn!(
@@ -6315,7 +6811,10 @@ where
             .open_next_boundary(ctx.run_id)
             .map_err(|error| AgentError::InternalError(error.to_string()))?;
 
-        let executable_tool_calls = self
+        let CallingLlmToolAdmission {
+            executable_tool_calls,
+            mut refused_tool_calls,
+        } = self
             .admit_calling_llm_tool_calls(ctx, tool_defs, tool_calls)
             .await?;
 
@@ -6325,7 +6824,7 @@ where
         // expiry becomes a `ToolError::Timeout` so it flows
         // through `terminal_tool_outcome_for_error` exactly like
         // any other tool execution failure.
-        let dispatch_results = dispatch_tool_calls_boxed(
+        let mut dispatch_results = dispatch_tool_calls_boxed(
             Arc::clone(&self.tools),
             self.tool_dispatch_context.clone(),
             self.tools_config.default_timeout,
@@ -6334,6 +6833,10 @@ where
             executable_tool_calls,
         )
         .await;
+        if !refused_tool_calls.is_empty() {
+            dispatch_results.append(&mut refused_tool_calls);
+            dispatch_results.sort_by_key(|(tool_index, _, _, _)| *tool_index);
+        }
 
         let batch = self
             .collect_calling_llm_tool_outcomes(ctx, tool_defs, dispatch_results)
@@ -6347,16 +6850,18 @@ where
         .await
     }
     /// Runs pre-tool hooks and visibility prechecks over the requested
-    /// tool calls, admitting the executable subset.
+    /// tool calls, admitting the executable subset and retaining ordinary
+    /// access-denied results for the remaining calls.
     async fn admit_calling_llm_tool_calls(
         &mut self,
         ctx: &mut CallingLlmTurnCtx<'_>,
         tool_defs: &Arc<[Arc<ToolDef>]>,
         tool_calls: Vec<(ToolCallOwned, ToolCallArguments)>,
-    ) -> Result<Vec<(usize, ToolCallOwned)>, AgentError> {
+    ) -> Result<CallingLlmToolAdmission, AgentError> {
         // Execute tool calls in parallel
         let tools_ref = Arc::clone(&self.tools);
         let mut executable_tool_calls = Vec::new();
+        let mut refused_tool_calls = Vec::new();
         let visible_tool_names = tool_defs
             .iter()
             .map(|tool| tool.tool_name())
@@ -6424,10 +6929,15 @@ where
                 &visible_tool_names,
                 tc.name.as_str(),
             ) {
-                // Preserve the typed `access_denied` / `not_found`
-                // cause through terminalization so the distinction
-                // survives to `error_code()`/wire instead of being
-                // flattened into an opaque message.
+                if matches!(error, ToolError::AccessDenied { .. }) {
+                    // Visibility refusal is the same per-call outcome as a
+                    // dispatcher access denial. Preserve its id and typed
+                    // cause without entering dispatch or blocking siblings.
+                    refused_tool_calls.push((tool_index, tc, Err(error), 0));
+                    continue;
+                }
+                // Other precheck failures retain their existing typed fatal
+                // path; this does not reclassify infrastructure or hook errors.
                 let error = AgentError::tool(error);
                 self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
                     .await?;
@@ -6444,7 +6954,10 @@ where
             );
             executable_tool_calls.push((tool_index, tc));
         }
-        Ok(executable_tool_calls)
+        Ok(CallingLlmToolAdmission {
+            executable_tool_calls,
+            refused_tool_calls,
+        })
     }
     /// Processes dispatch results: post-tool hooks, events, and the
     /// accumulated ops/effects/callback partition.
@@ -6454,16 +6967,26 @@ where
         tool_defs: &Arc<[Arc<ToolDef>]>,
         dispatch_results: Vec<ToolDispatchResult>,
     ) -> Result<CallingLlmToolBatch, AgentError> {
-        if let Some(failure) = dispatch_results
-            .iter()
-            .find_map(|(_, _, result, _)| match result {
-                Err(crate::error::ToolError::PolicyIndeterminate { failure }) => {
-                    Some(failure.clone())
-                }
-                _ => None,
-            })
+        let governed_work = self.tool_dispatch_context.work_authorization().is_some();
+        if !governed_work
+            && let Some((failure, settlement_failures)) =
+                dispatch_results
+                    .iter()
+                    .find_map(|(_, _, result, _)| match result {
+                        Err(error) => match error.primary_error() {
+                            crate::error::ToolError::PolicyIndeterminate { failure } => Some((
+                                failure.clone(),
+                                error.settlement_failures().cloned().collect(),
+                            )),
+                            _ => None,
+                        },
+                        _ => None,
+                    })
         {
-            let error = AgentError::PolicyIndeterminate { failure };
+            let error = AgentError::PolicyIndeterminate {
+                failure,
+                settlement_failures,
+            };
             self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
                 .await?;
             return Err(error);
@@ -6482,27 +7005,51 @@ where
         // Process results and emit events
         let mut all_async_ops = Vec::<crate::ops::AsyncOpRef>::new();
         let mut accumulated_session_effects = Vec::<crate::ops::SessionEffect>::new();
-        let mut callback_pending: Vec<(String, String, Value)> = Vec::new();
+        let mut callback_pending: Vec<crate::error::PendingCallbackToolCall> = Vec::new();
+        let mut deferred_failure = None;
         for (_, tc, dispatch_result, duration_ms) in dispatch_results {
             let mut tool_session_effects = Vec::new();
             let mut tool_result = match dispatch_result {
                 Ok(mut outcome) => {
+                    if outcome.terminal_cause().is_some_and(|cause| {
+                        cause.kind() == crate::ToolDispatchTerminalErrorKind::OperationObservationUnavailable
+                    }) {
+                        deferred_failure = Some(crate::session::DeferredToolBatchFailureKind::OperationObservationUnavailable);
+                    }
                     outcome.clear_terminal_cause();
                     all_async_ops.extend(outcome.async_ops);
                     tool_session_effects = outcome.session_effects;
                     outcome.result
                 }
-                Err(crate::error::ToolError::CallbackPending {
-                    tool_name: callback_tool,
-                    args: callback_args,
-                }) => {
+                Err(error) if error.is_callback_pending() => {
+                    let (callback_tool, callback_args) =
+                        error.as_callback_pending().ok_or_else(|| {
+                            AgentError::InternalError(
+                                "callback classification lost its exact payload".to_string(),
+                            )
+                        })?;
                     // Defer the successful continuation
                     // boundary until every completed sibling
                     // has been projected.
-                    callback_pending.push((tc.id.clone(), callback_tool, callback_args));
+                    callback_pending.push(crate::error::PendingCallbackToolCall {
+                        tool_use_id: tc.id.clone(),
+                        tool_name: callback_tool.to_owned(),
+                        args: callback_args.clone(),
+                        settlement_failures: error.settlement_failures().cloned().collect(),
+                    });
                     continue;
                 }
-                Err(e) => crate::ops::terminal_tool_outcome_for_error(tc.id.clone(), e).result,
+                Err(error) => {
+                    let (error, settlement_failures) = error.into_primary_and_settlement_failures();
+                    if matches!(error, ToolError::OperationObservationUnavailable) {
+                        deferred_failure = Some(crate::session::DeferredToolBatchFailureKind::OperationObservationUnavailable);
+                    }
+                    crate::ops::terminal_tool_outcome_for_error(
+                        tc.id.clone(),
+                        error.with_settlement_failures(settlement_failures),
+                    )
+                    .result
+                }
             };
 
             if tool_result.tool_use_id.is_empty() {
@@ -6595,6 +7142,7 @@ where
             pending_op_refs: all_async_ops,
             accumulated_session_effects,
             callback_pending,
+            deferred_failure,
         })
     }
     /// Commits the tool turn: transcript publication (incl. callback
@@ -6612,8 +7160,19 @@ where
             pending_op_refs,
             accumulated_session_effects,
             mut callback_pending,
+            deferred_failure,
         } = batch;
         let assistant_message_id = assistant_msg.assistant_message_id;
+        let deferred_failure =
+            deferred_failure.map(|kind| crate::session::DeferredToolBatchFailure {
+                kind,
+                source_run_id: ctx.run_id.clone(),
+                assistant_message_id,
+                tool_use_order: assistant_msg
+                    .tool_calls()
+                    .map(|call| call.id.to_string())
+                    .collect(),
+            });
         if self.noncommitting_live_bridge_run
             && (!pending_op_refs.is_empty() || !callback_pending.is_empty())
         {
@@ -6673,11 +7232,17 @@ where
                     .collect(),
                 pending_tool_use_ids: callback_pending
                     .iter()
-                    .map(|(tool_use_id, _, _)| tool_use_id.clone())
+                    .map(|call| call.tool_use_id.clone())
+                    .collect(),
+                callback_settlement_failures: callback_pending
+                    .iter()
+                    .filter(|call| !call.settlement_failures.is_empty())
+                    .map(|call| (call.tool_use_id.clone(), call.settlement_failures.clone()))
                     .collect(),
                 completed_results: tool_results.clone(),
                 session_effects: effects,
                 async_ops: pending_op_refs.clone(),
+                deferred_failure: deferred_failure.clone(),
             };
             let mut staged_session = self.session.clone();
             staged_session.push(Message::BlockAssistant(assistant_msg.clone()));
@@ -6789,27 +7354,16 @@ where
                 callback_results_applied: false,
             });
             if callback_pending.len() == 1 {
-                let (tool_use_id, tool_name, args) = callback_pending.remove(0);
-                return Err(AgentError::CallbackPending {
-                    tool_use_id,
-                    tool_name,
-                    args,
-                });
+                return Err(AgentError::callback_pending_with_settlement(
+                    callback_pending.remove(0),
+                ));
             }
             return Err(AgentError::CallbackBatchPending {
-                pending_tool_calls: callback_pending
-                    .into_iter()
-                    .map(
-                        |(tool_use_id, tool_name, args)| crate::error::PendingCallbackToolCall {
-                            tool_use_id,
-                            tool_name,
-                            args,
-                        },
-                    )
-                    .collect(),
+                pending_tool_calls: callback_pending,
             });
         }
 
+        *ctx.deferred_tool_failure = deferred_failure;
         if self.turn_has_barrier_ops()? {
             // Stay in WaitingForOps — the outer match arm will
             // await completion of barrier ops via wait-set.
@@ -6820,6 +7374,16 @@ where
         self.apply_turn_input(TurnExecutionInput::ToolCallsResolved {
             run_id: ctx.run_id.clone(),
         })?;
+        if let Some(failure) = ctx.deferred_tool_failure.take() {
+            return Err(self
+                .terminalize_deferred_tool_failure(
+                    ctx.run_id,
+                    ctx.turn_count,
+                    ctx.event_tx,
+                    &failure,
+                )
+                .await?);
+        }
         if let Err(error) = self
             .drain_turn_boundary(ctx.turn_count, ctx.event_tx.as_ref())
             .await
@@ -7438,6 +8002,11 @@ type ToolDispatchResult = (
     u64,
 );
 
+struct CallingLlmToolAdmission {
+    executable_tool_calls: Vec<(usize, ToolCallOwned)>,
+    refused_tool_calls: Vec<ToolDispatchResult>,
+}
+
 /// The owner-facing detail carried by a terminal operation outcome.
 fn terminal_outcome_detail(outcome: &crate::ops_lifecycle::OperationTerminalOutcome) -> String {
     use crate::ops_lifecycle::OperationTerminalOutcome as Outcome;
@@ -7635,7 +8204,9 @@ mod tests {
         background_job_completion_notice, classify_provider_turn_usage_identity,
         dispatch_tool_calls_boxed, is_synthetic_notice, promote_cache_breakpoint_claims,
     };
-    use crate::agent::{AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
+    use crate::agent::{
+        AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, ToolDispatchContext,
+    };
     use crate::blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
     use crate::budget::{Budget, BudgetLimits};
     use crate::compact::{
@@ -15660,18 +16231,15 @@ mod tests {
         );
     }
 
-    /// Ask 6: a call denied by the call-level execution gate
-    /// ([`crate::tool_execution_policy::ExecutionPolicyGatedDispatcher`])
-    /// surfaces as an ordinary `is_error` tool result (via
-    /// `terminal_tool_outcome_for_error`) and the run CONTINUES — denial is
-    /// per-call, never run-fatal. The denied tool stays in the LLM-visible
-    /// list, so the visible-set precheck passes and the deny happens inside
-    /// dispatch.
-    #[tokio::test]
-    async fn execution_policy_gate_denial_is_ordinary_tool_error_and_run_continues() {
+    /// Exercise the real agent loop with one denied call and one executable
+    /// sibling, including the next model request's complete tool-result batch.
+    async fn assert_tool_denial_preserves_sibling_and_model_turn(
+        hide_blocked_tool: bool,
+        denied_first: bool,
+    ) {
         struct RecordingDispatcher {
             tools: Arc<[Arc<ToolDef>]>,
-            dispatched: Mutex<Vec<String>>,
+            dispatched: Mutex<Vec<(String, String)>>,
         }
 
         #[async_trait]
@@ -15684,7 +16252,10 @@ mod tests {
                 &self,
                 call: ToolCallView<'_>,
             ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
-                self.dispatched.lock().unwrap().push(call.name.to_string());
+                self.dispatched
+                    .lock()
+                    .unwrap()
+                    .push((call.id.to_string(), call.name.to_string()));
                 Ok(crate::ops::ToolDispatchOutcome::from(ToolResult::new(
                     call.id.to_string(),
                     "ok".to_string(),
@@ -15695,6 +16266,9 @@ mod tests {
 
         struct DeniedToolCallClient {
             call_count: Mutex<u32>,
+            denied_first: bool,
+            observed_messages: Mutex<Vec<Vec<Message>>>,
+            observed_tools: Mutex<Vec<Vec<String>>>,
         }
 
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -15702,22 +16276,43 @@ mod tests {
         impl AgentLlmClient for DeniedToolCallClient {
             async fn stream_response(
                 &self,
-                _messages: &[Message],
-                _tools: &[Arc<ToolDef>],
+                messages: &[Message],
+                tools: &[Arc<ToolDef>],
                 _max_tokens: u32,
                 _temperature: Option<f32>,
                 _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
             ) -> Result<super::LlmStreamResult, AgentError> {
+                self.observed_messages
+                    .lock()
+                    .unwrap()
+                    .push(messages.to_vec());
+                self.observed_tools
+                    .lock()
+                    .unwrap()
+                    .push(tools.iter().map(|tool| tool.name.to_string()).collect());
                 let mut calls = self.call_count.lock().unwrap();
                 let response = if *calls == 0 {
-                    super::LlmStreamResult::new(
-                        vec![AssistantBlock::ToolUse {
+                    let mut blocks = vec![
+                        AssistantBlock::ToolUse {
                             id: "call-blocked".to_string(),
                             name: "blocked_tool".into(),
                             args: serde_json::value::RawValue::from_string("{}".to_string())
                                 .expect("static raw value should parse"),
                             meta: None,
-                        }],
+                        },
+                        AssistantBlock::ToolUse {
+                            id: "call-open".to_string(),
+                            name: "open_tool".into(),
+                            args: serde_json::value::RawValue::from_string("{}".to_string())
+                                .expect("static raw value should parse"),
+                            meta: None,
+                        },
+                    ];
+                    if !self.denied_first {
+                        blocks.reverse();
+                    }
+                    super::LlmStreamResult::new(
+                        blocks,
                         StopReason::ToolUse,
                         normalized_test_usage(self, Usage::default()),
                     )
@@ -15772,51 +16367,128 @@ mod tests {
 
         let client = Arc::new(DeniedToolCallClient {
             call_count: Mutex::new(0),
+            denied_first,
+            observed_messages: Mutex::new(Vec::new()),
+            observed_tools: Mutex::new(Vec::new()),
         });
-        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .build_standalone(client, gated, Arc::new(NoopStore))
+        let mut builder = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner());
+        if hide_blocked_tool {
+            builder = builder.with_capability_base_filter(ToolFilter::Deny(
+                ["blocked_tool".to_string()].into_iter().collect(),
+            ));
+        }
+        let mut agent = builder
+            .build_standalone(client.clone(), gated, Arc::new(NoopStore))
             .await;
 
         let (tx, mut rx) = mpsc::channel(64);
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            agent.run_with_events("call the blocked tool".to_string().into(), tx),
+            agent.run_with_events("call both tools".to_string().into(), tx),
         )
         .await
         .expect("run must complete promptly after the denial")
-        .expect("agent run must succeed — a policy denial is never run-fatal");
+        .expect("agent run must continue after a per-call access denial");
 
         // The denied call resolves to an error tool result, so the second
         // turn ends the conversation: two turns total.
         assert_eq!(result.turns, 2);
-        assert!(
-            inner.dispatched.lock().unwrap().is_empty(),
-            "denied call must never reach the inner dispatcher"
+        assert_eq!(result.text, "done");
+        assert_eq!(*client.call_count.lock().unwrap(), 2);
+        assert_eq!(
+            *inner.dispatched.lock().unwrap(),
+            [("call-open".to_string(), "open_tool".to_string())],
+            "only the allowed sibling may enter the tool body"
         );
 
-        let mut saw_denied_completion = false;
-        while let Ok(event) = rx.try_recv() {
-            if let crate::event::AgentEvent::ToolExecutionCompleted {
-                name,
-                is_error,
-                content,
-                ..
-            } = event
-                && name == "blocked_tool"
-            {
-                assert!(is_error, "denied tool result must be an error");
-                let text = crate::types::text_content(&content);
-                assert!(
-                    text.contains("\"error\":\"access_denied\""),
-                    "denied tool result must carry the canonical access_denied payload, got: {text}"
+        let expected_ids = if denied_first {
+            ["call-blocked", "call-open"]
+        } else {
+            ["call-open", "call-blocked"]
+        };
+        let observations = client.observed_messages.lock().unwrap();
+        let follow_up_results = observations[1]
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResults { results, .. } => Some(results),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            follow_up_results
+                .iter()
+                .map(|result| result.tool_use_id.as_str())
+                .collect::<Vec<_>>(),
+            expected_ids,
+            "the next model request must receive both results in call order"
+        );
+        for result in follow_up_results {
+            if result.tool_use_id == "call-blocked" {
+                let expected = crate::ops::terminal_tool_outcome_for_error(
+                    "call-blocked",
+                    ToolError::access_denied("blocked_tool"),
                 );
-                saw_denied_completion = true;
+                assert!(result.is_error);
+                assert_eq!(result.content, expected.result.content);
+            } else {
+                assert!(!result.is_error);
+                assert_eq!(crate::types::text_content(&result.content), "ok");
             }
         }
-        assert!(
-            saw_denied_completion,
-            "dispatch loop must emit an access_denied tool completion for the gated tool"
-        );
+        drop(observations);
+        for tools in client.observed_tools.lock().unwrap().iter() {
+            assert!(tools.iter().any(|name| name == "open_tool"));
+            assert_eq!(
+                tools.iter().any(|name| name == "blocked_tool"),
+                !hide_blocked_tool,
+                "the fixture must exercise the selected denial boundary"
+            );
+        }
+
+        let mut completion_ids = Vec::new();
+        let mut result_ids = Vec::new();
+        let mut blocked_started = false;
+        let mut run_completed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::ToolExecutionStarted { id, .. } => {
+                    blocked_started |= id == "call-blocked";
+                }
+                crate::event::AgentEvent::ToolExecutionCompleted { id, is_error, .. } => {
+                    assert_eq!(is_error, id == "call-blocked");
+                    completion_ids.push(id);
+                }
+                crate::event::AgentEvent::ToolResultReceived { id, is_error, .. } => {
+                    assert_eq!(is_error, id == "call-blocked");
+                    result_ids.push(id);
+                }
+                crate::event::AgentEvent::RunFailed { .. } => {
+                    panic!("per-call denial must not emit RunFailed");
+                }
+                crate::event::AgentEvent::RunCompleted { .. } => run_completed = true,
+                _ => {}
+            }
+        }
+        assert_eq!(completion_ids, expected_ids);
+        assert_eq!(result_ids, expected_ids);
+        assert_eq!(blocked_started, !hide_blocked_tool);
+        assert!(run_completed);
+    }
+
+    #[tokio::test]
+    async fn visibility_precheck_denial_preserves_sibling_and_model_turn() {
+        for denied_first in [true, false] {
+            assert_tool_denial_preserves_sibling_and_model_turn(true, denied_first).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_policy_gate_denial_is_ordinary_tool_error_and_run_continues() {
+        for denied_first in [true, false] {
+            assert_tool_denial_preserves_sibling_and_model_turn(false, denied_first).await;
+        }
     }
 
     #[tokio::test]
@@ -19170,7 +19842,7 @@ mod tests {
         });
 
         // Must be Ok (Success via BudgetExhausted), not Err(TokenBudgetExceeded).
-        let result = agent.run_loop(None, None).await.expect(
+        let result = agent.run_loop(None, None, None).await.expect(
             "token budget exhaustion must route through BudgetExhausted (Success), \
              not escape as raw AgentError",
         );
@@ -19197,7 +19869,7 @@ mod tests {
             max_tool_calls: Some(0),
         });
 
-        let result = agent.run_loop(None, None).await.expect(
+        let result = agent.run_loop(None, None, None).await.expect(
             "tool-call budget exhaustion must route through BudgetExhausted (Success), \
              not escape as raw AgentError",
         );
@@ -25472,5 +26144,1671 @@ mod tests {
             1,
             "the completion must remain externally unconsumed until cursor commit"
         );
+    }
+    struct AlwaysFailsSettlement;
+
+    #[async_trait]
+    impl crate::ToolDispatchAdmission for AlwaysFailsSettlement {
+        async fn await_dispatch_admission(
+            &self,
+            _call: ToolCallView<'_>,
+            _context: Option<&ToolDispatchContext>,
+            _kind: crate::LiveBridgeEffectKind,
+        ) -> Result<(), ToolError> {
+            Ok(())
+        }
+
+        async fn record_dispatch_outcome(
+            &self,
+            _call: ToolCallView<'_>,
+            _context: Option<&ToolDispatchContext>,
+            _kind: crate::LiveBridgeEffectKind,
+            _outcome: crate::LiveBridgeEffectOutcome,
+        ) -> Result<(), ToolError> {
+            Err(ToolError::execution_failed(
+                "private admission persistence failure",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn settlement_failures_preserve_tool_siblings_and_continue_the_model_turn() {
+        struct Siblings {
+            calls: std::sync::Mutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl AgentToolDispatcher for Siblings {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::from(["denied", "completed"].map(|name| {
+                    Arc::new(ToolDef::new(
+                        name,
+                        "test",
+                        serde_json::json!({"type":"object"}),
+                    ))
+                }))
+            }
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ToolDispatchOutcome, ToolError> {
+                self.calls.lock().unwrap().push(call.name.to_owned());
+                if call.name == "denied" {
+                    Err(ToolError::access_denied(call.name))
+                } else {
+                    Ok(
+                        ToolResult::new(call.id.to_owned(), "physical success".into(), false)
+                            .into(),
+                    )
+                }
+            }
+        }
+        struct RecordingModel(std::sync::atomic::AtomicUsize);
+        #[async_trait]
+        impl AgentLlmClient for RecordingModel {
+            async fn stream_response(
+                &self,
+                messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                let index = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (blocks, stop) = if index == 0 {
+                    (
+                        ["denied", "completed"]
+                            .map(|name| AssistantBlock::ToolUse {
+                                id: format!("call-{name}"),
+                                name: name.into(),
+                                args: serde_json::value::RawValue::from_string("{}".into())
+                                    .unwrap(),
+                                meta: None,
+                            })
+                            .to_vec(),
+                        StopReason::ToolUse,
+                    )
+                } else {
+                    assert_eq!(index, 1, "no tool body retry or extra model call");
+                    let results = messages
+                        .iter()
+                        .find_map(|message| match message {
+                            Message::ToolResults { results, .. } => Some(results),
+                            _ => None,
+                        })
+                        .expect("both physical results reach the next model request");
+                    assert_eq!(results.len(), 2);
+                    assert!(results[0].is_error);
+                    assert!(results[0].text_content().contains("access_denied"));
+                    assert_eq!(results[0].tool_use_id, "call-denied");
+                    assert_eq!(results[1].text_content(), "physical success");
+                    assert!(!results[1].is_error);
+                    assert_eq!(results[1].tool_use_id, "call-completed");
+                    assert!(
+                        results
+                            .iter()
+                            .all(|result| result.settlement_failures.len() == 1)
+                    );
+                    assert_eq!(
+                        results[0].settlement_failures[0].physical_outcome,
+                        crate::LiveBridgeEffectOutcome::Unknown
+                    );
+                    assert_eq!(
+                        results[1].settlement_failures[0].physical_outcome,
+                        crate::LiveBridgeEffectOutcome::Committed
+                    );
+                    (
+                        vec![AssistantBlock::Text {
+                            text: "continued".into(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                    )
+                };
+                Ok(super::LlmStreamResult::new(
+                    blocks,
+                    stop,
+                    normalized_test_usage(self, Usage::default()),
+                ))
+            }
+            fn provider(&self) -> crate::Provider {
+                crate::Provider::Other
+            }
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+        let inner = Arc::new(Siblings {
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let dispatcher = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                inner.clone(),
+                crate::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_dispatch_admission(Arc::new(AlwaysFailsSettlement)),
+        );
+        let model = Arc::new(RecordingModel(std::sync::atomic::AtomicUsize::new(0)));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(model.clone(), dispatcher, Arc::new(NoopStore))
+            .await;
+        let result = agent.run("do both".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "continued");
+        assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let mut calls = inner.calls.lock().unwrap().clone();
+        calls.sort();
+        assert_eq!(calls, vec!["completed", "denied"]);
+    }
+
+    #[tokio::test]
+    async fn decorated_callback_retains_settlement_through_snapshot_resume_and_replay() {
+        let dispatcher = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(UsageCallbackDispatcher {
+                    tools: Arc::from([Arc::new(ToolDef::new(
+                        "ask_user",
+                        "callback",
+                        serde_json::json!({"type":"object"}),
+                    ))]),
+                }),
+                crate::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_dispatch_admission(Arc::new(AlwaysFailsSettlement)),
+        );
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                Arc::new(UsageCallbackClient {
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                }),
+                dispatcher,
+                Arc::new(NoopStore),
+            )
+            .await;
+        let error = agent.run("ask".to_string().into()).await.unwrap_err();
+        let AgentError::CallbackBatchPending { pending_tool_calls } = error else {
+            panic!("decorated callback must retain the existing batch terminal class");
+        };
+        assert_eq!(pending_tool_calls.len(), 1);
+        assert_eq!(pending_tool_calls[0].tool_use_id, "callback-call");
+        assert_eq!(pending_tool_calls[0].tool_name, "ask_user");
+        assert_eq!(
+            pending_tool_calls[0].args,
+            serde_json::json!({"question":"approve?"})
+        );
+        assert_eq!(pending_tool_calls[0].settlement_failures.len(), 1);
+        let frozen = serde_json::to_value(agent.session()).unwrap();
+        let restored: crate::Session = serde_json::from_value(frozen).unwrap();
+        let batch = restored.pending_callback_tool_batch().unwrap().unwrap();
+        assert_eq!(
+            batch.callback_settlement_failures["callback-call"],
+            pending_tool_calls[0].settlement_failures
+        );
+        let answer = vec![ToolResult::new(
+            "callback-call".into(),
+            "approved".into(),
+            false,
+        )];
+        agent
+            .apply_pending_callback_tool_results(answer.clone())
+            .unwrap();
+        let applied = serde_json::to_value(agent.session()).unwrap();
+        agent.apply_pending_callback_tool_results(answer).unwrap();
+        assert_eq!(serde_json::to_value(agent.session()).unwrap(), applied);
+        let (tx, _rx) = mpsc::channel(64);
+        agent.run_pending_with_events(tx).await.unwrap();
+        let results = agent
+            .session()
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::ToolResults { results, .. } => Some(results),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(results[0].text_content(), "approved");
+        assert_eq!(
+            results[0].settlement_failures,
+            pending_tool_calls[0].settlement_failures
+        );
+    }
+
+    #[tokio::test]
+    async fn decorated_policy_indeterminate_keeps_its_existing_agent_class() {
+        struct IndeterminateTool;
+        #[async_trait]
+        impl AgentToolDispatcher for IndeterminateTool {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::from([Arc::new(ToolDef::new(
+                    "ask_user",
+                    "test",
+                    serde_json::json!({"type":"object"}),
+                ))])
+            }
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<crate::ToolDispatchOutcome, ToolError> {
+                Err(ToolError::policy_indeterminate(
+                    crate::ToolConsequenceFailure::InvalidProvenance {
+                        reason: "original indeterminate policy".into(),
+                    },
+                ))
+            }
+        }
+        let tools = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(IndeterminateTool),
+                crate::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_dispatch_admission(Arc::new(AlwaysFailsSettlement)),
+        );
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                Arc::new(UsageCallbackClient {
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                }),
+                tools,
+                Arc::new(NoopStore),
+            )
+            .await;
+        let error = agent.run("try tool".to_string().into()).await.unwrap_err();
+        let AgentError::PolicyIndeterminate {
+            failure,
+            settlement_failures,
+        } = error
+        else {
+            panic!("settlement must not change the existing infrastructure failure class");
+        };
+        assert_eq!(
+            failure,
+            crate::ToolConsequenceFailure::InvalidProvenance {
+                reason: "original indeterminate policy".into(),
+            }
+        );
+        assert_eq!(settlement_failures.len(), 1);
+        assert_eq!(
+            settlement_failures[0].physical_outcome,
+            crate::LiveBridgeEffectOutcome::Unknown
+        );
+    }
+
+    mod governed_authorization {
+        use super::*;
+        use crate::agent::AgentLlmRequestAttempt;
+        use crate::agent::state::controller_feedback_params;
+        use crate::authorization::{
+            AuthorizationOperation, ModelAuthorizationFacts, ModelAuthorizationUse,
+            OperationRefusalKind, OperationRefused, PreparedAuthorizationBinding,
+            PreparedOperationAuthorization, WorkAuthorization, WorkAuthorizationContext,
+        };
+        use crate::lifecycle::run_primitive::{
+            OpaqueProviderBody, OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Test-only admitted owner. The native admission contract has separate
+        /// integration tests; these tests exercise the real core loop boundary.
+        struct FixturePolicy {
+            hosted_denials: AtomicUsize,
+            compaction_denials: AtomicUsize,
+        }
+
+        impl WorkAuthorization for FixturePolicy {
+            fn controller_model_selection(&self) -> Option<crate::ControllerModelSelection> {
+                Some(fixture_controller_selection())
+            }
+
+            fn prepare(
+                &self,
+                binding: &PreparedAuthorizationBinding,
+            ) -> Result<Arc<dyn PreparedOperationAuthorization>, crate::OperationAuthorizationError>
+            {
+                if let AuthorizationOperation::Model(model) = &binding.facts().operation
+                    && model.usage == ModelAuthorizationUse::ControllerInference
+                    && !fixture_controller_selection().matches_model_facts(model)
+                {
+                    return Err(OperationRefused::new(OperationRefusalKind::MalformedFacts).into());
+                }
+                if let AuthorizationOperation::Model(model) = &binding.facts().operation
+                    && model.usage == ModelAuthorizationUse::Compaction
+                {
+                    self.compaction_denials.fetch_add(1, Ordering::Relaxed);
+                    return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
+                }
+                if let AuthorizationOperation::Model(model) = &binding.facts().operation
+                    && !model.hosted_capabilities.is_empty()
+                {
+                    self.hosted_denials.fetch_add(1, Ordering::Relaxed);
+                    return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
+                }
+                Ok(Arc::new(FixturePrepared(binding.clone())))
+            }
+        }
+
+        struct FixturePrepared(PreparedAuthorizationBinding);
+
+        impl PreparedOperationAuthorization for FixturePrepared {
+            fn check_current(
+                &self,
+                binding: &PreparedAuthorizationBinding,
+            ) -> Result<(), crate::OperationAuthorizationError> {
+                if self.0.same_operation(binding) {
+                    Ok(())
+                } else {
+                    Err(OperationRefused::new(OperationRefusalKind::MalformedFacts).into())
+                }
+            }
+        }
+
+        struct FixtureClient {
+            requests: Mutex<Vec<Vec<Message>>>,
+            tool_first: bool,
+            authorizations: Mutex<Vec<ModelAuthorizationUse>>,
+            hosted_default: bool,
+        }
+
+        fn fixture_controller_selection() -> crate::ControllerModelSelection {
+            let binding = crate::AuthBindingRef {
+                realm: crate::RealmId::parse("fixture").unwrap(),
+                binding: crate::BindingId::parse("controller").unwrap(),
+                profile: None,
+                origin: crate::BindingOrigin::Configured,
+            };
+            crate::ControllerModelSelection::new(
+                crate::SessionLlmIdentity {
+                    model: "fixture-model".into(),
+                    provider: crate::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: Some(binding.clone()),
+                },
+                crate::AuthCredentialIdentity::Binding(binding),
+                "fixture-profile".into(),
+                "fixture".into(),
+            )
+        }
+
+        struct FixtureAttempt {
+            client: Arc<FixtureClient>,
+            messages: Arc<Vec<Message>>,
+            hosted: bool,
+            authorization: crate::LlmRequestAuthorization,
+        }
+
+        fn fixture_model_facts(hosted: bool) -> ModelAuthorizationFacts {
+            let selection = fixture_controller_selection();
+            ModelAuthorizationFacts {
+                identity: Arc::new(crate::SessionLlmIdentity {
+                    model: selection.model().into(),
+                    provider: selection.provider(),
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: selection.auth_binding().cloned(),
+                }),
+                wire_model: selection.model().into(),
+                hosted_capabilities: if hosted {
+                    Arc::from([crate::ServerToolKind::WebSearch])
+                } else {
+                    Arc::from([])
+                },
+                backend_profile_id: Some(selection.backend_profile_id().into()),
+                backend_kind: selection.backend_kind().into(),
+                endpoint: "http://fixture.invalid/model".into(),
+                credential: Some(selection.credential().clone()),
+                usage: ModelAuthorizationUse::Inference,
+                live_channel: None,
+            }
+        }
+
+        #[async_trait]
+        impl AgentLlmRequestAttempt for FixtureAttempt {
+            fn request_pressure(
+                &self,
+            ) -> Result<Option<crate::ProviderRequestPressure>, AgentError> {
+                Ok(None)
+            }
+
+            async fn stream_response(
+                &self,
+                _assistant_message_id: crate::AssistantMessageId,
+            ) -> Result<crate::LlmStreamResult, AgentError> {
+                let checked = self
+                    .authorization
+                    .prepare(fixture_model_facts(self.hosted))
+                    .map_err(AgentError::from)?;
+                checked.current().map_err(AgentError::from)?;
+                let mut requests = self.client.requests.lock().unwrap();
+                let first = requests.is_empty();
+                requests.push(self.messages.as_ref().clone());
+                let (blocks, stop) = if self.client.tool_first && first {
+                    (
+                        vec![AssistantBlock::ToolUse {
+                            id: "refused-call".into(),
+                            name: "restricted_action".into(),
+                            args: serde_json::value::RawValue::from_string("{}".into()).unwrap(),
+                            meta: None,
+                        }],
+                        StopReason::ToolUse,
+                    )
+                } else {
+                    (
+                        vec![AssistantBlock::Text {
+                            text: "continued after local feedback".into(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                    )
+                };
+                Ok(crate::LlmStreamResult::new(
+                    blocks,
+                    stop,
+                    normalized_test_usage(self.client.as_ref(), Usage::default()),
+                ))
+            }
+        }
+
+        #[async_trait]
+        impl AgentLlmClient for FixtureClient {
+            fn controller_model_selection(&self) -> Option<crate::ControllerModelSelection> {
+                Some(fixture_controller_selection())
+            }
+
+            fn prepare_request_attempt_authorized(
+                self: Arc<Self>,
+                messages: Arc<Vec<Message>>,
+                _tools: Arc<[Arc<ToolDef>]>,
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                provider_params: Option<ProviderParamsOverride>,
+                authorization: Option<crate::LlmRequestAuthorization>,
+            ) -> Result<Arc<dyn AgentLlmRequestAttempt>, AgentError> {
+                let authorization =
+                    authorization.expect("governed context must reach the provider");
+                self.authorizations
+                    .lock()
+                    .unwrap()
+                    .push(authorization.usage());
+                let tag = provider_params.and_then(|params| params.provider_tag);
+                let hosted = tag.as_ref().map_or(self.hosted_default, |tag| {
+                    matches!(
+                        tag,
+                        ProviderTag::OpenAi(OpenAiProviderTag {
+                            web_search: Some(_),
+                            ..
+                        })
+                    )
+                });
+                Ok(Arc::new(FixtureAttempt {
+                    client: self,
+                    messages,
+                    hosted,
+                    authorization,
+                }))
+            }
+
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&ProviderParamsOverride>,
+            ) -> Result<crate::LlmStreamResult, AgentError> {
+                panic!("governed execution must not use the raw provider path")
+            }
+
+            async fn stream_response_authorized(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&ProviderParamsOverride>,
+                authorization: Option<crate::LlmRequestAuthorization>,
+            ) -> Result<crate::LlmStreamResult, AgentError> {
+                let authorization =
+                    authorization.expect("optional compaction retains governed work");
+                assert!(authorization.usage() == ModelAuthorizationUse::Compaction);
+                authorization
+                    .prepare(fixture_model_facts(false))
+                    .map_err(AgentError::from)?
+                    .current()
+                    .map_err(AgentError::from)?;
+                panic!("the test policy must refuse compaction before sending")
+            }
+
+            fn provider(&self) -> crate::Provider {
+                crate::Provider::OpenAI
+            }
+            fn model(&self) -> &str {
+                "fixture-model"
+            }
+        }
+
+        fn work(
+            policy: Arc<dyn WorkAuthorization>,
+            client: Arc<FixtureClient>,
+        ) -> WorkAuthorizationContext {
+            WorkAuthorizationContext::new(
+                policy,
+                crate::exact_operation::OperationExecutionScope::Domain,
+            )
+            .with_controller_client(crate::ControllerModelClient::new(
+                fixture_controller_selection(),
+                client,
+            ))
+            .unwrap()
+        }
+
+        fn assert_completed_without_failure(events: &mut mpsc::Receiver<crate::AgentEvent>) {
+            let mut completed = 0;
+            while let Ok(event) = events.try_recv() {
+                assert!(!matches!(
+                    event,
+                    crate::AgentEvent::RunFailed { .. } | crate::AgentEvent::Retrying { .. }
+                ));
+                if matches!(event, crate::AgentEvent::RunCompleted { .. }) {
+                    completed += 1;
+                }
+            }
+            assert_eq!(completed, 1);
+        }
+
+        #[derive(Debug, Clone, Copy)]
+        enum RefusalBoundary {
+            Prepare,
+            Pressure,
+            Stream,
+            ProviderStream,
+        }
+
+        struct RefusedAlternate {
+            boundary: RefusalBoundary,
+            kind: OperationRefusalKind,
+            unavailable: bool,
+            preparations: AtomicUsize,
+            attempts: AtomicUsize,
+        }
+
+        impl RefusedAlternate {
+            fn refusal(&self) -> AgentError {
+                if self.unavailable {
+                    return AgentError::llm(
+                        "openai",
+                        LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                            LlmProviderErrorKind::OperationAuthorizationUnavailable,
+                            serde_json::Value::Null,
+                        )),
+                        "private unavailable canary",
+                    );
+                }
+                if matches!(self.boundary, RefusalBoundary::ProviderStream) {
+                    AgentError::llm(
+                        "openai",
+                        LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                            LlmProviderErrorKind::OperationRefused,
+                            serde_json::json!({"kind": self.kind}),
+                        )),
+                        "private provider rejection canary",
+                    )
+                } else {
+                    AgentError::OperationRefused {
+                        refusal: OperationRefused::new(self.kind),
+                    }
+                }
+            }
+        }
+
+        struct RefusedAlternateAttempt(Arc<RefusedAlternate>);
+
+        #[async_trait]
+        impl AgentLlmRequestAttempt for RefusedAlternateAttempt {
+            fn request_pressure(
+                &self,
+            ) -> Result<Option<crate::ProviderRequestPressure>, AgentError> {
+                if matches!(self.0.boundary, RefusalBoundary::Pressure) {
+                    self.0.attempts.fetch_add(1, Ordering::Relaxed);
+                    Err(self.0.refusal())
+                } else {
+                    Ok(None)
+                }
+            }
+
+            async fn stream_response(
+                &self,
+                _assistant_message_id: crate::AssistantMessageId,
+            ) -> Result<crate::LlmStreamResult, AgentError> {
+                self.0.attempts.fetch_add(1, Ordering::Relaxed);
+                Err(self.0.refusal())
+            }
+        }
+
+        #[async_trait]
+        impl AgentLlmClient for RefusedAlternate {
+            fn prepare_request_attempt_authorized(
+                self: Arc<Self>,
+                _messages: Arc<Vec<Message>>,
+                _tools: Arc<[Arc<ToolDef>]>,
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                provider_params: Option<ProviderParamsOverride>,
+                authorization: Option<crate::LlmRequestAuthorization>,
+            ) -> Result<Arc<dyn AgentLlmRequestAttempt>, AgentError> {
+                assert!(
+                    provider_params.is_none(),
+                    "exercise bare refusal without hosted params"
+                );
+                assert!(authorization.unwrap().usage() == ModelAuthorizationUse::Inference);
+                self.preparations.fetch_add(1, Ordering::Relaxed);
+                if matches!(self.boundary, RefusalBoundary::Prepare) {
+                    Err(self.refusal())
+                } else {
+                    Ok(Arc::new(RefusedAlternateAttempt(self)))
+                }
+            }
+
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&ProviderParamsOverride>,
+            ) -> Result<crate::LlmStreamResult, AgentError> {
+                panic!("refused alternate cannot use an unauthorized raw path")
+            }
+
+            fn provider(&self) -> crate::Provider {
+                crate::Provider::OpenAI
+            }
+            fn model(&self) -> &str {
+                "alternate-model"
+            }
+        }
+
+        #[tokio::test]
+        async fn refused_alternate_at_every_request_boundary_returns_to_pinned_controller() {
+            for boundary in [
+                RefusalBoundary::Prepare,
+                RefusalBoundary::Pressure,
+                RefusalBoundary::Stream,
+                RefusalBoundary::ProviderStream,
+            ] {
+                for kind in [
+                    OperationRefusalKind::Denied,
+                    OperationRefusalKind::MalformedFacts,
+                    OperationRefusalKind::ReprepareRequired,
+                ] {
+                    let alternate = Arc::new(RefusedAlternate {
+                        boundary,
+                        kind,
+                        unavailable: false,
+                        preparations: AtomicUsize::new(0),
+                        attempts: AtomicUsize::new(0),
+                    });
+                    let controller = Arc::new(FixtureClient {
+                        requests: Mutex::new(Vec::new()),
+                        tool_first: true,
+                        authorizations: Mutex::new(Vec::new()),
+                        hosted_default: true,
+                    });
+                    let policy = Arc::new(FixturePolicy {
+                        hosted_denials: AtomicUsize::new(0),
+                        compaction_denials: AtomicUsize::new(0),
+                    });
+                    let mut agent =
+                        with_test_turn_state_handle(AgentBuilder::new().model("alternate-model"))
+                            .build_standalone(
+                                alternate.clone(),
+                                Arc::new(IndeterminateDispatcher),
+                                Arc::new(NoopStore),
+                            )
+                            .await;
+                    let (tx, mut rx) = mpsc::channel(128);
+                    let result = agent
+                        .run_with_events_and_work_authorization(
+                            "attempt the requested action".to_string().into(),
+                            vec![],
+                            vec![],
+                            None,
+                            tx,
+                            Some(work(policy, controller.clone())),
+                        )
+                        .await
+                        .expect("operation refusal must return to the retained controller");
+                    assert_eq!(result.turns, 2, "controller continues across its tool turn");
+                    let bounded_reprepare = kind == OperationRefusalKind::ReprepareRequired
+                        && matches!(
+                            boundary,
+                            RefusalBoundary::Stream | RefusalBoundary::ProviderStream
+                        );
+                    assert_eq!(
+                        alternate.preparations.load(Ordering::Relaxed),
+                        if bounded_reprepare { 2 } else { 1 }
+                    );
+                    assert_eq!(controller.requests.lock().unwrap().len(), 2);
+                    assert!(
+                        controller
+                            .authorizations
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .all(|usage| *usage == ModelAuthorizationUse::ControllerInference)
+                    );
+                    let transcript = serde_json::to_string(agent.session().messages()).unwrap();
+                    assert!(transcript.contains("operation_refused"));
+                    assert!(!transcript.contains("private provider rejection canary"));
+                    assert_eq!(
+                        agent
+                            .session()
+                            .messages()
+                            .iter()
+                            .filter(|message| {
+                                matches!(message, Message::SystemNotice(_))
+                                    && serde_json::to_string(message)
+                                        .unwrap()
+                                        .contains("operation_refused")
+                            })
+                            .count(),
+                        1,
+                        "one local notice, no rejection loop"
+                    );
+                    assert_completed_without_failure(&mut rx);
+                }
+            }
+        }
+
+        struct UnavailableController;
+        impl WorkAuthorization for UnavailableController {
+            fn controller_model_selection(&self) -> Option<crate::ControllerModelSelection> {
+                Some(fixture_controller_selection())
+            }
+            fn prepare(
+                &self,
+                _: &PreparedAuthorizationBinding,
+            ) -> Result<Arc<dyn PreparedOperationAuthorization>, crate::OperationAuthorizationError>
+            {
+                Err(crate::OperationAuthorizationError::Unavailable)
+            }
+        }
+
+        #[tokio::test]
+        async fn unavailable_alternate_uses_one_safe_retained_controller_attempt() {
+            for boundary in [
+                RefusalBoundary::Prepare,
+                RefusalBoundary::Pressure,
+                RefusalBoundary::Stream,
+                RefusalBoundary::ProviderStream,
+            ] {
+                for controller_unavailable in [false, true] {
+                    let alternate = Arc::new(RefusedAlternate {
+                        boundary,
+                        kind: OperationRefusalKind::Denied,
+                        unavailable: true,
+                        preparations: AtomicUsize::new(0),
+                        attempts: AtomicUsize::new(0),
+                    });
+                    let controller = Arc::new(FixtureClient {
+                        requests: Mutex::new(Vec::new()),
+                        tool_first: false,
+                        authorizations: Mutex::new(Vec::new()),
+                        hosted_default: false,
+                    });
+                    let policy: Arc<dyn WorkAuthorization> = if controller_unavailable {
+                        Arc::new(UnavailableController)
+                    } else {
+                        Arc::new(FixturePolicy {
+                            hosted_denials: AtomicUsize::new(0),
+                            compaction_denials: AtomicUsize::new(0),
+                        })
+                    };
+                    let mut agent =
+                        with_test_turn_state_handle(AgentBuilder::new().model("alternate-model"))
+                            .build_standalone(
+                                alternate.clone(),
+                                Arc::new(NoTools),
+                                Arc::new(NoopStore),
+                            )
+                            .await;
+                    let (tx, mut rx) = mpsc::channel(128);
+                    let result = agent
+                        .run_with_events_and_work_authorization(
+                            "attempt optional operation".to_string().into(),
+                            vec![],
+                            vec![],
+                            None,
+                            tx,
+                            Some(work(policy, controller.clone())),
+                        )
+                        .await;
+                    assert_eq!(
+                        alternate.preparations.load(Ordering::Relaxed),
+                        1,
+                        "no retry of failed action"
+                    );
+                    assert_eq!(
+                        controller.authorizations.lock().unwrap().len(),
+                        1,
+                        "one retained controller attempt"
+                    );
+                    if controller_unavailable {
+                        // Both authorities are unavailable. The one safe feedback
+                        // attempt returns an infrastructure error through the normal
+                        // runner lifecycle; this is not an ordinary permission refusal.
+                        let error = result.unwrap_err();
+                        assert!(error.operation_authorization_unavailable());
+                        assert!(error.operation_refusal().is_none());
+                        assert!(matches!(&error,
+                            AgentError::Llm { reason: LlmFailureReason::ProviderError(provider), .. }
+                                if provider.kind == LlmProviderErrorKind::OperationAuthorizationUnavailable
+                                    && !provider.is_retryable() && provider.details.is_null()));
+                        assert!(
+                            controller.requests.lock().unwrap().is_empty(),
+                            "no unauthorized send"
+                        );
+                        assert!(
+                            matches!(
+                                controller.authorizations.lock().unwrap().as_slice(),
+                                [ModelAuthorizationUse::ControllerInference]
+                            ),
+                            "the only authorization must be for retained controller inference"
+                        );
+                        assert_eq!(
+                            alternate.attempts.load(Ordering::Relaxed),
+                            if matches!(boundary, RefusalBoundary::Prepare) {
+                                0
+                            } else {
+                                1
+                            },
+                            "no second attempt of the unavailable alternate"
+                        );
+                        let mut failed = 0;
+                        while let Ok(event) = rx.try_recv() {
+                            match event {
+                                crate::AgentEvent::RunFailed { error_report, .. } => {
+                                    failed += 1;
+                                    let diagnostic = format!(
+                                        "boundary={boundary:?} error_report={error_report:?}"
+                                    );
+                                    assert_eq!(
+                                        error_report.class,
+                                        crate::event::AgentErrorClass::Llm,
+                                        "{diagnostic}"
+                                    );
+                                    assert!(
+                                        matches!(&error_report.reason,
+                                        Some(crate::event::AgentErrorReason::LlmProviderError {
+                                            provider_error_kind: LlmProviderErrorKind::OperationAuthorizationUnavailable,
+                                            provider_error_retryability: crate::error::LlmProviderErrorRetryability::NonRetryable,
+                                            provider_error,
+                                        }) if provider_error.is_null()),
+                                        "{diagnostic}"
+                                    );
+                                    assert_eq!(
+                                        error_report.message,
+                                        error.to_string(),
+                                        "{diagnostic}"
+                                    );
+                                    assert!(
+                                        !error_report
+                                            .message
+                                            .contains("private unavailable canary"),
+                                        "{diagnostic}"
+                                    );
+                                }
+                                event @ crate::AgentEvent::Retrying { .. } => panic!(
+                                    "boundary={boundary:?} unavailable authority retried: {event:?}"
+                                ),
+                                event @ crate::AgentEvent::RunCompleted { .. } => panic!(
+                                    "boundary={boundary:?} unavailable controller completed: {event:?}"
+                                ),
+                                _ => {}
+                            }
+                        }
+                        assert_eq!(
+                            failed, 1,
+                            "boundary={boundary:?}: one typed failure for the unavailable controller invocation"
+                        );
+                    } else {
+                        assert_eq!(result.unwrap().turns, 1);
+                        assert_eq!(controller.requests.lock().unwrap().len(), 1);
+                        assert_completed_without_failure(&mut rx);
+                    }
+                    let transcript = serde_json::to_string(agent.session().messages()).unwrap();
+                    assert!(transcript.contains("operation_authorization_unavailable"));
+                    assert!(!transcript.contains("operation_refused"));
+                    assert!(!transcript.contains("private unavailable canary"));
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn bare_controller_hosted_defaults_are_suppressed_across_tool_turns() {
+            let client = Arc::new(FixtureClient {
+                requests: Mutex::new(Vec::new()),
+                tool_first: true,
+                authorizations: Mutex::new(Vec::new()),
+                hosted_default: true,
+            });
+            let policy = Arc::new(FixturePolicy {
+                hosted_denials: AtomicUsize::new(0),
+                compaction_denials: AtomicUsize::new(0),
+            });
+            // No runtime provider params: the adapter's own configured native
+            // default must be explicitly suppressed after its first refusal.
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new().model("fixture-model"))
+                .build_standalone(
+                    client.clone(),
+                    Arc::new(IndeterminateDispatcher),
+                    Arc::new(NoopStore),
+                )
+                .await;
+            let (tx, mut rx) = mpsc::channel(128);
+            let result = agent
+                .run_with_events_and_work_authorization(
+                    "continue with permitted actions".to_string().into(),
+                    vec![],
+                    vec![],
+                    None,
+                    tx,
+                    Some(work(policy.clone(), client.clone())),
+                )
+                .await
+                .expect("default-only hosted refusal is operation-local");
+            assert_eq!(result.turns, 2);
+            assert_eq!(policy.hosted_denials.load(Ordering::Relaxed), 1);
+            let requests = client.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests.iter().all(|request| request.iter().any(|message| {
+                matches!(message, Message::SystemNotice(_))
+                    && serde_json::to_string(message)
+                        .unwrap()
+                        .contains("operation_refused")
+            })));
+            assert_eq!(client.authorizations.lock().unwrap().len(), 3);
+            assert_completed_without_failure(&mut rx);
+        }
+
+        #[test]
+        fn controller_feedback_has_an_explicit_hosted_free_tag_for_each_typed_provider() {
+            let requested = ProviderParamsOverride {
+                provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                    web_search: Some(OpaqueProviderBody::from_value(
+                        &serde_json::json!({"type":"web_search"}),
+                    )),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+            for provider in [
+                crate::Provider::Anthropic,
+                crate::Provider::OpenAI,
+                crate::Provider::Gemini,
+                crate::Provider::SelfHosted,
+            ] {
+                for current in [None, Some(&requested)] {
+                    let cleared = controller_feedback_params(provider, current).unwrap();
+                    assert!(
+                        cleared.provider_tag.is_some(),
+                        "None re-enables adapter defaults"
+                    );
+                    let mut already_clear = cleared.clone();
+                    already_clear.clear_provider_native_tools();
+                    assert_eq!(cleared, already_clear);
+                    assert!(matches!(
+                        (provider, cleared.provider_tag),
+                        (crate::Provider::Anthropic, Some(ProviderTag::Anthropic(_)))
+                            | (
+                                crate::Provider::OpenAI | crate::Provider::SelfHosted,
+                                Some(ProviderTag::OpenAi(_))
+                            )
+                            | (crate::Provider::Gemini, Some(ProviderTag::Gemini(_)))
+                    ));
+                }
+            }
+            assert!(controller_feedback_params(crate::Provider::Other, None).is_none());
+        }
+
+        #[tokio::test]
+        async fn denied_hosted_capability_reaches_controller_as_local_feedback() {
+            let client = Arc::new(FixtureClient {
+                requests: Mutex::new(Vec::new()),
+                tool_first: false,
+                authorizations: Mutex::new(Vec::new()),
+                hosted_default: false,
+            });
+            let policy = Arc::new(FixturePolicy {
+                hosted_denials: AtomicUsize::new(0),
+                compaction_denials: AtomicUsize::new(0),
+            });
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new().model("fixture-model"))
+                .provider_tool_defaults(ProviderTag::OpenAi(OpenAiProviderTag {
+                    web_search: Some(OpaqueProviderBody::from_value(
+                        &serde_json::json!({"type":"web_search"}),
+                    )),
+                    ..Default::default()
+                }))
+                .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+                .await;
+            let (tx, mut rx) = mpsc::channel(128);
+            let result = agent
+                .run_with_events_and_work_authorization(
+                    "use the available capabilities".to_string().into(),
+                    vec![],
+                    vec![],
+                    None,
+                    tx,
+                    Some(work(policy.clone(), client.clone())),
+                )
+                .await
+                .expect("a hosted refusal must not terminate the run");
+            assert_eq!(result.turns, 1);
+            assert_eq!(policy.hosted_denials.load(Ordering::Relaxed), 1);
+            let requests = client.requests.lock().unwrap();
+            assert_eq!(
+                requests.len(),
+                1,
+                "the refused request must never enter the model transport"
+            );
+            assert!(requests[0].iter().any(|message| {
+                matches!(message, Message::SystemNotice(_))
+                    && serde_json::to_string(message)
+                        .unwrap()
+                        .contains("operation_refused")
+            }));
+            assert!(agent.session().messages().iter().any(|message| {
+                matches!(message, Message::SystemNotice(_))
+                    && serde_json::to_string(message)
+                        .unwrap()
+                        .contains("operation_refused")
+            }));
+            assert_completed_without_failure(&mut rx);
+        }
+
+        struct IndeterminateDispatcher;
+
+        #[async_trait]
+        impl AgentToolDispatcher for IndeterminateDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::from([Arc::new(ToolDef::new(
+                    "restricted_action",
+                    "fixture",
+                    serde_json::json!({"type":"object"}),
+                ))])
+            }
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<crate::ToolDispatchOutcome, ToolError> {
+                Err(ToolError::policy_indeterminate(
+                    crate::ToolConsequenceFailure::InvalidProvenance {
+                        reason: "private evaluator diagnostics".into(),
+                    },
+                ))
+            }
+        }
+
+        #[tokio::test]
+        async fn governed_indeterminate_tool_preserves_kind_privacy_and_continuation() {
+            let client = Arc::new(FixtureClient {
+                requests: Mutex::new(Vec::new()),
+                tool_first: true,
+                authorizations: Mutex::new(Vec::new()),
+                hosted_default: false,
+            });
+            let policy = Arc::new(FixturePolicy {
+                hosted_denials: AtomicUsize::new(0),
+                compaction_denials: AtomicUsize::new(0),
+            });
+            let tools = Arc::new(
+                crate::ExecutionPolicyGatedDispatcher::new(
+                    Arc::new(IndeterminateDispatcher),
+                    crate::ToolExecutionPolicy::unrestricted(),
+                )
+                .with_dispatch_admission(Arc::new(AlwaysFailsSettlement)),
+            );
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new().model("fixture-model"))
+                .build_standalone(client.clone(), tools, Arc::new(NoopStore))
+                .await;
+            let (tx, mut rx) = mpsc::channel(128);
+            let result = agent
+                .run_with_events_and_work_authorization(
+                    "try the restricted action".to_string().into(),
+                    vec![],
+                    vec![],
+                    None,
+                    tx,
+                    Some(work(policy, client.clone())),
+                )
+                .await
+                .expect("indeterminate operation policy must not terminate governed work");
+            assert_eq!(result.turns, 2);
+            let requests = client.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            let results = requests[1]
+                .iter()
+                .find_map(|message| match message {
+                    Message::ToolResults { results, .. } => Some(results),
+                    _ => None,
+                })
+                .expect("the controller must see the refused tool result");
+            assert_eq!(results.len(), 1);
+            assert!(results[0].is_error);
+            let payload: serde_json::Value = serde_json::from_str(&results[0].text_content())
+                .expect("canonical typed tool feedback");
+            assert_eq!(
+                payload["error"], "policy_indeterminate",
+                "absence of a policy verdict must not be relabeled a permission denial"
+            );
+            assert!(!results[0].text_content().contains("operation_refused"));
+            assert!(
+                !results[0]
+                    .text_content()
+                    .contains("private evaluator diagnostics")
+            );
+            assert_eq!(results[0].settlement_failures.len(), 1);
+            assert_eq!(
+                results[0].settlement_failures[0].physical_outcome,
+                crate::LiveBridgeEffectOutcome::Unknown
+            );
+            assert_completed_without_failure(&mut rx);
+        }
+
+        #[tokio::test]
+        async fn denied_compaction_preserves_history_and_informs_the_controller() {
+            let client = Arc::new(FixtureClient {
+                requests: Mutex::new(Vec::new()),
+                tool_first: false,
+                authorizations: Mutex::new(Vec::new()),
+                hosted_default: false,
+            });
+            let policy = Arc::new(FixturePolicy {
+                hosted_denials: AtomicUsize::new(0),
+                compaction_denials: AtomicUsize::new(0),
+            });
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new().model("fixture-model"))
+                .compactor(Arc::new(TrackingCompactor::new(Some(1))))
+                .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+                .await;
+            let context = work(policy.clone(), client.clone());
+            let (tx, _rx) = mpsc::channel(128);
+            agent
+                .run_with_events_and_work_authorization(
+                    "first retained input".to_string().into(),
+                    vec![],
+                    vec![],
+                    None,
+                    tx,
+                    Some(context.clone()),
+                )
+                .await
+                .expect("initial governed run");
+            let (tx, mut rx) = mpsc::channel(128);
+            agent
+                .run_with_events_and_work_authorization(
+                    "second input".to_string().into(),
+                    vec![],
+                    vec![],
+                    None,
+                    tx,
+                    Some(context),
+                )
+                .await
+                .expect("optional compaction refusal must not stop the run");
+            assert_eq!(policy.compaction_denials.load(Ordering::Relaxed), 1);
+            let requests = client.requests.lock().unwrap();
+            assert_eq!(
+                requests.len(),
+                2,
+                "only ordinary model calls enter the transport"
+            );
+            let request = serde_json::to_string(&requests[1]).unwrap();
+            assert!(request.contains("first retained input"));
+            assert!(request.contains("operation_refused"));
+            assert_completed_without_failure(&mut rx);
+        }
+
+        mod observation_infrastructure_tool_siblings {
+            use super::*;
+            use crate::authorization::{OperationObservation, OperationObservationError};
+
+            #[derive(Default)]
+            struct EntryObserver {
+                authority_unavailable: bool,
+                failed_entries: AtomicUsize,
+                refused_observations: AtomicUsize,
+            }
+
+            struct Policy(Arc<EntryObserver>);
+            struct Prepared {
+                binding: PreparedAuthorizationBinding,
+                observer: Arc<EntryObserver>,
+            }
+
+            impl WorkAuthorization for Policy {
+                fn controller_model_selection(&self) -> Option<crate::ControllerModelSelection> {
+                    Some(fixture_controller_selection())
+                }
+
+                fn prepare(
+                    &self,
+                    binding: &PreparedAuthorizationBinding,
+                ) -> Result<
+                    Arc<dyn PreparedOperationAuthorization>,
+                    crate::OperationAuthorizationError,
+                > {
+                    Ok(Arc::new(Prepared {
+                        binding: binding.clone(),
+                        observer: self.0.clone(),
+                    }))
+                }
+            }
+
+            impl PreparedOperationAuthorization for Prepared {
+                fn check_current(
+                    &self,
+                    binding: &PreparedAuthorizationBinding,
+                ) -> Result<(), crate::OperationAuthorizationError> {
+                    if !self.binding.same_operation(binding) {
+                        return Err(
+                            OperationRefused::new(OperationRefusalKind::MalformedFacts).into()
+                        );
+                    }
+                    if self.observer.authority_unavailable
+                        && matches!(&binding.facts().operation,
+                        AuthorizationOperation::Tool(tool) if tool.name == "audit_blocked")
+                    {
+                        return Err(crate::OperationAuthorizationError::Unavailable);
+                    }
+                    Ok(())
+                }
+
+                fn observe(
+                    &self,
+                    binding: &PreparedAuthorizationBinding,
+                    observation: OperationObservation,
+                ) -> Result<(), OperationObservationError> {
+                    assert!(self.binding.same_operation(binding));
+                    match observation {
+                        OperationObservation::Entry
+                            if matches!(&binding.facts().operation,
+                                AuthorizationOperation::Tool(tool) if tool.name == "audit_blocked") =>
+                        {
+                            self.observer.failed_entries.fetch_add(1, Ordering::SeqCst);
+                            Err(OperationObservationError)
+                        }
+                        OperationObservation::AuthorizationUnavailable => Ok(()),
+                        OperationObservation::Refused(_) => {
+                            self.observer
+                                .refused_observations
+                                .fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        }
+                        _ => Ok(()),
+                    }
+                }
+            }
+
+            #[derive(Default)]
+            struct Siblings {
+                blocked_bodies: AtomicUsize,
+                healthy_bodies: AtomicUsize,
+            }
+
+            #[async_trait]
+            impl AgentToolDispatcher for Siblings {
+                fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                    Arc::from(["audit_blocked", "healthy"].map(|name| {
+                        Arc::new(ToolDef::new(
+                            name,
+                            "test",
+                            serde_json::json!({"type":"object"}),
+                        ))
+                    }))
+                }
+
+                async fn dispatch(
+                    &self,
+                    call: ToolCallView<'_>,
+                ) -> Result<crate::ToolDispatchOutcome, ToolError> {
+                    if call.name == "audit_blocked" {
+                        self.blocked_bodies.fetch_add(1, Ordering::SeqCst);
+                        return Ok(ToolResult::new(
+                            call.id.into(),
+                            "unexpected body".into(),
+                            false,
+                        )
+                        .into());
+                    }
+                    assert_eq!(call.name, "healthy");
+                    self.healthy_bodies.fetch_add(1, Ordering::SeqCst);
+                    Ok(crate::ToolDispatchOutcome::new(
+                        ToolResult::new(call.id.into(), "healthy physical result".into(), false),
+                        Vec::new(),
+                        vec![crate::SessionEffect::AppendAssistantBlocks {
+                            blocks: vec![AssistantBlock::Text {
+                                text: "healthy committed session effect".into(),
+                                meta: None,
+                            }],
+                        }],
+                    ))
+                }
+            }
+
+            struct Model {
+                preparations: AtomicUsize,
+                requests: AtomicUsize,
+                failed_first: bool,
+            }
+
+            struct Attempt {
+                model: Arc<Model>,
+                authorization: crate::LlmRequestAuthorization,
+            }
+
+            #[async_trait]
+            impl AgentLlmRequestAttempt for Attempt {
+                fn request_pressure(
+                    &self,
+                ) -> Result<Option<crate::ProviderRequestPressure>, AgentError> {
+                    Ok(None)
+                }
+
+                async fn stream_response(
+                    &self,
+                    _assistant_message_id: crate::AssistantMessageId,
+                ) -> Result<crate::LlmStreamResult, AgentError> {
+                    let checked = self
+                        .authorization
+                        .prepare(fixture_model_facts(false))
+                        .map_err(AgentError::from)?;
+                    checked.current().map_err(AgentError::from)?;
+                    // Exercise the model's entry observation too; only the named
+                    // tool entry is injected to fail, not controller permission.
+                    checked.observe_entry().map_err(AgentError::from)?;
+                    let request = self.model.requests.fetch_add(1, Ordering::SeqCst);
+                    let (blocks, stop) = if request == 0 {
+                        let mut names = ["audit_blocked", "healthy"];
+                        if !self.model.failed_first {
+                            names.reverse();
+                        }
+                        (
+                            names
+                                .map(|name| AssistantBlock::ToolUse {
+                                    id: format!("call-{name}"),
+                                    name: name.into(),
+                                    args: serde_json::value::RawValue::from_string("{}".into())
+                                        .unwrap(),
+                                    meta: None,
+                                })
+                                .to_vec(),
+                            StopReason::ToolUse,
+                        )
+                    } else {
+                        // Do not panic on the known baseline bug. Let it finish
+                        // so the final assertions expose extra model activity
+                        // alongside retained physical sibling truth.
+                        (
+                            vec![AssistantBlock::Text {
+                                text: "unexpected policy-feedback model continuation".into(),
+                                meta: None,
+                            }],
+                            StopReason::EndTurn,
+                        )
+                    };
+                    Ok(crate::LlmStreamResult::new(
+                        blocks,
+                        stop,
+                        normalized_test_usage(self.model.as_ref(), Usage::default()),
+                    ))
+                }
+            }
+
+            #[async_trait]
+            impl AgentLlmClient for Model {
+                fn controller_model_selection(&self) -> Option<crate::ControllerModelSelection> {
+                    Some(fixture_controller_selection())
+                }
+
+                fn prepare_request_attempt_authorized(
+                    self: Arc<Self>,
+                    _messages: Arc<Vec<Message>>,
+                    _tools: Arc<[Arc<ToolDef>]>,
+                    _max_tokens: u32,
+                    _temperature: Option<f32>,
+                    _provider_params: Option<ProviderParamsOverride>,
+                    authorization: Option<crate::LlmRequestAuthorization>,
+                ) -> Result<Arc<dyn AgentLlmRequestAttempt>, AgentError> {
+                    self.preparations.fetch_add(1, Ordering::SeqCst);
+                    Ok(Arc::new(Attempt {
+                        model: self,
+                        authorization: authorization.expect("actual per-work controller context"),
+                    }))
+                }
+
+                async fn stream_response(
+                    &self,
+                    _messages: &[Message],
+                    _tools: &[Arc<ToolDef>],
+                    _max_tokens: u32,
+                    _temperature: Option<f32>,
+                    _provider_params: Option<&ProviderParamsOverride>,
+                ) -> Result<crate::LlmStreamResult, AgentError> {
+                    panic!("governed test must not discard its request context")
+                }
+
+                fn provider(&self) -> crate::Provider {
+                    crate::Provider::OpenAI
+                }
+                fn model(&self) -> &str {
+                    "fixture-model"
+                }
+            }
+
+            async fn assert_entry_failure_keeps_sibling(failed_first: bool) {
+                let observer = Arc::new(EntryObserver::default());
+                let tools = Arc::new(Siblings::default());
+                let model = Arc::new(Model {
+                    preparations: AtomicUsize::new(0),
+                    requests: AtomicUsize::new(0),
+                    failed_first,
+                });
+                let context = WorkAuthorizationContext::new(
+                    Arc::new(Policy(observer.clone())),
+                    crate::exact_operation::OperationExecutionScope::Domain,
+                )
+                .with_controller_client(crate::ControllerModelClient::new(
+                    fixture_controller_selection(),
+                    model.clone(),
+                ))
+                .unwrap();
+                let mut agent =
+                    with_test_turn_state_handle(AgentBuilder::new().model("fixture-model"))
+                        .build_standalone(model.clone(), tools.clone(), Arc::new(NoopStore))
+                        .await;
+                let (tx, _rx) = mpsc::channel(128);
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    agent.run_with_events_and_work_authorization(
+                        "try both tools".to_string().into(),
+                        vec![],
+                        vec![],
+                        None,
+                        tx,
+                        Some(context),
+                    ),
+                )
+                .await
+                .expect("entry infrastructure failure must not loop or hang");
+
+                assert_eq!(observer.failed_entries.load(Ordering::SeqCst), 1);
+                assert_eq!(tools.blocked_bodies.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    tools.healthy_bodies.load(Ordering::SeqCst),
+                    1,
+                    "a sibling already dispatched by this batch must complete exactly once"
+                );
+                assert_eq!(
+                    observer.refused_observations.load(Ordering::SeqCst),
+                    0,
+                    "failed infrastructure must not recurse into policy-refusal auditing"
+                );
+                let results = agent
+                    .session
+                    .messages()
+                    .iter()
+                    .filter_map(|message| match message {
+                        Message::ToolResults { results, .. } => Some(results),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    results.len(),
+                    2,
+                    "commit one result for each assistant tool-use id"
+                );
+                let healthy = results
+                    .iter()
+                    .find(|result| result.tool_use_id == "call-healthy")
+                    .unwrap();
+                assert!(!healthy.is_error);
+                assert_eq!(healthy.text_content(), "healthy physical result");
+                let effect_count = agent.session.messages().iter().filter_map(|message| match message {
+                    Message::BlockAssistant(message) => Some(message.blocks.iter()),
+                    _ => None,
+                }).flatten().filter(|block| matches!(block,
+                    AssistantBlock::Text { text, .. } if text == "healthy committed session effect"
+                )).count();
+                assert_eq!(
+                    effect_count, 1,
+                    "the healthy sibling's session effect must commit once"
+                );
+
+                assert_eq!(
+                    model.preparations.load(Ordering::SeqCst),
+                    1,
+                    "infrastructure failure must not prepare policy feedback or retry the controller"
+                );
+                assert_eq!(model.requests.load(Ordering::SeqCst), 1);
+                let error = result.expect_err("pre-entry infrastructure failure is an engine error, not successful policy feedback");
+                assert!(error.operation_refusal().is_none());
+                assert!(matches!(error, AgentError::Llm {
+                    reason: crate::error::LlmFailureReason::ProviderError(ref provider), ..
+                } if provider.kind == crate::error::LlmProviderErrorKind::OperationObservationUnavailable));
+                let failed = results
+                    .iter()
+                    .find(|result| result.tool_use_id == "call-audit_blocked")
+                    .unwrap();
+                assert!(failed.is_error);
+                assert_eq!(
+                    failed.text_content(),
+                    ToolError::OperationObservationUnavailable.to_transcript_content()
+                );
+            }
+
+            #[tokio::test]
+            async fn authority_unavailable_keeps_siblings_and_returns_local_model_feedback() {
+                for failed_first in [false, true] {
+                    let observer = Arc::new(EntryObserver {
+                        authority_unavailable: true,
+                        ..Default::default()
+                    });
+                    let tools = Arc::new(Siblings::default());
+                    let model = Arc::new(Model {
+                        preparations: AtomicUsize::new(0),
+                        requests: AtomicUsize::new(0),
+                        failed_first,
+                    });
+                    let context = WorkAuthorizationContext::new(
+                        Arc::new(Policy(observer.clone())),
+                        crate::exact_operation::OperationExecutionScope::Domain,
+                    )
+                    .with_controller_client(crate::ControllerModelClient::new(
+                        fixture_controller_selection(),
+                        model.clone(),
+                    ))
+                    .unwrap();
+                    let mut agent =
+                        with_test_turn_state_handle(AgentBuilder::new().model("fixture-model"))
+                            .build_standalone(model.clone(), tools.clone(), Arc::new(NoopStore))
+                            .await;
+                    let (tx, mut rx) = mpsc::channel(128);
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        agent.run_with_events_and_work_authorization(
+                            "try both tools".to_string().into(),
+                            vec![],
+                            vec![],
+                            None,
+                            tx,
+                            Some(context),
+                        ),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(result.turns, 2);
+                    assert_eq!(tools.blocked_bodies.load(Ordering::SeqCst), 0);
+                    assert_eq!(tools.healthy_bodies.load(Ordering::SeqCst), 1);
+                    assert_eq!(observer.failed_entries.load(Ordering::SeqCst), 0);
+                    assert_eq!(observer.refused_observations.load(Ordering::SeqCst), 0);
+                    assert_eq!(model.preparations.load(Ordering::SeqCst), 2);
+                    assert_eq!(model.requests.load(Ordering::SeqCst), 2);
+                    let results = agent
+                        .session
+                        .messages()
+                        .iter()
+                        .filter_map(|message| match message {
+                            Message::ToolResults { results, .. } => Some(results),
+                            _ => None,
+                        })
+                        .flatten()
+                        .collect::<Vec<_>>();
+                    assert_eq!(results.len(), 2);
+                    let unavailable = results
+                        .iter()
+                        .find(|result| result.tool_use_id == "call-audit_blocked")
+                        .unwrap();
+                    assert!(unavailable.is_error);
+                    assert_eq!(
+                        unavailable.text_content(),
+                        ToolError::OperationAuthorizationUnavailable.to_transcript_content()
+                    );
+                    let healthy = results
+                        .iter()
+                        .find(|result| result.tool_use_id == "call-healthy")
+                        .unwrap();
+                    assert!(!healthy.is_error);
+                    assert_eq!(healthy.text_content(), "healthy physical result");
+                    let effects = agent
+                        .session
+                        .messages()
+                        .iter()
+                        .filter_map(|message| match message {
+                            Message::BlockAssistant(message) => Some(message.blocks.iter()),
+                            _ => None,
+                        })
+                        .flatten()
+                        .filter(|block| {
+                            matches!(block, AssistantBlock::Text { text, .. }
+                        if text == "healthy committed session effect")
+                        })
+                        .count();
+                    assert_eq!(effects, 1);
+                    assert_completed_without_failure(&mut rx);
+                }
+            }
+
+            #[tokio::test]
+            async fn observation_infrastructure_failed_entry_preserves_later_synchronous_sibling() {
+                assert_entry_failure_keeps_sibling(true).await;
+            }
+
+            #[tokio::test]
+            async fn observation_infrastructure_failed_entry_preserves_earlier_synchronous_sibling()
+            {
+                assert_entry_failure_keeps_sibling(false).await;
+            }
+        }
     }
 }

@@ -575,6 +575,19 @@ fn render_event(
         }
 
         // ── Budget / retry ─────────────────────────────────────────
+        AgentEvent::OperationObservationFailed {
+            operation_id,
+            phase,
+        } => {
+            chrome_line(
+                mux,
+                scope_id,
+                &format!(
+                    "Operation {operation_id} audit {phase:?} was not retained; physical result unchanged"
+                ),
+            );
+        }
+
         AgentEvent::BudgetWarning {
             budget_type,
             used,

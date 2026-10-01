@@ -678,6 +678,9 @@ pub(crate) fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
 
 #[async_trait::async_trait]
 impl CoreExecutor for SessionRuntimeExecutor {
+    fn supports_work_authorization(&self) -> bool {
+        true
+    }
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(SessionRuntimeBoundaryHandle {
             runtime: Arc::clone(&self.runtime),
@@ -1044,6 +1047,9 @@ mod persistent_cleanup_tests {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl CoreExecutor for MobRpcRuntimeExecutor {
+    fn supports_work_authorization(&self) -> bool {
+        true
+    }
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(MobRpcRuntimeBoundaryHandle {
             session_service: Arc::clone(&self.session_service),

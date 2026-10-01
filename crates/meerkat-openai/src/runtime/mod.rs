@@ -52,6 +52,12 @@ fn openai_oauth_refresh_error(
     error: oauth::OpenAiOAuthError,
     authmachine_failure: String,
 ) -> ProviderAuthError {
+    if matches!(
+        &error,
+        oauth::OpenAiOAuthError::Refresh(meerkat_auth_core::RefreshError::StalePreparation)
+    ) {
+        return ProviderAuthError::Auth(AuthError::StaleCredential);
+    }
     let detail = if authmachine_failure.is_empty() {
         error.to_string()
     } else {
@@ -525,8 +531,8 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                     );
                                     let prepare_env = env.clone();
                                     let prepare_binding = binding.clone();
-                                    let prepare: oauth::TokenPrepareFn =
-                                        Box::new(move |locked_baseline, mode| {
+                                    let prepare: oauth::TokenPrepareFn = Box::new(
+                                        move |locked_baseline, mode| {
                                             Box::pin(async move {
                                                 prepare_managed_store_oauth_refresh_under_lock(
                                                     &prepare_env,
@@ -536,13 +542,10 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                                     mode,
                                                 )
                                                 .await
-                                                .map_err(|e| {
-                                                    meerkat_auth_core::RefreshError::Refresh(
-                                                        e.to_string(),
-                                                    )
-                                                })
+                                                .map_err(meerkat_auth_core::resolver::refresh_error_from_provider)
                                             })
-                                        });
+                                        },
+                                    );
                                     runtime
                                         .refresh_tokens_with_locked_preparation(
                                             prepare,
@@ -1665,4 +1668,17 @@ mod tests {
         handle.abort();
         Ok(())
     }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "oauth"))]
+#[test]
+fn ce_stale_refresh_remains_stale_credential() {
+    let result = openai_oauth_refresh_error(
+        oauth::OpenAiOAuthError::Refresh(meerkat_auth_core::RefreshError::StalePreparation),
+        String::new(),
+    );
+    assert!(matches!(
+        result,
+        ProviderAuthError::Auth(AuthError::StaleCredential)
+    ));
 }

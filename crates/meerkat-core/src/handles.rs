@@ -2294,12 +2294,13 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
     }
 
     /// Resolve a typed refresh-failure observation through AuthMachine, then
-    /// commit the machine-issued disposition — only legal from `refreshing`.
+    /// commit the machine-issued disposition, returning its actual closed
+    /// transition for durable publication. Only legal from `refreshing`.
     fn refresh_failed(
         &self,
         lease_key: &LeaseKey,
         observation: RefreshFailureObservation,
-    ) -> Result<(), DslTransitionError>;
+    ) -> Result<AuthLeaseTransition, DslTransitionError>;
 
     /// Fire `MarkReauthRequired { lease_key }` — any known state → reauth.
     fn mark_reauth_required(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
@@ -2307,6 +2308,32 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
     /// Fire `ReleaseAuthLease { lease_key }` — removes the binding from all
     /// sets and the expiry map.
     fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
+
+    /// Release while the caller retains the existing normalized credential
+    /// lifecycle guard. Implementations must validate the exact lease before
+    /// any observer, mutation or I/O, and must not acquire that guard again.
+    ///
+    /// The caller retains ownership through release and any subsequent durable
+    /// mutation or compensation. This guard is not a native-wide fence and
+    /// does not by itself establish credential readiness or permission.
+    /// Unsupported handles refuse instead of falling back to raw release.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn release_lease_with_guard(
+        &self,
+        lease_key: &LeaseKey,
+        guard: &crate::auth::AuthLoginLifecycleGuard,
+    ) -> Result<(), DslTransitionError> {
+        if guard.lease_key() != lease_key {
+            return Err(DslTransitionError::guard_rejected(
+                "AuthLeaseHandle::release_lease_with_guard",
+                "credential lifecycle guard belongs to another lease",
+            ));
+        }
+        Err(DslTransitionError::no_matching(
+            "AuthLeaseHandle::release_lease_with_guard",
+            "guarded release requires an implementation using the existing lease ownership",
+        ))
+    }
 
     /// Clear credential lifecycle authority without treating persisted token
     /// bytes as a new lease source.

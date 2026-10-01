@@ -46,6 +46,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Operator,
@@ -73,6 +75,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Operator,
@@ -126,6 +130,8 @@ mod tests {
         let input = Input::Prompt(PromptInput {
             injected_context: Vec::new(),
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Operator,

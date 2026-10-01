@@ -2971,13 +2971,24 @@ dependencies = [
 name = "meerkat-authorization"
 version = "0.8.50"
 dependencies = [
+ "async-trait",
+ "axum",
+ "futures",
  "indexmap",
+ "meerkat",
+ "meerkat-anthropic",
+ "meerkat-auth-core",
  "meerkat-authorization-contracts",
  "meerkat-core",
+ "meerkat-llm-core",
  "meerkat-machine-dsl",
  "meerkat-machine-schema",
+ "meerkat-models",
+ "meerkat-runtime",
+ "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
  "uuid",
 ]
 
@@ -2988,6 +2999,7 @@ dependencies = [
  "meerkat-core",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
  "uuid",
 ]
@@ -3575,7 +3587,10 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "indexmap",
+ "meerkat",
  "meerkat-auth-core",
+ "meerkat-authorization",
+ "meerkat-authorization-contracts",
  "meerkat-contracts",
  "meerkat-copilot",
  "meerkat-core",
@@ -3692,6 +3707,8 @@ dependencies = [
  "futures",
  "indexmap",
  "meerkat-auth-core",
+ "meerkat-authorization",
+ "meerkat-authorization-contracts",
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",

@@ -3045,10 +3045,10 @@ mod live_context_mirror_tests {
     async fn confirm_test_live_bridge_final_input(
         machine: &crate::MeerkatMachine,
         admission: &crate::live_execution::LiveBridgeOperationAdmission,
-    ) {
+    ) -> crate::live_execution::LiveBridgeFinalInputAuthority {
         let binding = admission.binding();
         let correlation = admission.operation().domain_correlation();
-        machine
+        let (_, effects) = machine
             .apply_session_dsl_input(
                 admission.session_id(),
                 crate::meerkat_machine::dsl::MeerkatMachineInput::ConfirmLiveBridgeFinalInput {
@@ -3075,6 +3075,18 @@ mod live_context_mirror_tests {
             )
             .await
             .expect("persist exact final input");
+        effects
+            .as_slice()
+            .iter()
+            .find_map(|effect| {
+                crate::live_execution::LiveBridgeFinalInputAuthority::from_generated_effect(
+                    admission, effect,
+                )
+                .transpose()
+            })
+            .transpose()
+            .expect("exact generated final-input effect")
+            .expect("final-input authority")
     }
 
     async fn authorize_test_live_bridge_execution_start(
@@ -3199,6 +3211,100 @@ mod live_context_mirror_tests {
             TestLiveBridgeClosePath::CloseCustodyRevocation,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn native_tool_settlement_retains_physical_result_and_retries_every_selected_effect() {
+        use meerkat_core::ToolDispatchAdmission;
+        let (machine, admission) = admitted_live_bridge_operation().await;
+        let final_input = confirm_test_live_bridge_final_input(&machine, &admission).await;
+        machine
+            .authorize_live_bridge_execution_start(&admission)
+            .await
+            .unwrap();
+        let gate = machine.live_bridge_tool_execution_gate(&admission);
+        gate.release_final_input(&final_input).unwrap();
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let first = meerkat_core::ToolCallView {
+            id: "completed",
+            name: "tool",
+            args: &args,
+        };
+        let second = meerkat_core::ToolCallView {
+            id: "dropped",
+            name: "tool",
+            args: &args,
+        };
+        let kind = meerkat_core::LiveBridgeEffectKind::ToolDispatch;
+        gate.await_dispatch_admission(first, None, kind)
+            .await
+            .unwrap();
+        // This is the actual generated owner's existing fault: mutation has
+        // committed in memory, but effect/receipt dispatch returns backoff.
+        // It is not a failed database commit or proof of durability.
+        machine
+            .shared
+            .test_fail_next_typed_dsl_post_commit_dispatch
+            .store(true, std::sync::atomic::Ordering::Release);
+        gate.record_dispatch_outcome(
+            first,
+            None,
+            kind,
+            meerkat_core::LiveBridgeEffectOutcome::Committed,
+        )
+        .await
+        .unwrap_err();
+        let (outcome, error) = gate.pending_settlement_for_test(first.id).await.unwrap();
+        assert_eq!(
+            outcome,
+            Some(meerkat_core::LiveBridgeEffectOutcome::Committed)
+        );
+        assert!(matches!(
+            error.as_deref(),
+            Some(RuntimeDriverError::RecoveryBackoff { .. })
+        ));
+        gate.await_dispatch_admission(second, None, kind)
+            .await
+            .unwrap();
+        machine
+            .shared
+            .test_fail_next_typed_dsl_post_commit_dispatch
+            .store(true, std::sync::atomic::Ordering::Release);
+        gate.settle_effects_before_terminal(&admission)
+            .await
+            .unwrap_err();
+        let pending = [
+            gate.pending_settlement_for_test(first.id).await,
+            gate.pending_settlement_for_test(second.id).await,
+        ];
+        assert_eq!(
+            pending.iter().filter(|entry| entry.is_some()).count(),
+            1,
+            "one failed receipt must not skip the other admission in the sweep"
+        );
+        if let Some((outcome, _)) = &pending[0] {
+            assert_eq!(
+                *outcome,
+                Some(meerkat_core::LiveBridgeEffectOutcome::Committed)
+            );
+        }
+        if let Some((outcome, _)) = &pending[1] {
+            assert_eq!(
+                *outcome,
+                Some(meerkat_core::LiveBridgeEffectOutcome::Unknown)
+            );
+        }
+        gate.settle_effects_before_terminal(&admission)
+            .await
+            .unwrap();
+        assert!(gate.pending_settlement_for_test(first.id).await.is_none());
+        assert!(gate.pending_settlement_for_test(second.id).await.is_none());
+        assert!(
+            gate.await_dispatch_admission(first, None, kind)
+                .await
+                .is_err(),
+            "settlement retry never reopens the body dispatch gate"
+        );
     }
 
     #[tokio::test]
@@ -7972,7 +8078,7 @@ impl MeerkatMachine {
         let authority = dispatch.effect();
         let admission = authority.admission();
         let (_, effects) = self
-            .apply_session_dsl_input(
+            .apply_session_dsl_input_typed(
                 admission.session_id(),
                 crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveBridgeEffectOutcome {
                     channel_id: admission.binding().channel_id().to_string(),
@@ -7985,8 +8091,7 @@ impl MeerkatMachine {
                 },
                 "RecordLiveBridgeEffectOutcome",
             )
-            .await
-            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+            .await?;
         for effect in effects.as_slice() {
             if let Some(receipt) =
                 crate::live_execution::LiveBridgeEffectOutcomeReceipt::from_generated_effect(

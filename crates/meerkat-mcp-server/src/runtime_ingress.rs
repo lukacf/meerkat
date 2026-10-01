@@ -2522,6 +2522,11 @@ async fn apply_runtime_turn_under_runtime_turn_boundary(
                 .and_then(|meta| meta.turn_tool_overlay.clone()),
             primitive.turn_metadata().cloned(),
         )
+        .with_work_authorization(
+            primitive
+                .turn_metadata()
+                .and_then(|meta| meta.work_authorization.clone()),
+        )
         .with_typed_turn_appends(typed_turn_appends),
     };
     meerkat::surface::inject_workgraph_attention_turn_overlay(
@@ -2591,6 +2596,9 @@ async fn apply_runtime_turn(
 
 #[async_trait]
 impl CoreExecutor for McpSessionRuntimeExecutor {
+    fn supports_work_authorization(&self) -> bool {
+        true
+    }
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(McpSessionRuntimeBoundaryHandle {
             context: self.context.clone(),
@@ -4217,6 +4225,8 @@ mod tests {
         let operation_id = meerkat_core::OperationId::new();
         let input = Input::Operation(meerkat_runtime::OperationInput {
             header: meerkat_runtime::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: meerkat_core::types::message_timestamp_now(),
                 source: meerkat_runtime::InputOrigin::System,

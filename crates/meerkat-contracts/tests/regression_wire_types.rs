@@ -329,6 +329,7 @@ fn wire_session_history_roundtrip() {
                     tool_use_id: "tool-1".to_string(),
                     content: meerkat_contracts::WireToolResultContent::Text("ok".to_string()),
                     is_error: false,
+                    settlement_failures: Vec::new(),
                 }],
                 created_at: "2026-04-27T00:00:03Z".to_string(),
             },
@@ -554,6 +555,10 @@ fn agent_event_all_variants_roundtrip() {
                 error_class: meerkat_core::AgentErrorClass::Llm,
                 message: "LLM failed".to_string(),
             },
+        },
+        AgentEvent::OperationObservationFailed {
+            operation_id: meerkat_core::OperationId::new(),
+            phase: meerkat_core::authorization::OperationObservationPhase::Outcome,
         },
         AgentEvent::BudgetWarning {
             budget_type: BudgetType::Tokens,
@@ -821,6 +826,10 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
                 error_class: meerkat_core::AgentErrorClass::Llm,
                 message: "failed".to_string(),
             },
+        },
+        AgentEvent::OperationObservationFailed {
+            operation_id: meerkat_core::OperationId::new(),
+            phase: meerkat_core::authorization::OperationObservationPhase::Outcome,
         },
         AgentEvent::BudgetWarning {
             budget_type: BudgetType::Time,

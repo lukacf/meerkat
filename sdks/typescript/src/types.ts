@@ -238,6 +238,7 @@ export interface SessionToolResult {
   readonly toolUseId: string;
   readonly content: SessionContentInput;
   readonly isError: boolean;
+  readonly settlementFailures?: readonly Generated.ToolDispatchSettlementFailure[];
 }
 
 /**

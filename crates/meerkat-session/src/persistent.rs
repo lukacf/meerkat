@@ -7026,6 +7026,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner.external_tool_surface_snapshot(id).await
     }
 
+    /// Pin the actual selected client while the caller holds this service's
+    /// exact actor turn-boundary lease. No serialized identity is resolved.
+    pub async fn pin_controller_client_for_actor(
+        &self,
+        lease: &LiveSessionActorTurnBoundaryLease,
+    ) -> Result<meerkat_core::ControllerModelClient, SessionError> {
+        self.pin_controller_client_for_actor_under_runtime_turn_boundary(lease.witness())
+            .await
+    }
+
+    /// Variant for the canonical materialization owner already holding the
+    /// runtime turn boundary. Reacquiring that boundary here would deadlock.
+    #[doc(hidden)]
+    pub async fn pin_controller_client_for_actor_under_runtime_turn_boundary(
+        &self,
+        witness: &crate::ephemeral::LiveSessionActorWitness,
+    ) -> Result<meerkat_core::ControllerModelClient, SessionError> {
+        self.inner.pin_controller_client_for_actor(witness).await
+    }
+
     pub async fn live_session_llm_identity(
         &self,
         id: &SessionId,
@@ -29908,6 +29928,7 @@ mod tests {
                         },
                     }],
                     is_error: false,
+                    settlement_failures: Vec::new(),
                 }],
                 created_at: std::time::SystemTime::UNIX_EPOCH.into(),
             });

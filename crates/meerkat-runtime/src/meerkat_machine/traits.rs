@@ -972,8 +972,19 @@ impl MeerkatMachine {
         match err {
             MeerkatMachineCommandError::Control(err) => err,
             MeerkatMachineCommandError::Driver(err) => {
-                RuntimeControlPlaneError::Internal(err.to_string())
+                Self::control_plane_error_from_driver_error(err)
             }
+        }
+    }
+
+    pub(super) fn control_plane_error_from_driver_error(
+        err: RuntimeDriverError,
+    ) -> RuntimeControlPlaneError {
+        match err {
+            RuntimeDriverError::ControllerReadinessUnavailable { reason } => {
+                RuntimeControlPlaneError::ControllerReadinessUnavailable { reason }
+            }
+            error => RuntimeControlPlaneError::Internal(error.to_string()),
         }
     }
 
@@ -981,6 +992,9 @@ impl MeerkatMachine {
         err: RuntimeControlPlaneError,
     ) -> RuntimeDriverError {
         match err {
+            RuntimeControlPlaneError::ControllerReadinessUnavailable { reason } => {
+                RuntimeDriverError::ControllerReadinessUnavailable { reason }
+            }
             RuntimeControlPlaneError::NotFound(runtime_id) => {
                 RuntimeDriverError::NotFound { runtime_id }
             }

@@ -296,6 +296,8 @@ pub enum McpOAuthError {
     Verification(#[from] ConnectorOAuthRefusal),
     #[error("MCP OAuth flow owner refused the ceremony")]
     Flow(#[source] OAuthFlowError),
+    #[error("MCP OAuth refresh preparation is no longer current")]
+    StalePreparation,
     #[error("MCP OAuth token not found for '{server_name}'. Run: rkat mcp login {server_name}")]
     MissingStoredToken { server_name: String },
     #[error("MCP OAuth interactive login requires a TTY")]
@@ -422,7 +424,8 @@ impl McpOAuthAuthority {
         let lease_key = target.lease_key()?;
         let admitted = {
             let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-            self.load_admitted_stored_credential(target, &key).await?
+            self.load_admitted_stored_credential(target, &key, &_guard)
+                .await?
         };
         let Some(admitted) = admitted else {
             return Ok(None);
@@ -663,7 +666,14 @@ impl McpOAuthAuthority {
         &self,
         target: &McpServerIdentity,
         key: &TokenKey,
+        guard: &meerkat_core::AuthLoginLifecycleGuard,
     ) -> Result<Option<AdmittedMcpCredential>, McpOAuthError> {
+        if guard.lease_key() != &target.lease_key()? {
+            return Err(McpOAuthError::AuthLifecycle {
+                server_name: target.server_name().to_string(),
+                reason: "credential lifecycle guard belongs to another lease".into(),
+            });
+        }
         let Some(mut tokens) = self
             .token_store()
             .load(key)
@@ -709,18 +719,35 @@ impl McpOAuthAuthority {
             };
 
         let snapshot = self.auth_lease.snapshot(&lease_key);
+        let marker_relation =
+            durable_marker::marker_relation_for_tokens_and_snapshot(&tokens, &snapshot, key);
+        // Legacy interrupted-refresh bytes may be normalized only against
+        // their still-authorized owner. Check before any durable restoration
+        // can replace a newer verdict or create an absent owner.
+        if meerkat_core::tokens_lifecycle_publication(&tokens).and_then(|marker| marker.phase)
+            == Some(meerkat_core::handles::AuthLeasePhase::Refreshing)
+            && (marker_relation != durable_marker::AuthLeaseDurableMarkerRelation::Matches
+                || !crate::resolver::legacy_refresh_owner_allows_preparation(
+                    &self.auth_lease,
+                    &lease_key,
+                )
+                .map_err(lifecycle_err)?)
+        {
+            return Err(McpOAuthError::StalePreparation);
+        }
         let restore_from_durable_marker = lifecycle_snapshot_is_absent(&snapshot)
             || matches!(
-                durable_marker::marker_relation_for_tokens_and_snapshot(&tokens, &snapshot, key),
+                marker_relation,
                 durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer
             );
         if restore_from_durable_marker {
-            tokens = meerkat_core::rehydrate_marked_tokens_for_status(
+            tokens = meerkat_core::rehydrate_marked_tokens_for_status_with_guard(
                 self.token_store().as_ref(),
                 &self.auth_lease,
                 &auth_binding,
                 PersistedAuthMode::McpOauth,
                 Utc::now(),
+                guard,
             )
             .await
             .map_err(|error| McpOAuthError::AuthLifecycle {
@@ -792,8 +819,8 @@ impl McpOAuthAuthority {
             .lease_key()
             .map_err(|error| RefreshError::Refresh(error.to_string()))?;
         let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-        let admitted = self
-            .load_admitted_stored_credential(target, key)
+        let mut admitted = self
+            .load_admitted_stored_credential(target, key, &_guard)
             .await
             .map_err(refresh_error_from_mcp)?
             .ok_or_else(|| {
@@ -801,6 +828,22 @@ impl McpOAuthAuthority {
                     "stored MCP OAuth credential disappeared before refresh".to_string(),
                 )
             })?;
+        if crate::resolver::normalize_interrupted_refresh_under_coordinator(
+            self.token_store().as_ref(),
+            &self.auth_lease,
+            key,
+            &admitted.tokens,
+            &_guard,
+        )
+        .await?
+        .is_some()
+        {
+            admitted = self
+                .load_admitted_stored_credential(target, key, &_guard)
+                .await
+                .map_err(refresh_error_from_mcp)?
+                .ok_or(RefreshError::StalePreparation)?;
+        }
         if admitted.disposition == CredentialUseDisposition::Authorized {
             return Ok(admitted.tokens);
         }
@@ -865,14 +908,26 @@ impl McpOAuthAuthority {
             refresh_scopes: metadata.discovery.scopes.clone(),
             extra_headers: Vec::new(),
         };
-        let refreshed = match exchange_refresh_token(
+        drop(_guard);
+        let exchange = exchange_refresh_token(
             &self.http,
             &endpoints,
             &refresh_token,
             metadata.client.client_secret.as_deref(),
         )
-        .await
+        .await;
+        let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+        let current_tokens = self
+            .token_store()
+            .load(key)
+            .await
+            .map_err(|error| RefreshError::Refresh(error.to_string()))?;
+        if current_tokens.as_ref() != Some(&admitted.tokens)
+            || self.auth_lease.snapshot(&lease_key) != refreshing_snapshot
         {
+            return Err(RefreshError::StalePreparation);
+        }
+        let refreshed = match exchange {
             Ok(refreshed) => refreshed,
             Err(error) => {
                 let observation = oauth_refresh_observation(&error);
@@ -911,34 +966,6 @@ impl McpOAuthAuthority {
         persisted.account_id = admitted.tokens.account_id.clone();
         if persisted.refresh_token.is_none() {
             persisted.refresh_token = Some(refresh_token);
-        }
-
-        let current_tokens = match self.token_store().load(key).await {
-            Ok(tokens) => tokens,
-            Err(error) => {
-                let observation = meerkat_core::RefreshFailureObservation::transient();
-                self.auth_lease
-                    .refresh_failed(&lease_key, observation)
-                    .map_err(|transition_error| {
-                        RefreshError::Refresh(format!(
-                            "{error}; AuthMachine refresh_failed rejected closure: {transition_error}"
-                        ))
-                    })?;
-                return Err(RefreshError::Refresh(error.to_string()));
-            }
-        };
-        let current_snapshot = self.auth_lease.snapshot(&lease_key);
-        if current_tokens.as_ref() != Some(&admitted.tokens)
-            || current_snapshot != refreshing_snapshot
-        {
-            let observation = meerkat_core::RefreshFailureObservation::transient();
-            self.auth_lease
-                .refresh_failed(&lease_key, observation)
-                .map_err(|error| RefreshError::Refresh(error.to_string()))?;
-            return Err(RefreshError::Refresh(
-                "MCP OAuth token or AuthMachine lifecycle changed during refresh; stale result discarded"
-                    .to_string(),
-            ));
         }
 
         let transition = match self.auth_lease.complete_refresh(
@@ -1388,6 +1415,7 @@ fn map_coordinated_login_error(
     error: CredentialMutationError,
 ) -> McpOAuthError {
     match error {
+        CredentialMutationError::StalePreparation => McpOAuthError::StalePreparation,
         CredentialMutationError::TokenStore(reason) => McpOAuthError::TokenStore(reason),
         CredentialMutationError::AuthLifecycle(reason)
         | CredentialMutationError::Operation(reason)
@@ -1414,6 +1442,7 @@ fn refresh_error_from_mcp(error: McpOAuthError) -> RefreshError {
         McpOAuthError::Verification(ConnectorOAuthRefusal::AccountMismatch) => {
             RefreshError::CredentialIdentityMismatch
         }
+        McpOAuthError::StalePreparation => RefreshError::StalePreparation,
         McpOAuthError::ReauthRequired { .. }
         | McpOAuthError::MissingStoredToken { .. }
         | McpOAuthError::MissingStoredMetadata { .. } => {
@@ -1426,6 +1455,9 @@ fn refresh_error_from_mcp(error: McpOAuthError) -> RefreshError {
 fn map_coordinated_refresh_error(target: &McpServerIdentity, error: RefreshError) -> McpOAuthError {
     if matches!(error, RefreshError::CredentialIdentityMismatch) {
         return ConnectorOAuthRefusal::AccountMismatch.into();
+    }
+    if matches!(&error, RefreshError::StalePreparation) {
+        return McpOAuthError::StalePreparation;
     }
     if let RefreshError::DurableTerminalCommit { message, .. } = &error {
         return McpOAuthError::TokenStore(message.clone());
@@ -1759,5 +1791,641 @@ mod tests {
             resource_metadata_from_header(header).as_deref(),
             Some("/.well-known/oauth-protected-resource/mcp")
         );
+    }
+
+    // Interactive browser-flow tests live in tests/mcp_oauth_owner.rs so the
+    // runtime flow owner and test use the same auth-core trait identity. These
+    // private refresh tests seed a managed credential through the shared commit
+    // owner, then exercise the real MCP refresh HTTP and generated lease.
+    use crate::{EphemeralTokenStore, InMemoryCoordinator};
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::{Form, Json, Router};
+    use parking_lot::Mutex;
+    use serde_json::Value;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::net::TcpListener;
+    use tokio::sync::Notify;
+
+    fn test_auth_lease() -> GeneratedAuthLeaseHandle {
+        let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+            handle,
+        )
+        .expect("test auth lease must be certified by generated AuthMachine authority")
+    }
+
+    #[derive(Default)]
+    struct TestState {
+        token_requests: Mutex<Vec<Value>>,
+        token_fails: Mutex<bool>,
+        pause_refresh: AtomicBool,
+        refresh_started: Notify,
+        refresh_release: Notify,
+    }
+
+    struct NoRefreshBrowser;
+
+    #[async_trait]
+    impl BrowserOpener for NoRefreshBrowser {
+        async fn open(&self, _url: &str) -> Result<(), McpOAuthError> {
+            panic!("managed credential refresh must not open an interactive browser")
+        }
+    }
+
+    fn ce_refresh_authority(
+        store: Arc<EphemeralTokenStore>,
+        auth: GeneratedAuthLeaseHandle,
+    ) -> McpOAuthAuthority {
+        McpOAuthAuthority::with_http(
+            ProviderAuthPersistence::new(store, Arc::new(InMemoryCoordinator::new())),
+            Arc::new(NoRefreshBrowser),
+            Client::new(),
+            auth,
+        )
+    }
+
+    async fn spawn_oauth_fixture() -> (String, Arc<TestState>) {
+        let state = Arc::new(TestState::default());
+        let app = Router::new()
+            .route("/token", post(ce_refresh_token))
+            .with_state(Arc::clone(&state));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), state)
+    }
+
+    async fn ce_refresh_token(
+        State(state): State<Arc<TestState>>,
+        Form(body): Form<HashMap<String, String>>,
+    ) -> impl IntoResponse {
+        state
+            .token_requests
+            .lock()
+            .push(serde_json::to_value(&body).unwrap());
+        assert_eq!(
+            body.get("grant_type").map(String::as_str),
+            Some("refresh_token")
+        );
+        if state.pause_refresh.load(Ordering::SeqCst) {
+            state.refresh_started.notify_one();
+            state.refresh_release.notified().await;
+        }
+        if *state.token_fails.lock() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid_grant" })),
+            )
+                .into_response();
+        }
+        Json(serde_json::json!({
+            "access_token": "access-token",
+            "refresh_token": "refresh-token",
+            "expires_in": 3600,
+            "scope": "mcp.read"
+        }))
+        .into_response()
+    }
+
+    async fn ce_seed_stored_credential(
+        authority: &McpOAuthAuthority,
+        target: &McpServerIdentity,
+        base: &str,
+    ) {
+        let discovery = StoredMcpOAuthDiscovery {
+            resource: target.server_url().to_string(),
+            resource_metadata_url: format!("{base}/.well-known/oauth-protected-resource/mcp"),
+            authorization_server: base.to_string(),
+            authorization_metadata_url: format!("{base}/.well-known/oauth-authorization-server"),
+            authorization_endpoint: format!("{base}/authorize"),
+            token_endpoint: format!("{base}/token"),
+            registration_endpoint: format!("{base}/register"),
+            scopes: vec!["mcp.read".to_string()],
+        };
+        let client = StoredMcpOAuthClient {
+            client_id: "client-123".to_string(),
+            client_secret: None,
+            token_endpoint_auth_method: "none".to_string(),
+            redirect_uri: format!("{base}/mcp/oauth/callback"),
+        };
+        let result = OAuthTokenResult {
+            access_token: "access-token".to_string(),
+            refresh_token: Some("refresh-token".to_string()),
+            id_token: None,
+            expires_in_secs: Some(3600),
+            scope: Some("mcp.read".to_string()),
+        };
+        let tokens =
+            persisted_tokens_from_result(&result, &discovery, &client, target, Utc::now()).unwrap();
+        let stored = crate::save_tokens_and_publish_lifecycle(
+            authority.provider_auth_persistence.clone(),
+            authority.auth_lease.clone(),
+            target.auth_binding_ref().unwrap().into(),
+            tokens,
+        )
+        .await
+        .unwrap();
+        let key = target.token_key().unwrap();
+        let snapshot = authority.auth_lease.snapshot(&target.lease_key().unwrap());
+        assert!(snapshot.credential_present);
+        assert_eq!(
+            snapshot.phase,
+            Some(meerkat_core::handles::AuthLeasePhase::Valid)
+        );
+        assert_eq!(
+            authority.token_store().load(&key).await.unwrap(),
+            Some(stored.clone())
+        );
+        assert_eq!(
+            durable_marker::marker_relation_for_tokens_and_snapshot(&stored, &snapshot, &key),
+            durable_marker::AuthLeaseDurableMarkerRelation::Matches
+        );
+    }
+
+    async fn republish_stored_tokens(
+        authority: &McpOAuthAuthority,
+        store: &dyn TokenStore,
+        target: &McpServerIdentity,
+        mutate: impl FnOnce(&mut PersistedTokens),
+    ) -> PersistedTokens {
+        let key = target.token_key().unwrap();
+        let mut tokens = store.load(&key).await.unwrap().unwrap();
+        mutate(&mut tokens);
+        crate::save_tokens_and_publish_lifecycle(
+            authority.provider_auth_persistence.clone(),
+            authority.auth_lease.clone(),
+            target.auth_binding_ref().unwrap().into(),
+            tokens,
+        )
+        .await
+        .unwrap()
+    }
+
+    struct CeRefreshRelease(Arc<TestState>);
+    impl Drop for CeRefreshRelease {
+        fn drop(&mut self) {
+            self.0.pause_refresh.store(false, Ordering::SeqCst);
+            self.0.refresh_release.notify_one();
+        }
+    }
+
+    #[tokio::test]
+    async fn ce_mcp_http_releases_only_lifecycle_guard() {
+        let (base, state) = spawn_oauth_fixture().await;
+        let store = Arc::new(EphemeralTokenStore::new());
+        let auth = test_auth_lease();
+        let authority = ce_refresh_authority(store.clone(), auth.clone());
+        let target = McpServerIdentity::from_server_config("ce-mcp", format!("{base}/mcp"));
+        ce_seed_stored_credential(&authority, &target, &base).await;
+        republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+            tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        })
+        .await;
+        let key = target.token_key().unwrap();
+        let lease = target.lease_key().unwrap();
+        let original = store.load(&key).await.unwrap();
+        state.pause_refresh.store(true, Ordering::SeqCst);
+        let release = CeRefreshRelease(state.clone());
+        let child = authority.clone();
+        let child_target = target.clone();
+        let mut task = tokio::spawn(async move { child.stored_bearer_token(&child_target).await });
+        let entered =
+            tokio::time::timeout(Duration::from_secs(10), state.refresh_started.notified()).await;
+        let guard = meerkat_core::try_acquire_auth_login_lifecycle_guard(&lease);
+        let available_during_http = guard.is_some();
+        drop(guard);
+        let during = store.load(&key).await.unwrap();
+        drop(release);
+        let finished = tokio::time::timeout(Duration::from_secs(10), &mut task).await;
+        if finished.is_err() {
+            task.abort();
+            let _ = task.await;
+        }
+        assert!(
+            entered.is_ok(),
+            "must observe the actual MCP refresh endpoint"
+        );
+        assert_eq!(
+            finished.unwrap().unwrap().unwrap().as_deref(),
+            Some("access-token")
+        );
+        assert_eq!(during, original, "HTTP wait does not publish new bytes");
+        assert_eq!(
+            state
+                .token_requests
+                .lock()
+                .iter()
+                .filter(|r| r["grant_type"] == "refresh_token")
+                .count(),
+            1
+        );
+        assert!(
+            available_during_http,
+            "actual MCP HTTP must not retain the lifecycle guard"
+        );
+    }
+
+    #[tokio::test]
+    async fn ce_mcp_stale_success_and_failure_preserve_replacement() {
+        let mut observations = Vec::new();
+        for invalid_grant in [false, true] {
+            let (base, state) = spawn_oauth_fixture().await;
+            let store = Arc::new(EphemeralTokenStore::new());
+            let auth = test_auth_lease();
+            let authority = ce_refresh_authority(store.clone(), auth.clone());
+            let target =
+                McpServerIdentity::from_server_config("ce-mcp-stale", format!("{base}/mcp"));
+            ce_seed_stored_credential(&authority, &target, &base).await;
+            republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+                tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+            })
+            .await;
+            let key = target.token_key().unwrap();
+            let lease = target.lease_key().unwrap();
+            state.pause_refresh.store(true, Ordering::SeqCst);
+            let release = CeRefreshRelease(state.clone());
+            let child = authority.clone();
+            let child_target = target.clone();
+            let mut task =
+                tokio::spawn(async move { child.stored_bearer_token(&child_target).await });
+            let entered =
+                tokio::time::timeout(Duration::from_secs(10), state.refresh_started.notified())
+                    .await;
+            // Explicit off-protocol fault injection through the real generated
+            // owner, to exercise stale checks without fabricating snapshots.
+            let mut replacement = store.load(&key).await.unwrap().unwrap();
+            replacement.primary_secret = Some("ce-mcp-new-access".into());
+            replacement.refresh_token = Some("ce-mcp-new-refresh".into());
+            replacement.expires_at = Some(Utc::now() + chrono::Duration::hours(1));
+            let transition = auth
+                .acquire_lease(
+                    &lease,
+                    meerkat_core::persisted_token_expires_at_epoch_secs(&replacement),
+                )
+                .unwrap();
+            let replacement = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &key,
+                &replacement,
+                &transition,
+            )
+            .unwrap();
+            store.save(&key, &replacement).await.unwrap();
+            auth.begin_refresh(&lease).unwrap();
+            let expected = auth.snapshot(&lease);
+            *state.token_fails.lock() = invalid_grant;
+            drop(release);
+            let finished = tokio::time::timeout(Duration::from_secs(10), &mut task).await;
+            if finished.is_err() {
+                task.abort();
+                let _ = task.await;
+            }
+            assert!(entered.is_ok(), "actual paused endpoint is mandatory");
+            let refused = matches!(
+                finished.unwrap().unwrap(),
+                Err(McpOAuthError::StalePreparation)
+            );
+            let count = state
+                .token_requests
+                .lock()
+                .iter()
+                .filter(|r| r["grant_type"] == "refresh_token")
+                .count();
+            observations.push((
+                refused,
+                expected,
+                auth.snapshot(&lease),
+                replacement,
+                store.load(&key).await.unwrap(),
+                count,
+            ));
+        }
+        for (refused, expected, actual, replacement, stored, count) in observations {
+            assert!(refused, "stale result must not yield a bearer credential");
+            assert_eq!(count, 1);
+            assert_eq!(
+                actual, expected,
+                "stale HTTP may not fail the replacement's refresh owner"
+            );
+            assert_eq!(
+                stored,
+                Some(replacement),
+                "invalid_grant from the old credential cannot clear its replacement"
+            );
+        }
+    }
+    #[test]
+    fn ce_mcp_stale_error_roundtrip_remains_typed() {
+        let target = McpServerIdentity::from_server_config("stale-test", "http://localhost/mcp");
+        let public = map_coordinated_refresh_error(&target, RefreshError::StalePreparation);
+        assert!(matches!(public, McpOAuthError::StalePreparation));
+        assert!(matches!(
+            refresh_error_from_mcp(public),
+            RefreshError::StalePreparation
+        ));
+    }
+
+    // Make historical marker bytes through the real generated owner. The
+    // bounded clock wait only establishes an actual later publication; no
+    // serialized marker or snapshot field is edited by this fixture.
+    async fn ce_mcp_publish_later_marker(
+        authority: &McpOAuthAuthority,
+        target: &McpServerIdentity,
+        refreshing: bool,
+    ) -> PersistedTokens {
+        let key = target.token_key().unwrap();
+        let lease = target.lease_key().unwrap();
+        let old_time = authority
+            .auth_lease
+            .snapshot(&lease)
+            .credential_published_at_millis
+            .unwrap();
+        let mut tokens = authority.token_store().load(&key).await.unwrap().unwrap();
+        tokens.expires_at = Some(if refreshing {
+            Utc::now() - chrono::Duration::seconds(1)
+        } else {
+            Utc::now() + chrono::Duration::hours(1)
+        });
+        let later = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let transition = authority
+                    .auth_lease
+                    .acquire_lease(
+                        &lease,
+                        meerkat_core::persisted_token_expires_at_epoch_secs(&tokens),
+                    )
+                    .unwrap();
+                if transition.credential_published_at_millis().unwrap() > old_time {
+                    break transition;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual generated later publication");
+        let transition = if refreshing {
+            authority.auth_lease.begin_refresh(&lease).unwrap();
+            let captured = authority
+                .auth_lease
+                .capture_auth_lifecycle_restore_snapshot(&lease);
+            authority
+                .auth_lease
+                .release_credential_lifecycle(&lease)
+                .unwrap();
+            meerkat_core::restore_token_lifecycle_snapshot(&authority.auth_lease, &captured)
+                .unwrap()
+                .unwrap()
+        } else {
+            later
+        };
+        let published = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            &key,
+            &tokens,
+            &transition,
+        )
+        .unwrap();
+        authority
+            .token_store()
+            .save(&key, &published)
+            .await
+            .unwrap();
+        published
+    }
+
+    #[tokio::test]
+    async fn ce_mcp_newer_legacy_marker_cannot_replace_reauth_or_absent_owner() {
+        for absent in [false, true] {
+            for through_coordinator in [false, true] {
+                let (base, state) = spawn_oauth_fixture().await;
+                let store = Arc::new(EphemeralTokenStore::new());
+                let mut auth = test_auth_lease();
+                let target =
+                    McpServerIdentity::from_server_config("ce-legacy-owner", format!("{base}/mcp"));
+                let lease = target.lease_key().unwrap();
+                let mut authority = ce_refresh_authority(store.clone(), auth.clone());
+                ce_seed_stored_credential(&authority, &target, &base).await;
+                let previous = auth.capture_auth_lifecycle_restore_snapshot(&lease);
+                let key = target.token_key().unwrap();
+                let legacy = ce_mcp_publish_later_marker(&authority, &target, true).await;
+                if absent {
+                    // A cold process uses its actual fresh generated owner;
+                    // restoring an empty capture retains the old high-water mark.
+                    auth = test_auth_lease();
+                    authority = ce_refresh_authority(store.clone(), auth.clone());
+                } else {
+                    auth.restore_auth_lifecycle_snapshot(&previous).unwrap();
+                    auth.mark_reauth_required(&lease).unwrap();
+                }
+                let expected = auth.snapshot(&lease);
+                if absent {
+                    assert!(lifecycle_snapshot_is_absent(&expected));
+                } else {
+                    assert_eq!(
+                        expected.phase,
+                        Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
+                    );
+                    assert_eq!(
+                        durable_marker::marker_relation_for_tokens_and_snapshot(
+                            &legacy, &expected, &key
+                        ),
+                        durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer
+                    );
+                }
+                assert_eq!(
+                    meerkat_core::tokens_lifecycle_publication(&legacy)
+                        .unwrap()
+                        .phase,
+                    Some(meerkat_core::handles::AuthLeasePhase::Refreshing)
+                );
+                let rejected = if through_coordinator {
+                    let child = authority.clone();
+                    let child_target = target.clone();
+                    let child_key = key.clone();
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        authority.refresh_coordinator().with_refresh(
+                            key.clone(),
+                            Box::new(move || {
+                                Box::pin(async move {
+                                    child
+                                        .refresh_stored_credential_under_coordinator(
+                                            &child_target,
+                                            &child_key,
+                                        )
+                                        .await
+                                })
+                            }),
+                        ),
+                    )
+                    .await
+                    .expect("coordinated legacy check must finish");
+                    matches!(result, Err(RefreshError::StalePreparation))
+                } else {
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        authority.stored_bearer_token(&target),
+                    )
+                    .await
+                    .expect("public legacy load must finish");
+                    matches!(result, Err(McpOAuthError::StalePreparation))
+                };
+                assert!(rejected, "legacy mismatch must preserve the actual owner");
+                assert_eq!(auth.snapshot(&lease), expected);
+                assert_eq!(store.load(&key).await.unwrap(), Some(legacy));
+                assert_eq!(
+                    state
+                        .token_requests
+                        .lock()
+                        .iter()
+                        .filter(|request| request["grant_type"] == "refresh_token")
+                        .count(),
+                    0
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ce_mcp_matching_legacy_marker_normalizes_and_refreshes() {
+        for closed_in_memory in [false, true] {
+            let (base, state) = spawn_oauth_fixture().await;
+            let store = Arc::new(EphemeralTokenStore::new());
+            let auth = test_auth_lease();
+            let authority = ce_refresh_authority(store.clone(), auth.clone());
+            let target =
+                McpServerIdentity::from_server_config("ce-legacy-match", format!("{base}/mcp"));
+            ce_seed_stored_credential(&authority, &target, &base).await;
+            let legacy = ce_mcp_publish_later_marker(&authority, &target, true).await;
+            let key = target.token_key().unwrap();
+            let lease = target.lease_key().unwrap();
+            if closed_in_memory {
+                auth.refresh_failed(&lease, meerkat_core::RefreshFailureObservation::transient())
+                    .unwrap();
+                auth.observe_credential_freshness(
+                    &lease,
+                    epoch_secs(Utc::now()),
+                    AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
+                )
+                .unwrap();
+                assert_eq!(
+                    auth.snapshot(&lease).phase,
+                    Some(meerkat_core::handles::AuthLeasePhase::Expired)
+                );
+            }
+            assert_eq!(
+                durable_marker::marker_relation_for_tokens_and_snapshot(
+                    &legacy,
+                    &auth.snapshot(&lease),
+                    &key
+                ),
+                durable_marker::AuthLeaseDurableMarkerRelation::Matches
+            );
+            assert_eq!(
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    authority.stored_bearer_token(&target)
+                )
+                .await
+                .expect("matching legacy refresh must finish")
+                .unwrap()
+                .as_deref(),
+                Some("access-token")
+            );
+            assert_eq!(
+                state
+                    .token_requests
+                    .lock()
+                    .iter()
+                    .filter(|request| request["grant_type"] == "refresh_token")
+                    .count(),
+                1
+            );
+            let stored = store.load(&key).await.unwrap().unwrap();
+            assert_eq!(
+                auth.snapshot(&lease).phase,
+                Some(meerkat_core::handles::AuthLeasePhase::Valid)
+            );
+            assert_eq!(
+                meerkat_core::tokens_lifecycle_publication(&stored)
+                    .unwrap()
+                    .phase,
+                Some(meerkat_core::handles::AuthLeasePhase::Valid)
+            );
+            assert_eq!(
+                durable_marker::marker_relation_for_tokens_and_snapshot(
+                    &stored,
+                    &auth.snapshot(&lease),
+                    &key
+                ),
+                durable_marker::AuthLeaseDurableMarkerRelation::Matches
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ce_mcp_nonlegacy_newer_and_cold_restore_remain_supported() {
+        for absent in [false, true] {
+            let (base, state) = spawn_oauth_fixture().await;
+            let store = Arc::new(EphemeralTokenStore::new());
+            let mut auth = test_auth_lease();
+            let target =
+                McpServerIdentity::from_server_config("ce-ordinary-restore", format!("{base}/mcp"));
+            let lease = target.lease_key().unwrap();
+            let mut authority = ce_refresh_authority(store.clone(), auth.clone());
+            ce_seed_stored_credential(&authority, &target, &base).await;
+            let previous = auth.capture_auth_lifecycle_restore_snapshot(&lease);
+            let newer = ce_mcp_publish_later_marker(&authority, &target, false).await;
+            let key = target.token_key().unwrap();
+            if absent {
+                auth = test_auth_lease();
+                authority = ce_refresh_authority(store.clone(), auth.clone());
+                assert!(lifecycle_snapshot_is_absent(&auth.snapshot(&lease)));
+            } else {
+                auth.restore_auth_lifecycle_snapshot(&previous).unwrap();
+                auth.mark_reauth_required(&lease).unwrap();
+                assert_eq!(
+                    durable_marker::marker_relation_for_tokens_and_snapshot(
+                        &newer,
+                        &auth.snapshot(&lease),
+                        &key
+                    ),
+                    durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer
+                );
+            }
+            assert_eq!(
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    authority.stored_bearer_token(&target)
+                )
+                .await
+                .expect("ordinary durable restore must finish")
+                .unwrap()
+                .as_deref(),
+                Some("access-token")
+            );
+            assert_eq!(store.load(&key).await.unwrap(), Some(newer.clone()));
+            assert_eq!(
+                durable_marker::marker_relation_for_tokens_and_snapshot(
+                    &newer,
+                    &auth.snapshot(&lease),
+                    &key
+                ),
+                durable_marker::AuthLeaseDurableMarkerRelation::Matches
+            );
+            assert_eq!(
+                state
+                    .token_requests
+                    .lock()
+                    .iter()
+                    .filter(|request| request["grant_type"] == "refresh_token")
+                    .count(),
+                0
+            );
+        }
     }
 }

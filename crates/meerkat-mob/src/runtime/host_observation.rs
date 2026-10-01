@@ -4437,6 +4437,8 @@ mod tests {
             )],
             sender_taint: None,
             header: meerkat_runtime::input::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::from_uuid(stable),
                 timestamp: chrono::Utc::now(),
                 source: meerkat_runtime::input::InputOrigin::Peer {

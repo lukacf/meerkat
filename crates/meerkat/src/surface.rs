@@ -114,6 +114,7 @@ pub use runtime_backed::{
     install_prepared_runtime_interrupt_handle_for_actor_slot,
     materialize_attached_session_actor_only,
     materialize_attached_session_actor_only_with_reserved_admission,
+    materialize_attached_session_controller_with_reserved_admission,
     materialize_prepared_session_actor_unattached_with_actor_slot, materialize_session,
     materialize_session_actor_unattached_with_reserved_admission,
     materialize_session_under_runtime_turn_boundary, materialize_session_with_reserved_admission,

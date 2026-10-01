@@ -273,6 +273,8 @@ rust_test(
         ":package_runfiles",
         "//:github_workflows",
         "//:repo_governance_files",
+        "//crates/meerkat-authorization:cargo_manifest",
+        "//crates/meerkat-authorization:package_runfiles",
         "//crates/meerkat-cli:cargo_manifest",
         "//crates/meerkat-cli:package_runfiles",
         "//crates/meerkat-comms:cargo_manifest",

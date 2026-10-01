@@ -547,6 +547,9 @@ struct EphemeralRuntimeExecutor<B: SessionAgentBuilder> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<B: SessionAgentBuilder + 'static> CoreExecutor for EphemeralRuntimeExecutor<B> {
+    fn supports_work_authorization(&self) -> bool {
+        true
+    }
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(self.handles.clone())
     }
@@ -594,6 +597,11 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for EphemeralRuntimeExecutor
                     .turn_metadata()
                     .and_then(|metadata| metadata.turn_tool_overlay.clone()),
                 metadata,
+            )
+            .with_work_authorization(
+                primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.work_authorization.clone()),
             )
             .with_typed_turn_appends(primitive.typed_turn_appends()),
         };

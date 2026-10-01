@@ -334,6 +334,7 @@ fn completion_outcome_to_cli_runtime_turn_result(
                 tool_use_id,
                 tool_name: tool_name.clone(),
                 args: args.clone(),
+                settlement_failures: Vec::new(),
             }];
             Ok(CliRuntimeTurnResult::CallbackPending(CliCallbackPending {
                 session_id: session_id.clone(),
@@ -408,6 +409,7 @@ fn callback_pending_contract(
                 tool_use_id: call.tool_use_id.clone(),
                 tool_name: call.tool_name.clone(),
                 args: call.args.clone(),
+                settlement_failures: call.settlement_failures.clone(),
             })
             .collect(),
     )
@@ -5847,6 +5849,7 @@ async fn refresh_auth_profile(
                         &mutation_auth_lease,
                         &mutation_auth_binding,
                         chrono::Utc::now(),
+                        &_guard,
                     )
                     .await
                     .map_err(|error| CredentialMutationError::AuthLifecycle(error.to_string()))?
@@ -7041,6 +7044,7 @@ async fn prepare_cli_token_commit_unlocked(
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
+    guard: &meerkat_core::AuthLoginLifecycleGuard,
 ) -> anyhow::Result<CliPreparedTokenCommitSnapshot> {
     let key = meerkat_providers::auth_store::TokenKey::from_auth_binding(auth_binding);
     let previous = meerkat_core::rehydrate_durable_predecessor_for_mutation(
@@ -7048,6 +7052,7 @@ async fn prepare_cli_token_commit_unlocked(
         auth_lease,
         auth_binding,
         chrono::Utc::now(),
+        guard,
     )
     .await
     .map_err(|error| anyhow::anyhow!("durable credential predecessor rehydrate failed: {error}"))?;
@@ -7071,6 +7076,7 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     tokens: &meerkat_providers::auth_store::PersistedTokens,
+    guard: &meerkat_core::AuthLoginLifecycleGuard,
 ) -> anyhow::Result<CliTokenCommitSnapshot> {
     let key = meerkat_providers::auth_store::TokenKey::from_auth_binding(auth_binding);
     let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
@@ -7079,6 +7085,7 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
         auth_lease,
         auth_binding,
         chrono::Utc::now(),
+        guard,
     )
     .await
     .map_err(|error| anyhow::anyhow!("durable credential predecessor rehydrate failed: {error}"))?;
@@ -7202,6 +7209,7 @@ async fn save_cli_tokens_and_publish_lifecycle(
                         &auth_lease,
                         &auth_binding,
                         &tokens,
+                        &_guard,
                     )
                     .await
                     .map_err(|error| CredentialMutationError::Operation(error.to_string()))?;
@@ -7334,6 +7342,7 @@ async fn save_cli_oauth_tokens_and_consume_browser_flow(
                         store.as_ref(),
                         &auth_lease,
                         &auth_binding,
+                        &_guard,
                     )
                     .await
                     .map_err(|error| CredentialMutationError::Operation(error.to_string()))?;
@@ -12140,6 +12149,7 @@ async fn run_agent(
             shell_env: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
             initial_turn_metadata: None,
+            initial_work_authorization: None,
             resume_override_mask: meerkat_core::service::ResumeOverrideMask {
                 model: model_was_explicit,
                 provider: provider_was_explicit,
@@ -13744,6 +13754,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         scheduled_instructions.push(SCHEDULED_PROMPT_VISIBLE_COMPLETION_INSTRUCTION.to_string());
 
         let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            work_authorization: None,
             handling_mode: None,
             keep_alive: None,
             skill_references: scheduled_skill_keys(&dispatch.skill_refs)?,
@@ -13825,6 +13836,8 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         let input = Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
             objective_id: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::External {

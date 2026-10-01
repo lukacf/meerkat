@@ -629,6 +629,8 @@ fn peer_steer(body: &str) -> Input {
         injected_context: Vec::new(),
         sender_taint: None,
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: chrono::Utc::now(),
             source: crate::input::InputOrigin::Peer {

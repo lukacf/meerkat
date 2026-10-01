@@ -1941,3 +1941,45 @@ async function liveChannelRefreshShape(ch: LiveChannel) {
   return result;
 }
 void liveChannelRefreshShape;
+
+
+// Audit compatibility consumes generated closed types, not string assertions.
+import type { LlmProviderErrorKind as ObservationProviderKind } from "../src/generated/event_types.js";
+import type { WireToolResult as ObservationWireToolResult } from "../src/generated/types.js";
+const observationProviderKind: ObservationProviderKind = "operation_observation_unavailable";
+const ordinaryProviderKind: ObservationProviderKind = "server_overloaded";
+const observationCompanion: NonNullable<ObservationWireToolResult["settlement_failures"]>[number] = {
+  admission_source: "authorization_audit",
+  effect_kind: "tool_dispatch",
+  physical_outcome: "committed",
+  failure_kind: "operation_observation_unavailable",
+};
+const observedToolResult: ObservationWireToolResult = {
+  tool_use_id: "call-1",
+  content: "physical result",
+  is_error: false,
+  settlement_failures: [observationCompanion],
+};
+const legacyToolResult: ObservationWireToolResult = {
+  tool_use_id: "legacy", content: "unchanged", is_error: false,
+};
+void [observationProviderKind, ordinaryProviderKind, observedToolResult, legacyToolResult];
+
+// Current authority unavailable, audit failure and actual refusal remain distinct.
+const authorizationProviderKind: ObservationProviderKind = "operation_authorization_unavailable";
+const refusalProviderKind: ObservationProviderKind = "operation_refused";
+const authorizationCompanion: NonNullable<ObservationWireToolResult["settlement_failures"]>[number] = {
+  admission_source: "configured_gate", effect_kind: "tool_dispatch",
+  physical_outcome: "failed", failure_kind: "operation_authorization_unavailable",
+};
+const refusalCompanion: NonNullable<ObservationWireToolResult["settlement_failures"]>[number] = {
+  admission_source: "context_gate", effect_kind: "tool_dispatch",
+  physical_outcome: "unknown", failure_kind: "authorization_refused",
+};
+const orderedAuthorizationResult: ObservationWireToolResult = {
+  tool_use_id: "ordered-wire", content: "retained physical result", is_error: false,
+  settlement_failures: [authorizationCompanion, observationCompanion, refusalCompanion],
+};
+// @ts-expect-error The generated provider kind must remain a closed union.
+const inventedAuthorizationKind: ObservationProviderKind = "invented_authorization_kind";
+void [authorizationProviderKind, refusalProviderKind, orderedAuthorizationResult, inventedAuthorizationKind];

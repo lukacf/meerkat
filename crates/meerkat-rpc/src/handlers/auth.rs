@@ -671,6 +671,7 @@ async fn prepare_token_commit_unlocked(
     store: &Arc<dyn TokenStore>,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
+    guard: &meerkat_core::AuthLoginLifecycleGuard,
 ) -> Result<PreparedTokenCommitSnapshot, RpcResponse> {
     let key = TokenKey::from_auth_binding(auth_binding);
     let previous = meerkat_core::rehydrate_durable_predecessor_for_mutation(
@@ -678,6 +679,7 @@ async fn prepare_token_commit_unlocked(
         auth_lease,
         auth_binding,
         chrono::Utc::now(),
+        guard,
     )
     .await
     .map_err(|error| {
@@ -708,6 +710,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
+    guard: &meerkat_core::AuthLoginLifecycleGuard,
 ) -> Result<TokenCommitSnapshot, RpcResponse> {
     let key = TokenKey::from_auth_binding(auth_binding);
     let lease_key = LeaseKey::from_auth_binding(auth_binding);
@@ -716,6 +719,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
         auth_lease,
         auth_binding,
         chrono::Utc::now(),
+        guard,
     )
     .await
     .map_err(|error| {
@@ -829,6 +833,7 @@ async fn save_tokens_and_publish_lifecycle(
                         &auth_lease,
                         &mutation_binding,
                         &mutation_tokens,
+                        &_guard,
                     )
                     .await
                     .map_err(rpc_response_to_credential_mutation_error)?;
@@ -980,6 +985,7 @@ async fn save_tokens_and_consume_device_flow_unlocked(
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
     poll_lease: OAuthDevicePollLease,
+    guard: &meerkat_core::AuthLoginLifecycleGuard,
 ) -> Option<RpcResponse> {
     if !poll_lease.terminal_flow_state_is_authmachine_owned() {
         return Some(RpcResponse::error(
@@ -992,7 +998,9 @@ async fn save_tokens_and_consume_device_flow_unlocked(
         return Some(resp);
     }
     let prepared =
-        match prepare_token_commit_unlocked(id.clone(), store, auth_lease, auth_binding).await {
+        match prepare_token_commit_unlocked(id.clone(), store, auth_lease, auth_binding, guard)
+            .await
+        {
             Ok(prepared) => prepared,
             Err(resp) => return Some(resp),
         };
@@ -1047,6 +1055,7 @@ async fn save_tokens_and_consume_device_flow(
                         &mutation_binding,
                         &mutation_tokens,
                         poll_lease,
+                        &_guard,
                     )
                     .await
                     {
@@ -1105,6 +1114,7 @@ async fn save_tokens_and_consume_browser_flow_unlocked(
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
     flow: BrowserFlowConsume<'_>,
+    guard: &meerkat_core::AuthLoginLifecycleGuard,
 ) -> Result<(), RpcResponse> {
     if !flow.authority.terminal_flow_state_is_authmachine_owned() {
         return Err(RpcResponse::error(
@@ -1114,7 +1124,7 @@ async fn save_tokens_and_consume_browser_flow_unlocked(
         ));
     }
     let prepared =
-        prepare_token_commit_unlocked(id.clone(), store, auth_lease, auth_binding).await?;
+        prepare_token_commit_unlocked(id.clone(), store, auth_lease, auth_binding, guard).await?;
     flow.authority
         .consume(
             flow.state,
@@ -1178,6 +1188,7 @@ async fn save_tokens_and_consume_browser_flow(
                             provider: flow.provider,
                             redirect_uri: &flow.redirect_uri,
                         },
+                        &_guard,
                     )
                     .await
                     .map_err(rpc_response_to_credential_mutation_error)?;
@@ -4381,6 +4392,10 @@ mod tests {
             &auth_lease,
             &auth_binding,
             &failed_tokens,
+            &meerkat_core::acquire_auth_login_lifecycle_guard(
+                &meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding),
+            )
+            .await,
         )
         .await
         .unwrap();
@@ -4475,6 +4490,10 @@ mod tests {
             &auth_lease,
             &auth_binding,
             &failed_tokens,
+            &meerkat_core::acquire_auth_login_lifecycle_guard(
+                &meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding),
+            )
+            .await,
         )
         .await
         .unwrap();
@@ -4517,7 +4536,8 @@ mod tests {
         let auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
         runtime
             .runtime_adapter()
-            .set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
+            .set_runtime_auth_lease_handle(Arc::clone(&auth_lease))
+            .expect("initial runtime authority installation");
         let store = runtime
             .token_store()
             .expect("token store open")
@@ -4576,7 +4596,8 @@ mod tests {
         let auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
         runtime
             .runtime_adapter()
-            .set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
+            .set_runtime_auth_lease_handle(Arc::clone(&auth_lease))
+            .expect("initial runtime authority installation");
         let store = runtime
             .token_store()
             .expect("token store open")
@@ -4719,7 +4740,8 @@ mod tests {
         let auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
         runtime
             .runtime_adapter()
-            .set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
+            .set_runtime_auth_lease_handle(Arc::clone(&auth_lease))
+            .expect("initial runtime authority installation");
         let store = runtime
             .token_store()
             .expect("token store open")

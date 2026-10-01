@@ -19,9 +19,9 @@ use meerkat_core::{
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{
     ImageGenerationExecutor, LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream,
-    ProviderGeneratedImage, ProviderImageGenerationOutput, ProviderImageGenerationRequest,
-    dimensions_from_size_preference, media_type_from_format_preference,
-    normalize_base64_image_data,
+    PreparedLlmRequest, ProviderGeneratedImage, ProviderImageGenerationOutput,
+    ProviderImageGenerationRequest, dimensions_from_size_preference,
+    media_type_from_format_preference, normalize_base64_image_data,
 };
 use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
@@ -45,6 +45,48 @@ pub(crate) fn openai_tag(request: &LlmRequest) -> Option<&OpenAiProviderTag> {
     }
 }
 
+/// Project only the final wire target and provider-hosted capabilities. Policy
+/// remains with the work owner; ordinary function tools are client-dispatched.
+pub(crate) fn prepare_wire_authorization(
+    prepared: Option<&PreparedLlmRequest>,
+    endpoint: &str,
+    body: &Value,
+) -> Result<Option<meerkat_core::authorization::PreparedOperationCheck>, LlmError> {
+    let Some(prepared) = prepared.filter(|request| request.authorization().is_some()) else {
+        return Ok(None);
+    };
+    // Browser Fetch redirect control is not owned by this adapter yet.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (prepared, endpoint, body);
+        Err(LlmError::operation_refused(
+            meerkat_core::authorization::OperationRefusalKind::MalformedFacts,
+        ))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let wire_model = body.get("model").and_then(Value::as_str).ok_or_else(|| {
+            LlmError::operation_refused(
+                meerkat_core::authorization::OperationRefusalKind::MalformedFacts,
+            )
+        })?;
+        let capabilities = body
+            .get("tools")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|tool| match tool.get("type").and_then(Value::as_str) {
+                Some("function") | None => None,
+                Some("web_search" | "web_search_preview") => Some(ServerToolKind::WebSearch),
+                Some(kind) => Some(ServerToolKind::ProviderNative {
+                    name: kind.to_owned(),
+                }),
+            })
+            .collect();
+        prepared.prepare_model_authorization(endpoint, wire_model, capabilities)
+    }
+}
+
 /// Client for OpenAI Responses API
 pub struct OpenAiClient {
     api_key: Option<String>,
@@ -52,6 +94,8 @@ pub struct OpenAiClient {
     responses_path: String,
     backend_wire: OpenAiBackendWire,
     http: reqwest::Client,
+    #[cfg(not(target_arch = "wasm32"))]
+    checked_http: std::sync::OnceLock<Result<reqwest::Client, LlmError>>,
     /// Extra headers emitted on every request (e.g. `ChatGPT-Account-ID`,
     /// `X-OpenAI-Fedramp`). Populated by provider runtimes when the
     /// backend is the ChatGPT backend and the OAuth token's JWT carries
@@ -657,6 +701,8 @@ impl OpenAiClient {
             responses_path: "v1/responses".to_string(),
             backend_wire: OpenAiBackendWire::PublicOpenAi,
             http,
+            #[cfg(not(target_arch = "wasm32"))]
+            checked_http: std::sync::OnceLock::new(),
             extra_headers: Vec::new(),
             authorizer: None,
             supports_image_input: true,
@@ -797,6 +843,10 @@ impl OpenAiClient {
             self.http = http;
         }
         self.base_url = url;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.checked_http = std::sync::OnceLock::new();
+        }
         self
     }
 
@@ -1172,9 +1222,30 @@ impl OpenAiClient {
         endpoint: &str,
         body: &Value,
         has_images: bool,
+        prepared: Option<&PreparedLlmRequest>,
+        diagnostics: &mut Vec<LlmEvent>,
     ) -> Result<(reqwest::Response, meerkat_core::HttpAuthorizationReceipt), LlmError> {
-        let mut request_builder = self
-            .http
+        if prepared.is_some_and(|request| request.authorization().is_some()) {
+            http::validate_authorization_base_url(&self.base_url)?;
+        }
+        let check = prepare_wire_authorization(prepared, endpoint, body)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let http = if check.is_some() {
+            self.checked_http
+                .get_or_init(|| {
+                    http::build_checked_http_client_for_base_url(
+                        reqwest::Client::builder(),
+                        &self.base_url,
+                    )
+                })
+                .as_ref()
+                .map_err(Clone::clone)?
+        } else {
+            &self.http
+        };
+        #[cfg(target_arch = "wasm32")]
+        let http = &self.http;
+        let mut request_builder = http
             .post(endpoint)
             .header("Content-Type", "application/json");
         if let Some(authorizer) = &self.authorizer {
@@ -1194,20 +1265,29 @@ impl OpenAiClient {
         let (request_builder, receipt) = self
             .apply_request_headers_with_receipt(request_builder, endpoint, &[])
             .await?;
-        let response = request_builder.json(body).send().await.map_err(|e| {
-            if e.is_timeout() {
-                LlmError::NetworkTimeout { duration_ms: 30000 }
-            } else {
-                #[cfg(not(target_arch = "wasm32"))]
-                if e.is_connect() {
-                    return LlmError::ConnectionReset;
-                }
+        let request = request_builder
+            .json(body)
+            .build()
+            .map_err(|error| LlmError::Unknown {
+                message: error.to_string(),
+            })?;
+        // All credential awaits and request construction precede the warm check.
+        let response =
+            http::execute_with_authorization(http, request, check.as_ref(), diagnostics, |e| {
+                if e.is_timeout() {
+                    LlmError::NetworkTimeout { duration_ms: 30000 }
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if e.is_connect() {
+                        return LlmError::ConnectionReset;
+                    }
 
-                LlmError::Unknown {
-                    message: e.to_string(),
+                    LlmError::Unknown {
+                        message: e.to_string(),
+                    }
                 }
-            }
-        })?;
+            })
+            .await?;
         Ok((response, receipt))
     }
 
@@ -1217,13 +1297,15 @@ impl OpenAiClient {
         body: &Value,
         fallback_body: Option<Value>,
         has_images: bool,
+        prepared: Option<&PreparedLlmRequest>,
+        diagnostics: &mut Vec<LlmEvent>,
     ) -> Result<reqwest::Response, LlmError> {
         let mut current_body = body;
         let mut used_fallback = false;
         let mut refreshed_authorization = false;
         loop {
             let (response, receipt) = self
-                .send_responses_request(endpoint, current_body, has_images)
+                .send_responses_request(endpoint, current_body, has_images, prepared, diagnostics)
                 .await?;
             let status = response.status().as_u16();
             if (200..=299).contains(&status) {
@@ -2323,163 +2405,12 @@ fn ensure_additional_properties_false(value: &mut Value) {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl LlmClient for OpenAiClient {
-    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
-        project_openai_replay_messages_for_capabilities(
-            messages,
-            OpenAiReplayProjectionMode::Responses,
-            self.supports_image_input,
-            true,
-        )
-    }
-
-    fn request_pressure(
-        &self,
-        request: &LlmRequest,
-    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
-        let mut projected_request = request.clone();
-        projected_request.messages = self.project_replay_messages(&request.messages)?;
-        let (body, continuation_plan) =
-            self.build_request_body_with_continuation(&projected_request)?;
-        let mut encoded_body =
-            serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
-                message: format!("failed to serialize OpenAI request body: {error}"),
-            })?;
-        // A rejected continuation is retried as a full replay. The pressure
-        // witness must cover the largest body this one invocation may send.
-        if continuation_plan.is_some() {
-            let fallback_body = self.build_request_body(&projected_request)?;
-            let fallback_encoded =
-                serde_json::to_vec(&fallback_body).map_err(|error| LlmError::InvalidRequest {
-                    message: format!("failed to serialize OpenAI fallback request body: {error}"),
-                })?;
-            if fallback_encoded.len() > encoded_body.len() {
-                encoded_body = fallback_encoded;
-            }
-        }
-        Ok(Some(
-            meerkat_core::ProviderRequestPressure::new(
-                encoded_body.len() as u64,
-                meerkat_models::approximate_request_byte_cap(self.provider()),
-            )
-            .with_lowered_request_provenance(
-                meerkat_core::LoweredRequestProvenance::from_body(
-                    Provider::OpenAI,
-                    meerkat_core::LoweredRequestEncoding::OpenAiResponsesJson,
-                    &encoded_body,
-                ),
-            ),
-        ))
-    }
-
-    fn authored_cache_breakpoints(
-        &self,
-        request: &LlmRequest,
-        canonical_messages: &[Message],
-    ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, LlmError> {
-        let Some(tag) = openai_tag(request) else {
-            return Ok(Vec::new());
-        };
-        let explicit = tag.prompt_cache_enabled != Some(false)
-            && tag.prompt_cache_options.is_some_and(|options| {
-                options.mode
-                    == Some(
-                        meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode::Explicit,
-                    )
-            });
-        if !explicit || request.messages.len() != canonical_messages.len() {
-            return Ok(Vec::new());
-        }
-        // A previous_response_id request lowers only a replay suffix and may
-        // fall back to full replay after provider rejection. It has no single
-        // authored rendered prefix, so cache inheritance is unavailable.
-        if openai_continuation_plan(request).is_some() {
-            return Ok(Vec::new());
-        }
-
-        // Validate the exact full lowering first. Boundary evidence is minted
-        // only if the same renderer successfully authored the body.
-        let body = self.build_request_body(request)?;
-        let encoded_body = serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
-            message: format!("failed to serialize OpenAI cache evidence body: {error}"),
-        })?;
-        let system_mode = if self.is_chatgpt_backend_wire() {
-            Self::validate_chatgpt_system_messages(&request.messages)?;
-            SystemMessageMode::ExtractToInstructions
-        } else {
-            SystemMessageMode::IncludeInInput
-        };
-        let (_, _, boundaries) = Self::convert_to_responses_input_with_system_mode(
-            &request.messages,
-            system_mode,
-            ResponsesCacheBreakpoints::EveryInput,
-        )?;
-        let ttl = if tag
-            .prompt_cache_options
-            .and_then(|options| options.ttl)
-            .is_some()
-        {
-            meerkat_core::ProviderCacheTtl::ThirtyMinutes
-        } else if matches!(
-            tag.prompt_cache_retention,
-            Some(OpenAiPromptCacheRetention::TwentyFourHours)
-        ) {
-            meerkat_core::ProviderCacheTtl::TwentyFourHours
-        } else {
-            meerkat_core::ProviderCacheTtl::ProviderDefault
-        };
-        boundaries
-            .into_iter()
-            .map(|(boundary, input_item_count)| {
-                let input = body
-                    .get("input")
-                    .and_then(Value::as_array)
-                    .and_then(|items| items.get(..input_item_count))
-                    .ok_or_else(|| LlmError::InvalidRequest {
-                        message: "OpenAI cache breakpoint did not map to lowered input items"
-                            .to_string(),
-                    })?;
-                let rendered_prefix = serde_json::to_vec(&serde_json::json!({
-                    "renderer_mode": match system_mode {
-                        SystemMessageMode::IncludeInInput => "responses_full_replay_input_system_v1",
-                        SystemMessageMode::ExtractToInstructions => "responses_full_replay_instructions_v1",
-                    },
-                    "model": body.get("model"),
-                    "instructions": body.get("instructions"),
-                    "tools": body.get("tools"),
-                    "tool_choice": body.get("tool_choice"),
-                    "parallel_tool_calls": body.get("parallel_tool_calls"),
-                    "prompt_cache_key": body.get("prompt_cache_key"),
-                    "prompt_cache_retention": body.get("prompt_cache_retention"),
-                    "prompt_cache_options": body.get("prompt_cache_options"),
-                    "input": input,
-                }))
-                .map_err(|error| LlmError::InvalidRequest {
-                    message: format!("failed to serialize OpenAI rendered cache prefix: {error}"),
-                })?;
-                meerkat_core::provider_cache_breakpoint_claim(
-                    meerkat_core::ProviderCacheBreakpointClaimRequest {
-                        provider: Provider::OpenAI,
-                        model: &request.model,
-                        messages: canonical_messages,
-                        boundary,
-                        ttl,
-                        rendered_prefix: &rendered_prefix,
-                        lowered_request_encoding:
-                            meerkat_core::LoweredRequestEncoding::OpenAiResponsesJson,
-                        lowered_request_body: &encoded_body,
-                    },
-                )
-                .map_err(|error| LlmError::InvalidRequest {
-                    message: format!("invalid OpenAI cache-breakpoint evidence: {error}"),
-                })
-            })
-            .collect()
-    }
-
-    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+impl OpenAiClient {
+    fn stream_request<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+        prepared: Option<&'a PreparedLlmRequest>,
+    ) -> LlmStream<'a> {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
             let mut projected_request = request.clone();
             projected_request.messages = self.project_replay_messages(&request.messages)?;
@@ -2492,14 +2423,14 @@ impl LlmClient for OpenAiClient {
             };
 
             let endpoint = self.responses_endpoint();
+            let mut diagnostics = Vec::new();
             let response = self
                 .responses_response_with_fallback(
-                    &endpoint,
-                    &body,
-                    fallback_body,
-                    request.has_images(),
+                    &endpoint, &body, fallback_body, request.has_images(), prepared, &mut diagnostics,
                 )
-                .await?;
+                .await;
+            for diagnostic in diagnostics { yield diagnostic; }
+            let response = response?;
             let mut stream = response.bytes_stream();
             let mut buffer = String::with_capacity(512);
             let mut usage = Usage::default();
@@ -3101,6 +3032,180 @@ impl LlmClient for OpenAiClient {
         });
 
         streaming::ensure_terminal_done(inner)
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl LlmClient for OpenAiClient {
+    fn plain_model_route(
+        &self,
+        logical_model: &str,
+    ) -> Result<meerkat_llm_core::PlainModelRoute, meerkat_core::ControllerFactsUnavailable> {
+        http::validate_authorization_base_url(&self.base_url)
+            .map_err(|_| meerkat_core::ControllerFactsUnavailable)?;
+        meerkat_llm_core::PlainModelRoute::new(&self.responses_endpoint(), logical_model)
+    }
+
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        project_openai_replay_messages_for_capabilities(
+            messages,
+            OpenAiReplayProjectionMode::Responses,
+            self.supports_image_input,
+            true,
+        )
+    }
+
+    fn request_pressure(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        let mut projected_request = request.clone();
+        projected_request.messages = self.project_replay_messages(&request.messages)?;
+        let (body, continuation_plan) =
+            self.build_request_body_with_continuation(&projected_request)?;
+        let mut encoded_body =
+            serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
+                message: format!("failed to serialize OpenAI request body: {error}"),
+            })?;
+        // A rejected continuation is retried as a full replay. The pressure
+        // witness must cover the largest body this one invocation may send.
+        if continuation_plan.is_some() {
+            let fallback_body = self.build_request_body(&projected_request)?;
+            let fallback_encoded =
+                serde_json::to_vec(&fallback_body).map_err(|error| LlmError::InvalidRequest {
+                    message: format!("failed to serialize OpenAI fallback request body: {error}"),
+                })?;
+            if fallback_encoded.len() > encoded_body.len() {
+                encoded_body = fallback_encoded;
+            }
+        }
+        Ok(Some(
+            meerkat_core::ProviderRequestPressure::new(
+                encoded_body.len() as u64,
+                meerkat_models::approximate_request_byte_cap(self.provider()),
+            )
+            .with_lowered_request_provenance(
+                meerkat_core::LoweredRequestProvenance::from_body(
+                    Provider::OpenAI,
+                    meerkat_core::LoweredRequestEncoding::OpenAiResponsesJson,
+                    &encoded_body,
+                ),
+            ),
+        ))
+    }
+
+    fn authored_cache_breakpoints(
+        &self,
+        request: &LlmRequest,
+        canonical_messages: &[Message],
+    ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, LlmError> {
+        let Some(tag) = openai_tag(request) else {
+            return Ok(Vec::new());
+        };
+        let explicit = tag.prompt_cache_enabled != Some(false)
+            && tag.prompt_cache_options.is_some_and(|options| {
+                options.mode
+                    == Some(
+                        meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode::Explicit,
+                    )
+            });
+        if !explicit || request.messages.len() != canonical_messages.len() {
+            return Ok(Vec::new());
+        }
+        // A previous_response_id request lowers only a replay suffix and may
+        // fall back to full replay after provider rejection. It has no single
+        // authored rendered prefix, so cache inheritance is unavailable.
+        if openai_continuation_plan(request).is_some() {
+            return Ok(Vec::new());
+        }
+
+        // Validate the exact full lowering first. Boundary evidence is minted
+        // only if the same renderer successfully authored the body.
+        let body = self.build_request_body(request)?;
+        let encoded_body = serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
+            message: format!("failed to serialize OpenAI cache evidence body: {error}"),
+        })?;
+        let system_mode = if self.is_chatgpt_backend_wire() {
+            Self::validate_chatgpt_system_messages(&request.messages)?;
+            SystemMessageMode::ExtractToInstructions
+        } else {
+            SystemMessageMode::IncludeInInput
+        };
+        let (_, _, boundaries) = Self::convert_to_responses_input_with_system_mode(
+            &request.messages,
+            system_mode,
+            ResponsesCacheBreakpoints::EveryInput,
+        )?;
+        let ttl = if tag
+            .prompt_cache_options
+            .and_then(|options| options.ttl)
+            .is_some()
+        {
+            meerkat_core::ProviderCacheTtl::ThirtyMinutes
+        } else if matches!(
+            tag.prompt_cache_retention,
+            Some(OpenAiPromptCacheRetention::TwentyFourHours)
+        ) {
+            meerkat_core::ProviderCacheTtl::TwentyFourHours
+        } else {
+            meerkat_core::ProviderCacheTtl::ProviderDefault
+        };
+        boundaries
+            .into_iter()
+            .map(|(boundary, input_item_count)| {
+                let input = body
+                    .get("input")
+                    .and_then(Value::as_array)
+                    .and_then(|items| items.get(..input_item_count))
+                    .ok_or_else(|| LlmError::InvalidRequest {
+                        message: "OpenAI cache breakpoint did not map to lowered input items"
+                            .to_string(),
+                    })?;
+                let rendered_prefix = serde_json::to_vec(&serde_json::json!({
+                    "renderer_mode": match system_mode {
+                        SystemMessageMode::IncludeInInput => "responses_full_replay_input_system_v1",
+                        SystemMessageMode::ExtractToInstructions => "responses_full_replay_instructions_v1",
+                    },
+                    "model": body.get("model"),
+                    "instructions": body.get("instructions"),
+                    "tools": body.get("tools"),
+                    "tool_choice": body.get("tool_choice"),
+                    "parallel_tool_calls": body.get("parallel_tool_calls"),
+                    "prompt_cache_key": body.get("prompt_cache_key"),
+                    "prompt_cache_retention": body.get("prompt_cache_retention"),
+                    "prompt_cache_options": body.get("prompt_cache_options"),
+                    "input": input,
+                }))
+                .map_err(|error| LlmError::InvalidRequest {
+                    message: format!("failed to serialize OpenAI rendered cache prefix: {error}"),
+                })?;
+                meerkat_core::provider_cache_breakpoint_claim(
+                    meerkat_core::ProviderCacheBreakpointClaimRequest {
+                        provider: Provider::OpenAI,
+                        model: &request.model,
+                        messages: canonical_messages,
+                        boundary,
+                        ttl,
+                        rendered_prefix: &rendered_prefix,
+                        lowered_request_encoding:
+                            meerkat_core::LoweredRequestEncoding::OpenAiResponsesJson,
+                        lowered_request_body: &encoded_body,
+                    },
+                )
+                .map_err(|error| LlmError::InvalidRequest {
+                    message: format!("invalid OpenAI cache-breakpoint evidence: {error}"),
+                })
+            })
+            .collect()
+    }
+
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        self.stream_request(request, None)
+    }
+
+    fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
+        self.stream_request(request.request(), Some(request))
     }
 
     fn provider(&self) -> meerkat_core::Provider {
@@ -4184,6 +4289,8 @@ mod tests {
                 &serde_json::json!({"stream": true}),
                 None,
                 false,
+                None,
+                &mut Vec::new(),
             )
             .await
             .expect("second authorization succeeds");
@@ -4214,6 +4321,8 @@ mod tests {
                 &serde_json::json!({"stream": true}),
                 None,
                 false,
+                None,
+                &mut Vec::new(),
             )
             .await
             .expect_err("second unauthorized response propagates");
@@ -4266,6 +4375,8 @@ mod tests {
                     &serde_json::json!({"previous_response_id":"resp_blocked"}),
                     Some(serde_json::json!({"input":[]})),
                     false,
+                    None,
+                    &mut Vec::new(),
                 )
                 .await
                 .unwrap_err();
@@ -9179,3 +9290,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "authorization_tests.rs"]
+mod authorization_tests;

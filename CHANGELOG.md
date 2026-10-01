@@ -37,6 +37,51 @@ them.
 
 ### Breaking
 
+- Removed `meerkat_core::clear_tokens_and_publish_lifecycle_released` and
+  `clear_tokens_and_publish_lifecycle_released_for_identity`, including their
+  `auth` and `auth::lifecycle` paths. Use the native
+  `clear_tokens_and_publish_lifecycle_released_coordinated` or
+  `clear_tokens_and_publish_lifecycle_released_coordinated_for_identity` with
+  owned `ProviderAuthPersistence`, `GeneratedAuthLeaseHandle` and binding or
+  credential identity. Handle `CredentialMutationError`. The coordinator retains
+  the operation through credential deletion and compensation if the caller is
+  cancelled; the removed borrowed future could abandon that work.
+- `meerkat_runtime::input::InputHeader` gains `ingress_context` and
+  `authority_association`; explicit Rust literals must initialize both. Existing
+  input constructors use `None`. The ingress context is process-local and skipped
+  by Serde; a decoded association is only a claim and does not authenticate or
+  admit an input.
+- `meerkat_core::SessionBuildOptions` gains `initial_work_authorization`;
+  `StartTurnRuntimeSemantics` and `RuntimeTurnMetadata` gain
+  `work_authorization`. Explicit literals must supply these fields; existing
+  defaults use `None`. Governed hosts must forward the context from actual native
+  admission. It is not a reusable builder default or recovery credential, and
+  `RuntimeTurnMetadata` does not serialize it.
+- `meerkat_core::ToolResult`, `meerkat_core::error::PendingCallbackToolCall`,
+  `meerkat_contracts::WireToolResult` and `WirePendingToolCall` gain
+  `settlement_failures`. `meerkat_core::AgentError::PolicyIndeterminate` gains the
+  same field. Initialize empty companions with `Vec::new()` or use the existing
+  result constructors. Old wire records still decode, and empty companions stay
+  omitted on encode. A callback with a companion uses `CallbackBatchPending`,
+  including a single-item batch; ordinary single callbacks keep `CallbackPending`.
+  Companions preserve the original result and do not authorize repeating an
+  effect whose body already ran.
+- Exhaustive matches must handle `ToolError::AuthorizationRefused`,
+  `OperationObservationUnavailable`, `OperationAuthorizationUnavailable` and
+  `WithSettlementFailures`, plus `AgentError::OperationRefused`.
+  `LlmProviderErrorKind` gains `OperationRefused`,
+  `OperationObservationUnavailable` and `OperationAuthorizationUnavailable`;
+  `ToolDispatchTerminalErrorKind` gains `AuthorizationRefused`,
+  `OperationObservationUnavailable` and `OperationAuthorizationUnavailable`.
+  Classify wrapped tool errors through `primary_error()` and retain their
+  settlement companions. Local permission feedback, unavailable authorization
+  and failed audit recording are distinct outcomes; infrastructure failures must
+  not be presented as permission denials or provider retry/fallback triggers.
+- `TurnFailureSourceKind::from_agent_error` and
+  `TurnFailureSource::from_agent_error` now return
+  `Result<_, OperationRefused>`. Callers must preserve a refused operation as local
+  feedback instead of turning it into a terminal run failure.
+
 - `meerkat_machine_schema::MachineSchema` and
   `meerkat_machine_schema::catalog::dsl::MachineSchemaMetadata` gain the public
   field `tlc_model: Option<MachineTlcModel>`. Struct literals must supply it;
@@ -69,11 +114,17 @@ them.
 
 ### Added
 
-- Portable authorization restriction contracts and a generated process-local
-  grant authority with qualified identities, exact attenuation, ancestor
-  revocation and current full-lineage resolution. These crates provide the
-  foundation for governed operations; native enforcement and durable grant
-  recovery are not enabled by this addition.
+- Local governed authorization for explicitly configured native Rust embeddings:
+  portable restrictions and generated process-local grants now compose with
+  native input admission, the actual pinned controller, current application
+  policy and exact operation checks. Local refusals can return as model feedback;
+  native audit and typed settlement companions retain distinct infrastructure
+  failures and physical results. Enable `meerkat-runtime`'s `local-authorization`
+  feature and install the real owners before sharing an empty storeless machine.
+  This checkpoint does not activate stock CLI/REST/RPC/MCP governance or provide
+  persistent admission, durable grant recovery, consent, OS confinement or full
+  execution-mode coverage. See `docs/rust/native-authorization.mdx` for the
+  supported integration boundary; performance acceptance remains unmeasured.
 
 - Canonical principal, trust-domain, grant and visibility contracts are now
   emitted as schema roots and generated Python and TypeScript SDK types.

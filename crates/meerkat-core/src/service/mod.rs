@@ -971,6 +971,10 @@ pub struct SessionBuildOptions {
     /// Session services only forward this carrier. They must not infer an
     /// execution kind from runtime build mode.
     pub initial_turn_metadata: Option<RuntimeTurnMetadata>,
+    /// One-shot process-local context for an eager first turn. The session
+    /// service consumes this before building the agent; it is not a reusable
+    /// builder default, a deferred-turn slot, or persisted recovery authority.
+    pub initial_work_authorization: Option<crate::WorkAuthorizationContext>,
     /// Runtime-injected mob operator authority context.
     ///
     /// This is the only source of mob operator tool authority. Tool visibility
@@ -1736,6 +1740,7 @@ impl Default for SessionBuildOptions {
             mob_tools: None,
             runtime_build_mode: crate::runtime_epoch::RuntimeBuildMode::StandaloneEphemeral,
             initial_turn_metadata: None,
+            initial_work_authorization: None,
             mob_tool_authority_context: None,
         }
     }
@@ -1818,6 +1823,10 @@ impl std::fmt::Debug for SessionBuildOptions {
                 &self.initial_turn_metadata.is_some(),
             )
             .field(
+                "initial_work_authorization",
+                &self.initial_work_authorization,
+            )
+            .field(
                 "mob_tool_authority_context",
                 &self.mob_tool_authority_context.is_some(),
             )
@@ -1833,6 +1842,9 @@ impl std::fmt::Debug for SessionBuildOptions {
 /// into service-level request fields.
 #[derive(Debug)]
 pub struct StartTurnRuntimeSemantics {
+    /// Exact process-local context selected for this admitted work. Absence
+    /// is explicit and never inherits a prior turn's caller or execution scope.
+    pub work_authorization: Option<crate::WorkAuthorizationContext>,
     /// Caller-stable identity for durable runtime input admission.
     ///
     /// This is intentionally distinct from transcript identity. Runtime
@@ -1867,6 +1879,7 @@ pub struct StartTurnRuntimeSemantics {
 impl Default for StartTurnRuntimeSemantics {
     fn default() -> Self {
         Self {
+            work_authorization: None,
             input_identity: None,
             handling_mode: HandlingMode::Queue,
             turn_tool_overlay: None,
@@ -1884,6 +1897,7 @@ impl StartTurnRuntimeSemantics {
         turn_metadata: Option<RuntimeTurnMetadata>,
     ) -> Self {
         Self {
+            work_authorization: None,
             input_identity: None,
             handling_mode,
             turn_tool_overlay,
@@ -1909,6 +1923,15 @@ impl StartTurnRuntimeSemantics {
     #[must_use]
     pub fn with_input_identity(mut self, input_identity: StartTurnInputIdentity) -> Self {
         self.input_identity = Some(input_identity);
+        self
+    }
+
+    #[must_use]
+    pub fn with_work_authorization(
+        mut self,
+        context: Option<crate::WorkAuthorizationContext>,
+    ) -> Self {
+        self.work_authorization = context;
         self
     }
 }

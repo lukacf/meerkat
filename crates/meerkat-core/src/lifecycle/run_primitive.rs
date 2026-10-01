@@ -1559,6 +1559,10 @@ where
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeTurnMetadata {
+    /// Exact process-local context rebuilt by the native input owner from every
+    /// retained contributor. Serialized metadata cannot install or restore it.
+    #[serde(skip)]
+    pub work_authorization: Option<crate::WorkAuthorizationContext>,
     /// Handling mode for staged ordinary work when admitted through runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handling_mode: Option<HandlingMode>,
@@ -1651,7 +1655,8 @@ impl RuntimeTurnMetadata {
     /// True when every optional field is `None` and every collection is empty
     /// — used to skip serializing empty metadata carriers on the wire.
     pub fn is_empty(&self) -> bool {
-        self.handling_mode.is_none()
+        self.work_authorization.is_none()
+            && self.handling_mode.is_none()
             && self.skill_references.is_none()
             && self.turn_tool_overlay.is_none()
             && self.additional_instructions.is_none()
@@ -1692,6 +1697,7 @@ impl RuntimeTurnMetadata {
         // Exhaustive destructuring: a new field must decide here whether a
         // running turn can honour it.
         let Self {
+            work_authorization,
             handling_mode: _,
             skill_references,
             turn_tool_overlay,
@@ -1711,7 +1717,8 @@ impl RuntimeTurnMetadata {
             directed_interaction_ids,
             transcript_identity: _,
         } = self;
-        skill_references.as_ref().is_none_or(Vec::is_empty)
+        work_authorization.is_none()
+            && skill_references.as_ref().is_none_or(Vec::is_empty)
             && turn_tool_overlay.is_none()
             && additional_instructions.as_ref().is_none_or(Vec::is_empty)
             && system_prompts.is_empty()
@@ -1733,6 +1740,11 @@ impl RuntimeTurnMetadata {
     /// etc.) return a typed [`TurnMetadataMergeConflict`] rather than
     /// last-wins. Collection fields accumulate.
     pub fn merge(&mut self, other: Self) -> Result<(), TurnMetadataMergeConflict> {
+        merge_scalar(
+            &mut self.work_authorization,
+            other.work_authorization,
+            "work_authorization",
+        )?;
         // Scalar: conflict-refusing merge.
         merge_scalar(
             &mut self.handling_mode,

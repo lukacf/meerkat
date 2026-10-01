@@ -130,7 +130,12 @@ pub(crate) fn op_tool_name(op: &MemberOperatorOp) -> &'static str {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum UpcallToolOutcome {
     /// `ToolResult` passthrough (text projection).
-    Ok { content: String, is_error: bool },
+    Ok {
+        content: String,
+        is_error: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        settlement_failures: Vec<meerkat_core::ops::ToolDispatchSettlementFailure>,
+    },
     /// Closed mirror of the `ToolError` classes; reconstructs the exact
     /// variant member-side (T-4: `access_denied` stays `AccessDenied`).
     ToolError(UpcallToolError),
@@ -171,6 +176,9 @@ pub(crate) enum UpcallToolErrorClass {
     Timeout,
     InactivityTimeout,
     AccessDenied,
+    AuthorizationRefused,
+    OperationObservationUnavailable,
+    OperationAuthorizationUnavailable,
     PolicyDenied,
     PolicyIndeterminate,
     Other,
@@ -191,6 +199,8 @@ pub(crate) struct UpcallToolError {
     pub unavailable_reason: Option<ToolUnavailableReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settlement_failures: Vec<meerkat_core::ops::ToolDispatchSettlementFailure>,
 }
 
 impl UpcallToolOutcome {
@@ -199,12 +209,16 @@ impl UpcallToolOutcome {
         Self::Ok {
             content: result.text_content(),
             is_error: result.is_error,
+            settlement_failures: result.settlement_failures.clone(),
         }
     }
 
     /// Envelope a typed tool error (controlling side).
     pub(crate) fn from_tool_error(error: &ToolError) -> Self {
-        let payload = match error {
+        let mut payload = match error.primary_error() {
+            ToolError::WithSettlementFailures { .. } => {
+                return Self::from_tool_error(error.primary_error());
+            }
             ToolError::NotFound { name } => UpcallToolError {
                 class: UpcallToolErrorClass::NotFound,
                 message: error.to_string(),
@@ -212,6 +226,7 @@ impl UpcallToolOutcome {
                 timeout_ms: None,
                 unavailable_reason: None,
                 data: None,
+                settlement_failures: Vec::new(),
             },
             ToolError::Unavailable { name, reason } => UpcallToolError {
                 class: UpcallToolErrorClass::Unavailable,
@@ -220,6 +235,7 @@ impl UpcallToolOutcome {
                 timeout_ms: None,
                 unavailable_reason: Some(*reason),
                 data: None,
+                settlement_failures: Vec::new(),
             },
             ToolError::InvalidArguments { name, reason } => UpcallToolError {
                 class: UpcallToolErrorClass::InvalidArguments,
@@ -228,6 +244,7 @@ impl UpcallToolOutcome {
                 timeout_ms: None,
                 unavailable_reason: None,
                 data: None,
+                settlement_failures: Vec::new(),
             },
             ToolError::ExecutionFailed { message } => UpcallToolError {
                 class: UpcallToolErrorClass::ExecutionFailed,
@@ -236,6 +253,7 @@ impl UpcallToolOutcome {
                 timeout_ms: None,
                 unavailable_reason: None,
                 data: None,
+                settlement_failures: Vec::new(),
             },
             ToolError::ExecutionFailedWithData { message, data } => UpcallToolError {
                 class: UpcallToolErrorClass::ExecutionFailed,
@@ -244,6 +262,7 @@ impl UpcallToolOutcome {
                 timeout_ms: None,
                 unavailable_reason: None,
                 data: Some(data.clone()),
+                settlement_failures: Vec::new(),
             },
             ToolError::Timeout { name, timeout_ms } => UpcallToolError {
                 class: UpcallToolErrorClass::Timeout,
@@ -252,6 +271,7 @@ impl UpcallToolOutcome {
                 timeout_ms: Some(*timeout_ms),
                 unavailable_reason: None,
                 data: None,
+                settlement_failures: Vec::new(),
             },
             ToolError::InactivityTimeout {
                 name,
@@ -263,6 +283,7 @@ impl UpcallToolOutcome {
                 timeout_ms: Some(*inactivity_ms),
                 unavailable_reason: None,
                 data: None,
+                settlement_failures: Vec::new(),
             },
             ToolError::AccessDenied { name } => UpcallToolError {
                 class: UpcallToolErrorClass::AccessDenied,
@@ -271,6 +292,34 @@ impl UpcallToolOutcome {
                 timeout_ms: None,
                 unavailable_reason: None,
                 data: None,
+                settlement_failures: Vec::new(),
+            },
+            ToolError::AuthorizationRefused { refusal } => UpcallToolError {
+                class: UpcallToolErrorClass::AuthorizationRefused,
+                message: refusal.to_string(),
+                name: None,
+                timeout_ms: None,
+                unavailable_reason: None,
+                data: serde_json::to_value(refusal.kind()).ok(),
+                settlement_failures: Vec::new(),
+            },
+            ToolError::OperationObservationUnavailable => UpcallToolError {
+                class: UpcallToolErrorClass::OperationObservationUnavailable,
+                message: "operation observation unavailable".to_string(),
+                name: None,
+                timeout_ms: None,
+                unavailable_reason: None,
+                data: None,
+                settlement_failures: Vec::new(),
+            },
+            ToolError::OperationAuthorizationUnavailable => UpcallToolError {
+                class: UpcallToolErrorClass::OperationAuthorizationUnavailable,
+                message: "operation authorization unavailable".to_string(),
+                name: None,
+                timeout_ms: None,
+                unavailable_reason: None,
+                data: None,
+                settlement_failures: Vec::new(),
             },
             ToolError::PolicyDenied { denial } => UpcallToolError {
                 class: UpcallToolErrorClass::PolicyDenied,
@@ -279,6 +328,7 @@ impl UpcallToolOutcome {
                 timeout_ms: None,
                 unavailable_reason: None,
                 data: serde_json::to_value(denial).ok(),
+                settlement_failures: Vec::new(),
             },
             ToolError::PolicyIndeterminate { failure } => UpcallToolError {
                 class: UpcallToolErrorClass::PolicyIndeterminate,
@@ -287,6 +337,7 @@ impl UpcallToolOutcome {
                 timeout_ms: None,
                 unavailable_reason: None,
                 data: serde_json::to_value(failure).ok(),
+                settlement_failures: Vec::new(),
             },
             ToolError::Other(message) => UpcallToolError {
                 class: UpcallToolErrorClass::Other,
@@ -295,6 +346,7 @@ impl UpcallToolOutcome {
                 timeout_ms: None,
                 unavailable_reason: None,
                 data: None,
+                settlement_failures: Vec::new(),
             },
             // CallbackPending is an in-process external-routing signal with
             // no cross-host meaning; the operator tool set never produces it.
@@ -310,8 +362,10 @@ impl UpcallToolOutcome {
                 timeout_ms: None,
                 unavailable_reason: None,
                 data: None,
+                settlement_failures: Vec::new(),
             },
         };
+        payload.settlement_failures = error.settlement_failures().cloned().collect();
         Self::ToolError(payload)
     }
 
@@ -344,11 +398,15 @@ impl UpcallToolOutcome {
         tool_name: &str,
     ) -> Result<ToolDispatchOutcome, ToolError> {
         match self {
-            Self::Ok { content, is_error } => Ok(ToolDispatchOutcome::from(ToolResult::new(
-                call_id.to_string(),
+            Self::Ok {
                 content,
                 is_error,
-            ))),
+                settlement_failures,
+            } => {
+                let mut result = ToolResult::new(call_id.to_string(), content, is_error);
+                result.settlement_failures = settlement_failures;
+                Ok(ToolDispatchOutcome::from(result))
+            }
             Self::ToolError(payload) => Err(payload.into_tool_error(tool_name)),
             Self::DurabilityFailure(failure) => {
                 let code = match failure.failure_kind {
@@ -372,7 +430,7 @@ impl UpcallToolError {
     /// Rebuild the exact `ToolError` variant (T-4).
     fn into_tool_error(self, fallback_name: &str) -> ToolError {
         let name = self.name.unwrap_or_else(|| fallback_name.to_string());
-        match self.class {
+        let error = match self.class {
             UpcallToolErrorClass::NotFound => ToolError::not_found(name),
             UpcallToolErrorClass::Unavailable => ToolError::unavailable(
                 name,
@@ -393,6 +451,21 @@ impl UpcallToolError {
                 ToolError::inactivity_timeout(name, self.timeout_ms.unwrap_or_default())
             }
             UpcallToolErrorClass::AccessDenied => ToolError::access_denied(name),
+            UpcallToolErrorClass::AuthorizationRefused => ToolError::AuthorizationRefused {
+                refusal: meerkat_core::authorization::OperationRefused::new(
+                    self.data
+                        .and_then(|data| serde_json::from_value(data).ok())
+                        .unwrap_or(
+                            meerkat_core::authorization::OperationRefusalKind::MalformedFacts,
+                        ),
+                ),
+            },
+            UpcallToolErrorClass::OperationObservationUnavailable => {
+                ToolError::OperationObservationUnavailable
+            }
+            UpcallToolErrorClass::OperationAuthorizationUnavailable => {
+                ToolError::OperationAuthorizationUnavailable
+            }
             UpcallToolErrorClass::PolicyDenied => self
                 .data
                 .and_then(|data| serde_json::from_value(data).ok())
@@ -412,7 +485,8 @@ impl UpcallToolError {
                     )
                 }),
             UpcallToolErrorClass::Other => ToolError::other(self.message),
-        }
+        };
+        error.with_settlement_failures(self.settlement_failures)
     }
 }
 
@@ -1434,6 +1508,170 @@ mod tests {
                 }
                 _ => {}
             }
+        }
+    }
+
+    #[test]
+    fn settlement_companion_survives_upcall_success_and_policy_failure() {
+        let marker = meerkat_core::ToolDispatchSettlementFailure {
+            admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
+            effect_kind: meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Committed,
+            failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Unavailable,
+        };
+        let mut result = ToolResult::new("call".into(), "physical success".into(), false);
+        result.settlement_failures.push(marker.clone());
+        let envelope = UpcallToolOutcome::from_tool_result(&result);
+        let wire = serde_json::to_value(envelope).unwrap();
+        let back: UpcallToolOutcome = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            back.into_dispatch_outcome("call", "tool").unwrap().result,
+            result
+        );
+        let primary = ToolError::policy_indeterminate(
+            meerkat_core::ToolConsequenceFailure::InvalidProvenance {
+                reason: "exact-policy-reason".into(),
+            },
+        );
+        let decorated = primary
+            .clone()
+            .with_settlement_failures(vec![marker.clone()]);
+        let envelope = UpcallToolOutcome::from_tool_error(&decorated);
+        let wire = serde_json::to_value(envelope).unwrap();
+        let back: UpcallToolOutcome = serde_json::from_value(wire).unwrap();
+        let restored = back.into_dispatch_outcome("call", "tool").unwrap_err();
+        assert_eq!(restored.primary_error(), &primary);
+        assert_eq!(
+            restored.settlement_failures().cloned().collect::<Vec<_>>(),
+            vec![marker]
+        );
+    }
+
+    #[test]
+    fn observation_infrastructure_upcall_roundtrip_keeps_type_and_settlement_sequence() {
+        let primary = ToolError::OperationObservationUnavailable;
+        let first = meerkat_core::ToolDispatchSettlementFailure {
+            admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
+            effect_kind: meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Committed,
+            failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Unavailable,
+        };
+        let second = meerkat_core::ToolDispatchSettlementFailure {
+            admission_source: meerkat_core::ToolDispatchAdmissionSource::ContextGate,
+            failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Other,
+            ..first.clone()
+        };
+        for companions in [vec![], vec![first, second]] {
+            let error = primary.clone().with_settlement_failures(companions.clone());
+            let envelope = UpcallToolOutcome::from_tool_error(&error);
+            let encoded = serde_json::to_value(&envelope).unwrap();
+            assert_eq!(encoded["class"], "operation_observation_unavailable");
+            assert_eq!(encoded["message"], primary.to_string());
+            assert!(encoded.get("name").is_none());
+            assert!(encoded.get("data").is_none());
+            let wire = WireOpaqueJson::from_value(&encoded);
+            let restored: UpcallToolOutcome =
+                serde_json::from_value(wire.to_value().unwrap()).unwrap();
+            let restored = restored
+                .into_dispatch_outcome("actual-call", "actual-tool")
+                .expect_err("wire outcome must retain infrastructure error");
+            assert_eq!(restored.primary_error(), &primary);
+            assert_eq!(restored.error_code(), "operation_observation_unavailable");
+            assert_eq!(
+                meerkat_core::ToolDispatchTerminalErrorKind::from(&restored),
+                meerkat_core::ToolDispatchTerminalErrorKind::from(&primary),
+            );
+            assert_eq!(
+                restored.settlement_failures().cloned().collect::<Vec<_>>(),
+                companions,
+                "all settlement companions keep their order across the wire"
+            );
+            // The wire's free-form fields never replace the fixed diagnostic
+            // or turn this infrastructure class into a named policy refusal.
+            let mut untrusted = encoded.clone();
+            untrusted["message"] = json!("private provider detail must not escape");
+            untrusted["name"] = json!("private account");
+            untrusted["data"] = json!({"kind": "denied", "retry": true});
+            let untrusted: UpcallToolOutcome = serde_json::from_value(untrusted).unwrap();
+            let sanitized = untrusted
+                .into_dispatch_outcome("actual-call", "actual-tool")
+                .unwrap_err();
+            assert_eq!(sanitized.primary_error(), &primary);
+            assert_eq!(
+                sanitized.primary_error().to_string(),
+                "operation observation unavailable",
+            );
+            assert_eq!(
+                sanitized.settlement_failures().cloned().collect::<Vec<_>>(),
+                companions,
+            );
+            let mut unknown = encoded;
+            unknown["class"] = json!("unknown_future_observation_class");
+            assert!(serde_json::from_value::<UpcallToolOutcome>(unknown).is_err());
+        }
+    }
+
+    #[test]
+    fn authorization_unavailable_upcall_roundtrip_keeps_type_and_settlement_sequence() {
+        let primary = ToolError::OperationAuthorizationUnavailable;
+        let first = meerkat_core::ToolDispatchSettlementFailure {
+            admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
+            effect_kind: meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Committed,
+            failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Unavailable,
+        };
+        let second = meerkat_core::ToolDispatchSettlementFailure {
+            admission_source: meerkat_core::ToolDispatchAdmissionSource::ContextGate,
+            failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Other,
+            ..first.clone()
+        };
+        for companions in [vec![], vec![first, second]] {
+            let error = primary.clone().with_settlement_failures(companions.clone());
+            let envelope = UpcallToolOutcome::from_tool_error(&error);
+            let encoded = serde_json::to_value(&envelope).unwrap();
+            assert_eq!(encoded["class"], "operation_authorization_unavailable");
+            assert_eq!(encoded["message"], primary.to_string());
+            assert!(encoded.get("name").is_none());
+            assert!(encoded.get("data").is_none());
+            let wire = WireOpaqueJson::from_value(&encoded);
+            let restored: UpcallToolOutcome =
+                serde_json::from_value(wire.to_value().unwrap()).unwrap();
+            let restored = restored
+                .into_dispatch_outcome("actual-call", "actual-tool")
+                .expect_err("wire outcome must retain infrastructure error");
+            assert_eq!(restored.primary_error(), &primary);
+            assert_eq!(restored.error_code(), "operation_authorization_unavailable");
+            assert_eq!(
+                meerkat_core::ToolDispatchTerminalErrorKind::from(&restored),
+                meerkat_core::ToolDispatchTerminalErrorKind::from(&primary),
+            );
+            assert_eq!(
+                restored.settlement_failures().cloned().collect::<Vec<_>>(),
+                companions,
+                "all settlement companions keep their order across the wire"
+            );
+            // The wire's free-form fields never replace the fixed diagnostic
+            // or turn this infrastructure class into a named policy refusal.
+            let mut untrusted = encoded.clone();
+            untrusted["message"] = json!("private provider detail must not escape");
+            untrusted["name"] = json!("private account");
+            untrusted["data"] = json!({"kind": "denied", "retry": true});
+            let untrusted: UpcallToolOutcome = serde_json::from_value(untrusted).unwrap();
+            let sanitized = untrusted
+                .into_dispatch_outcome("actual-call", "actual-tool")
+                .unwrap_err();
+            assert_eq!(sanitized.primary_error(), &primary);
+            assert_eq!(
+                sanitized.primary_error().to_string(),
+                "operation authorization unavailable",
+            );
+            assert_eq!(
+                sanitized.settlement_failures().cloned().collect::<Vec<_>>(),
+                companions,
+            );
+            let mut unknown = encoded;
+            unknown["class"] = json!("unknown_future_observation_class");
+            assert!(serde_json::from_value::<UpcallToolOutcome>(unknown).is_err());
         }
     }
 }

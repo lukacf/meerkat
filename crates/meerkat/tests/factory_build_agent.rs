@@ -176,6 +176,17 @@ impl meerkat_core::AgentLlmRequestAttempt for CountingAgentLlmRequestAttempt {
 
 #[async_trait]
 impl AgentLlmClient for CountingAgentLlmClient {
+    fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
+        self.inner.controller_model_selection()
+    }
+
+    fn pin_controller(self: Arc<Self>) -> Option<meerkat_core::ControllerModelClient> {
+        Some(meerkat_core::ControllerModelClient::new(
+            self.controller_model_selection()?,
+            self,
+        ))
+    }
+
     fn prepare_request_attempt(
         self: Arc<Self>,
         messages: Arc<Vec<meerkat::Message>>,
@@ -733,6 +744,236 @@ async fn agent_llm_client_decorator_wraps_agent_llm_client_override() {
     assert!(result.text.contains("Hello from agent override"));
     assert_eq!(constructions.load(Ordering::SeqCst), 1);
     assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
+}
+
+// These fixtures are selected-client data producers only. They do not claim
+// authentication, native admission, or permission to call a model.
+mod controller_pair {
+    use super::*;
+    use meerkat_core::{AuthCredentialIdentity, ControllerModelSelection};
+
+    fn fixture_selection(model: &str) -> ControllerModelSelection {
+        ControllerModelSelection::new(
+            SessionLlmIdentity {
+                model: model.to_owned(),
+                provider: Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: None,
+            },
+            AuthCredentialIdentity::Binding(meerkat_core::AuthBindingRef {
+                realm: meerkat_core::RealmId::parse("controller-fixture").unwrap(),
+                binding: meerkat_core::BindingId::parse("fixture-only").unwrap(),
+                profile: None,
+                origin: meerkat_core::BindingOrigin::Configured,
+            }),
+            "fixture-only".to_owned(),
+            "anthropic".to_owned(),
+        )
+    }
+
+    struct SelectedFixture {
+        inner: MockLlmClient,
+        selection: ControllerModelSelection,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LlmClient for SelectedFixture {
+        fn controller_model_selection(&self) -> Option<ControllerModelSelection> {
+            Some(self.selection.clone())
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            self.inner.project_replay_messages(messages)
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<LlmEvent, meerkat_client::LlmError>> + Send + 'a>,
+        > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.stream(request)
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::Anthropic
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_pair_pins_the_once_decorated_selected_client() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = temp_factory(&temp);
+        let mut config = Config::default();
+        config.realm.insert(
+            meerkat_core::connection::GLOBAL_REALM_SLUG.to_owned(),
+            meerkat_core::RealmConfigSection::from_inline_api_keys(&[(
+                "openai",
+                "fixture-only-key",
+            )]),
+        );
+        config.model_fallback.enabled = Some(false);
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let stream_calls = Arc::new(AtomicUsize::new(0));
+        let captured: Arc<Mutex<Option<Arc<dyn AgentLlmClient>>>> = Arc::default();
+        let decorator = {
+            let constructions = Arc::clone(&constructions);
+            let stream_calls = Arc::clone(&stream_calls);
+            let captured = Arc::clone(&captured);
+            Arc::new(move |inner| {
+                constructions.fetch_add(1, Ordering::SeqCst);
+                let client: Arc<dyn AgentLlmClient> = Arc::new(CountingAgentLlmClient {
+                    inner,
+                    stream_calls: Arc::clone(&stream_calls),
+                });
+                *captured.lock().unwrap() = Some(Arc::clone(&client));
+                client
+            }) as meerkat::AgentLlmClientDecorator
+        };
+        let (agent, controller) = factory
+            .build_agent_with_controller(
+                AgentBuildConfig {
+                    agent_llm_client_decorator: Some(decorator),
+                    ..AgentBuildConfig::new("gpt-5.4")
+                },
+                &config,
+            )
+            .await
+            .unwrap();
+        assert_eq!(constructions.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(
+            controller.client(),
+            captured.lock().unwrap().as_ref().unwrap(),
+        ));
+        assert_eq!(controller.selection().model(), "gpt-5.4");
+        assert_eq!(controller.selection().provider(), Provider::OpenAI);
+        let built_identity = SessionMetadata::try_from_session(agent.session())
+            .unwrap()
+            .llm_identity();
+        assert_eq!(controller.selection().model(), built_identity.model);
+        assert_eq!(controller.selection().provider(), built_identity.provider);
+        assert_eq!(
+            controller.selection().auth_binding(),
+            built_identity.auth_binding.as_ref()
+        );
+        assert_eq!(stream_calls.load(Ordering::SeqCst), 0);
+        drop(agent);
+        assert_eq!(controller.client().model(), "gpt-5.4");
+    }
+
+    #[tokio::test]
+    async fn facade_pair_runs_through_the_same_adapter_and_event_wiring() {
+        let temp = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(64);
+        let (mut agent, controller) = meerkat::AgentBuilder::new()
+            .with_factory(temp_factory(&temp))
+            .model("claude-sonnet-4-5")
+            .llm_client(Arc::new(SelectedFixture {
+                inner: MockLlmClient,
+                selection: fixture_selection("claude-sonnet-4-5"),
+                calls: Arc::clone(&calls),
+            }))
+            .with_default_event_tx(event_tx)
+            .try_build_with_controller()
+            .await
+            .unwrap();
+        let result = agent.run("agent call".to_owned().into()).await.unwrap();
+        assert!(result.text.contains("Hello from mock"));
+        let result = controller
+            .client()
+            .stream_response(&[], &[], 64, None, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            &result.blocks()[0],
+            AssistantBlock::Text { text, .. } if text == "Hello from mock"
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let mut text_events = 0;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, meerkat::AgentEvent::TextDelta { ref delta, .. } if delta == "Hello from mock")
+            {
+                text_events += 1;
+            }
+        }
+        assert_eq!(text_events, 2, "both outputs retain the same event channel");
+    }
+
+    #[tokio::test]
+    async fn unsupported_custom_client_refuses_only_the_required_pair() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = temp_factory(&temp);
+        let build = || AgentBuildConfig {
+            llm_client_override: Some(Arc::new(MockLlmClient)),
+            ..AgentBuildConfig::new("claude-sonnet-4-5")
+        };
+        assert!(matches!(
+            factory
+                .build_agent_with_controller(build(), &Config::default())
+                .await,
+            Err(BuildAgentError::ControllerUnavailable)
+        ));
+        let mut agent = factory
+            .build_agent(build(), &Config::default())
+            .await
+            .unwrap();
+        assert!(
+            agent
+                .run("legacy".to_owned().into())
+                .await
+                .unwrap()
+                .text
+                .contains("Hello from mock")
+        );
+    }
+
+    #[tokio::test]
+    async fn required_pair_rejects_selected_route_different_from_built_agent() {
+        let temp = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let result = temp_factory(&temp)
+            .build_agent_with_controller(
+                AgentBuildConfig {
+                    llm_client_override: Some(Arc::new(SelectedFixture {
+                        inner: MockLlmClient,
+                        selection: fixture_selection("different-controller-route"),
+                        calls: Arc::clone(&calls),
+                    })),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                &Config::default(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(BuildAgentError::ControllerUnavailable)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn paired_builder_keeps_existing_unsupported_injection_refusal() {
+        let temp = tempfile::tempdir().unwrap();
+        let result = meerkat::AgentBuilder::new()
+            .with_factory(temp_factory(&temp))
+            .provider_tool_defaults(json!({ "forbidden-injection": true }))
+            .try_build_with_controller()
+            .await;
+        assert!(
+            matches!(result, Err(BuildAgentError::Config(message)) if message.contains("provider_tool_defaults"))
+        );
+    }
 }
 
 #[tokio::test]

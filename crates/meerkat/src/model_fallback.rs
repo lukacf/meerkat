@@ -150,6 +150,62 @@ impl ModelFallbackClient {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentLlmClient for ModelFallbackClient {
+    fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
+        self.candidates[self.active_index()]
+            .client
+            .controller_model_selection()
+    }
+
+    fn pin_controller(self: Arc<Self>) -> Option<meerkat_core::ControllerModelClient> {
+        // Read the existing selector exactly once and retain the selected
+        // child. Later fallback changes cannot retarget the admitted pin.
+        Arc::clone(&self.candidates[self.active_index()].client).pin_controller()
+    }
+
+    async fn stream_response_authorized(
+        &self,
+        messages: &[meerkat_core::Message],
+        tools: &[Arc<ToolDef>],
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<&ProviderParamsOverride>,
+        authorization: Option<meerkat_core::LlmRequestAuthorization>,
+    ) -> Result<LlmStreamResult, AgentError> {
+        self.candidates[self.active_index()]
+            .client
+            .stream_response_authorized(
+                messages,
+                tools,
+                max_tokens,
+                temperature,
+                provider_params,
+                authorization,
+            )
+            .await
+    }
+
+    fn prepare_request_attempt_authorized(
+        self: Arc<Self>,
+        messages: Arc<Vec<meerkat_core::Message>>,
+        tools: Arc<[Arc<ToolDef>]>,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<ProviderParamsOverride>,
+        authorization: Option<meerkat_core::LlmRequestAuthorization>,
+    ) -> Result<Arc<dyn meerkat_core::AgentLlmRequestAttempt>, AgentError> {
+        // Authorization refusal never advances the failure fallback policy.
+        // The admitted controller/alternative owner selects any other route.
+        let client = Arc::clone(&self.candidates[self.active_index()].client);
+        client.prepare_request_attempt_authorized(
+            messages,
+            tools,
+            max_tokens,
+            temperature,
+            provider_params,
+            authorization,
+        )
+    }
+
     fn prepare_request_attempt(
         self: Arc<Self>,
         messages: Arc<Vec<meerkat_core::Message>>,
@@ -519,6 +575,34 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for ScriptedClient {
+        fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
+            let binding = meerkat_core::AuthBindingRef {
+                realm: meerkat_core::RealmId::parse("fixture-realm").unwrap(),
+                binding: meerkat_core::BindingId::parse("fixture-binding").unwrap(),
+                profile: None,
+                origin: meerkat_core::BindingOrigin::Configured,
+            };
+            Some(meerkat_core::ControllerModelSelection::new(
+                SessionLlmIdentity {
+                    model: self.model.clone(),
+                    provider: self.provider,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: Some(binding.clone()),
+                },
+                meerkat_core::AuthCredentialIdentity::Binding(binding),
+                "fixture-profile".to_owned(),
+                self.provider.as_str().to_owned(),
+            ))
+        }
+
+        fn pin_controller(self: Arc<Self>) -> Option<meerkat_core::ControllerModelClient> {
+            Some(meerkat_core::ControllerModelClient::new(
+                self.controller_model_selection()?,
+                self,
+            ))
+        }
+
         fn request_pressure(
             &self,
             _messages: &[meerkat_core::Message],
@@ -651,6 +735,104 @@ mod tests {
             output_schema: None,
             attempt: 3,
         }
+    }
+
+    #[tokio::test]
+    async fn controller_pin_keeps_original_runnable_child_after_fallback_commit() {
+        let primary_seen = Arc::default();
+        let target_seen = Arc::default();
+        let primary = candidate(
+            Provider::OpenAI,
+            "primary",
+            Some(1_000_000),
+            Some(8192),
+            Arc::clone(&primary_seen),
+        );
+        let target = candidate(
+            Provider::OpenAI,
+            "target",
+            Some(1_000_000),
+            Some(8192),
+            Arc::clone(&target_seen),
+        );
+        let previous = primary.identity.clone();
+        let next = target.identity.clone();
+        let client = Arc::new(
+            ModelFallbackClient::new(vec![primary, target], Default::default(), Vec::new(), None)
+                .unwrap(),
+        );
+        let pinned = Arc::clone(&client).pin_controller().unwrap();
+        assert_eq!(pinned.selection().model(), "primary");
+        client.commit_model_fallback(&previous, &next).unwrap();
+        assert_eq!(
+            client.controller_model_selection().unwrap().model(),
+            "target"
+        );
+        assert_eq!(pinned.client().model(), "primary");
+        pinned
+            .client()
+            .stream_response(&[], &[], 64, None, None)
+            .await
+            .unwrap();
+        assert_eq!(primary_seen.lock().await.len(), 1);
+        assert!(target_seen.lock().await.is_empty());
+    }
+
+    #[test]
+    fn work_context_requires_pin_to_match_admitted_selection_and_actual_client() {
+        struct Admitted(meerkat_core::ControllerModelSelection);
+        impl meerkat_core::authorization::WorkAuthorization for Admitted {
+            fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
+                Some(self.0.clone())
+            }
+            fn prepare(
+                &self,
+                _: &meerkat_core::authorization::PreparedAuthorizationBinding,
+            ) -> Result<
+                Arc<dyn meerkat_core::authorization::PreparedOperationAuthorization>,
+                meerkat_core::OperationAuthorizationError,
+            > {
+                Err(meerkat_core::authorization::OperationRefused::new(
+                    meerkat_core::authorization::OperationRefusalKind::Denied,
+                )
+                .into())
+            }
+        }
+        let primary = candidate(
+            Provider::OpenAI,
+            "primary",
+            Some(1_000_000),
+            Some(8192),
+            Arc::default(),
+        );
+        let target = candidate(
+            Provider::OpenAI,
+            "target",
+            Some(1_000_000),
+            Some(8192),
+            Arc::default(),
+        );
+        let pin = Arc::clone(&primary.client).pin_controller().unwrap();
+        let work = meerkat_core::authorization::WorkAuthorizationContext::new(
+            Arc::new(Admitted(pin.selection().clone())),
+            meerkat_core::exact_operation::OperationExecutionScope::Domain,
+        );
+        assert!(work.controller_client().is_none());
+        let attached = work.clone().with_controller_client(pin.clone()).unwrap();
+        assert!(Arc::ptr_eq(
+            attached.controller_client().unwrap().client(),
+            pin.client()
+        ));
+        assert!(!attached.same_context(&work));
+        let wrong = Arc::clone(&target.client).pin_controller().unwrap();
+        assert!(work.clone().with_controller_client(wrong.clone()).is_err());
+        // Even a manually paired DTO and a different actual client cannot
+        // satisfy the supported attachment path.
+        let forged = meerkat_core::ControllerModelClient::new(
+            pin.selection().clone(),
+            Arc::clone(wrong.client()),
+        );
+        assert!(work.with_controller_client(forged).is_err());
     }
 
     #[test]
@@ -1141,6 +1323,73 @@ mod tests {
                 .unwrap()
                 .effective_input_tokens()
                 >= 650_000
+        );
+    }
+
+    #[test]
+    fn observation_infrastructure_never_selects_fallback_but_capacity_still_can() {
+        let client = ModelFallbackClient::new(
+            vec![
+                candidate(
+                    Provider::OpenAI,
+                    "primary",
+                    Some(200_000),
+                    Some(4096),
+                    Arc::default(),
+                ),
+                candidate(
+                    Provider::OpenAI,
+                    "backup",
+                    Some(200_000),
+                    Some(4096),
+                    Arc::default(),
+                ),
+            ],
+            Default::default(),
+            Vec::new(),
+            None,
+        )
+        .expect("real two-candidate fallback owner");
+        let original = client.active_model_fallback_identity().unwrap();
+        for retryability in [
+            meerkat_core::error::LlmProviderErrorRetryability::NonRetryable,
+            meerkat_core::error::LlmProviderErrorRetryability::Retryable,
+        ] {
+            let error = AgentError::llm(
+                "openai",
+                LlmFailureReason::ProviderError(LlmProviderError::new(
+                    LlmProviderErrorKind::OperationObservationUnavailable,
+                    retryability,
+                    serde_json::json!({"message": "capacity"}),
+                )),
+                "safe observation failure",
+            );
+            let rejected = client
+                .prepare_model_fallback(&error, &request(&[]))
+                .expect_err("infrastructure failure must not select any candidate");
+            assert!(
+                rejected.is_empty(),
+                "no candidate probing is required for this class"
+            );
+            assert_eq!(
+                client.active_model_fallback_identity().as_ref(),
+                Some(&original)
+            );
+        }
+
+        // Same configuration, threshold and candidates can admit and commit an
+        // ordinary capacity fallback. The negative is not a broken fixture.
+        let switch = client
+            .prepare_model_fallback(&retryable_error(Provider::OpenAI), &request(&[]))
+            .expect("ordinary capacity fallback remains supported");
+        assert_eq!(switch.previous_identity.model, "primary");
+        assert_eq!(switch.new_identity.model, "backup");
+        client
+            .commit_model_fallback(&switch.previous_identity, &switch.new_identity)
+            .expect("positive-control owner transition");
+        assert_eq!(
+            client.active_model_fallback_identity().unwrap().model,
+            "backup"
         );
     }
 }

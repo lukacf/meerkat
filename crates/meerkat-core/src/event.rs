@@ -3,7 +3,8 @@
 //! These events form the streaming API for consumers.
 
 use crate::error::{
-    AgentError, LlmFailureReason, LlmProviderErrorKind, LlmProviderErrorRetryability,
+    AgentError, LlmFailureReason, LlmProviderError, LlmProviderErrorKind,
+    LlmProviderErrorRetryability,
 };
 use crate::hooks::{HookFailureReason, HookId, HookPoint, HookReasonCode};
 use crate::interaction::InteractionId;
@@ -109,6 +110,7 @@ pub struct EventEnvelope<T> {
 #[serde(rename_all = "snake_case")]
 pub enum AgentErrorClass {
     Llm,
+    OperationRefused,
     Store,
     Tool,
     PolicyIndeterminate,
@@ -357,7 +359,11 @@ impl AgentErrorReason {
             },
             LlmFailureReason::ProviderError(provider_error) => Self::LlmProviderError {
                 provider_error_kind: provider_error.kind,
-                provider_error_retryability: provider_error.retryability,
+                provider_error_retryability: if provider_error.is_retryable() {
+                    LlmProviderErrorRetryability::Retryable
+                } else {
+                    LlmProviderErrorRetryability::NonRetryable
+                },
                 provider_error: provider_error.details.clone(),
             },
             LlmFailureReason::NetworkTimeout { duration_ms } => Self::LlmNetworkTimeout {
@@ -453,6 +459,7 @@ impl From<&AgentError> for AgentErrorClass {
     fn from(error: &AgentError) -> Self {
         match error {
             AgentError::Llm { .. } => Self::Llm,
+            AgentError::OperationRefused { .. } => Self::OperationRefused,
             AgentError::StoreError(_) => Self::Store,
             AgentError::Tool { .. } => Self::Tool,
             AgentError::PolicyIndeterminate { .. } => Self::PolicyIndeterminate,
@@ -629,17 +636,32 @@ impl TurnErrorMetadata {
                     TurnTerminalOutcome::Failed,
                     detail,
                 );
-                match reason {
+                let mut reason = reason.clone();
+                match &mut reason {
                     AgentErrorReason::LlmRateLimited { .. }
                     | AgentErrorReason::LlmNetworkTimeout { .. }
                     | AgentErrorReason::LlmCallTimeout { .. } => {
                         metadata.retryable = Some(true);
                     }
                     AgentErrorReason::LlmProviderError {
+                        provider_error_kind,
                         provider_error_retryability,
                         ..
                     } => {
-                        metadata.retryable = Some(provider_error_retryability.is_retryable());
+                        // Apply the same classifier as live retry decisions, including
+                        // when a decoded report contains contradictory retry metadata.
+                        let retryable = LlmProviderError::new(
+                            *provider_error_kind,
+                            *provider_error_retryability,
+                            Value::Null,
+                        )
+                        .is_retryable();
+                        *provider_error_retryability = if retryable {
+                            LlmProviderErrorRetryability::Retryable
+                        } else {
+                            LlmProviderErrorRetryability::NonRetryable
+                        };
+                        metadata.retryable = Some(retryable);
                     }
                     AgentErrorReason::LlmContextExceeded { .. }
                     | AgentErrorReason::LlmAuthError => {
@@ -651,7 +673,7 @@ impl TurnErrorMetadata {
                     }
                     _ => {}
                 }
-                metadata.reason = Some(reason.clone());
+                metadata.reason = Some(reason);
                 Some(metadata)
             }
             _ => None,
@@ -1042,6 +1064,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::CompactionCompleted { .. } => "compaction_completed",
         AgentEvent::CompactionFailed { .. } => "compaction_failed",
         AgentEvent::BudgetWarning { .. } => "budget_warning",
+        AgentEvent::OperationObservationFailed { .. } => "operation_observation_failed",
         AgentEvent::Retrying { .. } => "retrying",
         AgentEvent::ModelFallbackSkipped { .. } => "model_fallback_skipped",
         AgentEvent::ModelFallbackStaged { .. } => "model_fallback_staged",
@@ -2446,6 +2469,13 @@ pub enum AgentEvent {
     /// Context compaction failed (non-fatal — agent continues with uncompacted history).
     CompactionFailed { reason: CompactionFailureReason },
 
+    /// A real operation returned, but its protected audit outcome could not
+    /// be retained. This safe diagnostic is nonterminal and grants no retry.
+    OperationObservationFailed {
+        operation_id: crate::OperationId,
+        phase: crate::authorization::OperationObservationPhase,
+    },
+
     // === Budget ===
     /// Budget warning (approaching limits)
     BudgetWarning {
@@ -2986,6 +3016,12 @@ pub fn format_verbose_event_with_config(
             retry.plan.max_retries,
             retry.failure.message,
             retry.plan.selected_delay_ms
+        )),
+        AgentEvent::OperationObservationFailed {
+            operation_id,
+            phase,
+        } => Some(format!(
+            "  Operation {operation_id} audit {phase:?} was not retained; physical result unchanged"
         )),
         AgentEvent::BudgetWarning {
             budget_type,
@@ -3999,6 +4035,10 @@ mod tests {
                 content: ContentBlock::text_vec("ok".to_string()),
                 is_error: false,
             },
+            AgentEvent::OperationObservationFailed {
+                operation_id: crate::OperationId::new(),
+                phase: crate::authorization::OperationObservationPhase::Outcome,
+            },
             AgentEvent::BudgetWarning {
                 budget_type: BudgetType::Tokens,
                 used: 8000,
@@ -4542,6 +4582,106 @@ mod tests {
     }
 
     #[test]
+    fn provider_error_projection_uses_canonical_retryability() {
+        for (kind, raw_retryability, expected_retryable) in [
+            (
+                LlmProviderErrorKind::OperationObservationUnavailable,
+                LlmProviderErrorRetryability::Retryable,
+                false,
+            ),
+            (
+                LlmProviderErrorKind::OperationObservationUnavailable,
+                LlmProviderErrorRetryability::NonRetryable,
+                false,
+            ),
+            (
+                LlmProviderErrorKind::ServerOverloaded,
+                LlmProviderErrorRetryability::Retryable,
+                true,
+            ),
+            (
+                LlmProviderErrorKind::ServerOverloaded,
+                LlmProviderErrorRetryability::NonRetryable,
+                false,
+            ),
+        ] {
+            let details = serde_json::json!({"provider_code": "retained"});
+            let error = AgentError::llm(
+                "anthropic",
+                LlmFailureReason::ProviderError(crate::error::LlmProviderError::new(
+                    kind,
+                    raw_retryability,
+                    details.clone(),
+                )),
+                "provider diagnostic",
+            );
+            assert_eq!(error.is_recoverable(), expected_retryable);
+            let expected_reason = AgentErrorReason::LlmProviderError {
+                provider_error_kind: kind,
+                provider_error_retryability: if expected_retryable {
+                    LlmProviderErrorRetryability::Retryable
+                } else {
+                    LlmProviderErrorRetryability::NonRetryable
+                },
+                provider_error: details,
+            };
+            let report = AgentErrorReport::from_agent_error(&error);
+            assert_eq!(report.class, AgentErrorClass::Llm);
+            assert_eq!(report.reason, Some(expected_reason.clone()));
+            let metadata = TurnErrorMetadata::from_agent_error(&error).unwrap();
+            assert_eq!(metadata.retryable, Some(expected_retryable));
+            assert_eq!(metadata.reason, Some(expected_reason.clone()));
+            let projected = TurnErrorMetadata::from_agent_error_report(&report, "detail").unwrap();
+            assert_eq!(projected.retryable, Some(expected_retryable));
+            assert_eq!(projected.reason, Some(expected_reason));
+        }
+    }
+
+    #[test]
+    fn decoded_provider_report_normalizes_retryability_without_losing_details() {
+        for (kind, raw_retryability, expected_retryable) in [
+            ("operation_observation_unavailable", "retryable", false),
+            ("operation_observation_unavailable", "non_retryable", false),
+            ("server_overloaded", "retryable", true),
+            ("server_overloaded", "non_retryable", false),
+        ] {
+            let wire = serde_json::json!({
+                "class": "llm",
+                "message": "provider diagnostic",
+                "reason": {
+                    "reason_type": "llm_provider_error",
+                    "provider_error_kind": kind,
+                    "provider_error_retryability": raw_retryability,
+                    "provider_error": {"provider_code": "retained"}
+                }
+            });
+            let report: AgentErrorReport = serde_json::from_value(wire.clone()).unwrap();
+            let metadata = TurnErrorMetadata::from_agent_error_report(&report, "detail").unwrap();
+            assert_eq!(metadata.retryable, Some(expected_retryable));
+            let mut expected_reason = wire["reason"].clone();
+            expected_reason["provider_error_retryability"] =
+                serde_json::json!(if expected_retryable {
+                    "retryable"
+                } else {
+                    "non_retryable"
+                });
+            let projected = serde_json::to_value(&metadata).unwrap();
+            assert_eq!(projected["reason"], expected_reason);
+            assert_eq!(
+                projected["retryable"],
+                serde_json::json!(expected_retryable)
+            );
+            assert_eq!(metadata.detail.as_deref(), Some("detail"));
+            assert_eq!(metadata.kind, TurnTerminalCauseKind::LlmFailure);
+            assert_eq!(metadata.outcome, Some(TurnTerminalOutcome::Failed));
+            assert!(metadata.terminal);
+            assert_eq!(serde_json::to_value(&report).unwrap(), wire);
+            let restored: TurnErrorMetadata = serde_json::from_value(projected).unwrap();
+            assert_eq!(restored, metadata);
+        }
+    }
+
+    #[test]
     fn agent_error_report_fails_closed_for_unknown_terminal_cause() {
         let error = crate::error::AgentError::TerminalFailure {
             outcome: TurnTerminalOutcome::Failed,
@@ -4567,6 +4707,23 @@ mod tests {
         assert_eq!(report.class, AgentErrorClass::Internal);
         assert_eq!(report.reason, None);
         assert_eq!(TurnErrorMetadata::from_agent_error(&error), None);
+    }
+
+    #[test]
+    fn operation_observation_diagnostic_contains_only_safe_correlation() {
+        let operation_id = crate::OperationId::new();
+        let event = AgentEvent::OperationObservationFailed {
+            operation_id: operation_id.clone(),
+            phase: crate::authorization::OperationObservationPhase::Outcome,
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "type": "operation_observation_failed",
+                "operation_id": operation_id,
+                "phase": "outcome",
+            })
+        );
     }
 
     #[test]
@@ -4703,6 +4860,10 @@ mod tests {
             },
             AgentEvent::CompactionFailed {
                 reason: CompactionFailureReason::EmptySummary,
+            },
+            AgentEvent::OperationObservationFailed {
+                operation_id: crate::OperationId::new(),
+                phase: crate::authorization::OperationObservationPhase::Outcome,
             },
             AgentEvent::BudgetWarning {
                 budget_type: BudgetType::Time,

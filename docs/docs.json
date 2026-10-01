@@ -130,6 +130,7 @@
                 "pages": [
                   "rust/overview",
                   "rust/tools-and-stores",
+                  "rust/native-authorization",
                   "rust/advanced"
                 ]
               },

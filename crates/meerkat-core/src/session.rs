@@ -3577,6 +3577,42 @@ pub enum DeferredToolResultsIngressError {
     WrongToolUseId(String),
 }
 
+/// Fixed engine failure retained while already-dispatched siblings settle.
+/// This is historical execution data, never permission or retry authority.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DeferredToolBatchFailureKind {
+    OperationObservationUnavailable,
+}
+
+/// Binds the deferred failure to the exact assistant batch that produced it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeferredToolBatchFailure {
+    pub kind: DeferredToolBatchFailureKind,
+    pub source_run_id: RunId,
+    pub assistant_message_id: Option<crate::types::AssistantMessageId>,
+    pub tool_use_order: Vec<String>,
+}
+
+impl DeferredToolBatchFailure {
+    fn matches_assistant(&self, assistant: &crate::types::BlockAssistantMessage) -> bool {
+        assistant.identity.run_id.as_ref() == Some(&self.source_run_id)
+            && assistant.assistant_message_id == self.assistant_message_id
+            && assistant
+                .tool_calls()
+                .map(|call| call.id)
+                .eq(self.tool_use_order.iter().map(String::as_str))
+    }
+}
+
+/// Process-local transfer from the existing applied callback receipt to its
+/// exact pending continuation. Fresh content runs never receive this value.
+pub(crate) struct DeferredCallbackContinuation {
+    pub failure: DeferredToolBatchFailure,
+    pub async_ops: Vec<crate::ops::AsyncOpRef>,
+}
+
 /// Durable staging record for one assistant tool-use batch that contains one
 /// or more external callbacks and optional locally completed siblings.
 ///
@@ -3589,9 +3625,14 @@ pub(crate) struct PendingCallbackToolBatch {
     pub run_id: RunId,
     pub tool_use_order: Vec<String>,
     pub pending_tool_use_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub callback_settlement_failures:
+        BTreeMap<String, Vec<crate::ops::ToolDispatchSettlementFailure>>,
     pub completed_results: Vec<ToolResult>,
     pub session_effects: Vec<crate::ops::SessionEffect>,
     pub async_ops: Vec<crate::ops::AsyncOpRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_failure: Option<DeferredToolBatchFailure>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -3603,12 +3644,17 @@ enum CallbackToolBatchState {
     Applied {
         tool_use_order: Vec<String>,
         results: Vec<ToolResult>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        callback_settlement_failures:
+            BTreeMap<String, Vec<crate::ops::ToolDispatchSettlementFailure>>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         async_ops: Vec<crate::ops::AsyncOpRef>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         post_tool_messages: Vec<Message>,
         #[serde(default)]
         post_tool_messages_applied: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deferred_failure: Option<DeferredToolBatchFailure>,
     },
 }
 
@@ -3672,6 +3718,18 @@ fn unique_tool_results(
     Ok(by_id)
 }
 
+fn attach_callback_settlement_failures(
+    mut results: Vec<ToolResult>,
+    failures: &BTreeMap<String, Vec<crate::ops::ToolDispatchSettlementFailure>>,
+) -> Vec<ToolResult> {
+    for result in &mut results {
+        if let Some(retained) = failures.get(&result.tool_use_id) {
+            result.settlement_failures.extend(retained.iter().cloned());
+        }
+    }
+    results
+}
+
 fn validate_pending_callback_batch(
     messages: &[Message],
     batch: &PendingCallbackToolBatch,
@@ -3691,6 +3749,15 @@ fn validate_pending_callback_batch(
             batch.tool_use_order
         )));
     }
+    if let Some(failure) = batch.deferred_failure.as_ref()
+        && (failure.source_run_id != batch.run_id
+            || failure.tool_use_order != batch.tool_use_order
+            || !matches!(assistant, Message::BlockAssistant(message) if failure.matches_assistant(message)))
+    {
+        return Err(PendingCallbackBatchError::Malformed(
+            "deferred failure does not belong to the staged assistant batch".to_string(),
+        ));
+    }
     let assistant_set = assistant_order.iter().cloned().collect::<BTreeSet<_>>();
     if assistant_set.len() != assistant_order.len() {
         return Err(PendingCallbackBatchError::Malformed(
@@ -3705,6 +3772,15 @@ fn validate_pending_callback_batch(
     if pending_set.len() != batch.pending_tool_use_ids.len() || pending_set.is_empty() {
         return Err(PendingCallbackBatchError::Malformed(
             "staged callback batch must contain at least one unique pending tool id".to_string(),
+        ));
+    }
+    if batch
+        .callback_settlement_failures
+        .keys()
+        .any(|id| !pending_set.contains(id))
+    {
+        return Err(PendingCallbackBatchError::Malformed(
+            "settlement diagnostic refers to a tool outside the pending callback set".to_string(),
         ));
     }
     let completed = unique_tool_results(batch.completed_results.clone())?;
@@ -6293,9 +6369,12 @@ impl Session {
             CallbackToolBatchState::Applied {
                 tool_use_order,
                 results,
+                callback_settlement_failures,
                 async_ops,
                 ..
             } => {
+                let incoming =
+                    attach_callback_settlement_failures(incoming, &callback_settlement_failures);
                 let incoming_by_id = unique_tool_results(incoming)?;
                 let expected = tool_use_order.iter().cloned().collect::<BTreeSet<_>>();
                 let actual = incoming_by_id.keys().cloned().collect::<BTreeSet<_>>();
@@ -6319,6 +6398,8 @@ impl Session {
             }
         };
         validate_pending_callback_batch(self.messages(), &batch)?;
+        let incoming =
+            attach_callback_settlement_failures(incoming, &batch.callback_settlement_failures);
         let incoming_by_id = unique_tool_results(incoming)?;
         let expected = batch
             .pending_tool_use_ids
@@ -6394,11 +6475,91 @@ impl Session {
         let value = serde_json::to_value(CallbackToolBatchState::Applied {
             tool_use_order: batch.pending_tool_use_ids.clone(),
             results: applied_callback_results,
+            callback_settlement_failures: batch.callback_settlement_failures.clone(),
             async_ops: batch.async_ops.clone(),
             post_tool_messages,
             post_tool_messages_applied: false,
+            deferred_failure: batch.deferred_failure.clone(),
         })
         .map_err(|error| PendingCallbackBatchError::Malformed(error.to_string()))?;
+        self.set_metadata_unchecked(SESSION_PENDING_CALLBACK_BATCH_KEY, value);
+        Ok(())
+    }
+
+    /// Restore only the failure belonging to this exact pending transcript
+    /// tail. An older applied receipt cannot attach to new independent work.
+    pub(crate) fn deferred_callback_continuation(
+        &self,
+    ) -> Result<Option<DeferredCallbackContinuation>, PendingCallbackBatchError> {
+        let Some(CallbackToolBatchState::Applied {
+            deferred_failure: Some(failure),
+            async_ops,
+            post_tool_messages,
+            post_tool_messages_applied,
+            ..
+        }) = self.callback_tool_batch_state()?
+        else {
+            return Ok(None);
+        };
+        let messages = self.messages();
+        let pending_tail = if post_tool_messages_applied {
+            // The existing Applied receipt owns this exact suffix. Never scan
+            // history or associate a marker with unrelated later messages.
+            let Some(pending_len) = messages.len().checked_sub(post_tool_messages.len()) else {
+                return Ok(None);
+            };
+            let (pending, suffix) = messages.split_at(pending_len);
+            if suffix != post_tool_messages.as_slice() {
+                return Ok(None);
+            }
+            pending
+        } else {
+            messages
+        };
+        let [
+            ..,
+            Message::BlockAssistant(assistant),
+            Message::ToolResults { results, .. },
+        ] = pending_tail
+        else {
+            return Ok(None);
+        };
+        if !failure.matches_assistant(assistant) {
+            return Ok(None);
+        }
+        if !results
+            .iter()
+            .map(|result| result.tool_use_id.as_str())
+            .eq(failure.tool_use_order.iter().map(String::as_str))
+        {
+            return Err(PendingCallbackBatchError::Malformed(
+                "applied failure receipt does not match the pending result set".to_string(),
+            ));
+        }
+        Ok(Some(DeferredCallbackContinuation { failure, async_ops }))
+    }
+
+    /// Clear only the exact applied marker after its engine terminal has been
+    /// committed. The historical tool result remains in the transcript.
+    pub(crate) fn complete_deferred_callback_failure(
+        &mut self,
+        expected: &DeferredToolBatchFailure,
+    ) -> Result<(), PendingCallbackBatchError> {
+        let Some(mut state) = self.callback_tool_batch_state()? else {
+            return Ok(());
+        };
+        let CallbackToolBatchState::Applied {
+            deferred_failure, ..
+        } = &mut state
+        else {
+            return Ok(());
+        };
+        if deferred_failure.as_ref() != Some(expected) {
+            return Ok(());
+        }
+        *deferred_failure = None;
+        let value = serde_json::to_value(state)
+            .map_err(|error| PendingCallbackBatchError::Malformed(error.to_string()))?;
         self.set_metadata_unchecked(SESSION_PENDING_CALLBACK_BATCH_KEY, value);
         Ok(())
     }
@@ -6426,6 +6587,8 @@ impl Session {
             async_ops,
             post_tool_messages,
             post_tool_messages_applied,
+            callback_settlement_failures,
+            deferred_failure,
         }) = self.callback_tool_batch_state()?
         else {
             return Ok(Vec::new());
@@ -6453,6 +6616,8 @@ impl Session {
             async_ops,
             post_tool_messages: post_tool_messages.clone(),
             post_tool_messages_applied: true,
+            callback_settlement_failures,
+            deferred_failure,
         };
         let value = serde_json::to_value(applied_state)
             .map_err(|error| PendingCallbackBatchError::Malformed(error.to_string()))?;
@@ -16946,6 +17111,236 @@ mod tests {
                 detail: "boom".to_string(),
             })
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod deferred_tool_failure_tests {
+    use super::*;
+    use crate::types::{AssistantBlock, AssistantMessageId, BlockAssistantMessage, StopReason};
+
+    fn applied_failure() -> (Session, DeferredToolBatchFailure) {
+        let run_id = RunId::new();
+        let mut assistant = BlockAssistantMessage::new(
+            ["failed", "callback"]
+                .into_iter()
+                .map(|id| AssistantBlock::ToolUse {
+                    id: id.into(),
+                    name: id.into(),
+                    args: serde_json::value::RawValue::from_string("{}".into()).unwrap(),
+                    meta: None,
+                })
+                .collect(),
+            StopReason::ToolUse,
+        )
+        .with_assistant_message_id(AssistantMessageId::mint());
+        assistant.identity = assistant.identity.with_run_id(run_id.clone());
+        let failure = DeferredToolBatchFailure {
+            kind: DeferredToolBatchFailureKind::OperationObservationUnavailable,
+            source_run_id: run_id.clone(),
+            assistant_message_id: assistant.assistant_message_id,
+            tool_use_order: vec!["failed".into(), "callback".into()],
+        };
+        let mut session = Session::new();
+        session.push(Message::BlockAssistant(assistant));
+        session
+            .stage_pending_callback_tool_batch(PendingCallbackToolBatch {
+                run_id,
+                tool_use_order: failure.tool_use_order.clone(),
+                pending_tool_use_ids: vec!["callback".into()],
+                callback_settlement_failures: BTreeMap::new(),
+                completed_results: vec![ToolResult::new(
+                    "failed".into(),
+                    "fixed infrastructure result".into(),
+                    true,
+                )],
+                session_effects: Vec::new(),
+                async_ops: vec![crate::ops::AsyncOpRef::barrier(
+                    crate::ops::OperationId::new(),
+                )],
+                deferred_failure: Some(failure.clone()),
+            })
+            .unwrap();
+        let mut session: Session =
+            serde_json::from_value(serde_json::to_value(session).unwrap()).unwrap();
+        assert_eq!(
+            session
+                .pending_callback_tool_batch()
+                .unwrap()
+                .unwrap()
+                .deferred_failure,
+            Some(failure.clone())
+        );
+        let ResolvedPendingCallbackToolResults::Pending {
+            batch,
+            ordered_results,
+        } = session
+            .resolve_pending_callback_tool_results(vec![ToolResult::new(
+                "callback".into(),
+                "answered".into(),
+                false,
+            )])
+            .unwrap()
+        else {
+            panic!("expected existing callback owner");
+        };
+        session
+            .commit_pending_callback_tool_results(&batch, ordered_results, Vec::new())
+            .unwrap();
+        let session = serde_json::from_value(serde_json::to_value(session).unwrap()).unwrap();
+        (session, failure)
+    }
+
+    #[test]
+    fn observation_infrastructure_callback_marker_roundtrips_without_process_state() {
+        let (mut session, failure) = applied_failure();
+        let continuation = session.deferred_callback_continuation().unwrap().unwrap();
+        assert_eq!(continuation.failure, failure);
+        assert_eq!(continuation.async_ops.len(), 1);
+        session.apply_pending_callback_resume_effects().unwrap();
+        let restored: Session =
+            serde_json::from_value(serde_json::to_value(session).unwrap()).unwrap();
+        assert_eq!(
+            restored
+                .deferred_callback_continuation()
+                .unwrap()
+                .unwrap()
+                .failure,
+            failure,
+            "post-tool bookkeeping does not itself settle an engine failure"
+        );
+    }
+
+    #[test]
+    fn observation_infrastructure_applied_suffix_retains_exact_marker_after_interruption() {
+        let (mut session, failure) = applied_failure();
+        let Some(mut receipt) = session.callback_tool_batch_state().unwrap() else {
+            panic!("fixture Applied receipt");
+        };
+        let CallbackToolBatchState::Applied {
+            post_tool_messages, ..
+        } = &mut receipt
+        else {
+            panic!("fixture Applied receipt");
+        };
+        post_tool_messages.push(Message::BlockAssistant(
+            BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "completed sibling effect".into(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            )
+            .with_assistant_message_id(AssistantMessageId::mint()),
+        ));
+        session.set_metadata_unchecked(
+            SESSION_PENDING_CALLBACK_BATCH_KEY,
+            serde_json::to_value(receipt).unwrap(),
+        );
+        assert_eq!(
+            session
+                .deferred_callback_continuation()
+                .unwrap()
+                .unwrap()
+                .failure,
+            failure
+        );
+        session.apply_pending_callback_resume_effects().unwrap();
+        assert_eq!(session.messages().len(), 3);
+        // Simulate cancellation after effect publication and reconstruction of
+        // the existing owner. The recorded suffix, not a process field, binds it.
+        let mut restored: Session =
+            serde_json::from_value(serde_json::to_value(session).unwrap()).unwrap();
+        assert_eq!(
+            restored
+                .deferred_callback_continuation()
+                .unwrap()
+                .unwrap()
+                .failure,
+            failure
+        );
+        assert!(
+            restored
+                .apply_pending_callback_resume_effects()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(restored.messages().len(), 3, "no duplicate effect on retry");
+        restored.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "unrelated later work".into(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        )));
+        assert!(
+            restored.deferred_callback_continuation().unwrap().is_none(),
+            "no scan through unrelated history"
+        );
+    }
+
+    #[test]
+    fn observation_infrastructure_callback_clear_requires_exact_receipt() {
+        let (mut session, failure) = applied_failure();
+        let mut other = failure.clone();
+        other.source_run_id = RunId::new();
+        session.complete_deferred_callback_failure(&other).unwrap();
+        assert_eq!(
+            session
+                .deferred_callback_continuation()
+                .unwrap()
+                .unwrap()
+                .failure,
+            failure
+        );
+        other = failure.clone();
+        other.assistant_message_id = Some(AssistantMessageId::mint());
+        session.complete_deferred_callback_failure(&other).unwrap();
+        assert!(session.deferred_callback_continuation().unwrap().is_some());
+        other = failure.clone();
+        other.tool_use_order.reverse();
+        session.complete_deferred_callback_failure(&other).unwrap();
+        assert!(session.deferred_callback_continuation().unwrap().is_some());
+        session
+            .complete_deferred_callback_failure(&failure)
+            .unwrap();
+        assert!(session.deferred_callback_continuation().unwrap().is_none());
+        assert_eq!(
+            session.messages().len(),
+            2,
+            "historical results are retained"
+        );
+    }
+
+    #[test]
+    fn observation_infrastructure_old_callback_receipt_cannot_bind_independent_work() {
+        let (mut session, failure) = applied_failure();
+        // Reuse provider call IDs deliberately: only the exact source run and
+        // assistant occurrence may associate the pending failure.
+        let mut new_assistant = match &session.messages()[0] {
+            Message::BlockAssistant(message) => message.clone(),
+            _ => panic!("fixture assistant"),
+        };
+        new_assistant.identity = new_assistant.identity.with_run_id(RunId::new());
+        new_assistant.assistant_message_id = Some(AssistantMessageId::mint());
+        session.push(Message::BlockAssistant(new_assistant));
+        session.push(Message::tool_results(vec![
+            ToolResult::new("failed".into(), "new result".into(), false),
+            ToolResult::new("callback".into(), "new result".into(), false),
+        ]));
+        assert!(session.deferred_callback_continuation().unwrap().is_none());
+        let Some(CallbackToolBatchState::Applied {
+            deferred_failure, ..
+        }) = session.callback_tool_batch_state().unwrap()
+        else {
+            panic!("retained historical receipt");
+        };
+        assert_eq!(
+            deferred_failure,
+            Some(failure),
+            "unrelated work cannot clear old evidence"
         );
     }
 }

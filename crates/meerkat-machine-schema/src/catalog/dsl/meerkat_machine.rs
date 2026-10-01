@@ -3762,6 +3762,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             turn_tool_overlay_deny_names: Set<ToolName>,
 
             // --- Input lifecycle substate ---
+            // Authenticated shell supplies exact opaque association bytes. These
+            // are immutable attribution/equality facts, never live permission.
+            #[redacted]
+            input_authority_bindings: Map<String, String>,
+            #[redacted]
+            input_authority_batch_keys: Map<String, String>,
+            authority_staged_run: Option<RunId>,
+            #[redacted]
+            authority_staged_batch: Option<String>,
             input_phases: Map<String, InputPhase>,
             input_terminal_kind: Map<String, InputTerminalKind>,
             input_superseded_by: Map<String, String>,
@@ -4458,6 +4467,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             turn_tool_overlay_allow_names = EmptySet,
             turn_tool_overlay_deny_names = EmptySet,
             // Input lifecycle substate
+            input_authority_bindings = EmptyMap,
+            input_authority_batch_keys = EmptyMap,
+            authority_staged_run = None,
+            authority_staged_batch = None,
             input_phases = EmptyMap,
             input_terminal_kind = EmptyMap,
             input_superseded_by = EmptyMap,
@@ -5261,8 +5274,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 lane: Enum<InputLane>,
                 observation: Enum<LiveBoundaryJoinObservation>,
             },
+            BindInputAuthority {
+                input_id: String,
+                #[redacted]
+                authority_binding: String,
+                #[redacted]
+                authority_batch_key: String,
+            },
             ResolveAdmissionPlan {
                 input_id: String,
+                #[redacted]
+                authority_binding: Option<String>,
+                #[redacted]
+                authority_batch_key: Option<String>,
                 input_kind: Enum<AdmissionInputKind>,
                 requested_lane: Option<Enum<InputLane>>,
                 continuation_kind: Enum<AdmissionContinuationKind>,
@@ -9498,6 +9522,16 @@ macro_rules! meerkat_catalog_machine_dsl {
         invariant current_run_has_pre_run_phase {
             (self.current_run_id == None && self.pre_run_phase == None)
             || (self.current_run_id != None && self.pre_run_phase != None)
+        }
+
+        // Admission may bind an input before its lifecycle phase is created.
+        // Both equality projections belong to that generated admission or the
+        // tracked input, and terminal archival removes them together.
+        invariant input_authority_bindings_have_native_owner {
+            self.input_authority_bindings.keys() == self.input_authority_batch_keys.keys()
+            && for_all(input_id in self.input_authority_bindings.keys(),
+                self.input_phases.contains_key(input_id)
+                || self.admission_authorized_plans.contains_key(input_id))
         }
 
         invariant staged_inputs_are_not_queued {
@@ -16646,9 +16680,46 @@ macro_rules! meerkat_catalog_machine_dsl {
         // coalescing candidate exists). This transition emits the full typed
         // admission result and records the lane/plan witness that later
         // lifecycle transitions require.
+        // Rehydrate exact accepted attribution from the retained input row.
+        // This adds no permission and cannot replace a different binding.
+        transition BindInputAuthority {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input BindInputAuthority { input_id, authority_binding, authority_batch_key }
+            guard "tracked_input" { self.input_phases.contains_key(input_id) }
+            guard "nonempty_authority_binding" { authority_binding != "" && authority_batch_key != "" }
+            guard "immutable_binding" {
+                !self.input_authority_bindings.contains_key(input_id)
+                || self.input_authority_bindings.get_cloned(input_id) == Some(authority_binding)
+            }
+            guard "immutable_batch_key" {
+                !self.input_authority_batch_keys.contains_key(input_id)
+                || self.input_authority_batch_keys.get_cloned(input_id) == Some(authority_batch_key)
+            }
+            update {
+                self.input_authority_bindings.insert(input_id, authority_binding);
+                self.input_authority_batch_keys.insert(input_id, authority_batch_key);
+            }
+            to Idle
+        }
+
         transition ResolveAdmissionPlanRequestedTerminalQueue {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "exact_input_authority_binding" {
+                (authority_binding == None && authority_batch_key == None
+                    && !self.input_authority_bindings.contains_key(input_id))
+                || (authority_binding != None && authority_batch_key != None
+                    && authority_binding.get("value") != ""
+                    && authority_batch_key.get("value") != ""
+                    && (!self.input_authority_bindings.contains_key(input_id)
+                        || self.input_authority_bindings.get_cloned(input_id) == authority_binding)
+                    && (!self.input_authority_batch_keys.contains_key(input_id)
+                        || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))
+            }
+            guard "same_authority_supersession" {
+                existing_superseded_input_id == None
+                || self.input_authority_batch_keys.get_cloned(existing_superseded_input_id.get("value")) == authority_batch_key
+            }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -16663,6 +16734,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && silent_intent_match == false
             }
             update {
+                if authority_binding != None {
+                    self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                    self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
+                }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
@@ -16704,7 +16779,25 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanRequestedTerminalSteer {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "exact_input_authority_binding" {
+                (authority_binding == None && authority_batch_key == None
+                    && !self.input_authority_bindings.contains_key(input_id))
+                || (authority_binding != None && authority_batch_key != None
+                    && authority_binding.get("value") != ""
+                    && authority_batch_key.get("value") != ""
+                    && (!self.input_authority_bindings.contains_key(input_id)
+                        || self.input_authority_bindings.get_cloned(input_id) == authority_binding)
+                    && (!self.input_authority_batch_keys.contains_key(input_id)
+                        || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))
+            }
+            guard "same_authority_supersession" {
+                existing_superseded_input_id == None
+                || self.input_authority_batch_keys.get_cloned(existing_superseded_input_id.get("value")) == authority_batch_key
+            }
+            guard "governed_live_steer_unavailable" {
+                authority_binding == None || runtime_running == false
+            }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -16719,6 +16812,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && silent_intent_match == false
             }
             update {
+                if authority_binding != None {
+                    self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                    self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
+                }
                 self.admission_authorized_live_boundary_delivery.insert(input_id, LiveBoundaryDelivery::RequestOnly);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
@@ -16772,7 +16869,22 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanRequestedQueue {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "exact_input_authority_binding" {
+                (authority_binding == None && authority_batch_key == None
+                    && !self.input_authority_bindings.contains_key(input_id))
+                || (authority_binding != None && authority_batch_key != None
+                    && authority_binding.get("value") != ""
+                    && authority_batch_key.get("value") != ""
+                    && (!self.input_authority_bindings.contains_key(input_id)
+                        || self.input_authority_bindings.get_cloned(input_id) == authority_binding)
+                    && (!self.input_authority_batch_keys.contains_key(input_id)
+                        || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))
+            }
+            guard "same_authority_supersession" {
+                existing_superseded_input_id == None
+                || self.input_authority_batch_keys.get_cloned(existing_superseded_input_id.get("value")) == authority_batch_key
+            }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -16789,6 +16901,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (silent_intent_match == false || input_kind == AdmissionInputKind::PeerRequest)
             }
             update {
+                if authority_binding != None {
+                    self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                    self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
+                }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
@@ -16852,7 +16968,25 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanRequestedSteer {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "exact_input_authority_binding" {
+                (authority_binding == None && authority_batch_key == None
+                    && !self.input_authority_bindings.contains_key(input_id))
+                || (authority_binding != None && authority_batch_key != None
+                    && authority_binding.get("value") != ""
+                    && authority_batch_key.get("value") != ""
+                    && (!self.input_authority_bindings.contains_key(input_id)
+                        || self.input_authority_bindings.get_cloned(input_id) == authority_binding)
+                    && (!self.input_authority_batch_keys.contains_key(input_id)
+                        || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))
+            }
+            guard "same_authority_supersession" {
+                existing_superseded_input_id == None
+                || self.input_authority_batch_keys.get_cloned(existing_superseded_input_id.get("value")) == authority_batch_key
+            }
+            guard "governed_live_steer_unavailable" {
+                authority_binding == None || runtime_running == false
+            }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -16869,6 +17003,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (silent_intent_match == false || input_kind == AdmissionInputKind::PeerRequest)
             }
             update {
+                if authority_binding != None {
+                    self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                    self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
+                }
                 self.admission_authorized_live_boundary_delivery.insert(input_id, if input_kind == AdmissionInputKind::Prompt
                     && turn_append_shape == AdmissionTurnAppendShape::InTurnEligible
                     && silent_intent_match == false
@@ -16959,7 +17097,22 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanDefaultQueueKind {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "exact_input_authority_binding" {
+                (authority_binding == None && authority_batch_key == None
+                    && !self.input_authority_bindings.contains_key(input_id))
+                || (authority_binding != None && authority_batch_key != None
+                    && authority_binding.get("value") != ""
+                    && authority_batch_key.get("value") != ""
+                    && (!self.input_authority_bindings.contains_key(input_id)
+                        || self.input_authority_bindings.get_cloned(input_id) == authority_binding)
+                    && (!self.input_authority_batch_keys.contains_key(input_id)
+                        || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))
+            }
+            guard "same_authority_supersession" {
+                existing_superseded_input_id == None
+                || self.input_authority_batch_keys.get_cloned(existing_superseded_input_id.get("value")) == authority_batch_key
+            }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -16976,6 +17129,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || input_kind == AdmissionInputKind::ExternalEvent)
             }
             update {
+                if authority_binding != None {
+                    self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                    self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
+                }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
@@ -17029,7 +17186,22 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanDefaultPeerMessageOrRequest {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "exact_input_authority_binding" {
+                (authority_binding == None && authority_batch_key == None
+                    && !self.input_authority_bindings.contains_key(input_id))
+                || (authority_binding != None && authority_batch_key != None
+                    && authority_binding.get("value") != ""
+                    && authority_batch_key.get("value") != ""
+                    && (!self.input_authority_bindings.contains_key(input_id)
+                        || self.input_authority_bindings.get_cloned(input_id) == authority_binding)
+                    && (!self.input_authority_batch_keys.contains_key(input_id)
+                        || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))
+            }
+            guard "same_authority_supersession" {
+                existing_superseded_input_id == None
+                || self.input_authority_batch_keys.get_cloned(existing_superseded_input_id.get("value")) == authority_batch_key
+            }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -17045,6 +17217,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (silent_intent_match == false || input_kind == AdmissionInputKind::PeerRequest)
             }
             update {
+                if authority_binding != None {
+                    self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                    self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
+                }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
@@ -17099,7 +17275,25 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanPeerResponseProgress {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "exact_input_authority_binding" {
+                (authority_binding == None && authority_batch_key == None
+                    && !self.input_authority_bindings.contains_key(input_id))
+                || (authority_binding != None && authority_batch_key != None
+                    && authority_binding.get("value") != ""
+                    && authority_batch_key.get("value") != ""
+                    && (!self.input_authority_bindings.contains_key(input_id)
+                        || self.input_authority_bindings.get_cloned(input_id) == authority_binding)
+                    && (!self.input_authority_batch_keys.contains_key(input_id)
+                        || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))
+            }
+            guard "same_authority_supersession" {
+                existing_superseded_input_id == None
+                || self.input_authority_batch_keys.get_cloned(existing_superseded_input_id.get("value")) == authority_batch_key
+            }
+            guard "governed_live_steer_unavailable" {
+                authority_binding == None || runtime_running == false
+            }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -17117,6 +17311,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.input_phases.contains_key(existing_superseded_input_id.get("value"))
             }
             update {
+                if authority_binding != None {
+                    self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                    self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
+                }
                 self.admission_authorized_live_boundary_delivery.insert(input_id, LiveBoundaryDelivery::RequestOnly);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
@@ -17167,7 +17365,22 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanDefaultPeerResponseTerminal {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "exact_input_authority_binding" {
+                (authority_binding == None && authority_batch_key == None
+                    && !self.input_authority_bindings.contains_key(input_id))
+                || (authority_binding != None && authority_batch_key != None
+                    && authority_binding.get("value") != ""
+                    && authority_batch_key.get("value") != ""
+                    && (!self.input_authority_bindings.contains_key(input_id)
+                        || self.input_authority_bindings.get_cloned(input_id) == authority_binding)
+                    && (!self.input_authority_batch_keys.contains_key(input_id)
+                        || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))
+            }
+            guard "same_authority_supersession" {
+                existing_superseded_input_id == None
+                || self.input_authority_batch_keys.get_cloned(existing_superseded_input_id.get("value")) == authority_batch_key
+            }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -17182,6 +17395,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && silent_intent_match == false
             }
             update {
+                if authority_binding != None {
+                    self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                    self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
+                }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
@@ -17223,7 +17440,25 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanDefaultContinuation {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "exact_input_authority_binding" {
+                (authority_binding == None && authority_batch_key == None
+                    && !self.input_authority_bindings.contains_key(input_id))
+                || (authority_binding != None && authority_batch_key != None
+                    && authority_binding.get("value") != ""
+                    && authority_batch_key.get("value") != ""
+                    && (!self.input_authority_bindings.contains_key(input_id)
+                        || self.input_authority_bindings.get_cloned(input_id) == authority_binding)
+                    && (!self.input_authority_batch_keys.contains_key(input_id)
+                        || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))
+            }
+            guard "same_authority_supersession" {
+                existing_superseded_input_id == None
+                || self.input_authority_batch_keys.get_cloned(existing_superseded_input_id.get("value")) == authority_batch_key
+            }
+            guard "governed_live_steer_unavailable" {
+                authority_binding == None || runtime_running == false
+            }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -17239,6 +17474,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && silent_intent_match == false
             }
             update {
+                if authority_binding != None {
+                    self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                    self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
+                }
                 self.admission_authorized_live_boundary_delivery.insert(input_id, LiveBoundaryDelivery::RequestOnly);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
@@ -17297,7 +17536,22 @@ macro_rules! meerkat_catalog_machine_dsl {
         // overrides the projected runtime semantics.
         transition ResolveAdmissionPlanWorkgraphAttentionContinuation {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "exact_input_authority_binding" {
+                (authority_binding == None && authority_batch_key == None
+                    && !self.input_authority_bindings.contains_key(input_id))
+                || (authority_binding != None && authority_batch_key != None
+                    && authority_binding.get("value") != ""
+                    && authority_batch_key.get("value") != ""
+                    && (!self.input_authority_bindings.contains_key(input_id)
+                        || self.input_authority_bindings.get_cloned(input_id) == authority_binding)
+                    && (!self.input_authority_batch_keys.contains_key(input_id)
+                        || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))
+            }
+            guard "same_authority_supersession" {
+                existing_superseded_input_id == None
+                || self.input_authority_batch_keys.get_cloned(existing_superseded_input_id.get("value")) == authority_batch_key
+            }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -17312,6 +17566,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && silent_intent_match == false
             }
             update {
+                if authority_binding != None {
+                    self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                    self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
+                }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
@@ -17365,7 +17623,22 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanOperation {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "exact_input_authority_binding" {
+                (authority_binding == None && authority_batch_key == None
+                    && !self.input_authority_bindings.contains_key(input_id))
+                || (authority_binding != None && authority_batch_key != None
+                    && authority_binding.get("value") != ""
+                    && authority_batch_key.get("value") != ""
+                    && (!self.input_authority_bindings.contains_key(input_id)
+                        || self.input_authority_bindings.get_cloned(input_id) == authority_binding)
+                    && (!self.input_authority_batch_keys.contains_key(input_id)
+                        || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))
+            }
+            guard "same_authority_supersession" {
+                existing_superseded_input_id == None
+                || self.input_authority_batch_keys.get_cloned(existing_superseded_input_id.get("value")) == authority_batch_key
+            }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -17380,6 +17653,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && silent_intent_match == false
             }
             update {
+                if authority_binding != None {
+                    self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                    self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
+                }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::ConsumedOnAccept);
@@ -22232,7 +22509,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.current_run_id != None
                 && self.current_run_id.get("value") == run_id
             }
+            guard "homogeneous_run_authority" {
+                self.authority_staged_run != Some(run_id)
+                || self.authority_staged_batch == self.input_authority_batch_keys.get_cloned(input_id)
+            }
             update {
+                self.authority_staged_run = Some(run_id);
+                self.authority_staged_batch = self.input_authority_batch_keys.get_cloned(input_id);
                 self.input_phases.insert(input_id, InputPhase::Staged);
                 self.input_run_associations.insert(input_id, run_id);
                 self.input_completion_boundaries.remove(input_id);
@@ -22667,6 +22950,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Running]
             on input JoinLiveBoundaryDurableAppend { run_id, input_id }
             guard "current_run_matches" { self.current_run_id == Some(run_id) }
+            // The current local authorization adapter retains a complete
+            // admitted batch. Dynamic governed contributors require a later
+            // owner-backed replacement protocol before this edge is enabled.
+            guard "live_join_input_is_ungoverned" {
+                !self.input_authority_bindings.contains_key(input_id)
+            }
+            guard "live_join_run_is_ungoverned" {
+                for_all(owner_input_id in self.input_authority_bindings.keys(),
+                    self.input_run_associations.get_cloned(owner_input_id) != Some(run_id))
+            }
             guard "turn_at_model_boundary" { self.turn_phase == TurnPhase::CallingLlm }
             guard "no_cancel_after_boundary" { self.cancel_after_boundary == false }
             guard "run_not_stopped" { self.run_stop_requested != Some(run_id) }
@@ -22933,6 +23226,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.admission_authorized_existing_targets.contains_key(superseded_by)
                 && self.admission_authorized_existing_targets.get_cloned(superseded_by).get("value") == input_id
             }
+            guard "same_input_authority" {
+                self.input_authority_batch_keys.get_cloned(input_id) == self.input_authority_batch_keys.get_cloned(superseded_by)
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Superseded);
                 self.input_lane.remove(input_id);
@@ -22964,6 +23260,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.admission_authorized_existing_actions.get_cloned(aggregate_id).get("value") == AdmissionExistingQueuedActionKind::Coalesce
                 && self.admission_authorized_existing_targets.contains_key(aggregate_id)
                 && self.admission_authorized_existing_targets.get_cloned(aggregate_id).get("value") == input_id
+            }
+            guard "same_input_authority" {
+                self.input_authority_batch_keys.get_cloned(input_id) == self.input_authority_batch_keys.get_cloned(aggregate_id)
             }
             update {
                 self.input_phases.insert(input_id, InputPhase::Coalesced);
@@ -23128,7 +23427,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                 !self.input_lane.contains_key(input_id)
                 && !self.input_recovery_lanes.contains_key(input_id)
             }
+            // A terminal original can still contribute to an unfinished run.
+            // Keep its controller custody until that exact run settles. The
+            // current run id remains populated after completion, so correlate
+            // the existing terminal witness rather than treating it as live.
+            guard "archive_governed_run_settled" {
+                self.input_authority_bindings.len() == 0
+                || !self.input_authority_bindings.contains_key(input_id)
+                || run_id == None
+                || self.current_run_id != run_id
+                || self.turn_terminal_run_id == run_id
+                || self.lifecycle_phase != Phase::Running
+            }
             update {
+                self.input_authority_bindings.remove(input_id);
+                self.input_authority_batch_keys.remove(input_id);
                 self.input_phases.remove(input_id);
                 self.input_terminal_kind.remove(input_id);
                 self.input_superseded_by.remove(input_id);
@@ -35780,6 +36093,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 if input_ids.is_empty() {
                     return None;
                 }
+                let first_authority = state.input_authority_batch_keys.get(&input_ids[0]);
+                if input_ids.iter().any(|id| state.input_authority_batch_keys.get(id) != first_authority) {
+                    return None;
+                }
                 // A separately requested stage must preserve terminal-response cardinality.
                 if input_ids.len() > 1 && input_ids.iter().any(|input_id| {
                     state.input_runtime_peer_response_terminal_apply_intent.get(input_id)
@@ -35860,7 +36177,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 ordered
                     .iter()
                     .take_while(|input_id| {
-                        state.input_runtime_boundary.get(*input_id).copied()
+                        state.input_authority_batch_keys.get(*input_id) == state.input_authority_batch_keys.get(first)
+                            && state.input_runtime_boundary.get(*input_id).copied()
                             == Some(target_boundary)
                             && state.input_runtime_execution_kind.get(*input_id).copied()
                                 == Some(target_execution_kind)
@@ -35893,6 +36211,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 };
                 let mut selected = Vec::new();
                 for input_id in ordered {
+                    if state.input_authority_batch_keys.get(input_id) != state.input_authority_batch_keys.get(first) {
+                        break;
+                    }
                     if state.input_runtime_execution_kind.get(input_id).copied()
                         != Some(target_execution_kind)
                         || state

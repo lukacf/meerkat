@@ -5646,6 +5646,8 @@ impl SessionBackend {
         };
         Ok(Input::Prompt(PromptInput {
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: InputOrigin::Operator,
@@ -9856,11 +9858,13 @@ mod tests {
                 tool_use_id: "callback-a".to_string(),
                 tool_name: "ask_a".to_string(),
                 args: json!({"tool_use_id": "callback-a"}),
+                settlement_failures: Vec::new(),
             },
             meerkat_core::error::PendingCallbackToolCall {
                 tool_use_id: "callback-b".to_string(),
                 tool_name: "ask_b".to_string(),
                 args: json!({"tool_use_id": "callback-b"}),
+                settlement_failures: Vec::new(),
             },
         ];
         let err = session_turn_error_to_mob_error(
@@ -10992,6 +10996,9 @@ fn runtime_llm_reconfigure_request_from_primitive(
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreExecutor for MobSessionRuntimeExecutor {
+    fn supports_work_authorization(&self) -> bool {
+        true
+    }
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(MobSessionRuntimeBoundaryHandle {
             session_service: Arc::clone(&self.session_service),
@@ -11120,6 +11127,11 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                     .turn_metadata()
                     .and_then(|meta| meta.turn_tool_overlay.clone()),
                 executor_turn_metadata,
+            )
+            .with_work_authorization(
+                primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.work_authorization.clone()),
             )
             .with_typed_turn_appends(primitive.typed_turn_appends()),
         };

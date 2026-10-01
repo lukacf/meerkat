@@ -16155,6 +16155,138 @@ ORDER BY runtime_id";
 
         use super::*;
 
+        // Source-grounded controls for the later administrative reservation tests.
+        // These exercise existing APIs and do not implement that reservation.
+        struct FollowthroughHeldFence {
+            entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+
+        impl RuntimeStoreWriteFence for FollowthroughHeldFence {
+            fn execute_if_current(
+                &self,
+                _operation: Box<dyn FnOnce() -> Result<(), RuntimeStoreError> + '_>,
+            ) -> Result<RuntimeStoreWriteFenceOutcome, RuntimeStoreError> {
+                self.entered
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .unwrap();
+                // A failed test drops its sender and wakes this receiver. The
+                // finite timeout is a second cleanup bound, not the test oracle.
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|error| RuntimeStoreError::Internal(error.to_string()))?;
+                Ok(RuntimeStoreWriteFenceOutcome::Conflict {
+                    reason: "test fence refuses target mutation after release".to_string(),
+                })
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn persistent_admin_control_cancelled_sqlite_waiter_is_not_writer_release() {
+            let (_dir, store) = temp_store();
+            let store = Arc::new(store);
+            let rid = runtime_id();
+            let original = input_state();
+            let original_id = original.as_stored().state.input_id.clone();
+            store.persist_input_state(&rid, &original).await.unwrap();
+            let expected = store.load_input_states_strict(&rid).await.unwrap();
+            let replacements = replacement_records(&expected, 1);
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+            let fence = Arc::new(FollowthroughHeldFence {
+                entered: std::sync::Mutex::new(Some(entered_tx)),
+                release: std::sync::Mutex::new(release_rx),
+            });
+            let waiter = tokio::spawn({
+                let store = store.clone();
+                let rid = rid.clone();
+                async move {
+                    store
+                        .compare_and_swap_input_states_atomically_with_fence(
+                            &rid,
+                            &expected,
+                            &replacements,
+                            fence,
+                        )
+                        .await
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(2), entered_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            // The callback can only be entered after the actual BEGIN IMMEDIATE.
+            waiter.abort();
+            let cancelled = tokio::time::timeout(Duration::from_secs(2), waiter)
+                .await
+                .unwrap()
+                .unwrap_err();
+            assert!(cancelled.is_cancelled());
+
+            let mut contender = open_runtime_connection(store.path()).unwrap();
+            contender.busy_timeout(Duration::ZERO).unwrap();
+            let error = begin_runtime_transaction(&mut contender).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    RuntimeStoreError::SqliteOperationFailed {
+                        primary_code: rusqlite::ffi::SQLITE_BUSY,
+                        ..
+                    }
+                ),
+                "a cancelled waiter must not be mistaken for actual writer release: {error}"
+            );
+            drop(contender);
+
+            release_tx.send(()).unwrap();
+            let followup = input_state();
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                store.persist_input_state(&rid, &followup),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let observed = store
+                .load_input_state(&rid, &original_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                observed.state.recovery_count, 0,
+                "the refusing fence must not mutate"
+            );
+            assert!(
+                store
+                    .load_input_state(&rid, &followup.as_stored().state.input_id)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "real store work succeeds after actual release"
+            );
+        }
+
+        #[test]
+        fn persistent_admin_control_current_runtime_schema_needs_no_writer() {
+            let (_dir, store) = temp_store();
+            let mut writer = open_runtime_connection(store.path()).unwrap();
+            let mut observer = open_runtime_connection(store.path()).unwrap();
+            observer.busy_timeout(Duration::ZERO).unwrap();
+            let reservation = begin_runtime_transaction(&mut writer).unwrap();
+            let report =
+                meerkat_sqlite::apply_domain_migrations(&mut observer, &RUNTIME_STORE_DOMAIN)
+                    .expect("current runtime schema verification is read-only");
+            assert!(!report.migrated());
+            assert!(observer.is_autocommit());
+            drop(reservation);
+        }
+
         #[tokio::test]
         async fn external_activation_advances_only_representation_side_predecessor() {
             use meerkat_core::SessionStore as _;
@@ -16469,6 +16601,8 @@ ORDER BY runtime_id";
             let steer_continuation =
                 crate::input::Input::Continuation(crate::input::ContinuationInput {
                     header: crate::input::InputHeader {
+                        ingress_context: None,
+                        authority_association: None,
                         id: InputId::new(),
                         timestamp: chrono::Utc::now(),
                         source: crate::input::InputOrigin::System,
@@ -16504,6 +16638,8 @@ ORDER BY runtime_id";
             let instruction_continuation =
                 crate::input::Input::Continuation(crate::input::ContinuationInput {
                     header: crate::input::InputHeader {
+                        ingress_context: None,
+                        authority_association: None,
                         id: InputId::new(),
                         timestamp: chrono::Utc::now(),
                         source: crate::input::InputOrigin::System,

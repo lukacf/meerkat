@@ -18211,6 +18211,7 @@ mod tests {
             tool_use_id: "call-84".to_string(),
             tool_name: "ask_batch".to_string(),
             args: serde_json::json!({"question": "continue all?"}),
+            settlement_failures: Vec::new(),
         }];
         let batch = bounded_direct_session_failure(
             meerkat_core::service::SessionError::Agent(

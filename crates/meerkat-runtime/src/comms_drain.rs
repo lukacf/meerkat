@@ -1379,6 +1379,8 @@ fn peer_input_from_delivery_payload(
         .or_else(|| (!is_placed).then_some(stable_uuid))
         .map(crate::identifiers::CorrelationId::from_uuid);
     let header = InputHeader {
+        ingress_context: None,
+        authority_association: None,
         id: meerkat_core::lifecycle::InputId::from_uuid(stable_uuid),
         timestamp: chrono::Utc::now(),
         source: InputOrigin::Peer {
@@ -11366,6 +11368,8 @@ mod tests {
             system_prompts: Vec::new(),
             injected_context: Vec::new(),
             header: crate::input::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: crate::input::InputOrigin::Peer {

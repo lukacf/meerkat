@@ -646,6 +646,12 @@ impl CompositeDispatcher {
                 BuiltinToolError::ExecutionFailed(msg) => {
                     ToolError::ExecutionFailed { message: msg }
                 }
+                BuiltinToolError::OperationObservationUnavailable => {
+                    ToolError::OperationObservationUnavailable
+                }
+                BuiltinToolError::OperationAuthorizationUnavailable => {
+                    ToolError::OperationAuthorizationUnavailable
+                }
                 BuiltinToolError::TaskError(te) => ToolError::ExecutionFailed { message: te },
             })?;
         let async_ops = tool.async_ops_for_output(&output);
@@ -3229,5 +3235,71 @@ mod tests {
             names.contains(&"load_skill".to_string()),
             "explicitly enabled load_skill must appear: {names:?}"
         );
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn observation_infrastructure_web_search_retains_type_through_dispatcher() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ObservationUnavailableSearch(Arc<AtomicUsize>);
+        #[async_trait]
+        impl meerkat_llm_core::WebSearchExecutor for ObservationUnavailableSearch {
+            async fn execute_web_search(
+                &self,
+                _request: meerkat_core::web_search::WebSearchRequest,
+            ) -> Result<meerkat_core::web_search::WebSearchResult, meerkat_llm_core::LlmError>
+            {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(meerkat_llm_core::LlmError::OperationObservationUnavailable)
+            }
+        }
+
+        let root = TempDir::new().unwrap();
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(root.path().to_path_buf()),
+            None,
+            None,
+            Some(SessionId::new().to_string()),
+        )
+        .unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        dispatcher.register_web_search_tool(
+            Arc::new(ObservationUnavailableSearch(Arc::clone(&attempts))),
+            ToolCategoryOverride::Enable,
+        );
+        let args = serde_json::value::RawValue::from_string(
+            json!({"query": "fixed test query"}).to_string(),
+        )
+        .unwrap();
+        let result = dispatcher
+            .dispatch(ToolCallView {
+                id: "observation-failure",
+                name: "web_search",
+                args: &args,
+            })
+            .await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "no search retry");
+
+        // The same actual tool family still routes a healthy independent call.
+        // This rules out disabled-tool or malformed-argument false positives.
+        dispatcher.register_web_search_tool(
+            Arc::new(MarkerWebSearchExecutor {
+                marker: "healthy search",
+            }),
+            ToolCategoryOverride::Enable,
+        );
+        let healthy = dispatch_json(&dispatcher, "web_search", json!({"query": "healthy"})).await;
+        assert_eq!(healthy["answer"], "healthy search");
+        let error = result.expect_err("the failing search must not become a tool result");
+        assert_eq!(
+            error.primary_error(),
+            &ToolError::OperationObservationUnavailable,
+            "stringifying into ExecutionFailed would re-enable ordinary model feedback"
+        );
+        assert_eq!(error.error_code(), "operation_observation_unavailable");
+        assert_eq!(error.settlement_failures().count(), 0);
     }
 }

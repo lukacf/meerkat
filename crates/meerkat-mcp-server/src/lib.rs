@@ -2268,6 +2268,7 @@ fn format_agent_result(
                         tool_use_id: call.tool_use_id,
                         tool_name: call.tool_name,
                         args: call.args,
+                        settlement_failures: call.settlement_failures,
                     })
                     .collect(),
             );
@@ -4189,6 +4190,7 @@ async fn handle_meerkat_run(
                 host_prompt_sections: Default::default(),
                 agent_llm_client_decorator: None,
                 runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                initial_work_authorization: None,
                 initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
                     None,
                 )),
@@ -4622,6 +4624,7 @@ async fn handle_meerkat_resume(
             host_prompt_sections: Default::default(),
             agent_llm_client_decorator: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(runtime_bindings),
+            initial_work_authorization: None,
             initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
                 None,
             )),
@@ -7134,11 +7137,18 @@ mod tests {
                 tool_use_id: "callback-a".to_string(),
                 tool_name: "ask_a".to_string(),
                 args: json!({"question": "a"}),
+                settlement_failures: vec![meerkat_core::ToolDispatchSettlementFailure {
+                    admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
+                    effect_kind: meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+                    physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Unknown,
+                    failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Unavailable,
+                }],
             },
             meerkat_core::error::PendingCallbackToolCall {
                 tool_use_id: "callback-b".to_string(),
                 tool_name: "ask_b".to_string(),
                 args: json!({"question": "b"}),
+                settlement_failures: Vec::new(),
             },
         ];
         let payload = format_agent_result(
@@ -7154,6 +7164,10 @@ mod tests {
         let decoded: Value = serde_json::from_str(raw).expect("valid wrapped JSON");
         assert_eq!(decoded["status"], "pending_tool_call");
         assert_eq!(decoded["resumable"], true);
+        assert_eq!(
+            decoded["pending_tool_calls"][0]["settlement_failures"][0]["physical_outcome"],
+            "unknown"
+        );
         assert_eq!(decoded["pending_tool_calls"].as_array().unwrap().len(), 2);
         assert_eq!(
             decoded["pending_tool_calls"][0]["tool_use_id"],

@@ -685,6 +685,7 @@ pub fn resolve_effective_turn_config(
         mob_tools: None,
         runtime_build_mode: context.runtime_build_mode,
         initial_turn_metadata: None,
+        initial_work_authorization: None,
     };
     if let Some(override_mob) = overrides.override_mob {
         build.apply_generated_create_only_mob_operator_access(

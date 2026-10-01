@@ -65,6 +65,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
     ],
     edition = "2024",
@@ -93,6 +94,8 @@ rust_library(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-live:meerkat_live",
@@ -114,6 +117,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -132,6 +136,7 @@ rust_library(
         "//crates/meerkat:__pkg__",
         "//crates/meerkat-anthropic:__pkg__",
         "//crates/meerkat-auth-core:__pkg__",
+        "//crates/meerkat-authorization:__pkg__",
         "//crates/meerkat-cli:__pkg__",
         "//crates/meerkat-comms:__pkg__",
         "//crates/meerkat-copilot:__pkg__",
@@ -164,6 +169,8 @@ rust_library(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-live:meerkat_live",
@@ -185,6 +192,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
     ],
     edition = "2024",
@@ -215,6 +223,8 @@ rust_library(
     ),
     deps = [
         "//crates/meerkat:meerkat_auth_core_agent_factory_build",
+        "//crates/meerkat:meerkat_authorization_agent_factory_build",
+        "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
         "//crates/meerkat:meerkat_contracts_agent_factory_build",
         "//crates/meerkat:meerkat_core_agent_factory_build",
         "//crates/meerkat:meerkat_live_agent_factory_build",
@@ -236,6 +246,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -267,6 +278,8 @@ rust_library(
     ),
     deps = [
         "//crates/meerkat:meerkat_auth_core_agent_factory_build",
+        "//crates/meerkat:meerkat_authorization_agent_factory_build",
+        "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
         "//crates/meerkat:meerkat_contracts_agent_factory_build",
         "//crates/meerkat:meerkat_core_agent_factory_build",
         "//crates/meerkat:meerkat_live_agent_factory_build",
@@ -294,6 +307,7 @@ rust_test(
     crate_root = "src/lib.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -343,6 +357,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -373,6 +389,7 @@ rust_test(
     crate_root = "tests/auth_reauth_notice.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -418,6 +435,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -448,6 +467,7 @@ rust_test(
     crate_root = "tests/bounded_submit_contract.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -490,6 +510,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -520,6 +542,7 @@ rust_test(
     crate_root = "tests/composition_dispatch_is_the_path.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -564,6 +587,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -594,6 +619,7 @@ rust_test(
     crate_root = "tests/composition_driver_contract.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -638,6 +664,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -668,6 +696,7 @@ rust_test(
     crate_root = "tests/control_plane_contract.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -712,6 +741,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -742,6 +773,7 @@ rust_test(
     crate_root = "tests/core_apply_terminal_truth.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -792,6 +824,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -822,6 +856,7 @@ rust_test(
     crate_root = "tests/detached_wake_contract.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -864,6 +899,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -894,6 +931,7 @@ rust_test(
     crate_root = "tests/driver_ephemeral.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -936,6 +974,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -966,6 +1006,7 @@ rust_test(
     crate_root = "tests/driver_persistent.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -1008,6 +1049,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -1038,6 +1081,7 @@ rust_test(
     crate_root = "tests/durable_delivery_inbox.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -1080,6 +1124,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -1110,6 +1156,7 @@ rust_test(
     crate_root = "tests/durable_tail_recovery_authorization.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -1152,6 +1199,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -1182,6 +1231,7 @@ rust_test(
     crate_root = "tests/gpt_live_generated_authority.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -1224,6 +1274,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -1254,6 +1306,7 @@ rust_test(
     crate_root = "tests/handles_dispatch_through_dispatcher.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -1301,6 +1354,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -1331,6 +1386,7 @@ rust_test(
     crate_root = "tests/meerkat_machine.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -1375,6 +1431,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -1405,6 +1463,7 @@ rust_test(
     crate_root = "tests/ops_lifecycle_contract.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -1447,6 +1506,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -1477,6 +1538,7 @@ rust_test(
     crate_root = "tests/ops_lifecycle_persistence.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -1519,6 +1581,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -1549,6 +1613,7 @@ rust_test(
     crate_root = "tests/peer_handling_mode_contract.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -1591,6 +1656,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -1621,6 +1688,7 @@ rust_test(
     crate_root = "tests/peer_ingress_fact_ratchet.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -1665,6 +1733,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -1695,6 +1765,7 @@ rust_test(
     crate_root = "tests/peer_interaction_dsl.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -1737,6 +1808,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -1767,6 +1840,7 @@ rust_test(
     crate_root = "tests/peer_projection_dsl.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -1809,6 +1883,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -1839,6 +1915,7 @@ rust_test(
     crate_root = "tests/peer_projection_producer_wiring.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -1883,6 +1960,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -1913,6 +1992,7 @@ rust_test(
     crate_root = "tests/pre_ledger_realm_bridge.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -1961,6 +2041,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -1991,6 +2073,7 @@ rust_test(
     crate_root = "tests/recovery_contract.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -2039,6 +2122,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -2069,6 +2154,7 @@ rust_test(
     crate_root = "tests/recovery_replay.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -2111,6 +2197,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -2141,6 +2229,7 @@ rust_test(
     crate_root = "tests/regression_comms_runtime.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -2185,6 +2274,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -2215,6 +2306,7 @@ rust_test(
     crate_root = "tests/runtime_bindings_contract.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -2257,6 +2349,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -2287,6 +2381,7 @@ rust_test(
     crate_root = "tests/runtime_ingress_control.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -2329,6 +2424,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -2359,6 +2456,7 @@ rust_test(
     crate_root = "tests/runtime_terminal_publication_contract.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -2403,6 +2501,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -2433,6 +2533,7 @@ rust_test(
     crate_root = "tests/stop_run_public_api.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -2475,6 +2576,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -2505,6 +2608,7 @@ rust_test(
     crate_root = "tests/trust_reconcile_add_failure.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -2550,6 +2654,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -2580,6 +2686,7 @@ rust_test(
     crate_root = "tests/trust_reconcile_concurrency.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -2625,6 +2732,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -2655,6 +2764,7 @@ rust_test(
     crate_root = "tests/turn_content_shape_contract.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -2699,6 +2809,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -2729,6 +2841,7 @@ rust_test(
     crate_root = "tests/turn_metadata_single_construction_site.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -2773,6 +2886,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -2803,6 +2918,7 @@ rust_test(
     crate_root = "tests/unregister_drain_contract.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -2845,6 +2961,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
@@ -2875,6 +2993,7 @@ rust_test(
     crate_root = "tests/whole_blob_repair.rs",
     crate_features = [
         "live",
+        "local-authorization",
         "sqlite-store",
         "test-support",
     ],
@@ -2917,6 +3036,8 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-authorization:meerkat_authorization",
         "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",

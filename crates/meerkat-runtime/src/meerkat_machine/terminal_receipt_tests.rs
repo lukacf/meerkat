@@ -193,6 +193,8 @@ fn keyed_external_event(key: &str) -> Input {
     Input::ExternalEvent(crate::input::ExternalEventInput {
         objective_id: None,
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::External {
@@ -531,6 +533,8 @@ fn response_progress(label: &str) -> Input {
         injected_context: Vec::new(),
         sender_taint: None,
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::Peer {

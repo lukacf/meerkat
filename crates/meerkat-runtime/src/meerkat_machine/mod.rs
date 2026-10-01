@@ -1117,6 +1117,13 @@ pub(crate) use driver::{
 pub(crate) mod driver;
 
 mod comms_drain;
+mod controller_custody;
+pub(crate) mod credential_custody;
+#[cfg(feature = "local-authorization")]
+mod local_authorization;
+pub use controller_custody::NativeControllerGrantMutation;
+#[cfg(feature = "local-authorization")]
+pub use local_authorization::{NativeGrantWorkConfiguration, NativeIngressCheck};
 pub mod composition;
 mod dispatch_control;
 mod dispatch_drain;
@@ -2519,6 +2526,29 @@ pub(crate) struct OwedInterruptedToolNotice {
 const INTERRUPTED_REQUEST_CONTENT_BOUND: usize = 64 * 1024;
 
 impl MeerkatMachine {
+    /// Install the trusted native ingress/policy composition before sharing or
+    /// registering this machine. No serialized input can select this component.
+    /// Existing work cannot be silently adopted into a newly installed profile.
+    pub fn with_native_work_authorization_host(
+        mut self,
+        host: Arc<dyn crate::input_authority::NativeWorkAuthorizationHost>,
+    ) -> Result<Self, RuntimeDriverError> {
+        {
+            let shared =
+                Arc::get_mut(&mut self.shared).ok_or_else(crate::input_authority::unavailable)?;
+            if !shared.sessions.get_mut().is_empty() {
+                return Err(crate::input_authority::unavailable());
+            }
+        }
+        // Establish exclusive installation before constructing the Weak owner.
+        let attachment = credential_custody::NativeWorkAuthorizationAttachment::new(host, &self);
+        self.native_work_authorization_host
+            .set(attachment)
+            .map_err(|_| crate::input_authority::unavailable())?;
+        self.install_native_credential_observer()?;
+        Ok(self)
+    }
+
     /// Take the interrupted-run notices owed to `session_id`'s model, if any.
     pub(crate) async fn take_interrupted_tool_notices(
         &self,
@@ -8611,8 +8641,12 @@ impl LiveChannelStatusAuthority {
 /// implementation detail helpers.
 #[doc(hidden)]
 pub struct MeerkatMachineShared {
+    native_work_authorization_host: crate::input_authority::NativeWorkAuthorizationSlot,
     /// Per-session entries.
     sessions: RwLock<HashMap<SessionId, RuntimeSessionEntry>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    credential_release_observer:
+        std::sync::OnceLock<Arc<credential_custody::NativeCredentialReleaseObserver>>,
     /// Once-per-distinct-payload panic log gate for the attachment
     /// `catch_unwind` boundaries (executor factory, surface activation,
     /// surface publication). See `crate::panic_boundary` for the 2026-07-29
@@ -10222,7 +10256,10 @@ impl MeerkatMachine {
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
             shared: Arc::new(MeerkatMachineShared {
+                native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
                 sessions: RwLock::new(HashMap::new()),
+                #[cfg(not(target_arch = "wasm32"))]
+                credential_release_observer: std::sync::OnceLock::new(),
                 boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
                 ),
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
@@ -10318,7 +10355,10 @@ impl MeerkatMachine {
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
             shared: Arc::new(MeerkatMachineShared {
+                native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
                 sessions: RwLock::new(HashMap::new()),
+                #[cfg(not(target_arch = "wasm32"))]
+                credential_release_observer: std::sync::OnceLock::new(),
                 boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
                 ),
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
@@ -10414,7 +10454,10 @@ impl MeerkatMachine {
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
             shared: Arc::new(MeerkatMachineShared {
+                native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
                 sessions: RwLock::new(HashMap::new()),
+                #[cfg(not(target_arch = "wasm32"))]
+                credential_release_observer: std::sync::OnceLock::new(),
                 boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
                 ),
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
@@ -10527,8 +10570,11 @@ impl MeerkatMachine {
     /// Surfaces construct the adapter before all state fields are available, so
     /// this setter lets them align the adapter's runtime-backed traffic with
     /// the surface-visible status handle without creating a competing registry.
-    pub fn set_auth_lease_handle(&self, handle: Arc<crate::handles::RuntimeAuthLeaseHandle>) {
-        self.set_runtime_auth_lease_handle(handle);
+    pub fn set_auth_lease_handle(
+        &self,
+        handle: Arc<crate::handles::RuntimeAuthLeaseHandle>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.set_runtime_auth_lease_handle(handle)
     }
 
     /// Install the runtime credential lifecycle handle together with an
@@ -10536,31 +10582,16 @@ impl MeerkatMachine {
     ///
     /// The credential side still has to be a generated AuthMachine authority;
     /// the explicit OAuth authority only controls login-flow test seams.
+    /// Once native credential custody is installed, a same-credential request
+    /// with a different OAuth owner is unsupported and leaves the pair unchanged.
     #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
     pub fn set_auth_lease_handle_with_oauth_flow_authority(
         &self,
         handle: Arc<crate::handles::RuntimeAuthLeaseHandle>,
         oauth_flows: Arc<dyn meerkat_auth_core::oauth_flow::OAuthFlowAuthority>,
-    ) {
-        *self
-            .oauth_flows
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = oauth_flows;
-        let handle = generated_runtime_auth_lease_handle(handle);
-        *self
-            .auth_lease
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = handle;
-    }
-
-    /// Install a runtime AuthMachine authority shared by auth leases and OAuth
-    /// login-flow lifecycle transitions.
-    pub fn set_runtime_auth_lease_handle(
-        &self,
-        handle: Arc<crate::handles::RuntimeAuthLeaseHandle>,
-    ) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
+    ) -> Result<(), RuntimeDriverError> {
+        let mut installed = false;
+        self.with_credential_authority_replacement(&handle, || {
             let mut auth_slot = self
                 .auth_lease
                 .write()
@@ -10569,20 +10600,67 @@ impl MeerkatMachine {
                 .oauth_flows
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *oauth_slot = Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-                std::time::Duration::from_secs(10 * 60),
-                Arc::clone(&handle),
-            ));
-            *auth_slot = generated_runtime_auth_lease_handle(handle);
+            *oauth_slot = Arc::clone(&oauth_flows);
+            *auth_slot = generated_runtime_auth_lease_handle(handle.clone());
+            installed = true;
+        })?;
+        if !installed {
+            // The credential helper's same-handle no-op does not install a
+            // different OAuth owner. Only the exact existing pair is a no-op.
+            let current = self.provider_auth_runtime_authority();
+            let requested_auth: Arc<dyn meerkat_core::handles::AuthLeaseHandle> = handle;
+            if !Arc::ptr_eq(
+                &current.generated_auth_lease_handle().clone_handle(),
+                &requested_auth,
+            ) || !Arc::ptr_eq(&current.oauth_flow_authority(), &oauth_flows)
+            {
+                return Err(credential_custody::unavailable(
+                    crate::traits::ControllerReadinessFailure::UnsupportedScope,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Install a paired generated credential and OAuth authority. An unfinished
+    /// governed controller prevents replacement; temporary native contention is
+    /// a typed readiness result and does not change either installed handle.
+    pub fn set_runtime_auth_lease_handle(
+        &self,
+        handle: Arc<crate::handles::RuntimeAuthLeaseHandle>,
+    ) -> Result<(), RuntimeDriverError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.with_credential_authority_replacement(&handle, || {
+                let mut auth_slot = self
+                    .auth_lease
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut oauth_slot = self
+                    .oauth_flows
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *oauth_slot =
+                    Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
+                        std::time::Duration::from_secs(10 * 60),
+                        handle.clone(),
+                    ));
+                *auth_slot = generated_runtime_auth_lease_handle(handle.clone());
+            })
         }
         #[cfg(target_arch = "wasm32")]
-        let handle = generated_runtime_auth_lease_handle(handle);
-        #[cfg(target_arch = "wasm32")]
         {
+            if self.native_work_authorization_host.get().is_some() {
+                return Err(credential_custody::unavailable(
+                    crate::traits::ControllerReadinessFailure::UnsupportedScope,
+                ));
+            }
             *self
                 .auth_lease
                 .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = handle;
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                generated_runtime_auth_lease_handle(handle);
+            Ok(())
         }
     }
 
@@ -10874,7 +10952,7 @@ impl MeerkatMachine {
                         "persistent runtime driver construction requires the registration cold-install durability handle"
                             .to_string(),
                     ))?;
-                let driver = PersistentRuntimeDriver::new_with_control_and_durability_health(
+                let mut driver = PersistentRuntimeDriver::new_with_control_and_durability_health(
                     runtime_id,
                     store.clone(),
                     blob_store.clone(),
@@ -10882,19 +10960,25 @@ impl MeerkatMachine {
                     dsl_authority,
                     durability_health,
                 );
+                driver
+                    .inner_mut()
+                    .set_work_authorization_host(Arc::clone(&self.native_work_authorization_host));
                 Ok(DriverEntry::Persistent(driver))
             }
             _ if durability_health.is_some() => Err(RuntimeDriverError::Internal(
                 "storeless runtime driver construction received a persistent durability handle"
                     .to_string(),
             )),
-            _ => Ok(DriverEntry::Ephemeral(
-                EphemeralRuntimeDriver::new_with_control_and_dsl(
+            _ => {
+                let mut driver = EphemeralRuntimeDriver::new_with_control_and_dsl(
                     runtime_id,
                     control_projection,
                     dsl_authority,
-                ),
-            )),
+                );
+                driver
+                    .set_work_authorization_host(Arc::clone(&self.native_work_authorization_host));
+                Ok(DriverEntry::Ephemeral(driver))
+            }
         }
     }
 
@@ -11125,3 +11209,6 @@ mod durable_steer_tests;
 
 #[cfg(test)]
 mod terminal_receipt_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod oauth_pair_tests;

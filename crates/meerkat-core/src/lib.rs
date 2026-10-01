@@ -27,9 +27,15 @@ pub mod tokio {
 }
 
 pub mod agent;
+pub mod llm_client;
+pub use llm_client::{
+    ControllerFactsUnavailable, ControllerModelClient, ControllerModelFacts,
+    ControllerModelSelection, LlmRequestAuthorization,
+};
 pub mod approval;
 pub mod artifact;
 pub mod auth;
+pub mod authorization;
 pub mod blob;
 pub mod budget;
 pub mod comms;
@@ -153,6 +159,15 @@ pub use auth::{
     PrincipalContractError, PrincipalId, PrincipalKind, PrincipalQualification, PrincipalRef,
     TrustDomainId, VisibilityClass, authorize_explicit_auth_binding_use,
     authorize_then_materialize_auth_binding, can_observe_visibility, metadata_grants_no_visibility,
+};
+pub use authorization::{
+    AuthorizationOperation, ModelAuthorizationFacts, ModelAuthorizationUse,
+    OperationAuthorizationError, OperationAuthorizationFacts, OperationRefusalKind,
+    OperationRefused, OwnerQualifiedTarget, PreparedAuthorizationBinding,
+    PreparedOperationAuthorization, PublicationAuthorizationFacts, PublicationMode,
+    PublicationRecipient, SourceAuthorizationFacts, SourceAuthorizationTarget,
+    SourceAuthorizationUse, ToolAuthorizationFacts, ToolAuthorizationTarget, WorkAuthorization,
+    WorkAuthorizationContext,
 };
 pub use blob::{
     BlobAddressAttestation, BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError,
@@ -337,9 +352,9 @@ pub use oauth_identity::OAuthProviderIdentity;
 pub use ops::{
     AsyncOpRef, ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent,
     OperationId, OperationPolicy, OperationResult, OperationSpec, ResultShape, SessionEffect,
-    SpawnSpec, ToolAccessConstraint, ToolAccessPolicy, ToolDispatchOutcome,
-    ToolDispatchTerminalCause, ToolDispatchTerminalErrorKind, ToolDispatchTimeoutPolicy,
-    WaitPolicy, WorkKind,
+    SpawnSpec, ToolAccessConstraint, ToolAccessPolicy, ToolDispatchAdmissionSource,
+    ToolDispatchOutcome, ToolDispatchSettlementFailure, ToolDispatchTerminalCause,
+    ToolDispatchTerminalErrorKind, ToolDispatchTimeoutPolicy, WaitPolicy, WorkKind,
 };
 pub use ops_lifecycle::{
     OperationCompletionWatch, OperationCompletionWatchError, OperationKind,
@@ -589,9 +604,7 @@ pub use auth::{
     HttpAuthorizationResponse, HttpAuthorizationResponseAction, HttpAuthorizer, OpenAiAuthMetadata,
     OpenAiRouteHints, ProviderAuthMetadata, PublishedAuthStatus, RefreshFailureObservation,
     ResolvedAuthEnvelope, ResolvedAuthKind, TokenLifecycleClearError,
-    clear_tokens_and_publish_lifecycle_released,
-    clear_tokens_and_publish_lifecycle_released_for_identity, lease_snapshot_expires_at_datetime,
-    mark_tokens_lifecycle_published_for_transition,
+    lease_snapshot_expires_at_datetime, mark_tokens_lifecycle_published_for_transition,
     oauth_status_projection_snapshot_from_newer_marker, persisted_auth_mode_is_directly_creatable,
     persisted_auth_mode_uses_oauth_login_lifecycle, persisted_token_expires_at_epoch_secs,
     project_published_auth_status, publish_token_lifecycle_acquired,
@@ -608,6 +621,8 @@ pub use auth::{
     rehydrate_durable_predecessor_for_mutation,
     rehydrate_durable_predecessor_for_mutation_for_identity, rehydrate_marked_tokens_for_status,
     rehydrate_marked_tokens_for_status_for_identity,
+    rehydrate_marked_tokens_for_status_for_identity_with_guard,
+    rehydrate_marked_tokens_for_status_with_guard, try_acquire_auth_login_lifecycle_guard,
 };
 pub use connection::{
     AuthBindingRef, AuthCredentialIdentity, AuthProfile, AuthProfileConfig, BackendProfile,

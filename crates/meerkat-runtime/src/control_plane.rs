@@ -75,7 +75,9 @@ impl RunlessTerminalConvergenceError {
             | RuntimeDriverError::RecoveryCorruption { .. }
             | RuntimeDriverError::InputTerminalWithoutReceipt { .. }
             | RuntimeDriverError::RecoveryRepairBlocked { .. }) => Self::Corrupt { context, error },
-            error @ (RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
+            error @ (RuntimeDriverError::ControllerReadinessUnavailable { .. }
+            | RuntimeDriverError::ControllerInUse
+            | RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
             | RuntimeDriverError::UnregisterInProgress { .. }
             | RuntimeDriverError::RuntimeStopInProgress { .. }
             | RuntimeDriverError::InterruptDispatchOutcomeUnknown { .. }
@@ -89,6 +91,8 @@ impl RunlessTerminalConvergenceError {
 
     fn from_generated_authority(context: &'static str, error: RuntimeDriverError) -> Self {
         match error {
+            error @ (RuntimeDriverError::ControllerReadinessUnavailable { .. }
+            | RuntimeDriverError::ControllerInUse) => Self::Retryable { context, error },
             error @ (RuntimeDriverError::NotReady { .. }
             | RuntimeDriverError::NotFound { .. }
             | RuntimeDriverError::Destroyed
@@ -2100,5 +2104,49 @@ mod tests {
             overlap,
             RuntimeDriverError::ValidationFailed { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod controller_readiness_projection_tests {
+    use super::*;
+
+    #[test]
+    fn controller_readiness_does_not_authorize_runless_terminal_failure() {
+        let readiness = || RuntimeDriverError::ControllerReadinessUnavailable {
+            reason: crate::traits::ControllerReadinessFailure::Busy,
+        };
+        for projected in [
+            RunlessTerminalConvergenceError::from_driver("fixture", readiness()),
+            RunlessTerminalConvergenceError::from_generated_authority("fixture", readiness()),
+        ] {
+            assert!(matches!(
+                projected,
+                RunlessTerminalConvergenceError::Retryable {
+                    error: RuntimeDriverError::ControllerReadinessUnavailable {
+                        reason: crate::traits::ControllerReadinessFailure::Busy
+                    },
+                    ..
+                }
+            ));
+        }
+        for projected in [
+            RunlessTerminalConvergenceError::from_driver(
+                "fixture",
+                RuntimeDriverError::ControllerInUse,
+            ),
+            RunlessTerminalConvergenceError::from_generated_authority(
+                "fixture",
+                RuntimeDriverError::ControllerInUse,
+            ),
+        ] {
+            assert!(matches!(
+                projected,
+                RunlessTerminalConvergenceError::Retryable {
+                    error: RuntimeDriverError::ControllerInUse,
+                    ..
+                }
+            ));
+        }
     }
 }

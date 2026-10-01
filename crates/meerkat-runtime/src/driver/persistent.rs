@@ -651,7 +651,9 @@ impl PersistentRuntimeDriver {
         input: &Input,
         replay_policy: crate::accept::InputReplayPolicy,
     ) -> Result<Option<(InputId, InputStateSeed)>, RuntimeDriverError> {
-        let Some(key) = input.header().idempotency_key.as_ref() else {
+        self.inner.authenticate_work(input)?;
+        let qualified_key = crate::input_authority::qualified_idempotency_key(input)?;
+        let Some(key) = qualified_key.as_ref() else {
             return Ok(None);
         };
         let observation = self
@@ -693,6 +695,7 @@ impl PersistentRuntimeDriver {
                 ),
             });
         }
+        crate::input_authority::verify_retained_replay(&stored.state, input)?;
         crate::input_state::PromptReplayIdentity::verify_replay(
             &stored.state,
             input,
@@ -1772,6 +1775,11 @@ impl PersistentRuntimeDriver {
         input: Input,
         resolved: crate::accept::ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
+        if input.header().authority_association.is_some() {
+            return Err(crate::meerkat_machine::credential_custody::unavailable(
+                crate::traits::ControllerReadinessFailure::UnsupportedScope,
+            ));
+        }
         self.require_durability_ready()?;
         self.inner.ensure_contract_session_authority()?;
         if let Some((existing_id, existing_seed)) = self
@@ -3166,6 +3174,8 @@ mod tests {
         Input::Prompt(crate::input::PromptInput {
             injected_context: Vec::new(),
             header: crate::input::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: crate::input::InputOrigin::Operator,

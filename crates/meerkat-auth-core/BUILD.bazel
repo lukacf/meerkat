@@ -779,6 +779,65 @@ rust_test(
 )
 
 rust_test(
+    name = "token_lifecycle_serialization_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "token_lifecycle_serialization",
+    crate_root = "tests/token_lifecycle_serialization.rs",
+    crate_features = [
+        "file-lock",
+        "gcp-auth",
+        "keyring",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "tests/fixtures/oauth-browser-pre-connector.json",
+        "tests/fixtures/test_sa_key.pem",
+    ],
+    srcs = [
+        "tests/token_lifecycle_serialization.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_BIN_NAME": "token_lifecycle_serialization",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-auth-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "token_store_contract_test",
     aliases = aliases(
         package_name = "crates/meerkat-auth-core",
@@ -851,6 +910,7 @@ test_suite(
         ":refresh_coordinator_crossproc_test",
         ":refresh_coordinator_inproc_test",
         ":token_lifecycle_clear_test",
+        ":token_lifecycle_serialization_test",
         ":token_store_contract_test",
     ],
 )

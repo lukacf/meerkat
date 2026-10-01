@@ -103,7 +103,9 @@ pub enum SessionEffect {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
 pub enum ToolDispatchTerminalErrorKind {
     NotFound,
     Unavailable,
@@ -111,6 +113,9 @@ pub enum ToolDispatchTerminalErrorKind {
     ExecutionFailed,
     Timeout,
     AccessDenied,
+    AuthorizationRefused,
+    OperationObservationUnavailable,
+    OperationAuthorizationUnavailable,
     PolicyDenied,
     PolicyIndeterminate,
     Other,
@@ -128,12 +133,41 @@ impl From<&ToolError> for ToolDispatchTerminalErrorKind {
             }
             ToolError::Timeout { .. } | ToolError::InactivityTimeout { .. } => Self::Timeout,
             ToolError::AccessDenied { .. } => Self::AccessDenied,
+            ToolError::AuthorizationRefused { .. } => Self::AuthorizationRefused,
+            ToolError::OperationObservationUnavailable => Self::OperationObservationUnavailable,
+            ToolError::OperationAuthorizationUnavailable => Self::OperationAuthorizationUnavailable,
             ToolError::PolicyDenied { .. } => Self::PolicyDenied,
             ToolError::PolicyIndeterminate { .. } => Self::PolicyIndeterminate,
             ToolError::Other(_) => Self::Other,
             ToolError::CallbackPending { .. } => Self::CallbackPending,
+            ToolError::WithSettlementFailures { .. } => Self::from(error.primary_error()),
         }
     }
+}
+
+/// Which configured admission reported a settlement failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ToolDispatchAdmissionSource {
+    ConfiguredGate,
+    ContextGate,
+    AuthorizationAudit,
+}
+
+/// A diagnostic that accompanies, and never replaces, the physical result.
+///
+/// This contains no error text, tool arguments, credentials or execution
+/// authority. The admission owner retains any exact internal failure and the
+/// selected physical outcome until its generated settlement succeeds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ToolDispatchSettlementFailure {
+    pub admission_source: ToolDispatchAdmissionSource,
+    pub effect_kind: crate::LiveBridgeEffectKind,
+    pub physical_outcome: crate::LiveBridgeEffectOutcome,
+    pub failure_kind: ToolDispatchTerminalErrorKind,
 }
 
 /// The canonical, typed terminal cause for a runtime/tool-dispatch failure.
@@ -258,6 +292,18 @@ impl ToolDispatchOutcome {
     }
 
     #[must_use]
+    pub fn settlement_failures(&self) -> &[ToolDispatchSettlementFailure] {
+        &self.result.settlement_failures
+    }
+
+    pub(crate) fn extend_settlement_failures(
+        &mut self,
+        failures: impl IntoIterator<Item = ToolDispatchSettlementFailure>,
+    ) {
+        self.result.settlement_failures.extend(failures);
+    }
+
+    #[must_use]
     pub fn is_runtime_tool_timeout(&self) -> bool {
         self.terminal_cause
             .as_ref()
@@ -281,6 +327,7 @@ pub fn terminal_tool_outcome_for_error(
     tool_use_id: impl Into<String>,
     error: ToolError,
 ) -> ToolDispatchOutcome {
+    let (error, settlement_failures) = error.into_primary_and_settlement_failures();
     let terminal_cause = ToolDispatchTerminalCause::RuntimeToolError { error };
     // The transcript text is derived purely from the typed terminal cause, so
     // the cause is the sole source of truth and the transcript can never drift
@@ -292,6 +339,7 @@ pub fn terminal_tool_outcome_for_error(
         true,
     ));
     outcome.terminal_cause = Some(terminal_cause);
+    outcome.result.settlement_failures = settlement_failures;
     outcome
 }
 

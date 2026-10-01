@@ -44,27 +44,55 @@ fn login_lifecycle_locks() -> &'static LoginLifecycleLockMap {
 /// consume, and compensating rollback for one auth binding.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct AuthLoginLifecycleGuard {
-    _lease_key: LeaseKey,
+    lease_key: LeaseKey,
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn acquire_auth_login_lifecycle_guard(lease_key: &LeaseKey) -> AuthLoginLifecycleGuard {
-    let lock = {
-        let mut locks = login_lifecycle_locks().lock();
-        locks.retain(|_, lock| lock.strong_count() > 0);
-        if let Some(lock) = locks.get(lease_key).and_then(Weak::upgrade) {
-            lock
-        } else {
-            let lock = Arc::new(tokio::sync::Mutex::new(()));
-            locks.insert(lease_key.clone(), Arc::downgrade(&lock));
-            lock
-        }
-    };
-    AuthLoginLifecycleGuard {
-        _lease_key: lease_key.clone(),
-        _guard: lock.lock_owned().await,
+impl AuthLoginLifecycleGuard {
+    /// The normalized lease actually excluded by this guard. The guard cannot
+    /// be reconstructed from this data and is not transferable to another key.
+    pub fn lease_key(&self) -> &LeaseKey {
+        &self.lease_key
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn auth_login_lifecycle_lock(lease_key: &LeaseKey) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = login_lifecycle_locks().lock();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(lease_key).and_then(Weak::upgrade) {
+        lock
+    } else {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(lease_key.clone(), Arc::downgrade(&lock));
+        lock
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn acquire_auth_login_lifecycle_guard(lease_key: &LeaseKey) -> AuthLoginLifecycleGuard {
+    AuthLoginLifecycleGuard {
+        lease_key: lease_key.clone(),
+        _guard: auth_login_lifecycle_lock(lease_key).lock_owned().await,
+    }
+}
+
+/// Attempt the same process-local lease ownership without waiting for its
+/// current owner. Uses the existing short registry lock, then try-locks the
+/// exact lease. `None` means busy, not denied, absent or safe to use unguarded.
+/// This performs no credential I/O, readiness check, or lifecycle mutation.
+/// Callers already holding native custody must not fall back to awaiting the
+/// lease while retaining those locks.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn try_acquire_auth_login_lifecycle_guard(
+    lease_key: &LeaseKey,
+) -> Option<AuthLoginLifecycleGuard> {
+    let guard = auth_login_lifecycle_lock(lease_key).try_lock_owned().ok()?;
+    Some(AuthLoginLifecycleGuard {
+        lease_key: lease_key.clone(),
+        _guard: guard,
+    })
 }
 
 pub fn persisted_token_expires_at_epoch_secs(tokens: &PersistedTokens) -> u64 {
@@ -282,6 +310,8 @@ pub fn publish_token_lifecycle_released_for_identity(
 
 #[derive(Debug, Error)]
 pub enum TokenLifecycleClearError {
+    #[error("credential mutation guard belongs to another lease")]
+    LeaseGuardMismatch,
     #[error("AuthMachine lifecycle release failed: {0}")]
     AuthMachineRelease(DslTransitionError),
     #[error("TokenStore clear failed: {0}")]
@@ -297,51 +327,26 @@ pub enum TokenLifecycleClearError {
     },
 }
 
-/// Clear persisted token material and release the AuthMachine lifecycle.
-///
-/// The lease release is STAGED before the durable clear commits, so no lease
-/// operation ever runs after the durable credential is gone — the
-/// "resurrected live lease over a cleared credential" interleaving is
-/// unrepresentable:
-///
-/// - If staging the release fails (a release-observer fault — which aborts
-///   the release before its authoritative transition — or a machine
-///   rejection), the typed
-///   [`TokenLifecycleClearError::AuthMachineRelease`] fault propagates and
-///   the durable clear NEVER runs. Durable truth retains the credential and
-///   the lease projection still matches it; the clear is retryable.
-/// - If the durable clear commit fails, the staged release is rolled back
-///   from the pre-stage snapshot (legal: the durable record still holds the
-///   credential, so lease truth re-aligns with durable truth) and the typed
-///   [`TokenLifecycleClearError::TokenStoreClear`] fault propagates.
-/// - Once the durable clear has committed, the operation is complete: the
-///   lease was already released at staging, and nothing fallible follows the
-///   commit.
-pub async fn clear_tokens_and_publish_lifecycle_released(
-    store: &dyn TokenStore,
-    handle: &GeneratedAuthLeaseHandle,
-    auth_binding: &AuthBindingRef,
-) -> Result<(), TokenLifecycleClearError> {
-    clear_tokens_and_publish_lifecycle_released_for_identity(
-        store,
-        handle,
-        &AuthCredentialIdentity::from_auth_binding(auth_binding),
-    )
-    .await
-}
-
-pub async fn clear_tokens_and_publish_lifecycle_released_for_identity(
+// Coordinator-private mutation. Its caller owns task completion and the
+// normalized lease guard through physical clear and compensating restoration.
+#[cfg(not(target_arch = "wasm32"))]
+async fn clear_tokens_and_publish_lifecycle_released_under_guard(
     store: &dyn TokenStore,
     handle: &GeneratedAuthLeaseHandle,
     credential_identity: &AuthCredentialIdentity,
+    guard: &AuthLoginLifecycleGuard,
 ) -> Result<(), TokenLifecycleClearError> {
+    if guard.lease_key() != &LeaseKey::from_credential_identity(credential_identity) {
+        return Err(TokenLifecycleClearError::LeaseGuardMismatch);
+    }
     let key = TokenKey::from_credential_identity(credential_identity);
     let lease_key = LeaseKey::from_credential_identity(credential_identity);
 
     // Stage: release the lease BEFORE the durable commit, capturing the
     // pre-stage snapshot for rollback if the commit fails.
     let staged = handle.capture_auth_lifecycle_restore_snapshot(&lease_key);
-    publish_token_lifecycle_released_for_identity(handle, credential_identity)
+    handle
+        .release_lease_with_guard(&lease_key, guard)
         .map_err(TokenLifecycleClearError::AuthMachineRelease)?;
 
     // Commit: one durable mutation destroys the credential and its lifecycle
@@ -360,6 +365,14 @@ pub async fn clear_tokens_and_publish_lifecycle_released_for_identity(
     Ok(())
 }
 
+/// The former borrowed clear helpers are deliberately unavailable: dropping
+/// a borrowed mutation future could abandon its compensation.
+/// ```compile_fail
+/// use meerkat_core::clear_tokens_and_publish_lifecycle_released;
+/// ```
+/// ```compile_fail
+/// use meerkat_core::clear_tokens_and_publish_lifecycle_released_for_identity;
+/// ```
 /// Clear one persisted credential inside the backend-derived mutation
 /// authority shared with refresh and login.
 ///
@@ -367,6 +380,11 @@ pub async fn clear_tokens_and_publish_lifecycle_released_for_identity(
 /// the coordinator transaction. A concurrent refresh can therefore run either
 /// before this operation or after it observes the cleared store, but can never
 /// commit stale bytes after a successful logout/profile deletion.
+/// A release veto precedes durable clear. Failed clear restores the captured
+/// predecessor; restoration failure remains combined with the clear failure.
+/// Cancellation of this caller does not cancel the coordinator-owned operation.
+/// Status readers share the lease guard and cannot restore the predecessor
+/// while deletion or compensation is in progress.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn clear_tokens_and_publish_lifecycle_released_coordinated(
     persistence: ProviderAuthPersistence,
@@ -396,24 +414,27 @@ pub async fn clear_tokens_and_publish_lifecycle_released_coordinated_for_identit
             Box::new(move || {
                 Box::pin(async move {
                     let lease_key = LeaseKey::from_credential_identity(&credential_identity);
-                    let _guard = acquire_auth_login_lifecycle_guard(&lease_key).await;
+                    let guard = acquire_auth_login_lifecycle_guard(&lease_key).await;
                     rehydrate_durable_predecessor_for_mutation_for_identity(
                         store.as_ref(),
                         &handle,
                         &credential_identity,
                         Utc::now(),
+                        &guard,
                     )
                     .await
                     .map_err(|error| {
                         CredentialMutationError::AuthLifecycle(error.to_string())
                     })?;
-                    clear_tokens_and_publish_lifecycle_released_for_identity(
+                    clear_tokens_and_publish_lifecycle_released_under_guard(
                         store.as_ref(),
                         &handle,
                         &credential_identity,
+                        &guard,
                     )
                     .await
                     .map_err(|error| match error {
+                        TokenLifecycleClearError::LeaseGuardMismatch => CredentialMutationError::AuthLifecycle("credential mutation guard belongs to another lease".into()),
                         TokenLifecycleClearError::TokenStoreClear(error) => {
                             CredentialMutationError::TokenStore(error.to_string())
                         }
@@ -481,6 +502,8 @@ pub struct PublishedAuthStatus<'a> {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Error)]
 pub enum AuthStatusRehydrateError {
+    #[error("credential lifecycle guard belongs to another lease")]
+    LeaseGuardMismatch,
     #[error("token store error: {0}")]
     TokenStore(#[from] TokenStoreError),
     #[error("AuthMachine lifecycle acquire failed: {0}")]
@@ -541,6 +564,55 @@ pub async fn rehydrate_marked_tokens_for_status_for_identity(
     expected_mode: PersistedAuthMode,
     now: DateTime<Utc>,
 ) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
+    let lease_key = LeaseKey::from_credential_identity(credential_identity);
+    let guard = acquire_auth_login_lifecycle_guard(&lease_key).await;
+    rehydrate_marked_tokens_for_status_for_identity_with_guard(
+        token_store,
+        auth_lease,
+        credential_identity,
+        expected_mode,
+        now,
+        &guard,
+    )
+    .await
+}
+
+/// Rehydrate while the caller already owns this exact normalized lease.
+/// Does not reacquire the mutex. Rejects the wrong guard before loading bytes
+/// or touching AuthMachine. The caller retains the guard across the mutation.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn rehydrate_marked_tokens_for_status_with_guard(
+    token_store: &dyn TokenStore,
+    auth_lease: &GeneratedAuthLeaseHandle,
+    auth_binding: &AuthBindingRef,
+    expected_mode: PersistedAuthMode,
+    now: DateTime<Utc>,
+    guard: &AuthLoginLifecycleGuard,
+) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
+    rehydrate_marked_tokens_for_status_for_identity_with_guard(
+        token_store,
+        auth_lease,
+        &AuthCredentialIdentity::from_auth_binding(auth_binding),
+        expected_mode,
+        now,
+        guard,
+    )
+    .await
+}
+
+/// Identity form of the already-owned status operation.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn rehydrate_marked_tokens_for_status_for_identity_with_guard(
+    token_store: &dyn TokenStore,
+    auth_lease: &GeneratedAuthLeaseHandle,
+    credential_identity: &AuthCredentialIdentity,
+    expected_mode: PersistedAuthMode,
+    now: DateTime<Utc>,
+    guard: &AuthLoginLifecycleGuard,
+) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
+    if guard.lease_key() != &LeaseKey::from_credential_identity(credential_identity) {
+        return Err(AuthStatusRehydrateError::LeaseGuardMismatch);
+    }
     let key = TokenKey::from_credential_identity(credential_identity);
     let Some(tokens) = token_store.load(&key).await? else {
         // Durable truth holds no credential for this binding. The in-process
@@ -557,7 +629,7 @@ pub async fn rehydrate_marked_tokens_for_status_for_identity(
                 .is_some_and(|phase| phase != AuthLeasePhase::Released);
         if lease_is_live {
             auth_lease
-                .release_lease(&lease_key)
+                .release_lease_with_guard(&lease_key, guard)
                 .map_err(AuthStatusRehydrateError::LifecycleRestore)?;
         }
         return Ok(None);
@@ -565,8 +637,19 @@ pub async fn rehydrate_marked_tokens_for_status_for_identity(
     if tokens.auth_mode != expected_mode {
         return Ok(None);
     }
-    let restored =
-        restore_marked_token_lifecycle_for_identity(auth_lease, credential_identity, &tokens)?;
+    // A matching durable publication does not supersede a live Refreshing or
+    // ReauthRequired phase. Nonmatching restoration keeps its existing rules.
+    let lease_key = LeaseKey::from_credential_identity(credential_identity);
+    let restored = if durable_marker::marker_relation_for_tokens_and_snapshot(
+        &tokens,
+        &auth_lease.snapshot(&lease_key),
+        &key,
+    ) == durable_marker::AuthLeaseDurableMarkerRelation::Matches
+    {
+        Some(tokens)
+    } else {
+        restore_marked_token_lifecycle_for_identity(auth_lease, credential_identity, &tokens)?
+    };
     if restored.is_some() {
         let lease_key = LeaseKey::from_credential_identity(credential_identity);
         auth_lease
@@ -588,7 +671,9 @@ pub async fn rehydrate_marked_tokens_for_status_for_identity(
 /// capture rollback state from B's durable lifecycle marker, not from the
 /// caller's stale pre-lock projection of A. Missing, structurally malformed,
 /// or invalidly-marked bytes are dead credentials: they release any stale
-/// local lease before the explicit replacement/clear mutation proceeds. This
+/// local lease before the explicit replacement/clear mutation proceeds.
+/// Callers must retain the supplied exact lease guard through the complete
+/// write or clear and compensation, not only this predecessor read. This
 /// recovery is intentionally mutation-only; read/status paths continue to
 /// surface malformed durable storage as a fault.
 #[cfg(not(target_arch = "wasm32"))]
@@ -597,12 +682,14 @@ pub async fn rehydrate_durable_predecessor_for_mutation(
     auth_lease: &GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     now: DateTime<Utc>,
+    guard: &AuthLoginLifecycleGuard,
 ) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
     rehydrate_durable_predecessor_for_mutation_for_identity(
         token_store,
         auth_lease,
         &AuthCredentialIdentity::from_auth_binding(auth_binding),
         now,
+        guard,
     )
     .await
 }
@@ -613,7 +700,11 @@ pub async fn rehydrate_durable_predecessor_for_mutation_for_identity(
     auth_lease: &GeneratedAuthLeaseHandle,
     credential_identity: &AuthCredentialIdentity,
     now: DateTime<Utc>,
+    guard: &AuthLoginLifecycleGuard,
 ) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
+    if guard.lease_key() != &LeaseKey::from_credential_identity(credential_identity) {
+        return Err(AuthStatusRehydrateError::LeaseGuardMismatch);
+    }
     let key = TokenKey::from_credential_identity(credential_identity);
     let tokens = match token_store.load(&key).await {
         Ok(tokens) => tokens,
@@ -643,7 +734,7 @@ pub async fn rehydrate_durable_predecessor_for_mutation_for_identity(
                 .is_some_and(|phase| phase != AuthLeasePhase::Released)
         {
             auth_lease
-                .release_lease(&lease_key)
+                .release_lease_with_guard(&lease_key, guard)
                 .map_err(AuthStatusRehydrateError::LifecycleRestore)?;
         }
     }
@@ -686,6 +777,68 @@ mod tests {
 
     use crate::auth::PersistedAuthMode;
     use crate::handles::AuthLeasePhase;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn try_lifecycle_guard_shares_async_owner_and_releases_to_waiter() {
+        let key = LeaseKey::new(
+            crate::RealmId::parse("try-guard-test").unwrap(),
+            crate::BindingId::parse("shared-async").unwrap(),
+            None,
+        );
+        let held = acquire_auth_login_lifecycle_guard(&key).await;
+        assert!(
+            try_acquire_auth_login_lifecycle_guard(&key).is_none(),
+            "a try path cannot create a second owner while async acquisition holds the lease"
+        );
+        drop(held);
+        let held = try_acquire_auth_login_lifecycle_guard(&key).expect("released lease");
+        assert_eq!(held.lease_key(), &key);
+        let mut waiting = Box::pin(acquire_auth_login_lifecycle_guard(&key));
+        let pending = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(waiting.as_mut(), cx).is_pending())
+        })
+        .await;
+        assert!(
+            pending,
+            "async acquisition must wait behind the same actual try-owned lease"
+        );
+        assert!(try_acquire_auth_login_lifecycle_guard(&key).is_none());
+        drop(held);
+        let acquired = tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+            .await
+            .expect("waiter completes after actual release");
+        assert_eq!(acquired.lease_key(), &key);
+        drop(acquired);
+        assert!(
+            try_acquire_auth_login_lifecycle_guard(&key).is_some(),
+            "a failed attempt must leave no retained lease ownership"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn try_lifecycle_guard_is_available_without_runtime_and_keeps_identities_separate() {
+        let realm = crate::RealmId::parse("try-guard-test").unwrap();
+        let account = AuthCredentialIdentity::Account(crate::CredentialAccountRef {
+            realm: realm.clone(),
+            account: crate::CredentialAccountId::parse("same-text").unwrap(),
+        });
+        let account_key = LeaseKey::from_credential_identity(&account);
+        let binding_key = LeaseKey::new(realm, crate::BindingId::parse("same-text").unwrap(), None);
+        let account_guard = try_acquire_auth_login_lifecycle_guard(&account_key).expect("account");
+        assert!(
+            try_acquire_auth_login_lifecycle_guard(&LeaseKey::from_credential_identity(&account))
+                .is_none()
+        );
+        let binding_guard =
+            try_acquire_auth_login_lifecycle_guard(&binding_key).expect("distinct binding");
+        assert_eq!(account_guard.lease_key(), &account_key);
+        assert_eq!(binding_guard.lease_key(), &binding_key);
+        drop(account_guard);
+        assert!(try_acquire_auth_login_lifecycle_guard(&account_key).is_some());
+        assert!(try_acquire_auth_login_lifecycle_guard(&binding_key).is_none());
+    }
 
     fn oauth_tokens_with_metadata(metadata: serde_json::Value) -> PersistedTokens {
         PersistedTokens {

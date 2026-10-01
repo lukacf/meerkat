@@ -1655,6 +1655,12 @@ pub enum LiveAdapterHostError {
     AdapterError(#[from] LiveAdapterError),
     #[error("projection sink error: {0}")]
     ProjectionError(#[from] LiveProjectionError),
+    /// Required observation infrastructure failed during dispatch. This is
+    /// not provider tool feedback; retain any prior settlement diagnostics.
+    #[error("operation observation unavailable")]
+    OperationObservationUnavailable {
+        settlement_failures: Vec<meerkat_core::ToolDispatchSettlementFailure>,
+    },
     #[error("a playback terminal is already pending for this output")]
     PlaybackTerminalAlreadyPending,
     #[error("playback terminal did not settle: {0}")]
@@ -1689,6 +1695,7 @@ impl LiveAdapterHostError {
             Self::UnsupportedCommand(_) => "unsupported_command",
             Self::AdapterError(_) => "adapter_error",
             Self::ProjectionError(_) => "projection_error",
+            Self::OperationObservationUnavailable { .. } => "operation_observation_unavailable",
             Self::PlaybackTerminalAlreadyPending => "playback_terminal_already_pending",
             Self::PlaybackTerminalSettlementFailed(_) => "playback_terminal_settlement_failed",
             Self::PlaybackTerminalAcceptedButReceiptFailed(_) => {
@@ -1806,6 +1813,31 @@ impl LiveToolDispatchError {
         let code = err.code();
         let message = err.to_string();
         match err {
+            SessionError::Agent(meerkat_core::AgentError::Tool { error })
+                if matches!(
+                    error.primary_error(),
+                    ToolError::OperationObservationUnavailable
+                        | ToolError::OperationAuthorizationUnavailable
+                ) =>
+            {
+                Self::Tool(error)
+            }
+            SessionError::Agent(meerkat_core::AgentError::Llm {
+                reason: meerkat_core::error::LlmFailureReason::ProviderError(ref provider),
+                ..
+            }) if provider.kind
+                == meerkat_core::error::LlmProviderErrorKind::OperationObservationUnavailable =>
+            {
+                Self::Tool(ToolError::OperationObservationUnavailable)
+            }
+            SessionError::Agent(meerkat_core::AgentError::Llm {
+                reason: meerkat_core::error::LlmFailureReason::ProviderError(ref provider),
+                ..
+            }) if provider.kind
+                == meerkat_core::error::LlmProviderErrorKind::OperationAuthorizationUnavailable =>
+            {
+                Self::Tool(ToolError::OperationAuthorizationUnavailable)
+            }
             SessionError::NotFound { .. } => Self::SessionNotFound(session_id.clone()),
             SessionError::Unsupported(reason) => Self::Rejected(reason),
             SessionError::Busy { id } => Self::SessionBusy(id),
@@ -3195,6 +3227,17 @@ impl LiveAdapterHost {
                 let live_result =
                     tool_result_from_dispatch(provider_call_id.clone(), outcome.result);
                 self.submit_tool_result(channel_id, live_result).await?;
+            }
+            Err(LiveToolDispatchError::Tool(error))
+                if matches!(
+                    error.primary_error(),
+                    ToolError::OperationObservationUnavailable
+                ) =>
+            {
+                let (_, settlement_failures) = error.into_primary_and_settlement_failures();
+                return Err(LiveAdapterHostError::OperationObservationUnavailable {
+                    settlement_failures,
+                });
             }
             Err(err) => {
                 self.submit_tool_error(channel_id, provider_call_id.clone(), err.to_string())
@@ -5810,7 +5853,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_call_dispatch_error_submits_tool_error_to_adapter() {
+    async fn tool_call_dispatch_error_submits_typed_result_to_adapter() {
         let sink = Arc::new(RecordingProjectionSink::default());
         let dispatcher = Arc::new(FailingDispatcher);
         let adapter = Arc::new(RecordingAdapter::default());
@@ -5832,9 +5875,18 @@ mod tests {
             arguments: serde_json::json!({}),
         };
         host.apply_observation(&ch, &obs).await.unwrap();
-        let errors = adapter.submitted_errors.lock().unwrap();
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].0, "call_err");
+        assert!(adapter.submitted_errors.lock().unwrap().is_empty());
+        let results = adapter.submitted_results.lock().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].call_id.0, "call_err");
+        assert!(results[0].is_error);
+        let text = meerkat_core::types::text_content(&results[0].content);
+        let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({"error": "execution_failed", "message": "Tool execution failed: bang"})
+        );
+        assert!(sink.terminal_errors.lock().unwrap().is_empty());
     }
 
     // -- K61: tool-call dispatch timeout --
@@ -7275,5 +7327,596 @@ mod tests {
             no_item.require_delta_identity(),
             Err(LiveTranscriptIdentityError::MissingItemId)
         );
+    }
+
+    fn observation_failure_companions() -> Vec<meerkat_core::ToolDispatchSettlementFailure> {
+        let first = meerkat_core::ToolDispatchSettlementFailure {
+            admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
+            effect_kind: meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Committed,
+            failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Unavailable,
+        };
+        vec![
+            first.clone(),
+            meerkat_core::ToolDispatchSettlementFailure {
+                admission_source: meerkat_core::ToolDispatchAdmissionSource::AuthorizationAudit,
+                failure_kind:
+                    meerkat_core::ToolDispatchTerminalErrorKind::OperationObservationUnavailable,
+                ..first
+            },
+        ]
+    }
+
+    #[test]
+    fn observation_infrastructure_session_mapping_retains_tool_cause() {
+        let sid = test_session_id();
+        let companions = observation_failure_companions();
+        let original =
+            ToolError::OperationObservationUnavailable.with_settlement_failures(companions.clone());
+        let mapped = LiveToolDispatchError::from_session_error(
+            &sid,
+            meerkat_core::SessionError::Agent(meerkat_core::AgentError::Tool {
+                error: original.clone(),
+            }),
+        );
+        let LiveToolDispatchError::Tool(error) = mapped else {
+            panic!("observation infrastructure must keep its typed tool cause");
+        };
+        assert_eq!(error, original);
+        assert_eq!(
+            error.settlement_failures().cloned().collect::<Vec<_>>(),
+            companions
+        );
+        let mapped = LiveToolDispatchError::from_session_error(
+            &sid,
+            meerkat_core::SessionError::Agent(
+                meerkat_core::AgentError::operation_observation_unavailable(),
+            ),
+        );
+        assert!(matches!(
+            mapped,
+            LiveToolDispatchError::Tool(ToolError::OperationObservationUnavailable)
+        ));
+        // Unrelated session errors keep their existing classification.
+        let ordinary = LiveToolDispatchError::from_session_error(
+            &sid,
+            meerkat_core::SessionError::Agent(meerkat_core::AgentError::Tool {
+                error: ToolError::execution_failed("ordinary tool error"),
+            }),
+        );
+        assert!(matches!(
+            ordinary,
+            LiveToolDispatchError::Session {
+                code: "AGENT_ERROR",
+                ..
+            }
+        ));
+    }
+
+    struct ObservationUnavailableDispatcher {
+        via_session: bool,
+        calls: StdMutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl LiveToolDispatcher for ObservationUnavailableDispatcher {
+        async fn dispatch_live_tool_call(
+            &self,
+            session_id: &SessionId,
+            call: ToolCall,
+        ) -> Result<ToolDispatchOutcome, LiveToolDispatchError> {
+            self.calls.lock().unwrap().push(call.id);
+            let error = ToolError::OperationObservationUnavailable
+                .with_settlement_failures(observation_failure_companions());
+            Err(if self.via_session {
+                LiveToolDispatchError::from_session_error(
+                    session_id,
+                    meerkat_core::SessionError::Agent(meerkat_core::AgentError::Tool { error }),
+                )
+            } else {
+                LiveToolDispatchError::Tool(error)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_infrastructure_live_dispatch_never_submits_feedback() {
+        for via_session in [false, true] {
+            let sink = Arc::new(RecordingProjectionSink::default());
+            let dispatcher = Arc::new(ObservationUnavailableDispatcher {
+                via_session,
+                calls: StdMutex::new(Vec::new()),
+            });
+            let adapter = Arc::new(RecordingAdapter::default());
+            let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
+                .with_live_tool_dispatcher(Arc::clone(&dispatcher) as _);
+            let ch = host
+                .open_channel_with_generated_test_machine_authority(test_session_id())
+                .await
+                .unwrap();
+            host.attach_adapter(&ch, Arc::clone(&adapter) as _)
+                .await
+                .unwrap();
+            host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
+                .await
+                .unwrap();
+            let outcome = host
+                .apply_observation(
+                    &ch,
+                    &LiveAdapterObservation::ToolCallRequested {
+                        provider_call_id: ToolCallId::new("audit-unavailable"),
+                        tool_name: ToolName::new("calculator"),
+                        arguments: serde_json::json!({}),
+                    },
+                )
+                .await;
+            assert_eq!(
+                *dispatcher.calls.lock().unwrap(),
+                vec!["audit-unavailable".to_string()]
+            );
+            assert!(
+                adapter.submitted_errors.lock().unwrap().is_empty(),
+                "no model tool feedback"
+            );
+            assert!(
+                adapter.submitted_results.lock().unwrap().is_empty(),
+                "no synthetic result"
+            );
+            let error =
+                outcome.expect_err("infrastructure failure must leave the tool feedback path");
+            assert_eq!(error.reason_code(), "operation_observation_unavailable");
+            assert_eq!(error.to_string(), "operation observation unavailable");
+            assert!(sink.terminal_errors.lock().unwrap().is_empty());
+            assert!(sink.interrupts.lock().unwrap().is_empty());
+
+            // The host itself does not invent channel/run terminality. Its
+            // caller owns handling of the returned infrastructure failure.
+            host.set_live_tool_dispatcher(Arc::new(RecordingDispatcher::default()));
+            let healthy = host
+                .apply_observation(
+                    &ch,
+                    &LiveAdapterObservation::ToolCallRequested {
+                        provider_call_id: ToolCallId::new("healthy-independent-call"),
+                        tool_name: ToolName::new("calculator"),
+                        arguments: serde_json::json!({}),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                healthy,
+                ObservationOutcome::ToolCallDispatched { .. }
+            ));
+            assert_eq!(adapter.submitted_results.lock().unwrap().len(), 1);
+            assert!(adapter.submitted_errors.lock().unwrap().is_empty());
+            let LiveAdapterHostError::OperationObservationUnavailable {
+                settlement_failures,
+            } = error
+            else {
+                panic!("the host must retain the typed infrastructure class");
+            };
+            assert_eq!(settlement_failures, observation_failure_companions());
+        }
+    }
+
+    struct CustomTypedFeedbackDispatcher {
+        session_id: SessionId,
+        failure: ToolError,
+        calls: StdMutex<Vec<(String, String)>>,
+        successful_calls: StdMutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl LiveToolDispatcher for CustomTypedFeedbackDispatcher {
+        async fn dispatch_live_tool_call(
+            &self,
+            session_id: &SessionId,
+            call: ToolCall,
+        ) -> Result<ToolDispatchOutcome, LiveToolDispatchError> {
+            assert_eq!(session_id, &self.session_id);
+            assert_eq!(call.args, serde_json::json!({"request": call.id}));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((call.id.clone(), call.name.clone()));
+            match call.name.as_str() {
+                "healthy" => {
+                    self.successful_calls.lock().unwrap().push(call.id.clone());
+                    Ok(ToolDispatchOutcome::from(ToolResult::new(
+                        call.id.clone(),
+                        format!("completed:{}", call.id),
+                        false,
+                    )))
+                }
+                "affected" => Err(LiveToolDispatchError::Tool(self.failure.clone())),
+                _ => panic!("unexpected test tool"),
+            }
+        }
+    }
+
+    async fn assert_custom_typed_feedback(
+        primary: ToolError,
+        expected_code: &str,
+        expected_message: &str,
+    ) {
+        let session_id = test_session_id();
+        let sink = Arc::new(RecordingProjectionSink::default());
+        let companions = observation_failure_companions();
+        let dispatcher = Arc::new(CustomTypedFeedbackDispatcher {
+            session_id: session_id.clone(),
+            failure: primary.with_settlement_failures(companions.clone()),
+            calls: StdMutex::new(Vec::new()),
+            successful_calls: StdMutex::new(Vec::new()),
+        });
+        let adapter = Arc::new(RecordingAdapter::default());
+        let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
+            .with_live_tool_dispatcher(Arc::clone(&dispatcher) as _);
+        let channel = host
+            .open_channel_with_generated_test_machine_authority(session_id)
+            .await
+            .unwrap();
+        host.attach_adapter(&channel, Arc::clone(&adapter) as _)
+            .await
+            .unwrap();
+        host.commit_status_with_generated_test_machine_authority(
+            &channel,
+            LiveAdapterStatus::Ready,
+        )
+        .await
+        .unwrap();
+
+        // These are adjacent calls on one actual host channel, not a claim of
+        // atomic batch execution. Both healthy bodies run around the failure.
+        let expected_calls = [
+            ("healthy-before", "healthy"),
+            ("affected-call", "affected"),
+            ("healthy-after", "healthy"),
+        ];
+        for (call_id, tool_name) in expected_calls {
+            let outcome = host
+                .apply_observation(
+                    &channel,
+                    &LiveAdapterObservation::ToolCallRequested {
+                        provider_call_id: ToolCallId::new(call_id),
+                        tool_name: ToolName::new(tool_name),
+                        arguments: serde_json::json!({"request": call_id}),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                outcome,
+                ObservationOutcome::ToolCallDispatched {
+                    provider_call_id,
+                    tool_name: actual_tool,
+                } if provider_call_id == call_id && actual_tool == tool_name
+            ));
+        }
+        assert_eq!(
+            *dispatcher.calls.lock().unwrap(),
+            expected_calls.map(|(id, name)| (id.to_owned(), name.to_owned()))
+        );
+        assert_eq!(
+            *dispatcher.successful_calls.lock().unwrap(),
+            ["healthy-before".to_owned(), "healthy-after".to_owned()]
+        );
+        assert!(sink.terminal_errors.lock().unwrap().is_empty());
+        assert!(sink.interrupts.lock().unwrap().is_empty());
+
+        // Inspect actual adapter submissions, not a duplicated error mapper.
+        // A secondary audit failure must not override the primary local class.
+        assert!(adapter.submitted_errors.lock().unwrap().is_empty());
+        let submitted = adapter.submitted_results.lock().unwrap();
+        assert_eq!(submitted.len(), 3);
+        for (index, call_id) in [(0, "healthy-before"), (2, "healthy-after")] {
+            assert_eq!(submitted[index].call_id.0, call_id);
+            assert!(!submitted[index].is_error);
+            assert_eq!(
+                submitted[index].content,
+                meerkat_core::types::ContentBlock::text_vec(format!("completed:{call_id}"))
+            );
+        }
+        let affected = &submitted[1];
+        assert_eq!(affected.call_id.0, "affected-call");
+        assert!(affected.is_error);
+        let text = meerkat_core::types::text_content(&affected.content);
+        let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "error": expected_code,
+                "message": expected_message,
+                "settlement_failures": companions,
+            })
+        );
+        let retained: Vec<meerkat_core::ToolDispatchSettlementFailure> =
+            serde_json::from_value(payload["settlement_failures"].clone()).unwrap();
+        assert_eq!(retained, companions, "preserve order and physical outcomes");
+    }
+
+    #[tokio::test]
+    async fn custom_unavailable_live_feedback_preserves_class_settlements_and_healthy_calls() {
+        assert_custom_typed_feedback(
+            ToolError::OperationAuthorizationUnavailable,
+            "operation_authorization_unavailable",
+            "operation authorization unavailable",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn custom_refusal_live_feedback_preserves_class_settlements_and_healthy_calls() {
+        assert_custom_typed_feedback(
+            ToolError::AuthorizationRefused {
+                refusal: meerkat_core::OperationRefused::new(
+                    meerkat_core::OperationRefusalKind::Denied,
+                ),
+            },
+            "operation_refused",
+            "operation unavailable under current authorization",
+        )
+        .await;
+    }
+    // These controls exercise the existing dispatch and live-host owners.
+    // JSON assertions allow the loss regression to compile before the carrier
+    // gains its canonical settlement_failures field.
+    mod successful_settlement_companions {
+        use super::*;
+        use meerkat_core::agent::{AgentToolDispatcher, ToolDispatchContext};
+        use meerkat_core::{ContentBlock, ToolCallView, ToolDef};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct CompletedBody(AtomicUsize);
+
+        #[async_trait::async_trait]
+        impl AgentToolDispatcher for CompletedBody {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::from([Arc::new(ToolDef::new(
+                    "increment",
+                    "local completed effect",
+                    serde_json::json!({"type":"object"}),
+                ))])
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<ToolDispatchOutcome, ToolError> {
+                assert_eq!(call.name, "increment");
+                let value = self.0.fetch_add(1, Ordering::SeqCst) + 1;
+                Ok(ToolDispatchOutcome::from(ToolResult::with_blocks(
+                    call.id.to_owned(),
+                    vec![
+                        ContentBlock::Text {
+                            text: "value=".into(),
+                        },
+                        ContentBlock::Text {
+                            text: value.to_string(),
+                        },
+                    ],
+                    false,
+                )))
+            }
+        }
+
+        struct OutcomeRecorder {
+            fail_first: bool,
+            physical: StdMutex<Vec<(String, meerkat_core::LiveBridgeEffectOutcome)>>,
+        }
+
+        #[async_trait::async_trait]
+        impl meerkat_core::ToolDispatchAdmission for OutcomeRecorder {
+            async fn await_dispatch_admission(
+                &self,
+                _: ToolCallView<'_>,
+                _: Option<&ToolDispatchContext>,
+                _: meerkat_core::LiveBridgeEffectKind,
+            ) -> Result<(), ToolError> {
+                Ok(())
+            }
+
+            async fn record_dispatch_outcome(
+                &self,
+                call: ToolCallView<'_>,
+                _: Option<&ToolDispatchContext>,
+                kind: meerkat_core::LiveBridgeEffectKind,
+                outcome: meerkat_core::LiveBridgeEffectOutcome,
+            ) -> Result<(), ToolError> {
+                assert_eq!(kind, meerkat_core::LiveBridgeEffectKind::ExternalIo);
+                self.physical
+                    .lock()
+                    .unwrap()
+                    .push((call.id.to_owned(), outcome));
+                if self.fail_first && call.id == "completed-effect" {
+                    Err(ToolError::OperationObservationUnavailable)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        struct ActualGatedDispatch {
+            inner: Arc<dyn AgentToolDispatcher>,
+            returned: StdMutex<Vec<ToolResult>>,
+        }
+
+        #[async_trait::async_trait]
+        impl LiveToolDispatcher for ActualGatedDispatch {
+            async fn dispatch_live_tool_call(
+                &self,
+                _: &SessionId,
+                call: ToolCall,
+            ) -> Result<ToolDispatchOutcome, LiveToolDispatchError> {
+                let args = serde_json::value::to_raw_value(&call.args).unwrap();
+                let outcome = self
+                    .inner
+                    .dispatch(ToolCallView {
+                        id: &call.id,
+                        name: &call.name,
+                        args: args.as_ref(),
+                    })
+                    .await
+                    .map_err(LiveToolDispatchError::Tool)?;
+                assert!(outcome.terminal_cause().is_none());
+                self.returned.lock().unwrap().push(outcome.result.clone());
+                Ok(outcome)
+            }
+        }
+
+        async fn exercise_completed_result(fail_first: bool) {
+            let body = Arc::new(CompletedBody::default());
+            let recorder = Arc::new(OutcomeRecorder {
+                fail_first,
+                physical: StdMutex::new(Vec::new()),
+            });
+            let gated = meerkat_core::tool_execution_policy::ExecutionPolicyGatedDispatcher::new(
+                body.clone(),
+                meerkat_core::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_dispatch_admission(recorder.clone());
+            let dispatcher = Arc::new(ActualGatedDispatch {
+                inner: Arc::new(gated),
+                returned: StdMutex::new(Vec::new()),
+            });
+            let sink = Arc::new(RecordingProjectionSink::default());
+            let adapter = Arc::new(RecordingAdapter::default());
+            let host =
+                LiveAdapterHost::new(sink.clone()).with_live_tool_dispatcher(dispatcher.clone());
+            let channel = host
+                .open_channel_with_generated_test_machine_authority(test_session_id())
+                .await
+                .unwrap();
+            host.attach_adapter(&channel, adapter.clone())
+                .await
+                .unwrap();
+            host.commit_status_with_generated_test_machine_authority(
+                &channel,
+                LiveAdapterStatus::Ready,
+            )
+            .await
+            .unwrap();
+            for id in ["completed-effect", "healthy-next-effect"] {
+                let outcome = host
+                    .apply_observation(
+                        &channel,
+                        &LiveAdapterObservation::ToolCallRequested {
+                            provider_call_id: ToolCallId::new(id),
+                            tool_name: ToolName::new("increment"),
+                            arguments: serde_json::json!({}),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    outcome,
+                    ObservationOutcome::ToolCallDispatched { .. }
+                ));
+            }
+            // Physical and next-action controls precede the expected loss assertion.
+            assert_eq!(
+                host.channel_status(&channel).await.unwrap(),
+                LiveAdapterStatus::Ready
+            );
+            assert_eq!(
+                body.0.load(Ordering::SeqCst),
+                2,
+                "one effect per distinct call, no retry"
+            );
+            assert_eq!(
+                *recorder.physical.lock().unwrap(),
+                vec![
+                    (
+                        "completed-effect".to_owned(),
+                        meerkat_core::LiveBridgeEffectOutcome::Committed
+                    ),
+                    (
+                        "healthy-next-effect".to_owned(),
+                        meerkat_core::LiveBridgeEffectOutcome::Committed
+                    ),
+                ]
+            );
+            assert!(sink.terminal_errors.lock().unwrap().is_empty());
+            assert!(sink.interrupts.lock().unwrap().is_empty());
+            assert!(adapter.submitted_errors.lock().unwrap().is_empty());
+            let returned = dispatcher.returned.lock().unwrap().clone();
+            let submitted = adapter.submitted_results.lock().unwrap().clone();
+            assert_eq!(returned.len(), 2);
+            assert_eq!(submitted.len(), 2);
+            let expected = if fail_first {
+                vec![meerkat_core::ToolDispatchSettlementFailure {
+                    admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
+                    effect_kind: meerkat_core::LiveBridgeEffectKind::ExternalIo,
+                    physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Committed,
+                    failure_kind:
+                        meerkat_core::ToolDispatchTerminalErrorKind::OperationObservationUnavailable,
+                }]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(returned[0].settlement_failures, expected);
+            assert!(returned[1].settlement_failures.is_empty());
+            for (index, id) in ["completed-effect", "healthy-next-effect"]
+                .into_iter()
+                .enumerate()
+            {
+                assert_eq!(submitted[index].call_id, ToolCallId::new(id));
+                assert!(
+                    !submitted[index].is_error,
+                    "settlement did not change physical success"
+                );
+                assert_eq!(submitted[index].content, returned[index].content);
+                assert_eq!(
+                    returned[index].text_content(),
+                    format!("value=\n{}", index + 1)
+                );
+            }
+            let json = serde_json::to_value(&submitted[0]).unwrap();
+            if fail_first {
+                assert_eq!(
+                    json["settlement_failures"],
+                    serde_json::to_value(&expected).unwrap(),
+                    "the actual live carrier must retain the successful result's companion"
+                );
+            } else {
+                assert!(
+                    json.get("settlement_failures").is_none(),
+                    "legacy empty field stays omitted"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn live_success_retains_actual_settlement_failure_and_next_action() {
+            exercise_completed_result(true).await;
+        }
+
+        #[tokio::test]
+        async fn live_success_without_settlement_failure_keeps_legacy_shape() {
+            exercise_completed_result(false).await;
+        }
+
+        #[test]
+        fn live_success_projection_keeps_order_and_duplicate_companions() {
+            let mut expected = observation_failure_companions();
+            expected.push(expected[0].clone());
+            let mut result =
+                ToolResult::new("ordered-call".into(), "effect completed".into(), false);
+            result.settlement_failures = expected.clone();
+            let projected = tool_result_from_dispatch(ToolCallId::new("ordered-call"), result);
+            assert_eq!(projected.call_id, ToolCallId::new("ordered-call"));
+            assert!(!projected.is_error);
+            assert_eq!(
+                projected.content,
+                ContentBlock::text_vec("effect completed".into())
+            );
+            let value = serde_json::to_value(&projected).unwrap();
+            assert_eq!(
+                value["settlement_failures"],
+                serde_json::to_value(&expected).unwrap()
+            );
+            let restored: LiveToolResult = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(restored).unwrap(), value);
+        }
     }
 }

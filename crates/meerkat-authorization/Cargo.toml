@@ -18,11 +18,22 @@ meerkat-core.workspace = true
 meerkat-machine-schema.workspace = true
 meerkat-machine-dsl.workspace = true
 meerkat-authorization-contracts.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+axum.workspace = true
+meerkat-anthropic = { workspace = true, default-features = false }
+meerkat-auth-core.workspace = true
+meerkat-models.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+meerkat = { path = "../meerkat", default-features = false }
+meerkat-llm-core.workspace = true
+meerkat-runtime = { path = "../meerkat-runtime", features = ["local-authorization", "test-support"] }
+tokio.workspace = true
 
 [lints]
 workspace = true

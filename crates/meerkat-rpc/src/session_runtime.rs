@@ -2633,6 +2633,7 @@ impl SessionRuntime {
                 .and_then(|provider| parse_provider_override(provider).ok())
         });
         let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            work_authorization: None,
             handling_mode: None,
             keep_alive: overrides.and_then(|ov| Self::turn_keep_alive_directive(ov.keep_alive)),
             skill_references,
@@ -7700,6 +7701,8 @@ impl SessionRuntime {
         let input = Input::ExternalEvent(ExternalEventInput {
             objective_id: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: InputOrigin::External {
@@ -8190,6 +8193,11 @@ impl SessionRuntime {
                     turn_tool_overlay.clone(),
                     primitive.turn_metadata().cloned(),
                 )
+                .with_work_authorization(
+                    primitive
+                        .turn_metadata()
+                        .and_then(|meta| meta.work_authorization.clone()),
+                )
                 .with_typed_turn_appends(primitive.typed_turn_appends()),
             };
             meerkat::surface::inject_workgraph_attention_turn_overlay(
@@ -8428,6 +8436,11 @@ impl SessionRuntime {
                     turn_tool_overlay,
                     primitive.turn_metadata().cloned(),
                 )
+                .with_work_authorization(
+                    primitive
+                        .turn_metadata()
+                        .and_then(|meta| meta.work_authorization.clone()),
+                )
                 .with_typed_turn_appends(typed_turn_appends),
             };
             if let Some(workgraph_service) = workgraph_service.as_ref() {
@@ -8514,6 +8527,11 @@ impl SessionRuntime {
                 meerkat_core::types::HandlingMode::Queue,
                 turn_tool_overlay,
                 primitive.turn_metadata().cloned(),
+            )
+            .with_work_authorization(
+                primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.work_authorization.clone()),
             )
             .with_typed_turn_appends(primitive.typed_turn_appends()),
         };
@@ -16402,6 +16420,8 @@ mod tests {
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
+                        ingress_context: None,
+                        authority_association: None,
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
@@ -16520,6 +16540,8 @@ mod tests {
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
+                        ingress_context: None,
+                        authority_association: None,
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
@@ -16694,6 +16716,8 @@ mod tests {
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
+                        ingress_context: None,
+                        authority_association: None,
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
@@ -16814,6 +16838,8 @@ mod tests {
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
+                        ingress_context: None,
+                        authority_association: None,
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
@@ -20400,6 +20426,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: meerkat_runtime::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: meerkat_runtime::InputOrigin::Peer {
@@ -20472,6 +20500,8 @@ mod tests {
         let operation_id = meerkat_core::OperationId::new();
         let input = meerkat_runtime::Input::Operation(meerkat_runtime::OperationInput {
             header: meerkat_runtime::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: meerkat_runtime::InputOrigin::System,

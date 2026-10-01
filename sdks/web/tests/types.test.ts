@@ -429,6 +429,8 @@ function handleEvent(event: AgentEvent): string {
       return JSON.stringify(event.reason);
     case 'budget_warning':
       return `${event.budget_type}:${event.percent}`;
+    case 'operation_observation_failed':
+      return `${event.operation_id}:${event.phase}`;
     case 'retrying':
       return `${event.retry.plan.attempt}/${event.retry.plan.max_retries}`;
     case 'model_fallback_skipped':
@@ -675,3 +677,26 @@ canonicalSession.turn('Use the task workflow.', {
   skillReferences: ['task-workflow'],
 });
 void selectedSkillTurn;
+
+// Generated web event types carry the same finite error kinds as native SDKs.
+import type {
+  LlmProviderErrorKind as AvailabilityProviderKind,
+  ToolDispatchSettlementFailure as AvailabilitySettlement,
+  PendingCallbackToolCall as AvailabilityPendingCall,
+} from '../src/generated/events.js';
+const unavailableProvider: AvailabilityProviderKind = 'operation_authorization_unavailable';
+const auditProvider: AvailabilityProviderKind = 'operation_observation_unavailable';
+const refusedProvider: AvailabilityProviderKind = 'operation_refused';
+const normalProvider: AvailabilityProviderKind = 'server_overloaded';
+const availabilitySettlements: AvailabilitySettlement[] = [
+  { admission_source: 'configured_gate', effect_kind: 'tool_dispatch', physical_outcome: 'failed', failure_kind: 'operation_authorization_unavailable' },
+  { admission_source: 'authorization_audit', effect_kind: 'tool_dispatch', physical_outcome: 'committed', failure_kind: 'operation_observation_unavailable' },
+  { admission_source: 'context_gate', effect_kind: 'tool_dispatch', physical_outcome: 'unknown', failure_kind: 'authorization_refused' },
+];
+const availabilityPendingCall: AvailabilityPendingCall = {
+  tool_use_id: 'ordered-wire', tool_name: 'read_record', args: {},
+  settlement_failures: availabilitySettlements,
+};
+// @ts-expect-error A generated finite kind cannot accept arbitrary policy text.
+const inventedWebProvider: AvailabilityProviderKind = 'invented_authorization_kind';
+void [unavailableProvider, auditProvider, refusedProvider, normalProvider, availabilityPendingCall, inventedWebProvider];

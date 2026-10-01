@@ -302,13 +302,7 @@ impl LlmClientAdapter {
         let projection = self
             .client
             .project_replay_request(messages)
-            .map_err(|error| {
-                AgentError::llm(
-                    self.provider.as_str(),
-                    error.failure_reason(),
-                    error.to_string(),
-                )
-            })?;
+            .map_err(|error| error.into_agent_error(self.provider.as_str()))?;
 
         Ok(PreparedLlmRequest::from_projection(
             LlmRequest {
@@ -343,13 +337,7 @@ impl LlmClientAdapter {
         let cache_breakpoint_claims = self
             .client
             .prepared_cache_breakpoints(request, canonical_messages)
-            .map_err(|error| {
-                AgentError::llm(
-                    self.provider.as_str(),
-                    error.failure_reason(),
-                    error.to_string(),
-                )
-            })?;
+            .map_err(|error| error.into_agent_error(self.provider.as_str()))?;
         let mut stream = self.client.stream_prepared(request);
         let mut assembler = BlockAssembler::new();
         let mut reasoning_started = false;
@@ -463,6 +451,16 @@ impl LlmClientAdapter {
                             .project_wildcard_host_declared_usage(update)
                             .into_inner();
                     }
+                    LlmEvent::OperationObservationFailed {
+                        operation_id,
+                        phase,
+                    } => {
+                        self.publish(AgentEvent::OperationObservationFailed {
+                            operation_id,
+                            phase,
+                        })
+                        .await;
+                    }
                     LlmEvent::WireLiveness => {}
                     LlmEvent::Done { outcome } => match outcome {
                         LlmDoneOutcome::Success {
@@ -471,20 +469,12 @@ impl LlmClientAdapter {
                             stop_reason = completed_reason;
                         }
                         LlmDoneOutcome::Error { error } => {
-                            return Err(AgentError::llm(
-                                self.provider.as_str(),
-                                error.failure_reason(),
-                                error.to_string(),
-                            ));
+                            return Err(error.into_agent_error(self.provider.as_str()));
                         }
                     },
                 },
                 Err(error) => {
-                    return Err(AgentError::llm(
-                        self.provider.as_str(),
-                        error.failure_reason(),
-                        error.to_string(),
-                    ));
+                    return Err(error.into_agent_error(self.provider.as_str()));
                 }
             }
         }
@@ -525,13 +515,7 @@ impl AgentLlmRequestAttempt for LlmClientAdapterAttempt {
         self.adapter
             .client
             .prepared_request_pressure(&self.request)
-            .map_err(|error| {
-                AgentError::llm(
-                    self.adapter.provider.as_str(),
-                    error.failure_reason(),
-                    error.to_string(),
-                )
-            })
+            .map_err(|error| error.into_agent_error(self.adapter.provider.as_str()))
     }
 
     async fn stream_response(
@@ -551,6 +535,72 @@ impl AgentLlmRequestAttempt for LlmClientAdapterAttempt {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentLlmClient for LlmClientAdapter {
+    fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
+        let selection = self.client.controller_model_selection()?;
+        (selection.model() == self.model && selection.provider() == self.provider)
+            .then_some(selection)
+    }
+
+    fn controller_model_facts(
+        &self,
+    ) -> Result<meerkat_core::ControllerModelFacts, meerkat_core::ControllerFactsUnavailable> {
+        let selection = self
+            .controller_model_selection()
+            .ok_or(meerkat_core::ControllerFactsUnavailable)?;
+        let route = self.client.plain_model_route(&self.model)?;
+        Ok(meerkat_core::ControllerModelFacts::new(
+            selection,
+            Arc::from(route.endpoint()),
+            Arc::from(route.wire_model()),
+        ))
+    }
+
+    fn pin_controller(self: Arc<Self>) -> Option<meerkat_core::ControllerModelClient> {
+        let selection = self.controller_model_selection()?;
+        Some(meerkat_core::ControllerModelClient::new(selection, self))
+    }
+
+    async fn stream_response_authorized(
+        &self,
+        messages: &[Message],
+        tools: &[Arc<ToolDef>],
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<&ProviderParamsOverride>,
+        authorization: Option<meerkat_core::LlmRequestAuthorization>,
+    ) -> Result<LlmStreamResult, AgentError> {
+        let request = self
+            .build_request(messages, tools, max_tokens, temperature, provider_params)?
+            .with_authorization(authorization);
+        self.stream_prepared_response(&request, messages, None)
+            .await
+    }
+
+    fn prepare_request_attempt_authorized(
+        self: Arc<Self>,
+        messages: Arc<Vec<Message>>,
+        tools: Arc<[Arc<ToolDef>]>,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<ProviderParamsOverride>,
+        authorization: Option<meerkat_core::LlmRequestAuthorization>,
+    ) -> Result<Arc<dyn AgentLlmRequestAttempt>, AgentError> {
+        let request = self
+            .build_request(
+                messages.as_slice(),
+                tools.as_ref(),
+                max_tokens,
+                temperature,
+                provider_params.as_ref(),
+            )?
+            .with_authorization(authorization);
+        Ok(Arc::new(LlmClientAdapterAttempt {
+            adapter: self,
+            request,
+            canonical_messages: messages,
+        }))
+    }
+
     fn prepare_request_attempt(
         self: Arc<Self>,
         messages: Arc<Vec<Message>>,
@@ -605,13 +655,7 @@ impl AgentLlmClient for LlmClientAdapter {
             self.build_request(messages, tools, max_tokens, temperature, provider_params)?;
         self.client
             .prepared_request_pressure(&request)
-            .map_err(|error| {
-                AgentError::llm(
-                    self.provider.as_str(),
-                    error.failure_reason(),
-                    error.to_string(),
-                )
-            })
+            .map_err(|error| error.into_agent_error(self.provider.as_str()))
     }
 
     fn target_cache_lowering_capabilities(
@@ -627,13 +671,7 @@ impl AgentLlmClient for LlmClientAdapter {
             self.build_request(messages, tools, max_tokens, temperature, provider_params)?;
         self.client
             .prepared_cache_breakpoints(&request, messages)
-            .map_err(|error| {
-                AgentError::llm(
-                    self.provider.as_str(),
-                    error.failure_reason(),
-                    error.to_string(),
-                )
-            })?
+            .map_err(|error| error.into_agent_error(self.provider.as_str()))?
             .into_iter()
             .map(|evidence| {
                 issuer.mint(evidence).map_err(|error| {
@@ -1394,5 +1432,71 @@ mod tests {
             "partial text delta should suppress cross-model fallback on the failed call"
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn operation_observation_diagnostic_is_published_without_changing_success_or_error() {
+        for fail in [false, true] {
+            let operation_id = meerkat_core::OperationId::new();
+            let (tx, mut rx) = mpsc::channel(16);
+            let mut events = vec![Ok(LlmEvent::OperationObservationFailed {
+                operation_id: operation_id.clone(),
+                phase: meerkat_core::authorization::OperationObservationPhase::Outcome,
+            })];
+            if !fail {
+                events.push(Ok(LlmEvent::TextDelta {
+                    delta: "actual response".into(),
+                    meta: None,
+                }));
+            }
+            events.push(Ok(LlmEvent::Done {
+                outcome: if fail {
+                    LlmDoneOutcome::Error {
+                        error: LlmError::ConnectionReset,
+                    }
+                } else {
+                    LlmDoneOutcome::Success {
+                        stop_reason: StopReason::EndTurn,
+                    }
+                },
+            }));
+            let adapter = LlmClientAdapter::with_event_channel(
+                Arc::new(ScriptedClient { events }),
+                "scripted-model".into(),
+                tx,
+            );
+            adapter.begin_stream_output_observation();
+            let result = adapter
+                .stream_response(
+                    &[Message::User(UserMessage::text("observe"))],
+                    &[],
+                    1024,
+                    None,
+                    None,
+                )
+                .await;
+            if fail {
+                assert!(matches!(result, Err(AgentError::Llm { .. })));
+                assert!(
+                    !adapter.stream_output_observed(),
+                    "diagnostic is not model output"
+                );
+            } else {
+                let result = result.expect("success remains success");
+                assert_eq!(result.stop_reason(), StopReason::EndTurn);
+                assert!(
+                    matches!(result.blocks(), [AssistantBlock::Text { text, .. }] if text == "actual response")
+                );
+            }
+            let published = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+            assert_eq!(published.iter().filter(|event| matches!(event,
+                AgentEvent::OperationObservationFailed { operation_id: actual, phase: meerkat_core::authorization::OperationObservationPhase::Outcome }
+                if actual == &operation_id)).count(), 1);
+            assert!(!published.iter().any(|event| matches!(
+                event,
+                AgentEvent::Retrying { .. } | AgentEvent::RunFailed { .. }
+            )));
+        }
     }
 }

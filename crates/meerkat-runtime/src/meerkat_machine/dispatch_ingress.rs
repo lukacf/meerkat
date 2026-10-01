@@ -1390,21 +1390,55 @@ impl MeerkatMachine {
         Ok(resolved.requires_active_runtime_pre_admission())
     }
 
-    /// Execute the complete ingress transaction on the process-owned machine
-    /// runtime. Once this method has accepted the command, dropping the caller
-    /// may discard only the acknowledgement: driver admission, completion
-    /// registration, generated DSL publication, effect convergence, and wake
-    /// are allowed to finish as one owned transaction.
+    /// Wait for credential custody in the caller, before any owned admission.
+    /// Dropping this wait creates no accepted work. Once custody is acquired,
+    /// driver admission, completion registration, generated DSL publication,
+    /// effect convergence, and wake finish as one process-owned transaction;
+    /// dropping the caller then discards only its acknowledgement.
     pub(super) async fn execute_meerkat_machine_ingress_command(
         &self,
         command: MeerkatMachineCommand,
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
         let spawner = MachineCleanupTaskSpawner::acquire()?;
+        let input = match &command {
+            MeerkatMachineCommand::AcceptWithCompletion {
+                session_id,
+                input,
+                expected_attachment,
+                ..
+            } => {
+                if let Some(expected_attachment) = expected_attachment.as_ref()
+                    && (!expected_attachment.belongs_to(self)
+                        || expected_attachment.session_id() != session_id)
+                {
+                    return Err(RuntimeDriverError::StaleAuthority {
+                        reason: format!(
+                            "input admission attachment witness does not belong to runtime session '{session_id}'"
+                        ),
+                    });
+                }
+                input
+            }
+            MeerkatMachineCommand::AcceptWithoutWake { input, .. } => input,
+            _ => {
+                return Err(RuntimeDriverError::Internal(
+                    "non-ingress command reached credential admission".into(),
+                ));
+            }
+        };
+        let credential_custody = super::credential_custody::NativeCredentialCustody::acquire(
+            &self.native_work_authorization_host,
+            input,
+            self.store.is_some(),
+        )
+        .await?;
+        // There is no suspension between acquiring custody and transferring it
+        // into the existing process-owned transaction.
         let machine = self.clone();
         spawner
             .spawn(async move {
                 machine
-                    .execute_meerkat_machine_ingress_command_owned(command)
+                    .execute_meerkat_machine_ingress_command_owned(command, credential_custody)
                     .await
             })
             .await
@@ -1418,6 +1452,7 @@ impl MeerkatMachine {
     async fn execute_meerkat_machine_ingress_command_owned(
         &self,
         command: MeerkatMachineCommand,
+        credential_custody: super::credential_custody::NativeCredentialCustody,
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
         match command {
             MeerkatMachineCommand::AcceptWithCompletion {
@@ -1428,16 +1463,6 @@ impl MeerkatMachine {
                 member_residency,
                 expected_attachment,
             } => {
-                if let Some(expected_attachment) = expected_attachment.as_ref()
-                    && (!expected_attachment.belongs_to(self)
-                        || expected_attachment.session_id() != &session_id)
-                {
-                    return Err(RuntimeDriverError::StaleAuthority {
-                        reason: format!(
-                            "input admission attachment witness does not belong to runtime session '{session_id}'"
-                        ),
-                    });
-                }
                 let _member_residency_lease = match &member_residency {
                     MemberResidencyExpectation::Unfenced => None,
                     MemberResidencyExpectation::PeerOnly => Some(
@@ -1689,6 +1714,7 @@ impl MeerkatMachine {
                         active_turn_boundary_available,
                         "resolving runtime ingress admission via canonical machine seam"
                     );
+                    driver.authenticate_work_with_credential(&input, &credential_custody)?;
                     let resolved = match driver.resolve_admission_with_active_turn_boundary(
                         &input,
                         active_turn_boundary_available,
@@ -1731,7 +1757,7 @@ impl MeerkatMachine {
                     })?;
                     let displaced_input_id = resolved.displaced_queued_input_id().cloned();
                     let result = match driver
-                        .accept_resolved_input(input, resolved)
+                        .accept_resolved_input_with_credential(input, resolved, &credential_custody)
                         .await
                         .map_err(Self::normalize_destroyed_error)
                     {
@@ -1891,7 +1917,7 @@ impl MeerkatMachine {
                                     ),
                                 }
                             })?;
-                            Ok(RuntimeAcceptedBoundaryCancelPlan {
+                            Ok::<_, RuntimeDriverError>(RuntimeAcceptedBoundaryCancelPlan {
                                 witness: RuntimeEffectDispatchAttachmentWitness {
                                     mutation_gate: Arc::clone(&gate),
                                     driver: driver.clone(),
@@ -1927,6 +1953,7 @@ impl MeerkatMachine {
                 } else {
                     (signal, None)
                 };
+                drop(credential_custody);
                 crate::hook_observation::dispatch_runtime_input_outcome(
                     &post_commit_hooks,
                     &hook_input,
@@ -2045,6 +2072,7 @@ impl MeerkatMachine {
                 }
                 let (outcome, accepted_input_id) = {
                     let mut driver = driver.lock().await;
+                    driver.authenticate_work_with_credential(&input, &credential_custody)?;
                     let resolved = match driver
                         .resolve_admission_without_wake_with_active_turn_boundary(&input, false)
                     {
@@ -2080,7 +2108,7 @@ impl MeerkatMachine {
                     }
                     let displaced_input_id = resolved.displaced_queued_input_id().cloned();
                     let result = match driver
-                        .accept_resolved_input(input, resolved)
+                        .accept_resolved_input_with_credential(input, resolved, &credential_custody)
                         .await
                         .map_err(Self::normalize_destroyed_error)
                     {

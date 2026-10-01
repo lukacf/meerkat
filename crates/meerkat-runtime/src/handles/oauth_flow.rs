@@ -1867,7 +1867,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::{
         Arc, Condvar, Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
@@ -1910,7 +1910,7 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
-    struct FailingOAuthSnapshotStore {
+    pub(crate) struct FailingOAuthSnapshotStore {
         session_authority: crate::store::memory::InMemoryRuntimeStore,
         snapshot: StdMutex<Option<Vec<u8>>>,
         fail_oauth_persist: AtomicBool,
@@ -1919,7 +1919,7 @@ mod tests {
     }
 
     impl FailingOAuthSnapshotStore {
-        fn block_next_oauth_persist(&self) {
+        pub(crate) fn block_next_oauth_persist(&self) {
             let mut state = self
                 .blocking_oauth_persist
                 .lock()
@@ -1929,7 +1929,7 @@ mod tests {
             state.released = false;
         }
 
-        fn wait_for_blocked_oauth_persist(&self) {
+        pub(crate) fn wait_for_blocked_oauth_persist(&self) {
             let mut state = self
                 .blocking_oauth_persist
                 .lock()
@@ -1947,7 +1947,7 @@ mod tests {
             }
         }
 
-        fn release_blocked_oauth_persist(&self) {
+        pub(crate) fn release_blocked_oauth_persist(&self) {
             let mut state = self
                 .blocking_oauth_persist
                 .lock()
@@ -1975,11 +1975,11 @@ mod tests {
             }
         }
 
-        fn fail_oauth_persist(&self) {
+        pub(crate) fn fail_oauth_persist(&self) {
             self.fail_oauth_persist.store(true, Ordering::SeqCst);
         }
 
-        fn allow_oauth_persist(&self) {
+        pub(crate) fn allow_oauth_persist(&self) {
             self.fail_oauth_persist.store(false, Ordering::SeqCst);
         }
     }

@@ -842,7 +842,6 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
                 Err(Self::missing_route_witness())
             }));
         };
-        let request = request.request();
         Box::pin(async_stream::try_stream! {
             let authorizer = self
                 .connection
@@ -856,7 +855,10 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
                 .map_err(meerkat_llm_core::LlmError::from_authorizer)?;
             self.ensure_prepared_route_current(&prepared)?;
             let client = Arc::clone(&prepared.client);
-            let mut stream = client.stream(request);
+            // Keep the original replay-route witness and per-work companion
+            // through delegation. The concrete provider checks its lowered
+            // target again after this account/route preparation await.
+            let mut stream = client.stream_prepared(request);
             let mut emitted = false;
             while let Some(result) = stream.next().await {
                 match result {
@@ -1464,7 +1466,7 @@ impl CopilotAuthorizer {
                         mode,
                     )
                     .await
-                    .map_err(|error| RefreshError::Refresh(error.to_string()))
+                    .map_err(meerkat_auth_core::resolver::refresh_error_from_provider)
                 })
             });
         refresh_github_tokens(
@@ -1760,6 +1762,7 @@ fn auth_error_from_provider(error: ProviderAuthError) -> AuthError {
 
 fn auth_error_from_refresh(error: RefreshError) -> AuthError {
     match error {
+        RefreshError::StalePreparation => AuthError::StaleCredential,
         RefreshError::ReauthRequired(_)
         | RefreshError::Classified {
             disposition: meerkat_core::auth::RefreshFailureDisposition::ReauthRequired,
@@ -1963,7 +1966,7 @@ async fn refresh_github_tokens(
                             message: "GitHub credential has no refresh token".to_string(),
                             observation:
                                 meerkat_core::RefreshFailureObservation::local_credential_unusable(),
-                            }));
+                            }).await);
                         }
                     };
                     let mut endpoints = meerkat_auth_core::oauth_flow::oauth_provider_endpoints(
@@ -1973,7 +1976,9 @@ async fn refresh_github_tokens(
                     let configured = match config.endpoints() {
                         Ok(configured) => configured,
                         Err(error) => {
-                            return Err(transaction.fail(RefreshError::Refresh(error.to_string())));
+                            return Err(transaction
+                                .fail(RefreshError::Refresh(error.to_string()))
+                                .await);
                         }
                     };
                     endpoints.token_url = configured.oauth_token_url.to_string();
@@ -1987,14 +1992,16 @@ async fn refresh_github_tokens(
                     {
                         Ok(result) => result,
                         Err(error) => {
-                            return Err(transaction.fail(oauth_refresh_error(error)));
+                            return Err(transaction.fail(oauth_refresh_error(error)).await);
                         }
                     };
                     let now = Utc::now();
                     let expires_at = match result.expires_at_from(now) {
                         Ok(expires_at) => expires_at,
                         Err(error) => {
-                            return Err(transaction.fail(RefreshError::Refresh(error.to_string())));
+                            return Err(transaction
+                                .fail(RefreshError::Refresh(error.to_string()))
+                                .await);
                         }
                     };
                     let refreshed = PersistedTokens {
@@ -3323,4 +3330,13 @@ mod tests {
             "live Copilot model discovery returned no usable model snapshot"
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn ce_stale_refresh_remains_stale_credential() {
+    assert!(matches!(
+        auth_error_from_refresh(RefreshError::StalePreparation),
+        AuthError::StaleCredential
+    ));
 }

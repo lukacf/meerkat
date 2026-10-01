@@ -8188,9 +8188,9 @@ Next ==
 
 WitnessNext_close_stops_attention_route ==
     \/ DeliverQueuedRoute
-    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : workgraph_CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy)
-    \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_at_utc_ms \in 0..2 : workgraph_CloseOpenCompleted(arg_expected_revision, arg_at_utc_ms)
-    \/ \E arg_expected_revision \in {attention_revision} : \E arg_at_utc_ms \in 0..2 : attention_StopActive(arg_expected_revision, arg_at_utc_ms)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "workgraph" /\ witness_packet.variant = "CreateOpen" /\ workgraph_CreateOpen(witness_packet.payload.due_at_utc_ms, witness_packet.payload.not_before_utc_ms, witness_packet.payload.snoozed_until_utc_ms, witness_packet.payload.completion_policy, witness_packet.payload.completion_supervisor_owner_key, witness_packet.payload.completion_reviewer_quorum_threshold, witness_packet.payload.unresolved_blocker_count, witness_packet.payload.failed_child_join_policy, witness_packet.payload.cancelled_child_join_policy)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "workgraph" /\ witness_packet.variant = "CloseCompleted" /\ workgraph_CloseOpenCompleted(witness_packet.payload.expected_revision, witness_packet.payload.at_utc_ms)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "attention" /\ witness_packet.variant = "Stop" /\ attention_StopActive(witness_packet.payload.expected_revision, witness_packet.payload.at_utc_ms)
     \/ WitnessSatisfiedStutter_close_stops_attention_route
     \/ WitnessInjectNext_close_stops_attention_route
 

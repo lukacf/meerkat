@@ -51,7 +51,8 @@ pub struct VerifyArgs {
     /// Validate the canonical registry only and skip TLC execution.
     #[arg(long)]
     skip_tlc: bool,
-    /// Skip TLC for selected broad compositions after drift validation.
+    /// Skip the full ci.cfg/deep.cfg TLC sweep for selected broad compositions
+    /// after drift validation. Their scripted witnesses still run.
     #[arg(long = "skip-tlc-composition")]
     skip_tlc_compositions: Vec<String>,
     /// Skip Cargo-backed kernel/owner tests after drift and TLC checks.
@@ -441,24 +442,30 @@ fn machine_verify_at_root(
     for composition in &selection.compositions {
         println!("composition: {}", composition.schema.name);
         if run_tlc {
-            if skip_tlc_compositions.contains(&composition.slug) {
+            // A skipped broad composition skips only its full ci.cfg/deep.cfg
+            // state-space sweep, which exceeds the budget. Its scripted
+            // witnesses are bounded by construction and still run below with
+            // the completion proof.
+            let skip_full_sweep = skip_tlc_compositions.contains(&composition.slug);
+            let main_coverage = if skip_full_sweep {
                 ensure_composition_ci_structural_invariants(
                     root,
                     &composition.slug,
                     &composition.schema,
                 )?;
                 println!(
-                    "skipping full TLC for broad composition {} after drift and ci.cfg structural-invariant validation",
+                    "skipping full TLC for broad composition {} after drift and ci.cfg structural-invariant validation; its witnesses still run",
                     composition.schema.name
                 );
-                continue;
-            }
-            let main_coverage = maybe_run_tlc_in_dir(
-                &composition_dir(root, &composition.slug),
-                &composition.slug,
-                profile,
-                budget,
-            )?;
+                None
+            } else {
+                maybe_run_tlc_in_dir(
+                    &composition_dir(root, &composition.slug),
+                    &composition.slug,
+                    profile,
+                    budget,
+                )?
+            };
             // Structural requirements (expected routes / scheduler rules /
             // states / transitions) are enforced in EVERY verify profile via the
             // structural invariants emitted into the composition `ci.cfg`
@@ -516,7 +523,9 @@ fn machine_verify_at_root(
                         .join("\n")
                 );
             }
-            if matches!(profile, VerifyProfile::Deep) {
+            // The zero-hit audit needs the main sweep's coverage, which a
+            // skipped composition does not have.
+            if matches!(profile, VerifyProfile::Deep) && !skip_full_sweep {
                 ensure_composition_coverage(
                     &composition.schema,
                     &aggregated_coverage,

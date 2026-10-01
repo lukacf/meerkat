@@ -18,6 +18,115 @@ use meerkat_machine_schema::catalog::{
 };
 use meerkat_machine_schema::{NamedTypeBinding, RustTypeAtom};
 
+fn numeric_revision_witness_fixture() -> meerkat_machine_schema::CompositionSchema {
+    use meerkat_machine_schema::identity::{
+        CompositionId, CompositionWitnessId, FieldId, InputVariantId, MachineInstanceId, PhaseId,
+        TransitionId,
+    };
+    use meerkat_machine_schema::{
+        CompositionStateLimits, CompositionWitness, CompositionWitnessField,
+        CompositionWitnessInput, CompositionWitnessState, CompositionWitnessTransition, Expr,
+    };
+    // Exercise the existing occurrence owner; the test defines no new lifecycle.
+    let mut schema = meerkat_machine_schema::catalog::schedule_bundle_composition();
+    schema.name = CompositionId::parse("numeric_revision_witness").expect("composition");
+    schema
+        .machines
+        .retain(|machine| machine.instance_id.as_str() == "occurrence");
+    schema
+        .actors
+        .retain(|actor| actor.name.as_str() == "occurrence_authority");
+    schema.routes.clear();
+    schema.transaction_plans.clear();
+    schema.invariants.clear();
+    let instance = MachineInstanceId::parse("occurrence").expect("instance");
+    let field = |name: &str, expr| CompositionWitnessField {
+        field: FieldId::parse(name).expect("field"),
+        expr,
+    };
+    schema.witnesses = vec![CompositionWitness {
+        name: CompositionWitnessId::parse("revision_three_then_four").expect("witness"),
+        preload_inputs: [3, 4]
+            .into_iter()
+            .map(|revision| CompositionWitnessInput {
+                machine: instance.clone(),
+                input_variant: InputVariantId::parse("Supersede").expect("input"),
+                fields: vec![
+                    field("superseded_by_revision", Expr::U64(revision)),
+                    field("at_utc_ms", Expr::U64(0)),
+                ],
+            })
+            .collect(),
+        expected_routes: vec![],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![CompositionWitnessState {
+            machine: instance.clone(),
+            phase: Some(PhaseId::parse("Superseded").expect("phase")),
+            fields: vec![field(
+                "superseded_by_revision",
+                Expr::Some(Box::new(Expr::U64(3))),
+            )],
+        }],
+        expected_transitions: ["SupersedePendingOrLive", "SupersedeAlreadySuperseded"]
+            .into_iter()
+            .map(|name| CompositionWitnessTransition {
+                machine: instance.clone(),
+                transition: TransitionId::parse(name).expect("transition"),
+            })
+            .collect(),
+        expected_transition_order: vec![],
+        state_limits: CompositionStateLimits {
+            step_limit: 8,
+            pending_input_limit: 2,
+            pending_route_limit: 0,
+            delivered_route_limit: 0,
+            emitted_effect_limit: 4,
+            seq_limit: 2,
+            set_limit: 2,
+            map_limit: 2,
+        },
+    }];
+    schema
+}
+
+#[test]
+fn scripted_witnesses_consume_exact_queued_revisions_beyond_sample_domain() {
+    let schema = numeric_revision_witness_fixture();
+    let rendered = render_composition_semantic_model(&schema).expect("render numeric witness");
+    let config =
+        meerkat_machine_codegen::render_composition_witness_cfg(&schema, &schema.witnesses[0]);
+    // Optional artifact output lets the explicit TLC lane run this exact
+    // fixture before and after a generator change without a handwritten model.
+    if let Some(directory) = std::env::var_os("MEERKAT_NUMERIC_WITNESS_ARTIFACTS") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("fixture directory");
+        std::fs::write(directory.join("model.tla"), &rendered).expect("model artifact");
+        std::fs::write(directory.join("witness.cfg"), config).expect("config artifact");
+    }
+    assert!(rendered.contains("superseded_by_revision |-> 3"));
+    assert!(rendered.contains("superseded_by_revision |-> 4"));
+    let witness_next = rendered
+        .split("WitnessNext_revision_three_then_four ==")
+        .nth(1)
+        .and_then(|tail| tail.split("CiStateConstraint ==").next())
+        .expect("witness transition relation");
+    assert!(witness_next.contains("SeqElements(pending_inputs)"));
+    assert!(witness_next.contains("witness_packet.machine = \"occurrence\""));
+    assert!(witness_next.contains("witness_packet.variant = \"Supersede\""));
+    assert!(witness_next.contains("occurrence_SupersedePendingOrLive(witness_packet.payload.superseded_by_revision, witness_packet.payload.at_utc_ms)"));
+    assert!(witness_next.contains("occurrence_SupersedeAlreadySuperseded(witness_packet.payload.superseded_by_revision, witness_packet.payload.at_utc_ms)"));
+    assert!(!witness_next.contains(r"arg_superseded_by_revision \in 0..2"));
+    // Ordinary exploration keeps its original sample bound. The scripted
+    // path calls the same guarded actions, using the queued 3 and 4 instead.
+    let core_next = rendered
+        .split("CoreNext ==")
+        .nth(1)
+        .and_then(|tail| tail.split("InjectNext ==").next())
+        .expect("core next");
+    assert!(core_next.contains(r"arg_superseded_by_revision \in 0..2"));
+    assert!(rendered.contains("/\\ occurrence_phase = \"Superseded\""));
+}
+
 fn tool_filter_override_line(rendered: &str) -> &str {
     rendered
         .lines()

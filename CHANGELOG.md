@@ -243,6 +243,22 @@ them.
   native owner prunes them, including late callbacks and cancelled MCP login.
   Cleanup preserves concurrent live attempts and their deadlines; a failed
   durable write returns `PersistenceFailed` and remains retryable.
+- Scripted composition witnesses consume the exact queued packets: an
+  expected transition with bindings is called on the payload of a matching
+  packet in `pending_inputs` instead of re-sampling its arguments from the
+  ordinary domain product. Witnesses with scripted values outside the sample
+  domain (such as revisions 3 and 4) were unconsumable before, and the
+  `meerkat_mob_seam` witnesses stalled in TLC startup action splitting
+  (about 3.75e9 argument combinations) before computing any state. The three
+  `meerkat_mob_seam` witnesses (runtime-binding, retire and destroy round
+  trips) now reach `WitnessScriptComplete`: the scripts deliver the
+  MeerkatMachine `Initialize` signal, use respawn generation 0 for a fresh
+  identity, begin the destroy quiesce (`BeginPlacedCompletionLifecycleQuiesce`)
+  before `DestroyMob`, and size their state limits for that ladder.
+  `--skip-tlc-composition` now skips only a broad composition's full
+  ci.cfg/deep.cfg sweep; its witnesses still run with the completion proof,
+  so the canonical TLC lane checks them. `meerkat_mob_seam` ci.cfg stays
+  skipped (#1364).
 - A GPT Live reopen whose context summary is not ready yet (a Late open) now
   seeds the most recent conversation turns (up to the recent-turns window, when
   they fit the startup limits) verbatim as startup input, instead of opening

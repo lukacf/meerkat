@@ -19634,6 +19634,24 @@ mod tests {
         ActivatedResult,
         RawDuringRegistration,
         CancelledRawDuringRegistration,
+        /// The client reports the channel's first unmeasured output silent.
+        MediaFaultOnFirstOutput,
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn a_silent_first_unmeasured_output_closes_the_channel_on_a_media_fault() {
+        run_context_and_result_recovery_close_case(
+            None,
+            true,
+            false,
+            Some(RecoveryCloseCase::MediaFaultOnFirstOutput),
+        )
+        .await;
     }
 
     #[cfg(all(
@@ -20977,6 +20995,91 @@ mod tests {
             })
             .await
             .expect("unmeasured voice observation is retained without playback completion");
+            // The committed first output with a transcript is the typed end
+            // the runtime requests media health at.
+            let requested_output = runtime
+                .live_media_health_requested_output(&session_id, &old_channel)
+                .await
+                .expect("machine state")
+                .expect("the channel's first output requested media health");
+            let report = |output_id: &str, audible_frames: u64, max_rms: f64| {
+                meerkat_contracts::LiveMediaHealthParams {
+                    channel_id: old_channel.to_string(),
+                    output_id: output_id.to_string(),
+                    decoded_frames: 24_000,
+                    audible_frames,
+                    max_rms,
+                }
+            };
+            assert!(
+                matches!(
+                    member_host
+                        .report_experimental_live_media_health(
+                            authority.as_ref(),
+                            &old_channel,
+                            &initial_activation_receipt,
+                            &report("not-the-requested-output", 0, 0.0),
+                        )
+                        .await,
+                    Err(crate::surface::ExperimentalLiveMediaHealthError::Refused(_))
+                ),
+                "a report for an output the runtime did not request is refused"
+            );
+            if matches!(close_case, Some(RecoveryCloseCase::MediaFaultOnFirstOutput)) {
+                let verdict = member_host
+                    .report_experimental_live_media_health(
+                        authority.as_ref(),
+                        &old_channel,
+                        &initial_activation_receipt,
+                        &report(&requested_output, 0, 0.0004),
+                    )
+                    .await
+                    .expect("a silent report is judged");
+                assert_eq!(
+                    verdict,
+                    meerkat_contracts::LiveMediaHealthResult {
+                        verdict: meerkat_contracts::LiveMediaHealthVerdict::MediaFault,
+                        reopen_recommended: true,
+                    }
+                );
+                let closed = member_host
+                    .validate_experimental_live_channel_custody(
+                        &old_channel,
+                        opened.pending_receipt(),
+                    )
+                    .await
+                    .expect("closed custody stays readable");
+                assert!(matches!(
+                    closed.phase(),
+                    crate::surface::ExperimentalLiveChannelPhaseStatus::Closed
+                ));
+                assert!(
+                    member_host
+                        .report_experimental_live_media_health(
+                            authority.as_ref(),
+                            &old_channel,
+                            &initial_activation_receipt,
+                            &report(&requested_output, 0, 0.0),
+                        )
+                        .await
+                        .is_err(),
+                    "a closed channel's output is never judged again"
+                );
+                return;
+            }
+            let verdict = member_host
+                .report_experimental_live_media_health(
+                    authority.as_ref(),
+                    &old_channel,
+                    &initial_activation_receipt,
+                    &report(&requested_output, 900, 0.31),
+                )
+                .await
+                .expect("an audible report is judged");
+            assert_eq!(
+                verdict.verdict,
+                meerkat_contracts::LiveMediaHealthVerdict::Audible
+            );
             assert!(
                 mirror_host
                     .pending_replacement_required(&session_id)

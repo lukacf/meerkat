@@ -3959,8 +3959,10 @@ mod orchestrator {
             authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
             channel: &LiveChannelId,
             report: &meerkat_contracts::LiveMediaHealthParams,
-        ) -> Result<meerkat_contracts::LiveMediaHealthResult, crate::surface::ExperimentalLiveMediaHealthError>
-        {
+        ) -> Result<
+            meerkat_contracts::LiveMediaHealthResult,
+            crate::surface::ExperimentalLiveMediaHealthError,
+        > {
             use crate::surface::ExperimentalLiveMediaHealthError;
             let session_id = self
                 .runtime_adapter

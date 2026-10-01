@@ -377,7 +377,9 @@ impl TryFrom<WireLiveTransportBootstrap> for LiveTransportBootstrap {
     }
 }
 
-/// Request payload for `live/webrtc/answer`. `Debug` redacts the token.
+/// Request payload for `live/webrtc/answer`. `Debug` redacts the token and the
+/// SDP offer, whose ICE credentials (`ice-ufrag`, `ice-pwd`) are
+/// per-connection secrets; it prints the SDP length only.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveWebrtcAnswerParams {
@@ -391,16 +393,31 @@ impl std::fmt::Debug for LiveWebrtcAnswerParams {
         f.debug_struct("LiveWebrtcAnswerParams")
             .field("channel_id", &self.channel_id)
             .field("token", &meerkat_core::redact::REDACTED)
-            .field("offer_sdp", &self.offer_sdp)
+            .field(
+                "offer_sdp",
+                &format_args!("<redacted; {} bytes>", self.offer_sdp.len()),
+            )
             .finish()
     }
 }
 
-/// Response payload for `live/webrtc/answer`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Response payload for `live/webrtc/answer`. `Debug` prints the SDP
+/// answer length only; its ICE credentials are per-connection secrets.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveWebrtcAnswerResult {
     pub answer_sdp: String,
+}
+
+impl std::fmt::Debug for LiveWebrtcAnswerResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveWebrtcAnswerResult")
+            .field(
+                "answer_sdp",
+                &format_args!("<redacted; {} bytes>", self.answer_sdp.len()),
+            )
+            .finish()
+    }
 }
 
 /// Wire projection of [`meerkat_core::live_adapter::LiveChannelCapabilities`].
@@ -2329,9 +2346,17 @@ mod tests {
         let answer = LiveWebrtcAnswerParams {
             channel_id: "channel-visible".into(),
             token: SECRET.into(),
-            offer_sdp: "v=0".into(),
+            offer_sdp: format!("v=0\r\na=ice-ufrag:{SECRET}\r\na=ice-pwd:{SECRET}\r\n"),
         };
-        let rendered = format!("{bootstraps:?} {bootstraps:#?} {answer:?} {answer:#?}");
+        let result = LiveWebrtcAnswerResult {
+            answer_sdp: format!("v=0\r\na=ice-pwd:{SECRET}\r\n"),
+        };
+        let rendered =
+            format!("{bootstraps:?} {bootstraps:#?} {answer:?} {answer:#?} {result:?} {result:#?}");
+        assert!(
+            rendered.contains("bytes>"),
+            "SDP length missing: {rendered}"
+        );
         assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
         for kept in [
             "ws://127.0.0.1:9000/live/ws?<redacted>",

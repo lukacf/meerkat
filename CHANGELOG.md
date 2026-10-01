@@ -212,7 +212,10 @@ them.
   and effect types redact them, and `LiveTransportBootstrap`,
   `WireLiveTransportBootstrap`, `LiveWebrtcAnswerParams`, `LiveTokenString`
   and the runtime `LiveWebrtcTokenAuthority` / `LiveWebsocketTokenAuthority`
-  redact the token and the bootstrap URL query by hand.
+  redact the token and the bootstrap URL query by hand. WebRTC SDP offers and
+  answers (`LiveWebrtcAnswerParams.offer_sdp`, `LiveWebrtcAnswerResult`,
+  `LiveWebrtcAnswerAccepted`) print only their length, since their ICE
+  credentials (`ice-ufrag`, `ice-pwd`) are per-connection secrets.
 - The `meerkat_schedule_create` and `meerkat_schedule_update` tool schemas
   advertise the existing `host_runnable` target (`target_kind`
   `"host_runnable"`, a required non-empty `runnable` name and optional opaque

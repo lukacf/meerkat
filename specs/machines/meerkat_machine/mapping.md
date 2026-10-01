@@ -3305,6 +3305,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveLiveBoundaryContextReceiptRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveLiveBoundaryOwnerContextReceiptRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitTerminalBoundarySequenceRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4491,6 +4494,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeLiveDelegationSteerRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationSteerDeliveryIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationSteerDeliveryAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationSteerDeliveryRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ReconcileLiveDelegationSteerConfirmedIdle`
@@ -7543,6 +7555,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveBoundaryContextReceiptResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveBoundaryOwnerContextReceiptResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TerminalBoundarySequenceCommitted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7997,6 +8012,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveDelegationSteerAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationSteerDeliveryResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveDelegationSteerReconciled`

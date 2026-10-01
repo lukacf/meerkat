@@ -13729,6 +13729,7 @@ pub struct State {
     pub live_delegation_steer_digest_by_continuation: std::collections::BTreeMap<String, String>,
     pub live_delegation_steer_reconciliation_by_continuation:
         std::collections::BTreeMap<String, LiveDelegationReconciliation>,
+    pub live_delegation_steer_delivered_by_continuation: std::collections::BTreeMap<String, bool>,
     pub live_delegation_operation_by_interaction: std::collections::BTreeMap<String, OperationId>,
     pub live_delegation_channel_by_operation: std::collections::BTreeMap<OperationId, String>,
     pub live_delegation_schedule_state_by_operation:
@@ -16060,6 +16061,11 @@ pub mod inputs {
         pub input_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveBoundaryOwnerContextReceipt {
+        pub run_id: RunId,
+        pub contribution_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitTerminalBoundarySequence {
         pub run_id: RunId,
         pub boundary_sequence: u64,
@@ -17029,6 +17035,16 @@ pub mod inputs {
         pub provider_turn_correlation: String,
         pub continuation_id: String,
         pub continuation_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveDelegationSteerDelivery {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub operation_id: OperationId,
+        pub continuation_id: String,
+        pub delivered: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReconcileLiveDelegationSteer {
@@ -18149,6 +18165,7 @@ pub enum Input {
     AcceptWithCompletion(inputs::AcceptWithCompletion),
     AcceptWithoutWake(inputs::AcceptWithoutWake),
     ResolveLiveBoundaryContextReceipt(inputs::ResolveLiveBoundaryContextReceipt),
+    ResolveLiveBoundaryOwnerContextReceipt(inputs::ResolveLiveBoundaryOwnerContextReceipt),
     CommitTerminalBoundarySequence(inputs::CommitTerminalBoundarySequence),
     LiveBoundaryUnavailable(inputs::LiveBoundaryUnavailable),
     JoinLiveBoundaryDurableAppend(inputs::JoinLiveBoundaryDurableAppend),
@@ -18305,6 +18322,7 @@ pub enum Input {
     CancelQueuedLiveDelegation(inputs::CancelQueuedLiveDelegation),
     AuthorizeLiveDelegationNarration(inputs::AuthorizeLiveDelegationNarration),
     AuthorizeLiveDelegationSteer(inputs::AuthorizeLiveDelegationSteer),
+    ResolveLiveDelegationSteerDelivery(inputs::ResolveLiveDelegationSteerDelivery),
     ReconcileLiveDelegationSteer(inputs::ReconcileLiveDelegationSteer),
     AbandonLiveInteraction(inputs::AbandonLiveInteraction),
     CompleteLiveInteraction(inputs::CompleteLiveInteraction),
@@ -18593,6 +18611,9 @@ impl Input {
             Self::ResolveLiveBoundaryContextReceipt(_) => {
                 InputKind::ResolveLiveBoundaryContextReceipt
             }
+            Self::ResolveLiveBoundaryOwnerContextReceipt(_) => {
+                InputKind::ResolveLiveBoundaryOwnerContextReceipt
+            }
             Self::CommitTerminalBoundarySequence(_) => InputKind::CommitTerminalBoundarySequence,
             Self::LiveBoundaryUnavailable(_) => InputKind::LiveBoundaryUnavailable,
             Self::JoinLiveBoundaryDurableAppend(_) => InputKind::JoinLiveBoundaryDurableAppend,
@@ -18797,6 +18818,9 @@ impl Input {
                 InputKind::AuthorizeLiveDelegationNarration
             }
             Self::AuthorizeLiveDelegationSteer(_) => InputKind::AuthorizeLiveDelegationSteer,
+            Self::ResolveLiveDelegationSteerDelivery(_) => {
+                InputKind::ResolveLiveDelegationSteerDelivery
+            }
             Self::ReconcileLiveDelegationSteer(_) => InputKind::ReconcileLiveDelegationSteer,
             Self::AbandonLiveInteraction(_) => InputKind::AbandonLiveInteraction,
             Self::CompleteLiveInteraction(_) => InputKind::CompleteLiveInteraction,
@@ -19116,6 +19140,7 @@ pub enum InputKind {
     AcceptWithCompletion,
     AcceptWithoutWake,
     ResolveLiveBoundaryContextReceipt,
+    ResolveLiveBoundaryOwnerContextReceipt,
     CommitTerminalBoundarySequence,
     LiveBoundaryUnavailable,
     JoinLiveBoundaryDurableAppend,
@@ -19268,6 +19293,7 @@ pub enum InputKind {
     CancelQueuedLiveDelegation,
     AuthorizeLiveDelegationNarration,
     AuthorizeLiveDelegationSteer,
+    ResolveLiveDelegationSteerDelivery,
     ReconcileLiveDelegationSteer,
     AbandonLiveInteraction,
     CompleteLiveInteraction,
@@ -19515,6 +19541,13 @@ pub mod effects {
     pub struct LiveBoundaryContextReceiptResolved {
         pub run_id: RunId,
         pub input_id: String,
+        pub boundary: AdmissionRunApplyBoundary,
+        pub boundary_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBoundaryOwnerContextReceiptResolved {
+        pub run_id: RunId,
+        pub contribution_id: String,
         pub boundary: AdmissionRunApplyBoundary,
         pub boundary_sequence: u64,
     }
@@ -20430,6 +20463,13 @@ pub mod effects {
         pub continuation_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveDelegationSteerDeliveryResolved {
+        pub channel_id: String,
+        pub operation_id: OperationId,
+        pub continuation_id: String,
+        pub delivered: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveDelegationSteerReconciled {
         pub channel_id: String,
         pub operation_id: OperationId,
@@ -21092,6 +21132,7 @@ pub enum Effect {
     TurnRunStarted(effects::TurnRunStarted),
     TurnBoundaryApplied(effects::TurnBoundaryApplied),
     LiveBoundaryContextReceiptResolved(effects::LiveBoundaryContextReceiptResolved),
+    LiveBoundaryOwnerContextReceiptResolved(effects::LiveBoundaryOwnerContextReceiptResolved),
     TerminalBoundarySequenceCommitted(effects::TerminalBoundarySequenceCommitted),
     TurnRunCompleted(effects::TurnRunCompleted),
     DurableTailRecoveryAuthorized(effects::DurableTailRecoveryAuthorized),
@@ -21248,6 +21289,7 @@ pub enum Effect {
     LiveDelegationQueuedCancelled(effects::LiveDelegationQueuedCancelled),
     LiveDelegationNarrationAuthorized(effects::LiveDelegationNarrationAuthorized),
     LiveDelegationSteerAuthorized(effects::LiveDelegationSteerAuthorized),
+    LiveDelegationSteerDeliveryResolved(effects::LiveDelegationSteerDeliveryResolved),
     LiveDelegationSteerReconciled(effects::LiveDelegationSteerReconciled),
     LiveDelegationResultReleaseAuthorized(effects::LiveDelegationResultReleaseAuthorized),
     LiveDelegationResultDeliveryAuthorized(effects::LiveDelegationResultDeliveryAuthorized),
@@ -21350,6 +21392,7 @@ pub enum EffectKind {
     TurnRunStarted,
     TurnBoundaryApplied,
     LiveBoundaryContextReceiptResolved,
+    LiveBoundaryOwnerContextReceiptResolved,
     TerminalBoundarySequenceCommitted,
     TurnRunCompleted,
     DurableTailRecoveryAuthorized,
@@ -21502,6 +21545,7 @@ pub enum EffectKind {
     LiveDelegationQueuedCancelled,
     LiveDelegationNarrationAuthorized,
     LiveDelegationSteerAuthorized,
+    LiveDelegationSteerDeliveryResolved,
     LiveDelegationSteerReconciled,
     LiveDelegationResultReleaseAuthorized,
     LiveDelegationResultDeliveryAuthorized,
@@ -23075,6 +23119,7 @@ pub enum TransitionId {
     MarkAppliedPendingConsumptionRetired,
     MarkAppliedPendingConsumptionStopped,
     ResolveLiveBoundaryContextReceiptRunning,
+    ResolveLiveBoundaryOwnerContextReceiptRunning,
     CommitTerminalBoundarySequenceRunning,
     LiveBoundaryUnavailableAttached,
     LiveBoundaryUnavailableRunning,
@@ -23471,6 +23516,9 @@ pub enum TransitionId {
     AuthorizeLiveDelegationSteerIdle,
     AuthorizeLiveDelegationSteerAttached,
     AuthorizeLiveDelegationSteerRunning,
+    ResolveLiveDelegationSteerDeliveryIdle,
+    ResolveLiveDelegationSteerDeliveryAttached,
+    ResolveLiveDelegationSteerDeliveryRunning,
     ReconcileLiveDelegationSteerConfirmedIdle,
     ReconcileLiveDelegationSteerConfirmedAttached,
     ReconcileLiveDelegationSteerConfirmedRunning,
@@ -24807,6 +24855,7 @@ pub fn initial_state() -> State {
         live_delegation_steer_operation_by_continuation: Default::default(),
         live_delegation_steer_digest_by_continuation: Default::default(),
         live_delegation_steer_reconciliation_by_continuation: Default::default(),
+        live_delegation_steer_delivered_by_continuation: Default::default(),
         live_delegation_operation_by_interaction: Default::default(),
         live_delegation_channel_by_operation: Default::default(),
         live_delegation_schedule_state_by_operation: Default::default(),

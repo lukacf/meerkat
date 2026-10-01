@@ -12348,34 +12348,6 @@ impl MobHandle {
         }
     }
 
-    /// Steer one member's running turn with plain conversational input, by
-    /// identity and with a stable delivery identity. While the member's turn
-    /// runs, a plain steer resolves to request-only context for that turn's
-    /// next model call: it writes no conversation row. A member that is idle
-    /// takes it as ordinary queued work instead (runtime admission decides).
-    pub async fn steer_work_for_identity_with_delivery_identity(
-        &self,
-        identity: AgentIdentity,
-        spec: WorkSpec,
-        delivery_identity: crate::store::MobDeliveryIdentity,
-    ) -> Result<WorkDeliveryReceipt, MobError> {
-        let (runtime_id, fence_token) = self
-            .resolve_submit_work_runtime_binding(
-                &identity,
-                WorkOrigin::Internal,
-                "steer_work_for_identity_with_delivery_identity",
-            )
-            .await?;
-        self.submit_work_with_mode_and_delivery_identity(
-            runtime_id,
-            fence_token,
-            spec,
-            HandlingMode::Steer,
-            delivery_identity,
-        )
-        .await
-    }
-
     /// [`Self::submit_work_with_mode`] with a caller deadline (#1102).
     ///
     /// The actor round trip is bounded end to end: channel admission and the

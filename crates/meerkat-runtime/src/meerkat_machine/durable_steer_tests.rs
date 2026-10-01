@@ -62,6 +62,8 @@ struct RunnerScript {
     steps_done: AtomicUsize,
     primitives: std::sync::Mutex<Vec<Vec<InputId>>>,
     applied_durable: std::sync::Mutex<Vec<InputId>>,
+    /// Request-only contexts each boundary take handed the model.
+    request_only_taken: std::sync::Mutex<Vec<usize>>,
     discarded: std::sync::Mutex<Vec<meerkat_core::event::BoundaryAppendsDiscarded>>,
     applied_runs: std::sync::Mutex<Vec<RunId>>,
     publication_store: std::sync::Mutex<
@@ -102,6 +104,7 @@ impl RunnerScript {
             steps_done: AtomicUsize::new(0),
             primitives: std::sync::Mutex::new(Vec::new()),
             applied_durable: std::sync::Mutex::new(Vec::new()),
+            request_only_taken: std::sync::Mutex::new(Vec::new()),
             discarded: std::sync::Mutex::new(Vec::new()),
             applied_runs: std::sync::Mutex::new(Vec::new()),
             publication_store: std::sync::Mutex::new(None),
@@ -320,6 +323,13 @@ impl CoreExecutor for DurableSteerExecutor {
                         .take_boundary_for_test(&run_id, accept_durable)
                         .await
                         .map_err(|error| CoreExecutorError::Internal(error.to_string()))?;
+                    if !taken.request_only.is_empty() {
+                        self.script
+                            .request_only_taken
+                            .lock()
+                            .unwrap()
+                            .push(taken.request_only.len());
+                    }
                     if let Some(appends) = taken.applied_durable {
                         let lag = self.script.append_record_lag_ms.load(Ordering::SeqCst);
                         if lag > 0 {
@@ -2048,4 +2058,152 @@ async fn stop_run_of_an_unknown_run_is_not_current() {
         other => panic!("expected NotCurrent, got {other:?}"),
     }
     assert_eq!(rig.script.interrupts.load(Ordering::SeqCst), 0);
+}
+
+fn owner_context(text: &str) -> Vec<meerkat_core::lifecycle::TurnRequestContext> {
+    vec![meerkat_core::lifecycle::TurnRequestContext::new(text.to_string()).expect("context")]
+}
+
+/// Owner request-only context (a live delegation steer) delivered straight
+/// into the running turn: it waits across the closed window, lands at the
+/// next boundary, is recorded on that boundary's durable receipt in the
+/// run's dense sequence, and never becomes a turn of its own.
+#[tokio::test]
+async fn owner_context_lands_at_the_next_boundary_with_a_durable_receipt() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let rig = DurableSteerRig::persistent(Arc::clone(&store)).await;
+    let runtime_id = MeerkatMachine::logical_runtime_id(&rig.session_id);
+    let busy = rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenStream)
+        .await;
+    let adapter = Arc::clone(&rig.adapter);
+    let session_id = rig.session_id.clone();
+    let delivery = tokio::spawn(async move {
+        adapter
+            .deliver_live_owner_request_context(
+                &session_id,
+                "live-delegation-steer:continuation-1",
+                owner_context("into notes dot md"),
+            )
+            .await
+    });
+    rig.wait_for_waiting_delivery().await;
+    // The model returned tool calls: the next boundary opens and the waiting
+    // owner context attaches to it.
+    rig.script.step(RunnerStep::OpenNextBoundary);
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    let delivered = delivery.await.expect("delivery task").expect("delivery");
+    let crate::live_execution::LiveOwnerContextDelivery::Delivered {
+        run_id,
+        boundary_sequence,
+    } = delivered
+    else {
+        panic!("delivered at the next boundary, got {delivered:?}");
+    };
+    let receipt = store
+        .load_boundary_receipt(&runtime_id, &run_id, boundary_sequence)
+        .await
+        .expect("load receipt")
+        .expect("the owner contribution is on a durable runtime receipt");
+    assert_eq!(
+        receipt.owner_contributions,
+        vec!["live-delegation-steer:continuation-1".to_string()]
+    );
+    assert!(receipt.contributing_input_ids.is_empty());
+    rig.script.step(RunnerStep::Finish);
+    // The terminal receipt is the dense successor of the owner receipt: the
+    // run still commits.
+    rig.wait_for_phase(&busy, InputLifecycleState::Consumed)
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while rig.script.request_only_taken.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the runner took the owner context");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        rig.script.apply_calls.load(Ordering::SeqCst),
+        1,
+        "owner context never runs as a turn of its own"
+    );
+}
+
+/// The late window: the worker is on its final model call when the
+/// continuation arrives. The run ends without another boundary, so the
+/// context is NotDelivered, nothing is recorded, and no follow-up turn (no
+/// extra row, no orphan reply) ever runs.
+#[tokio::test]
+async fn owner_context_is_not_delivered_when_the_run_ends_first_and_never_runs() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let rig = DurableSteerRig::persistent(Arc::clone(&store)).await;
+    let runtime_id = MeerkatMachine::logical_runtime_id(&rig.session_id);
+    rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenStream)
+        .await;
+    let adapter = Arc::clone(&rig.adapter);
+    let session_id = rig.session_id.clone();
+    let delivery = tokio::spawn(async move {
+        adapter
+            .deliver_live_owner_request_context(
+                &session_id,
+                "live-delegation-steer:late",
+                owner_context("too late"),
+            )
+            .await
+    });
+    rig.wait_for_waiting_delivery().await;
+    let run_id = rig
+        .script
+        .active_run
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("active run");
+    // The model returns final text: the run ends with no further boundary.
+    rig.script.step(RunnerStep::Finish);
+    assert_eq!(
+        delivery.await.expect("delivery task").expect("delivery"),
+        crate::live_execution::LiveOwnerContextDelivery::NotDelivered
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        rig.script.apply_calls.load(Ordering::SeqCst),
+        1,
+        "a missed continuation never seeds a turn"
+    );
+    assert!(rig.script.request_only_taken.lock().unwrap().is_empty());
+    let receipts = store
+        .load_committed_boundary_receipts(&runtime_id, &run_id)
+        .await
+        .expect("load receipts");
+    assert!(
+        receipts
+            .iter()
+            .all(|receipt| receipt.owner_contributions.is_empty()),
+        "nothing was recorded for an undelivered contribution"
+    );
+}
+
+#[tokio::test]
+async fn owner_context_without_an_active_run_is_not_delivered() {
+    let rig = DurableSteerRig::ephemeral().await;
+    assert_eq!(
+        rig.adapter
+            .deliver_live_owner_request_context(
+                &rig.session_id,
+                "live-delegation-steer:idle",
+                owner_context("nobody listening"),
+            )
+            .await
+            .expect("delivery"),
+        crate::live_execution::LiveOwnerContextDelivery::NotDelivered
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(rig.script.apply_calls.load(Ordering::SeqCst), 0);
 }

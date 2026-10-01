@@ -10416,6 +10416,69 @@ impl MeerkatMachine {
         ))
     }
 
+    /// Record the runtime's exact boundary delivery outcome of one authorized
+    /// steer (`ResolveLiveDelegationSteerDelivery`): exactly once per steer.
+    pub async fn resolve_live_delegation_steer_delivery(
+        &self,
+        authority: &crate::live_execution::LiveDelegationSteerAuthority,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+        delivered: bool,
+    ) -> Result<(), RuntimeDriverError> {
+        let session_id = binding.session_id();
+        let correlation = authority.operation().domain_correlation();
+        if authority.session_id() != session_id || correlation.channel_id() != binding.channel_id()
+        {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "live delegation steer delivery does not match its exact binding"
+                    .to_string(),
+            });
+        }
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        self.apply_session_dsl_input(
+            session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::ResolveLiveDelegationSteerDelivery {
+                channel_id: correlation.channel_id().to_string(),
+                runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                    binding.runtime_id(),
+                ),
+                fence_token: crate::meerkat_machine::dsl::FenceToken::from_domain(
+                    binding.fence_token(),
+                ),
+                generation: crate::meerkat_machine::dsl::Generation::from_domain(
+                    binding.generation(),
+                ),
+                operation_id: crate::meerkat_machine::dsl::OperationId::from_domain(
+                    authority.operation().operation_id(),
+                ),
+                continuation_id: authority.continuation_id().to_owned(),
+                delivered,
+            },
+            "ResolveLiveDelegationSteerDelivery",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+    }
+
+    /// Whether a steer was delivered into its worker's running turn (`None`
+    /// until its delivery resolved).
+    pub async fn live_delegation_steer_delivered(
+        &self,
+        session_id: &SessionId,
+        continuation_id: &str,
+    ) -> Result<Option<bool>, RuntimeDriverError> {
+        let state = self
+            .session_dsl_state(session_id)
+            .await
+            .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
+        Ok(state
+            .live_delegation_steer_delivered_by_continuation
+            .get(continuation_id)
+            .copied())
+    }
+
     /// Reconcile one provisional steer against its canonical commit
     /// (`ReconcileLiveDelegationSteer`): confirmed when the continuation's row
     /// committed with exactly the steered text, a material conflict when it

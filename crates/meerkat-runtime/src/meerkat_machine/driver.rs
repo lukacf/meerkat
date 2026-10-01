@@ -5335,6 +5335,29 @@ impl DriverEntry {
         }
     }
 
+    /// Stamp and (for a persistent driver) durably commit one owner
+    /// request-only boundary receipt for the current run.
+    pub(crate) async fn machine_realize_live_boundary_owner_context(
+        &mut self,
+        run_id: &RunId,
+        contribution_id: &str,
+        owner_session_id: &SessionId,
+    ) -> Result<meerkat_core::lifecycle::RunBoundaryReceipt, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(d) => {
+                d.machine_resolve_live_boundary_owner_context_receipt(run_id, contribution_id)
+            }
+            DriverEntry::Persistent(d) => {
+                d.machine_realize_live_boundary_owner_context(
+                    run_id,
+                    contribution_id,
+                    owner_session_id,
+                )
+                .await
+            }
+        }
+    }
+
     /// Stage a batch of inputs atomically in a single `StageDrainSnapshot`.
     pub(crate) fn machine_realize_authorized_stage_batch(
         &mut self,

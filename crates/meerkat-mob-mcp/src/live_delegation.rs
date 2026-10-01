@@ -4092,6 +4092,64 @@ impl ExperimentalLiveDelegationCoordinator {
             .cloned()
     }
 
+    /// Take the continuations held for `delegation` while it waited for a
+    /// worker, authorize each as a steer (the worker's start is authorized),
+    /// record it delivered, and append it to the worker's task. Returns the
+    /// task and the authorities to reconcile once each row commits.
+    async fn fold_pending_continuations(
+        &self,
+        runtime_binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        operation: &ExactOperationIdentity<LiveUserTurnCorrelation>,
+        delegation: &LiveSidebandDelegationRef,
+        mut task: String,
+    ) -> (
+        String,
+        Vec<(
+            meerkat_runtime::live_execution::LiveDelegationSteerAuthority,
+            PendingContinuation,
+        )>,
+    ) {
+        let held: Vec<PendingContinuation> = {
+            let mut pending = self.pending_continuations.lock().await;
+            let (held, waiting): (Vec<_>, Vec<_>) = pending
+                .drain(..)
+                .partition(|continuation| &continuation.delegation == delegation);
+            *pending = waiting;
+            held
+        };
+        let mut folded = Vec::new();
+        for continuation in held {
+            let digest = continuation_digest(&continuation.transcript);
+            let authority = match self
+                .runtime
+                .authorize_live_delegation_steer(
+                    runtime_binding,
+                    operation,
+                    &continuation.continuation_id,
+                    &digest,
+                )
+                .await
+            {
+                Ok(authority) => authority,
+                Err(error) => {
+                    tracing::debug!(%error, "held continuation was not authorized as a steer");
+                    continue;
+                }
+            };
+            task.push_str("\n\n");
+            task.push_str(&continuation_steer_text(&continuation.transcript));
+            if let Err(error) = self
+                .runtime
+                .resolve_live_delegation_steer_delivery(&authority, runtime_binding, true)
+                .await
+            {
+                tracing::warn!(%error, "folded steer delivery outcome was not recorded");
+            }
+            folded.push((authority, continuation));
+        }
+        (task, folded)
+    }
+
     /// A queued delegation's worker started: deliver the continuations that
     /// arrived while it waited, each exactly once.
     async fn deliver_pending_continuations(&self, retained: &Arc<RetainedDelegation>) {
@@ -4138,50 +4196,81 @@ impl ExperimentalLiveDelegationCoordinator {
                 return;
             }
         };
-        let Some(mob_handle) = retained.mob_handle.as_ref() else {
-            tracing::warn!(
-                operation_id = %retained.operation.operation_id(),
-                "steered continuation has no mob handle to reach its worker"
-            );
-            return;
-        };
         let worker = self
             .execution_policy
             .worker_identity(&retained.source_identity, retained.operation.operation_id());
-        let interaction_id = retained
-            .operation
-            .domain_correlation()
-            .interaction_id()
-            .to_string();
-        match MobDeliveryIdentity::new(
-            format!("live-delegation-steer:{}", continuation.continuation_id),
-            interaction_id,
-        ) {
-            Ok(delivery_identity) => {
-                let work = WorkSpec::new(
-                    continuation_steer_text(&continuation.transcript),
-                    WorkOrigin::Internal,
-                );
-                match mob_handle
-                    .steer_work_for_identity_with_delivery_identity(worker, work, delivery_identity)
-                    .await
-                {
-                    Ok(_) => tracing::info!(
-                        operation_id = %retained.operation.operation_id(),
-                        "utterance continuation steered into its delegation's worker"
-                    ),
-                    Err(error) => tracing::warn!(
-                        %error,
-                        operation_id = %retained.operation.operation_id(),
-                        "steered continuation was not accepted by its worker"
-                    ),
-                }
-            }
-            Err(error) => tracing::warn!(
-                %error,
-                "steered continuation has no valid delivery identity"
-            ),
+        let worker_session = match retained.mob_handle.as_ref() {
+            Some(mob_handle) => mob_handle.resolve_bridge_session_id(&worker).await,
+            None => None,
         }
+        .unwrap_or_else(|| retained.runtime_binding.session_id().clone());
+        // Request-only context straight into the worker's running turn at its
+        // next model boundary: no runtime input, no queue, so a continuation
+        // that misses the run is NotDelivered and never becomes a turn. The
+        // runtime records the contribution on that boundary's receipt.
+        let delivered = match meerkat_core::lifecycle::TurnRequestContext::new(
+            continuation_steer_text(&continuation.transcript),
+        ) {
+            Ok(context) => match self
+                .runtime
+                .deliver_live_owner_request_context(
+                    &worker_session,
+                    &format!("live-delegation-steer:{}", continuation.continuation_id),
+                    vec![context],
+                )
+                .await
+            {
+                Ok(meerkat_runtime::live_execution::LiveOwnerContextDelivery::Delivered {
+                    boundary_sequence,
+                    ..
+                }) => {
+                    tracing::info!(
+                        operation_id = %retained.operation.operation_id(),
+                        boundary_sequence,
+                        "utterance continuation delivered into its delegation's running turn"
+                    );
+                    true
+                }
+                Ok(meerkat_runtime::live_execution::LiveOwnerContextDelivery::NotDelivered) => {
+                    tracing::info!(
+                        operation_id = %retained.operation.operation_id(),
+                        "utterance continuation missed its worker's run; it stays an ordinary turn"
+                    );
+                    false
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "utterance continuation delivery failed");
+                    false
+                }
+            },
+            Err(error) => {
+                tracing::warn!(%error, "utterance continuation has no deliverable context");
+                false
+            }
+        };
+        if let Err(error) = self
+            .runtime
+            .resolve_live_delegation_steer_delivery(
+                &authority,
+                &retained.runtime_binding,
+                delivered,
+            )
+            .await
+        {
+            tracing::warn!(%error, "steer delivery outcome was not recorded");
+        }
+        self.reconcile_steer_at_commit(retained, authority, continuation);
+    }
+
+    /// Reconcile one steer when its continuation's canonical row commits:
+    /// the facade resolves the commit event, the machine settles the steer.
+    fn reconcile_steer_at_commit(
+        &self,
+        retained: Arc<RetainedDelegation>,
+        authority: meerkat_runtime::live_execution::LiveDelegationSteerAuthority,
+        continuation: PendingContinuation,
+    ) {
+        let digest = continuation_digest(&continuation.transcript);
         let runtime = Arc::clone(&self.runtime);
         tokio::spawn(async move {
             let outcome = retained
@@ -4506,6 +4595,12 @@ impl ExperimentalLiveDelegationCoordinator {
         admission
             .release_tool_execution(&consequential)
             .map_err(|error| other(error.to_string()))?;
+        // Continuations that arrived while this delegation waited for its
+        // worker join the task itself, under generated steer authority: the
+        // task is the worker's runtime input, so the runtime accounts for it.
+        let (task, folded_continuations) = self
+            .fold_pending_continuations(&runtime_binding, &operation, &delegation, task)
+            .await;
         let result_spec =
             BoundedResultSpec::new("gpt_live_delegation", LIVE_DELEGATION_RESULT_BYTES)
                 .map_err(|error| other(error.to_string()))?;
@@ -4660,6 +4755,9 @@ impl ExperimentalLiveDelegationCoordinator {
             retained.operation.operation_id().clone(),
             Arc::clone(&retained),
         );
+        for (authority, continuation) in folded_continuations {
+            self.reconcile_steer_at_commit(Arc::clone(&retained), authority, continuation);
+        }
         self.deliver_pending_continuations(&retained).await;
         let task_coordinator = Arc::new(self.clone());
         let task_retained = Arc::clone(&retained);

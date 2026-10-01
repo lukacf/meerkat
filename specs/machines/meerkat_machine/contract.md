@@ -228,6 +228,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_delegation_steer_operation_by_continuation`: `Map<String, OperationId>`
 - `live_delegation_steer_digest_by_continuation`: `Map<String, String>`
 - `live_delegation_steer_reconciliation_by_continuation`: `Map<String, LiveDelegationReconciliation>`
+- `live_delegation_steer_delivered_by_continuation`: `Map<String, Bool>`
 - `live_delegation_operation_by_interaction`: `Map<String, OperationId>`
 - `live_delegation_channel_by_operation`: `Map<OperationId, String>`
 - `live_delegation_schedule_state_by_operation`: `Map<OperationId, LiveDelegationScheduleState>`
@@ -565,6 +566,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CompleteUntilChangedSwitchTurnReconfigure`(request_id: String)
 - `ArchiveUnresolvedModelRoutingHandoff`(request_id: String, observed: ModelRoutingHandoffRecord, record: ModelRoutingHandoffRecord)
 - `ResolveLiveBoundaryContextReceipt`(run_id: RunId, input_id: String)
+- `ResolveLiveBoundaryOwnerContextReceipt`(run_id: RunId, contribution_id: String)
 - `CommitTerminalBoundarySequence`(run_id: RunId, boundary_sequence: u64)
 - `LiveBoundaryUnavailable`(input_id: String)
 - `JoinLiveBoundaryDurableAppend`(run_id: RunId, input_id: String)
@@ -716,6 +718,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CancelQueuedLiveDelegation`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId)
 - `AuthorizeLiveDelegationNarration`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, kind: LiveDelegationNarrationKind)
 - `AuthorizeLiveDelegationSteer`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, continuation_id: String, continuation_digest: String)
+- `ResolveLiveDelegationSteerDelivery`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, continuation_id: String, delivered: Bool)
 - `ReconcileLiveDelegationSteer`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, continuation_id: String, continuation_committed: Bool, committed_digest_matches: Bool)
 - `AbandonLiveInteraction`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String)
 - `CompleteLiveInteraction`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, provider_turn_ref: String)
@@ -874,6 +877,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TurnRunStarted`(run_id: RunId)
 - `TurnBoundaryApplied`(run_id: RunId, boundary_sequence: u64)
 - `LiveBoundaryContextReceiptResolved`(run_id: RunId, input_id: String, boundary: AdmissionRunApplyBoundary, boundary_sequence: u64)
+- `LiveBoundaryOwnerContextReceiptResolved`(run_id: RunId, contribution_id: String, boundary: AdmissionRunApplyBoundary, boundary_sequence: u64)
 - `TerminalBoundarySequenceCommitted`(run_id: RunId, boundary_sequence: u64)
 - `TurnRunCompleted`(run_id: RunId, outcome: TurnTerminalOutcome)
 - `DurableTailRecoveryAuthorized`(candidate_id: String, disposition: DurableTailRecoveryDisposition)
@@ -1026,6 +1030,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveDelegationQueuedCancelled`(channel_id: String, interaction_id: String, operation_id: OperationId)
 - `LiveDelegationNarrationAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, kind: LiveDelegationNarrationKind)
 - `LiveDelegationSteerAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, continuation_id: String)
+- `LiveDelegationSteerDeliveryResolved`(channel_id: String, operation_id: OperationId, continuation_id: String, delivered: Bool)
 - `LiveDelegationSteerReconciled`(channel_id: String, operation_id: OperationId, continuation_id: String, reconciliation: LiveDelegationReconciliation)
 - `LiveDelegationResultReleaseAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, disposition: LiveDelegationResultDisposition)
 - `LiveDelegationResultDeliveryAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, result_digest: String, disposition: LiveDelegationResultDisposition)
@@ -11953,6 +11958,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LiveBoundaryContextReceiptResolved`
 - To: `Running`
 
+### `ResolveLiveBoundaryOwnerContextReceiptRunning`
+- From: `Running`
+- On: `ResolveLiveBoundaryOwnerContextReceipt`(run_id, contribution_id)
+- Guards:
+  - `current_run_matches`
+  - `contribution_identity_present`
+- Emits: `LiveBoundaryOwnerContextReceiptResolved`
+- To: `Running`
+
 ### `CommitTerminalBoundarySequenceRunning`
 - From: `Running`
 - On: `CommitTerminalBoundarySequence`(run_id, boundary_sequence)
@@ -16181,6 +16195,39 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `worker_accepts_input`
   - `continuation_steers_once`
 - Emits: `LiveDelegationSteerAuthorized`
+- To: `Running`
+
+### `ResolveLiveDelegationSteerDeliveryIdle`
+- From: `Idle`
+- On: `ResolveLiveDelegationSteerDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, continuation_id, delivered)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_steer_awaiting_delivery`
+- Emits: `LiveDelegationSteerDeliveryResolved`
+- To: `Idle`
+
+### `ResolveLiveDelegationSteerDeliveryAttached`
+- From: `Attached`
+- On: `ResolveLiveDelegationSteerDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, continuation_id, delivered)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_steer_awaiting_delivery`
+- Emits: `LiveDelegationSteerDeliveryResolved`
+- To: `Attached`
+
+### `ResolveLiveDelegationSteerDeliveryRunning`
+- From: `Running`
+- On: `ResolveLiveDelegationSteerDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, continuation_id, delivered)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_steer_awaiting_delivery`
+- Emits: `LiveDelegationSteerDeliveryResolved`
 - To: `Running`
 
 ### `ReconcileLiveDelegationSteerConfirmedIdle`

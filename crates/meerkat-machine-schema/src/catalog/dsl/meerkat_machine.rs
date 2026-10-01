@@ -3938,6 +3938,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_delegation_steer_operation_by_continuation: Map<String, OperationId>,
             live_delegation_steer_digest_by_continuation: Map<String, String>,
             live_delegation_steer_reconciliation_by_continuation: Map<String, Enum<LiveDelegationReconciliation>>,
+            live_delegation_steer_delivered_by_continuation: Map<String, bool>,
 
             // Several delegations coexist per channel. Each provider user
             // turn (interaction) carries at most one delegation and every
@@ -4560,6 +4561,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_delegation_steer_operation_by_continuation = EmptyMap,
             live_delegation_steer_digest_by_continuation = EmptyMap,
             live_delegation_steer_reconciliation_by_continuation = EmptyMap,
+            live_delegation_steer_delivered_by_continuation = EmptyMap,
             live_delegation_operation_by_interaction = EmptyMap,
             live_delegation_channel_by_operation = EmptyMap,
             live_delegation_schedule_state_by_operation = EmptyMap,
@@ -5240,6 +5242,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             AcceptWithCompletion { input_id: InputId, request_immediate_processing: bool, interrupt_yielding: bool, wake_if_idle: bool },
             AcceptWithoutWake { input_id: InputId },
             ResolveLiveBoundaryContextReceipt { run_id: RunId, input_id: String },
+            ResolveLiveBoundaryOwnerContextReceipt { run_id: RunId, contribution_id: String },
             CommitTerminalBoundarySequence { run_id: RunId, boundary_sequence: u64 },
             // Typed observation from the live boundary adapter: the active
             // target disappeared before this admitted Steer input could be
@@ -5936,6 +5939,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 provider_turn_correlation: String,
                 continuation_id: String,
                 continuation_digest: String,
+            },
+            ResolveLiveDelegationSteerDelivery {
+                channel_id: String,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+                operation_id: OperationId,
+                continuation_id: String,
+                delivered: bool,
             },
             ReconcileLiveDelegationSteer {
                 channel_id: String,
@@ -6776,6 +6788,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 boundary: Enum<AdmissionRunApplyBoundary>,
                 boundary_sequence: u64,
             },
+            LiveBoundaryOwnerContextReceiptResolved {
+                run_id: RunId,
+                contribution_id: String,
+                boundary: Enum<AdmissionRunApplyBoundary>,
+                boundary_sequence: u64,
+            },
             TerminalBoundarySequenceCommitted { run_id: RunId, boundary_sequence: u64 },
             TurnRunCompleted { run_id: RunId, outcome: Enum<TurnTerminalOutcome> },
             // Recovery verdict for a classified durable tail on the
@@ -7446,6 +7464,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: OperationId,
                 continuation_id: String,
             },
+            LiveDelegationSteerDeliveryResolved {
+                channel_id: String,
+                operation_id: OperationId,
+                continuation_id: String,
+                delivered: bool,
+            },
             LiveDelegationSteerReconciled {
                 channel_id: String,
                 operation_id: OperationId,
@@ -8029,6 +8053,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition TurnRunStarted => local seam NoOwnerRealization,
         disposition TurnBoundaryApplied => local seam NoOwnerRealization,
         disposition LiveBoundaryContextReceiptResolved => local seam NoOwnerRealization,
+        disposition LiveBoundaryOwnerContextReceiptResolved => local seam NoOwnerRealization,
         disposition TerminalBoundarySequenceCommitted => local seam NoOwnerRealization,
         disposition LiveBoundaryUnavailableNormalized => local seam NoOwnerRealization,
         disposition TurnRunCompleted => local seam NoOwnerRealization,
@@ -8189,6 +8214,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition LiveDelegationNarrationAuthorized => external seam OwnerRealizationOnly,
         disposition LiveDelegationSteerAuthorized => external seam OwnerRealizationOnly,
         disposition LiveDelegationSteerReconciled => external seam OwnerRealizationOnly,
+        disposition LiveDelegationSteerDeliveryResolved => external seam OwnerRealizationOnly,
         disposition LiveDelegationResultReleaseAuthorized => external seam OwnerRealizationOnly,
         disposition LiveDelegationResultDeliveryAuthorized => external seam OwnerRealizationOnly,
         disposition LiveDelegationResultDeliveryResolved => external seam OwnerRealizationOnly,
@@ -22521,6 +22547,39 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // Request-only context an owner (not a runtime input) delivered into
+        // the running turn at its exact parked boundary, such as a live
+        // delegation steer. It takes the next checkpoint in the same dense
+        // per-run sequence as input-owned receipts, so terminal successors
+        // stay exact and every context contribution to a model attempt is
+        // on a runtime receipt.
+        transition ResolveLiveBoundaryOwnerContextReceipt {
+            per_phase [Running]
+            on input ResolveLiveBoundaryOwnerContextReceipt { run_id, contribution_id }
+            guard "current_run_matches" {
+                self.current_run_id != None
+                && self.current_run_id.get("value") == run_id
+            }
+            guard "contribution_identity_present" { contribution_id != "" }
+            update {
+                if self.live_boundary_context_sequence_by_run.contains_key(run_id) {
+                    self.live_boundary_context_sequence_by_run.insert(
+                        run_id,
+                        self.live_boundary_context_sequence_by_run.get_cloned(run_id).get("value") + 1
+                    );
+                } else {
+                    self.live_boundary_context_sequence_by_run.insert(run_id, 1);
+                }
+            }
+            to Running
+            emit LiveBoundaryOwnerContextReceiptResolved {
+                run_id: run_id,
+                contribution_id: contribution_id,
+                boundary: AdmissionRunApplyBoundary::RunCheckpoint,
+                boundary_sequence: self.live_boundary_context_sequence_by_run.get_cloned(run_id).get("value")
+            }
+        }
+
         // A terminal receipt follows every live checkpoint in the same dense
         // per-run sequence. The shell presents the checked successor, while
         // the machine validates and commits the canonical frontier before any
@@ -27083,6 +27142,42 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interaction_id: interaction_id,
                 operation_id: operation_id,
                 continuation_id: continuation_id
+            }
+        }
+
+        // The runtime's exact boundary delivery of one authorized steer
+        // resolved: delivered into the running turn (with its owner receipt
+        // on the runtime boundary), or not delivered because the run ended
+        // first or no run was active. Exactly one outcome per steer; a steer
+        // that was not delivered never becomes a turn.
+        transition ResolveLiveDelegationSteerDelivery {
+            per_phase [Idle, Attached, Running]
+            on input ResolveLiveDelegationSteerDelivery {
+                channel_id, runtime_id, fence_token, generation, operation_id,
+                continuation_id, delivered
+            }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "exact_steer_awaiting_delivery" {
+                self.live_delegation_steer_operation_by_continuation.get_cloned(continuation_id) == Some(operation_id)
+                && !self.live_delegation_steer_delivered_by_continuation.contains_key(continuation_id)
+            }
+            update {
+                self.live_delegation_steer_delivered_by_continuation.insert(continuation_id, delivered);
+            }
+            to Idle
+            emit LiveDelegationSteerDeliveryResolved {
+                channel_id: channel_id,
+                operation_id: operation_id,
+                continuation_id: continuation_id,
+                delivered: delivered
             }
         }
 

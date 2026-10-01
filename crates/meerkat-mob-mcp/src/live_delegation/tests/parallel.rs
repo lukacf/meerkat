@@ -1149,62 +1149,63 @@ async fn without_a_workgraph_store_delegations_run_strictly_serially_and_never_s
     fx.close().await;
 }
 
-/// The rest of a sentence spoken after the provider created the delegation
-/// reaches the running worker as a steer under generated authority, and is
-/// reconciled when its canonical row commits: matching text confirms it, a
-/// different text is a recorded conflict.
+/// The late window: the worker is on its final model call when the rest of
+/// the user's sentence arrives. The steer is authorized, but the run ends
+/// without another model boundary, so it is NotDelivered: no follow-up turn
+/// runs (no extra row, no orphan reply). It is still reconciled against its
+/// canonical commit; a differing commit is recorded on the delegation.
 #[tokio::test]
-async fn an_utterance_continuation_steers_the_running_worker_and_reconciles_at_commit() {
+async fn a_continuation_that_misses_the_workers_last_model_call_is_not_delivered() {
     let mut fx = fixture(false).await;
     let split = fx
         .delegate("split", "write a note of at least two hundred words")
         .await;
     let head = fx.next_call().await;
     assert_eq!(head.index, 0);
-    assert!(!head.user_text.contains("notes dot md"));
 
-    fx.commit_continuation("continuation-1", " into a file called notes dot md")
+    fx.commit_continuation("continuation-1", "something else entirely")
         .await;
-    fx.continue_utterance(
-        "split",
-        "continuation-1",
-        " into a file called notes dot md",
-    )
-    .await;
-    assert!(
-        fx.steered("continuation-1").await,
-        "the machine recorded the steer"
+    let coordinator = Arc::clone(&fx.coordinator);
+    let provider_binding = fx.provider_binding.clone();
+    let steer = tokio::spawn(async move {
+        coordinator
+            .steer_continuation(PendingContinuation {
+                provider_binding,
+                delegation: LiveSidebandDelegationRef::__from_provider_observation(
+                    "split-delegation".to_string(),
+                    "split-provider-delegation".to_string(),
+                )
+                .expect("delegation"),
+                continuation_id: "continuation-1".to_string(),
+                transcript: " into a file called notes dot md".to_string(),
+            })
+            .await;
+    });
+    wait_until(WAIT, || async { fx.steered("continuation-1").await }).await;
+    // The model returns final text: the run ends with no further boundary.
+    fx.client.release(0);
+    steer.await.expect("steer task");
+    assert_eq!(
+        fx.runtime
+            .live_delegation_steer_delivered(&fx.session_id, "continuation-1")
+            .await
+            .expect("machine state"),
+        Some(false)
     );
-    // A second continuation whose committed row differs from what was steered.
-    fx.commit_continuation("continuation-2", "and tell me the word count")
-        .await;
-    fx.continue_utterance(
-        "split",
-        "continuation-2",
-        " and tell me the word count once saved",
-    )
-    .await;
+    fx.expect_no_call().await;
     wait_until(WAIT, || async {
         fx.unconfirmed_continuations(&split).await == Some(1)
+            || fx.unconfirmed_continuations(&split).await.is_none()
     })
     .await;
-
-    // The worker's next model call carries the continuation.
-    fx.client.release(0);
-    let next = fx.next_call().await;
-    assert!(
-        next.user_text.contains("into a file called notes dot md"),
-        "{next:?}"
-    );
-    fx.client.release(next.index);
     fx.close().await;
 }
 
-/// A continuation for a delegation still waiting for its worker is held and
-/// steered once that worker starts; one for a delegation with no live worker
-/// stays an ordinary turn.
+/// A continuation for a delegation still waiting for its worker joins that
+/// worker's task at start under steer authority (recorded delivered); one for
+/// a delegation with no live worker stays an ordinary turn.
 #[tokio::test]
-async fn a_continuation_waits_for_a_queued_worker_and_is_dropped_without_one() {
+async fn a_continuation_for_a_queued_worker_joins_its_task_and_is_dropped_without_one() {
     let mut fx = fixture(false).await;
     let first = fx.delegate("first", "serial task one").await;
     let second = fx.delegate("second", "serial task two").await;
@@ -1222,17 +1223,21 @@ async fn a_continuation_waits_for_a_queued_worker_and_is_dropped_without_one() {
     assert!(!fx.steered("continuation-x").await);
 
     fx.client.release(0);
-    wait_until(WAIT, || async { fx.steered("continuation-q").await }).await;
-    let mut seen = false;
-    for _ in 0..2 {
-        let call = fx.next_call().await;
-        seen |= call.user_text.contains("with three headings");
-        fx.client.release(call.index);
-        if seen {
-            break;
-        }
-    }
-    assert!(seen, "the queued worker received the continuation");
+    let tail = fx.next_call().await;
+    assert!(tail.user_text.contains("serial task two"), "{tail:?}");
+    assert!(
+        tail.task_text.contains("with three headings"),
+        "the held continuation joined the worker's task: {tail:?}"
+    );
+    assert!(fx.steered("continuation-q").await);
+    assert_eq!(
+        fx.runtime
+            .live_delegation_steer_delivered(&fx.session_id, "continuation-q")
+            .await
+            .expect("machine state"),
+        Some(true)
+    );
+    fx.client.release(tail.index);
     fx.wait_for_completed(&[first, second]).await;
     fx.close().await;
 }

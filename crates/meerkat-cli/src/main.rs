@@ -7311,7 +7311,7 @@ async fn save_cli_oauth_tokens_and_consume_browser_flow(
         .verify(
             &flow.state,
             &credential_identity,
-            flow.provider,
+            meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(flow.provider),
             &flow.redirect_uri,
         )
         .map_err(|e| anyhow::anyhow!("oauth state verification failed: {e}"))?;
@@ -7337,7 +7337,9 @@ async fn save_cli_oauth_tokens_and_consume_browser_flow(
                         .consume(
                             &flow.state,
                             &mutation_credential_identity,
-                            flow.provider,
+                            meerkat_providers::oauth_flow::OAuthBrowserFlowCompletion::from(
+                                flow.provider,
+                            ),
                             &flow.redirect_uri,
                         )
                         .map_err(|error| {
@@ -21188,7 +21190,6 @@ mod tests {
     async fn test_cli_oauth_login_save_consumes_runtime_browser_flow() {
         use meerkat_core::handles::{AuthLeasePhase, LeaseKey};
         use meerkat_providers::auth_store::{EphemeralTokenStore, TokenKey, TokenStore};
-        use meerkat_providers::oauth_flow::OAuthFlowAuthority;
 
         let raw_auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let auth_lease =
@@ -21211,7 +21212,7 @@ mod tests {
         let state = authority
             .start(
                 credential_identity.clone(),
-                provider,
+                meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(provider),
                 redirect_uri.to_string(),
                 "pkce-verifier".into(),
             )
@@ -21232,8 +21233,12 @@ mod tests {
         .await
         .expect("CLI OAuth save consumes terminal flow");
 
-        let second_consume =
-            authority.consume(&state, &credential_identity, provider, redirect_uri);
+        let second_consume = authority.consume(
+            &state,
+            &credential_identity,
+            meerkat_providers::oauth_flow::OAuthBrowserFlowCompletion::from(provider),
+            redirect_uri,
+        );
         assert!(
             second_consume.is_err(),
             "consumed runtime browser flow must not remain callable: {second_consume:?}"
@@ -21267,7 +21272,7 @@ mod tests {
         fn start(
             &self,
             _target: meerkat_core::AuthCredentialIdentity,
-            _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+            _provider: meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity,
             _redirect_uri: String,
             _pkce_verifier: String,
         ) -> Result<String, meerkat_providers::oauth_flow::OAuthFlowError> {
@@ -21278,7 +21283,7 @@ mod tests {
             &self,
             _state: &str,
             target: &meerkat_core::AuthCredentialIdentity,
-            provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+            provider: meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity,
             redirect_uri: &str,
         ) -> Result<
             meerkat_providers::oauth_flow::OAuthFlowRecord,
@@ -21297,7 +21302,7 @@ mod tests {
             &self,
             _state: &str,
             _target: &meerkat_core::AuthCredentialIdentity,
-            _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+            _provider: meerkat_providers::oauth_flow::OAuthBrowserFlowCompletion,
             _redirect_uri: &str,
         ) -> Result<
             meerkat_providers::oauth_flow::OAuthFlowRecord,
@@ -21309,6 +21314,16 @@ mod tests {
                     detail: "test rejection".into(),
                 },
             )
+        }
+
+        fn expire(
+            &self,
+            _state: &str,
+            _target: &meerkat_core::AuthCredentialIdentity,
+            _provider: meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity,
+            _redirect_uri: &str,
+        ) -> Result<(), meerkat_providers::oauth_flow::OAuthFlowError> {
+            unreachable!("test authority never retires browser flows")
         }
 
         fn admit_device_code(
@@ -28095,7 +28110,7 @@ default_model = "gpt-5.4"
             .oauth_flow_authority()
             .start(
                 credential_identity.clone(),
-                provider,
+                meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(provider),
                 redirect_uri.to_string(),
                 "cli-persistence-verifier".to_string(),
             )
@@ -28114,7 +28129,12 @@ default_model = "gpt-5.4"
         );
         let flow = runtime_adapter
             .oauth_flow_authority()
-            .consume(&state, &credential_identity, provider, redirect_uri)
+            .consume(
+                &state,
+                &credential_identity,
+                meerkat_providers::oauth_flow::OAuthBrowserFlowCompletion::from(provider),
+                redirect_uri,
+            )
             .expect("CLI service construction must preserve PersistenceBundle OAuth authority");
 
         assert_eq!(flow.pkce_verifier, "cli-persistence-verifier");

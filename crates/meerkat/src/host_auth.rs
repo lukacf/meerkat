@@ -260,7 +260,7 @@ impl HostAuthService {
         let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
         let state = self.authority.oauth_flow_authority().start(
             resolved.credential_identity.clone(),
-            target.provider,
+            meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(target.provider),
             redirect_uri.clone(),
             pkce.verifier.secret().clone(),
         )?;
@@ -294,7 +294,7 @@ impl HostAuthService {
         let flow = oauth_flow_authority.verify(
             &state,
             &resolved.credential_identity,
-            target.provider,
+            meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(target.provider),
             &redirect_uri,
         )?;
         let oauth = oauth_provider_resolution(target.provider, redirect_uri.clone());
@@ -333,7 +333,7 @@ impl HostAuthService {
                 meerkat_providers::browser_login::BrowserOAuthFlowCommit {
                     authority: oauth_flow_authority,
                     state,
-                    provider: target.provider,
+                    completion: (target.provider).into(),
                     redirect_uri,
                 },
             )

@@ -10,7 +10,12 @@
 //! `packages/core/src/code_assist/oauth2.ts:113-360`.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::io;
+use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
@@ -18,28 +23,175 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
+use axum::serve::Listener;
+use futures::FutureExt;
+use futures::future::{BoxFuture, Shared};
 use parking_lot::Mutex;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 use super::OAuthError;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LoopbackOutcome {
     pub code: String,
     pub state: String,
 }
 
+impl std::fmt::Debug for LoopbackOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoopbackOutcome").finish_non_exhaustive()
+    }
+}
+
+/// One mechanical termination signal shared by the accepted streams. It never
+/// admits, expires or consumes OAuth state; the native flow owner does that.
+type IoTermination = Shared<BoxFuture<'static, ()>>;
+
+struct CallbackListener<L> {
+    inner: L,
+    terminated: IoTermination,
+}
+
+impl<L: Listener> Listener for CallbackListener<L> {
+    type Io = CallbackIo<L::Io>;
+    type Addr = L::Addr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let (inner, address) = self.inner.accept().await;
+        (
+            CallbackIo {
+                inner,
+                terminated: self.terminated.clone(),
+                termination_observed: false,
+            },
+            address,
+        )
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+/// Axum still owns every accepted connection task and its aggregate drain.
+/// Termination wakes a blocked read/write/shutdown so that owner can finish;
+/// it does not replace the drain with a socket counter or a task registry.
+struct CallbackIo<I> {
+    inner: I,
+    terminated: IoTermination,
+    termination_observed: bool,
+}
+
+impl<I> CallbackIo<I> {
+    fn poll_termination(&mut self, cx: &mut Context<'_>) -> io::Result<()> {
+        if self.termination_observed || Pin::new(&mut self.terminated).poll(cx).is_ready() {
+            // Shared clones cannot be polled again after Ready. Termination is
+            // permanent for this stream, including later flush/shutdown polls.
+            self.termination_observed = true;
+            Err(io::ErrorKind::ConnectionAborted.into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<I: AsyncRead + Unpin> AsyncRead for CallbackIo<I> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.poll_termination(cx)?;
+        Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl<I: AsyncWrite + Unpin> AsyncWrite for CallbackIo<I> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        this.poll_termination(cx)?;
+        Pin::new(&mut this.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.poll_termination(cx)?;
+        Pin::new(&mut this.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.poll_termination(cx)?;
+        Pin::new(&mut this.inner).poll_shutdown(cx)
+    }
+}
+
+/// Owns transport mechanics, never OAuth flow authority. Explicit wait/cancel
+/// retain and await Axum's actual accepted-connection drain. Drop can only signal
+/// termination: the same Axum task continues draining, without a joined receipt.
+struct CallbackServer {
+    shutdown: Option<oneshot::Sender<()>>,
+    terminate_io: Option<oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<io::Result<()>>>,
+    #[cfg(test)]
+    drained: Option<oneshot::Receiver<bool>>,
+}
+
+impl CallbackServer {
+    fn signal(&mut self, terminate_io: bool) {
+        if terminate_io && let Some(terminate) = self.terminate_io.take() {
+            let _ = terminate.send(());
+        }
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
+
+    async fn join(&mut self, terminate_io: bool) -> Result<(), OAuthError> {
+        self.signal(terminate_io);
+        if let Some(task) = self.task.as_mut() {
+            // Keep the handle in self across await. If this future is cancelled,
+            // owned Drop can still terminate I/O; it never aborts Axum's drain.
+            let result = task.await;
+            self.task = None;
+            match result {
+                Ok(Ok(())) => Ok(()),
+                _ => Err(OAuthError::CallbackParse(
+                    "callback task retirement failed".into(),
+                )),
+            }
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for CallbackServer {
+    fn drop(&mut self) {
+        self.signal(true);
+        // Dropping the JoinHandle leaves its existing task running. That task
+        // retains Axum's connection-drain barrier until every accepted I/O owner
+        // retires. Synchronous Drop cannot return an awaited cleanup receipt.
+    }
+}
+
 pub struct LoopbackHandle {
     pub redirect_url: String,
-    shutdown: oneshot::Sender<()>,
+    server: CallbackServer,
     receiver: oneshot::Receiver<Result<LoopbackOutcome, OAuthError>>,
 }
 
 pub struct LoopbackBinding {
     pub redirect_url: String,
-    shutdown: oneshot::Sender<()>,
+    server: CallbackServer,
     receiver: oneshot::Receiver<Result<LoopbackOutcome, OAuthError>>,
     expected_state: Arc<Mutex<Option<String>>>,
 }
@@ -49,29 +201,49 @@ impl LoopbackBinding {
         *self.expected_state.lock() = Some(expected_state);
         LoopbackHandle {
             redirect_url: self.redirect_url,
-            shutdown: self.shutdown,
+            server: self.server,
             receiver: self.receiver,
         }
+    }
+
+    pub async fn cancel(mut self) -> Result<(), OAuthError> {
+        self.server.join(true).await
     }
 }
 
 impl LoopbackHandle {
-    /// Await the callback outcome. Fires once on first valid hit; fails
-    /// with `StateMismatch` if state doesn't match, `CallbackParse` if the
-    /// query is malformed, `Timeout` after `deadline`.
+    /// Await one callback using the existing login window. No separate cleanup
+    /// timer extends the ceremony; physical retirement is still awaited. A timeout
+    /// terminates accepted I/O and joins the same Axum drain owner. Caller
+    /// abandonment signals termination via Drop but has no joined receipt.
     pub async fn wait(self, deadline: Duration) -> Result<LoopbackOutcome, OAuthError> {
         let LoopbackHandle {
-            shutdown,
+            mut server,
             receiver,
             redirect_url: _,
         } = self;
-        let outcome = match timeout(deadline, receiver).await {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(_)) => Err(OAuthError::CallbackParse("receiver closed".into())),
-            Err(_) => Err(OAuthError::Timeout),
-        };
-        let _ = shutdown.send(());
-        outcome
+        let result = timeout(deadline, async {
+            let outcome = receiver
+                .await
+                .map_err(|_| OAuthError::CallbackParse("receiver closed".into()))?;
+            server.join(false).await?;
+            outcome
+        })
+        .await;
+        match result {
+            Ok(outcome) => {
+                server.join(true).await?;
+                outcome
+            }
+            Err(_) => {
+                server.join(true).await?;
+                Err(OAuthError::Timeout)
+            }
+        }
+    }
+
+    pub async fn cancel(mut self) -> Result<(), OAuthError> {
+        self.server.join(true).await
     }
 }
 
@@ -100,11 +272,12 @@ async fn callback_handler(
         params.get("error"),
         tx,
     ) {
-        (_, _, Some(err), Some(tx)) => {
-            let err = if err == "access_denied" {
-                OAuthError::UserDenied
-            } else {
-                OAuthError::CallbackParse(format!("provider error: {err}"))
+        (_, actual_state, Some(err), Some(tx)) => {
+            let err = match actual_state {
+                None => OAuthError::CallbackParse("invalid callback".into()),
+                Some(actual_state) if actual_state != &expected_state => OAuthError::StateMismatch,
+                Some(_) if err == "access_denied" => OAuthError::UserDenied,
+                Some(_) => OAuthError::CallbackParse("provider denied callback".into()),
             };
             let _ = tx.send(Err(err));
             (
@@ -133,10 +306,15 @@ async fn callback_handler(
                 )
             }
         }
-        _ => (
-            StatusCode::BAD_REQUEST,
-            Html("<h1>Invalid callback</h1>".to_string()),
-        ),
+        (_, _, _, tx) => {
+            if let Some(tx) = tx {
+                let _ = tx.send(Err(OAuthError::CallbackParse("invalid callback".into())));
+            }
+            (
+                StatusCode::BAD_REQUEST,
+                Html("<h1>Invalid callback</h1>".to_string()),
+            )
+        }
     }
 }
 
@@ -169,16 +347,6 @@ pub async fn bind_loopback_callback_with_redirect(
     redirect_host: &str,
     preferred_ports: &[u16],
 ) -> Result<LoopbackBinding, OAuthError> {
-    let (result_tx, result_rx) = oneshot::channel();
-    let expected_state = Arc::new(Mutex::new(None));
-    let state = CallbackState {
-        expected_state: Arc::clone(&expected_state),
-        result_tx: Arc::new(Mutex::new(Some(result_tx))),
-    };
-
-    let app = Router::new()
-        .route(path, get(callback_handler))
-        .with_state(state);
     let ports = if preferred_ports.is_empty() {
         &[0][..]
     } else {
@@ -204,24 +372,555 @@ pub async fn bind_loopback_callback_with_redirect(
             last_error.unwrap_or_else(|| "no callback ports configured".to_string())
         ))
     })?;
+    start_loopback_callback(listener, path, redirect_host)
+}
+
+fn start_loopback_callback<L>(
+    listener: L,
+    path: &str,
+    redirect_host: &str,
+) -> Result<LoopbackBinding, OAuthError>
+where
+    L: Listener<Addr = SocketAddr>,
+{
+    let (result_tx, result_rx) = oneshot::channel();
+    let expected_state = Arc::new(Mutex::new(None));
+    let state = CallbackState {
+        expected_state: Arc::clone(&expected_state),
+        result_tx: Arc::new(Mutex::new(Some(result_tx))),
+    };
+
+    let app = Router::new()
+        .route(path, get(callback_handler))
+        .with_state(state);
     let addr = listener
         .local_addr()
         .map_err(|e| OAuthError::InvalidConfig(format!("addr: {e}")))?;
     let redirect_url = format!("http://{}:{}{}", redirect_host, addr.port(), path);
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
+    let (terminate_tx, terminate_rx) = oneshot::channel();
+    let terminated = async move {
+        let _ = terminate_rx.await;
+    }
+    .boxed()
+    .shared();
+    let listener = CallbackListener {
+        inner: listener,
+        terminated,
+    };
+    #[cfg(test)]
+    let (drained_tx, drained_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        let result = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 let _ = shutdown_rx.await;
             })
             .await;
+        #[cfg(test)]
+        let _ = drained_tx.send(result.is_ok());
+        result
     });
 
     Ok(LoopbackBinding {
         redirect_url,
-        shutdown: shutdown_tx,
+        server: CallbackServer {
+            shutdown: Some(shutdown_tx),
+            terminate_io: Some(terminate_tx),
+            task: Some(task),
+            #[cfg(test)]
+            drained: Some(drained_rx),
+        },
         receiver: result_rx,
         expected_state,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod ownership_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    fn assert_connection_aborted<T>(result: Poll<io::Result<T>>) {
+        assert!(
+            matches!(result, Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::ConnectionAborted),
+            "terminated callback I/O did not refuse the operation"
+        );
+    }
+
+    #[test]
+    fn accepted_io_termination_remains_latched_across_repeated_io_polls() {
+        let (inner, _peer) = tokio::io::duplex(16);
+        let (terminate_tx, terminate_rx) = oneshot::channel();
+        let terminated = async move {
+            let _ = terminate_rx.await;
+        }
+        .boxed()
+        .shared();
+        let mut io = CallbackIo {
+            inner,
+            terminated,
+            termination_observed: false,
+        };
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut bytes = [0; 1];
+        let mut buffer = ReadBuf::new(&mut bytes);
+        assert!(
+            Pin::new(&mut io)
+                .poll_read(&mut cx, &mut buffer)
+                .is_pending()
+        );
+        terminate_tx.send(()).unwrap();
+        for _ in 0..3 {
+            let mut buffer = ReadBuf::new(&mut bytes);
+            assert_connection_aborted(Pin::new(&mut io).poll_read(&mut cx, &mut buffer));
+            assert_connection_aborted(Pin::new(&mut io).poll_write(&mut cx, b"x"));
+            assert_connection_aborted(Pin::new(&mut io).poll_flush(&mut cx));
+            assert_connection_aborted(Pin::new(&mut io).poll_shutdown(&mut cx));
+            assert!(buffer.filled().is_empty());
+        }
+    }
+
+    #[derive(Default)]
+    struct IoProbe {
+        accepted: Mutex<Option<oneshot::Sender<()>>>,
+        read_pending: Mutex<Option<oneshot::Sender<()>>>,
+        shutdown_pending: Mutex<Option<oneshot::Sender<()>>>,
+        dropped: Mutex<Option<oneshot::Sender<()>>>,
+    }
+
+    struct ProbeReceivers {
+        accepted: oneshot::Receiver<()>,
+        read_pending: oneshot::Receiver<()>,
+        shutdown_pending: oneshot::Receiver<()>,
+        dropped: oneshot::Receiver<()>,
+        // Sender Drop releases the test gate even if an assertion unwinds.
+        _release: oneshot::Sender<()>,
+    }
+
+    struct HeldListener {
+        inner: TcpListener,
+        probe: Arc<IoProbe>,
+        released: IoTermination,
+    }
+
+    impl Listener for HeldListener {
+        type Io = HeldIo;
+        type Addr = SocketAddr;
+
+        async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+            let (inner, address) = Listener::accept(&mut self.inner).await;
+            if let Some(sender) = self.probe.accepted.lock().take() {
+                let _ = sender.send(());
+            }
+            (
+                HeldIo {
+                    inner,
+                    probe: Arc::clone(&self.probe),
+                    released: self.released.clone(),
+                    release_observed: false,
+                    read_data: false,
+                },
+                address,
+            )
+        }
+
+        fn local_addr(&self) -> io::Result<Self::Addr> {
+            self.inner.local_addr()
+        }
+    }
+
+    struct HeldIo {
+        inner: TcpStream,
+        probe: Arc<IoProbe>,
+        released: IoTermination,
+        release_observed: bool,
+        read_data: bool,
+    }
+
+    impl AsyncRead for HeldIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let before = buf.filled().len();
+            let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+            if buf.filled().len() > before {
+                self.read_data = true;
+            }
+            if result.is_pending()
+                && self.read_data
+                && let Some(sender) = self.probe.read_pending.lock().take()
+            {
+                let _ = sender.send(());
+            }
+            result
+        }
+    }
+
+    impl AsyncWrite for HeldIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            // The completed probe request has reached native socket shutdown,
+            // but the real accepted stream remains owned until I/O termination.
+            if !self.release_observed {
+                if Pin::new(&mut self.released).poll(cx).is_pending() {
+                    if let Some(sender) = self.probe.shutdown_pending.lock().take() {
+                        let _ = sender.send(());
+                    }
+                    return Poll::Pending;
+                }
+                self.release_observed = true;
+            }
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    impl Drop for HeldIo {
+        fn drop(&mut self) {
+            if let Some(sender) = self.probe.dropped.lock().take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn held_io_release_remains_latched_across_repeated_shutdown_polls() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (peer, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+        let _peer = peer.unwrap();
+        let (inner, _) = accepted.unwrap();
+        let (release_tx, release_rx) = oneshot::channel();
+        let released = async move {
+            let _ = release_rx.await;
+        }
+        .boxed()
+        .shared();
+        let mut io = HeldIo {
+            inner,
+            probe: Arc::new(IoProbe::default()),
+            released,
+            release_observed: false,
+            read_data: false,
+        };
+        futures::future::poll_fn(|cx| {
+            assert!(Pin::new(&mut io).poll_shutdown(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        release_tx.send(()).unwrap();
+        for _ in 0..3 {
+            io.shutdown().await.unwrap();
+        }
+    }
+
+    async fn observed_binding() -> (LoopbackBinding, ProbeReceivers) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (accepted_tx, accepted) = oneshot::channel();
+        let (read_tx, read_pending) = oneshot::channel();
+        let (shutdown_tx, shutdown_pending) = oneshot::channel();
+        let (drop_tx, dropped) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let probe = Arc::new(IoProbe {
+            accepted: Mutex::new(Some(accepted_tx)),
+            read_pending: Mutex::new(Some(read_tx)),
+            shutdown_pending: Mutex::new(Some(shutdown_tx)),
+            dropped: Mutex::new(Some(drop_tx)),
+        });
+        let listener = HeldListener {
+            inner: listener,
+            probe,
+            released: async move {
+                let _ = release_rx.await;
+            }
+            .boxed()
+            .shared(),
+        };
+        let binding = start_loopback_callback(listener, "/callback", "127.0.0.1").unwrap();
+        (
+            binding,
+            ProbeReceivers {
+                accepted,
+                read_pending,
+                shutdown_pending,
+                dropped,
+                _release: release_tx,
+            },
+        )
+    }
+
+    async fn incomplete_peer(binding: &LoopbackBinding, probe: &mut ProbeReceivers) -> TcpStream {
+        let address = binding
+            .redirect_url
+            .strip_prefix("http://")
+            .unwrap()
+            .strip_suffix("/callback")
+            .unwrap();
+        let mut peer = TcpStream::connect(address).await.unwrap();
+        // Leave the headers incomplete until the actual accepted stream has
+        // observed pending input. The unmatched route never settles OAuth.
+        peer.write_all(b"GET /ownership-probe HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n")
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), &mut probe.accepted)
+            .await
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(2), &mut probe.read_pending)
+            .await
+            .unwrap()
+            .unwrap();
+        peer
+    }
+
+    async fn enter_held_shutdown(peer: &mut TcpStream, probe: &mut ProbeReceivers) {
+        // Buffered partial headers remain an in-progress Hyper request during
+        // graceful shutdown. Finish this unmatched request so the native 404
+        // response reaches the separately held poll_shutdown seam. No callback
+        // result is produced, and the test gate remains closed.
+        peer.write_all(b"\r\n").await.unwrap();
+        timeout(Duration::from_secs(2), &mut probe.shutdown_pending)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut status = [0; b"HTTP/1.1 404 Not Found\r\n".len()];
+        timeout(Duration::from_secs(2), peer.read_exact(&mut status))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&status, b"HTTP/1.1 404 Not Found\r\n");
+    }
+
+    async fn assert_peer_closed(mut peer: TcpStream) {
+        let mut data = Vec::new();
+        let result = timeout(Duration::from_secs(2), peer.read_to_end(&mut data))
+            .await
+            .unwrap();
+        assert!(
+            result.is_ok()
+                || matches!(result, Err(ref error) if matches!(error.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted))
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_joins_accepted_connection_with_headers_still_incomplete() {
+        let (mut binding, mut probe) = observed_binding().await;
+        let peer = incomplete_peer(&binding, &mut probe).await;
+        let mut drained = binding.server.drained.take().unwrap();
+        assert!(matches!(
+            probe.shutdown_pending.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            probe.dropped.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            drained.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        // Do not finish the headers or release the fixture gate. Native I/O
+        // termination must end the pending read and retire its real owner.
+        binding.cancel().await.unwrap();
+        assert_eq!(probe.dropped.try_recv(), Ok(()));
+        assert_eq!(
+            drained.try_recv(),
+            Ok(true),
+            "actual Axum accepted-connection drain did not return normally"
+        );
+        assert_peer_closed(peer).await;
+    }
+
+    #[tokio::test]
+    async fn cancel_joins_held_accepted_connection_before_returning() {
+        let (mut binding, mut probe) = observed_binding().await;
+        let mut peer = incomplete_peer(&binding, &mut probe).await;
+        let mut drained = binding.server.drained.take().unwrap();
+        // First establish accepted pending input, then native socket shutdown
+        // held by the same stream. Idle sockets or an outer AbortHandle alone
+        // would not falsify draft1.
+        binding.server.signal(false);
+        enter_held_shutdown(&mut peer, &mut probe).await;
+        assert!(matches!(
+            binding.receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            probe.dropped.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            drained.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        binding.cancel().await.unwrap();
+        assert_eq!(probe.dropped.try_recv(), Ok(()));
+        assert_eq!(
+            drained.try_recv(),
+            Ok(true),
+            "actual Axum accepted-connection drain did not return normally"
+        );
+        assert_peer_closed(peer).await;
+    }
+
+    #[tokio::test]
+    async fn existing_window_timeout_joins_held_accepted_connection() {
+        let (mut binding, mut probe) = observed_binding().await;
+        let mut peer = incomplete_peer(&binding, &mut probe).await;
+        let mut drained = binding.server.drained.take().unwrap();
+        binding.server.signal(false);
+        enter_held_shutdown(&mut peer, &mut probe).await;
+        assert!(matches!(
+            binding.receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            probe.dropped.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        let pending = binding.expect_state("state".into());
+        assert!(matches!(
+            pending.wait(Duration::from_millis(1)).await,
+            Err(OAuthError::Timeout)
+        ));
+        assert_eq!(probe.dropped.try_recv(), Ok(()));
+        assert_eq!(
+            drained.try_recv(),
+            Ok(true),
+            "actual Axum accepted-connection drain did not return normally"
+        );
+        assert_peer_closed(peer).await;
+    }
+
+    #[tokio::test]
+    async fn abandoning_entered_join_keeps_axum_drain_owner_until_connections_retire() {
+        let (mut binding, mut probe) = observed_binding().await;
+        let mut peer = incomplete_peer(&binding, &mut probe).await;
+        let mut drained = binding.server.drained.take().unwrap();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut joining = Box::pin(binding.server.join(false));
+            futures::future::poll_fn(|cx| {
+                // Observe the actual join pending before announcing entry.
+                assert!(joining.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            let _ = entered_tx.send(());
+            joining.await
+        });
+        timeout(Duration::from_secs(2), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        enter_held_shutdown(&mut peer, &mut probe).await;
+        assert!(matches!(
+            drained.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            probe.dropped.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        // This is a later observation of the actual drain, not a joined receipt
+        // from the abandoned public operation. An aborted Axum task closes this
+        // channel without sending true and therefore fails the assertion.
+        assert!(
+            timeout(Duration::from_secs(2), drained)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        assert_eq!(probe.dropped.try_recv(), Ok(()));
+        assert_peer_closed(peer).await;
+    }
+
+    #[tokio::test]
+    async fn actual_callback_task_is_joined_on_success_and_crossed_state_refuses() {
+        let a = run_loopback_callback("state-a".into(), "/callback")
+            .await
+            .unwrap();
+        let b = run_loopback_callback("state-b".into(), "/callback")
+            .await
+            .unwrap();
+        let a_task = a.server.task.as_ref().unwrap().abort_handle();
+        let b_task = b.server.task.as_ref().unwrap().abort_handle();
+        let a_url = a.redirect_url.clone();
+        let b_url = b.redirect_url.clone();
+        let client = reqwest::Client::new();
+        let crossed = client
+            .get(&a_url)
+            .query(&[("code", "secret-code-a"), ("state", "state-b")])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(crossed.status(), StatusCode::BAD_REQUEST);
+        assert!(matches!(
+            a.wait(Duration::from_secs(1)).await,
+            Err(OAuthError::StateMismatch)
+        ));
+        assert!(a_task.is_finished());
+        let exact = client
+            .get(&b_url)
+            .query(&[("code", "secret-code-b"), ("state", "state-b")])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(exact.status(), StatusCode::OK);
+        let result = b.wait(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(result.code, "secret-code-b");
+        assert!(!format!("{result:?}").contains("secret-code-b"));
+        assert!(b_task.is_finished());
+    }
+
+    #[tokio::test]
+    async fn timeout_and_pre_admission_cancellation_join_actual_callback_tasks() {
+        let binding = bind_loopback_callback("/callback").await.unwrap();
+        let task = binding.server.task.as_ref().unwrap().abort_handle();
+        binding.cancel().await.unwrap();
+        assert!(task.is_finished());
+        let pending = run_loopback_callback("state".into(), "/callback")
+            .await
+            .unwrap();
+        let task = pending.server.task.as_ref().unwrap().abort_handle();
+        assert!(matches!(
+            pending.wait(Duration::from_millis(1)).await,
+            Err(OAuthError::Timeout)
+        ));
+        assert!(task.is_finished());
+    }
+
+    #[tokio::test]
+    async fn abandoning_wait_signals_owned_drain_without_claiming_join_receipt() {
+        let pending = run_loopback_callback("state".into(), "/callback")
+            .await
+            .unwrap();
+        let task = pending.server.task.as_ref().unwrap().abort_handle();
+        let wait = tokio::spawn(pending.wait(Duration::from_secs(300)));
+        wait.abort();
+        assert!(wait.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
 }

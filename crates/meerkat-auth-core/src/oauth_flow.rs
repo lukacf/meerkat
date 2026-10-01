@@ -37,6 +37,10 @@ pub use crate::github_copilot::{
 // Re-exported here so existing `meerkat_auth_core::oauth_flow::OAuthProviderIdentity`
 // references keep resolving unchanged. The higher-type projections that reach
 // auth-core types (declaration / endpoints) stay below as free functions.
+pub use crate::connector_oauth::{
+    ConnectorOAuthRefusal, OAuthBrowserActionRef, OAuthBrowserFlowCompletion,
+    OAuthBrowserFlowIdentity,
+};
 pub use meerkat_core::oauth_identity::OAuthProviderIdentity;
 
 const DEFAULT_MAX_OUTSTANDING_FLOWS: usize = 1024;
@@ -536,10 +540,10 @@ fn source_kind_label(source: &CredentialSourceSpec) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct OAuthFlowRecord {
     pub target: AuthCredentialIdentity,
-    pub provider: OAuthProviderIdentity,
+    pub provider: OAuthBrowserFlowIdentity,
     pub redirect_uri: String,
     pub pkce_verifier: String,
     pub created_at: Instant,
@@ -586,11 +590,11 @@ pub struct OAuthFlowRegistrySnapshot {
     pub device: Vec<PersistedOAuthDeviceFlow>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedOAuthBrowserFlow {
     pub state: String,
     pub target: AuthCredentialIdentity,
-    pub provider: OAuthProviderIdentity,
+    pub provider: OAuthBrowserFlowIdentity,
     pub redirect_uri: String,
     pub pkce_verifier: String,
     pub created_at_millis: u64,
@@ -628,6 +632,10 @@ pub enum OAuthFlowError {
         expected: OAuthProviderIdentity,
         actual: OAuthProviderIdentity,
     },
+    #[error("oauth browser flow identity mismatch")]
+    BrowserIdentityMismatch,
+    #[error(transparent)]
+    Connector(#[from] ConnectorOAuthRefusal),
     #[error("oauth state redirect_uri mismatch")]
     RedirectUriMismatch,
     #[error("oauth state target mismatch: expected {expected:?}, got {actual:?}")]
@@ -952,6 +960,14 @@ impl Drop for OAuthDevicePollLease {
 }
 
 pub trait OAuthFlowAuthority: Send + Sync {
+    /// Matched credential publication capability of this flow owner. Payload-
+    /// only registries cannot supply it. Hosts do not assemble unrelated pairs.
+    fn generated_credential_lifecycle(
+        &self,
+    ) -> Option<meerkat_core::handles::GeneratedAuthLeaseHandle> {
+        None
+    }
+
     fn terminal_flow_state_is_authmachine_owned(&self) -> bool {
         false
     }
@@ -959,7 +975,7 @@ pub trait OAuthFlowAuthority: Send + Sync {
     fn start(
         &self,
         target: AuthCredentialIdentity,
-        provider: OAuthProviderIdentity,
+        provider: OAuthBrowserFlowIdentity,
         redirect_uri: String,
         pkce_verifier: String,
     ) -> Result<String, OAuthFlowError>;
@@ -968,7 +984,7 @@ pub trait OAuthFlowAuthority: Send + Sync {
         &self,
         state: &str,
         target: &AuthCredentialIdentity,
-        provider: OAuthProviderIdentity,
+        provider: OAuthBrowserFlowIdentity,
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError>;
 
@@ -976,9 +992,19 @@ pub trait OAuthFlowAuthority: Send + Sync {
         &self,
         state: &str,
         target: &AuthCredentialIdentity,
-        provider: OAuthProviderIdentity,
+        provider: OAuthBrowserFlowCompletion,
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError>;
+
+    /// Retire an exact browser attempt through its existing owner. Cancellation
+    /// does not consume an authorization response or publish a credential.
+    fn expire(
+        &self,
+        state: &str,
+        target: &AuthCredentialIdentity,
+        provider: OAuthBrowserFlowIdentity,
+        redirect_uri: &str,
+    ) -> Result<(), OAuthFlowError>;
 
     fn admit_device_code(
         &self,
@@ -1003,7 +1029,6 @@ pub trait OAuthFlowAuthority: Send + Sync {
     ) -> Result<OAuthDevicePollLease, OAuthFlowError>;
 }
 
-#[derive(Debug)]
 pub struct OAuthFlowRegistry {
     ttl: Duration,
     max_outstanding: usize,
@@ -1042,14 +1067,14 @@ impl OAuthFlowRegistry {
     pub fn start(
         &self,
         target: AuthCredentialIdentity,
-        provider: OAuthProviderIdentity,
+        provider: impl Into<OAuthBrowserFlowIdentity>,
         redirect_uri: impl Into<String>,
         pkce_verifier: impl Into<String>,
     ) -> Result<String, OAuthFlowError> {
         <Self as OAuthFlowAuthority>::start(
             self,
             target,
-            provider,
+            provider.into(),
             redirect_uri.into(),
             pkce_verifier.into(),
         )
@@ -1059,20 +1084,35 @@ impl OAuthFlowRegistry {
         &self,
         state: &str,
         target: &AuthCredentialIdentity,
-        provider: OAuthProviderIdentity,
+        provider: impl Into<OAuthBrowserFlowIdentity>,
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError> {
-        <Self as OAuthFlowAuthority>::verify(self, state, target, provider, redirect_uri)
+        <Self as OAuthFlowAuthority>::verify(self, state, target, provider.into(), redirect_uri)
     }
 
     pub fn consume(
         &self,
         state: &str,
         target: &AuthCredentialIdentity,
-        provider: OAuthProviderIdentity,
+        provider: impl Into<OAuthBrowserFlowCompletion>,
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError> {
-        <Self as OAuthFlowAuthority>::consume(self, state, target, provider, redirect_uri)
+        <Self as OAuthFlowAuthority>::consume(self, state, target, provider.into(), redirect_uri)
+    }
+
+    /// Remove a private projection only after its native flow owner retired it.
+    /// This never authorizes credential publication or a new attempt.
+    pub fn remove_retired_browser_payload(
+        &self,
+        state: &str,
+        target: &AuthCredentialIdentity,
+        provider: OAuthBrowserFlowIdentity,
+        redirect_uri: &str,
+    ) -> Result<OAuthFlowRecord, OAuthFlowError> {
+        let mut flows = self.flows.lock();
+        let record = flows.get(state).ok_or(OAuthFlowError::Missing)?;
+        verify_browser_record(record, target, provider, redirect_uri)?;
+        flows.remove(state).ok_or(OAuthFlowError::Missing)
     }
 
     pub fn admit_device_code(
@@ -1174,15 +1214,15 @@ impl OAuthFlowRegistry {
             .iter()
             .filter_map(|(state, record)| {
                 let elapsed = record.created_at.elapsed();
-                if elapsed > self.ttl {
+                if elapsed > record.provider.lifetime(self.ttl) {
                     return None;
                 }
                 let elapsed_millis = duration_millis_u64(elapsed);
-                let ttl_millis = duration_millis_u64(self.ttl);
+                let ttl_millis = duration_millis_u64(record.provider.lifetime(self.ttl));
                 Some(PersistedOAuthBrowserFlow {
                     state: state.clone(),
                     target: record.target.clone(),
-                    provider: record.provider,
+                    provider: record.provider.clone(),
                     redirect_uri: record.redirect_uri.clone(),
                     pkce_verifier: record.pkce_verifier.clone(),
                     created_at_millis: now_millis.saturating_sub(elapsed_millis),
@@ -1218,11 +1258,12 @@ impl OAuthFlowRegistry {
         &self,
         state: String,
         target: AuthCredentialIdentity,
-        provider: OAuthProviderIdentity,
+        provider: OAuthBrowserFlowIdentity,
         redirect_uri: String,
         pkce_verifier: String,
         created_at: Instant,
     ) -> Result<(), OAuthFlowError> {
+        provider.validate_redirect(&redirect_uri)?;
         let mut flows = self.flows.lock();
         flows.insert(
             state,
@@ -1269,11 +1310,12 @@ impl OAuthFlowRegistry {
     pub fn start_with_pruned(
         &self,
         target: AuthCredentialIdentity,
-        provider: OAuthProviderIdentity,
+        provider: OAuthBrowserFlowIdentity,
         redirect_uri: String,
         pkce_verifier: String,
     ) -> Result<(String, OAuthPrunedFlows), OAuthFlowError> {
         let state = new_state_token()?;
+        provider.validate_redirect(&redirect_uri)?;
         let record = OAuthFlowRecord {
             target,
             provider,
@@ -1296,10 +1338,11 @@ impl OAuthFlowRegistry {
         &self,
         state: String,
         target: AuthCredentialIdentity,
-        provider: OAuthProviderIdentity,
+        provider: OAuthBrowserFlowIdentity,
         redirect_uri: String,
         pkce_verifier: String,
     ) -> Result<OAuthPrunedFlows, OAuthFlowError> {
+        provider.validate_redirect(&redirect_uri)?;
         let record = OAuthFlowRecord {
             target,
             provider,
@@ -1367,7 +1410,7 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
     fn start(
         &self,
         target: AuthCredentialIdentity,
-        provider: OAuthProviderIdentity,
+        provider: OAuthBrowserFlowIdentity,
         redirect_uri: String,
         pkce_verifier: String,
     ) -> Result<String, OAuthFlowError> {
@@ -1379,7 +1422,7 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
         &self,
         state: &str,
         target: &AuthCredentialIdentity,
-        provider: OAuthProviderIdentity,
+        provider: OAuthBrowserFlowIdentity,
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError> {
         let mut flows = self.flows.lock();
@@ -1395,9 +1438,11 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
         &self,
         state: &str,
         target: &AuthCredentialIdentity,
-        provider: OAuthProviderIdentity,
+        provider: OAuthBrowserFlowCompletion,
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError> {
+        provider.verify_account_and_scopes()?;
+        let provider = provider.identity();
         let mut flows = self.flows.lock();
         prune_expired_locked(&mut flows, self.ttl);
         let Some(record) = flows.get(state) else {
@@ -1405,6 +1450,17 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
         };
         verify_browser_record(record, target, provider, redirect_uri)?;
         flows.remove(state).ok_or(OAuthFlowError::Missing)
+    }
+
+    fn expire(
+        &self,
+        state: &str,
+        target: &AuthCredentialIdentity,
+        provider: OAuthBrowserFlowIdentity,
+        redirect_uri: &str,
+    ) -> Result<(), OAuthFlowError> {
+        self.remove_retired_browser_payload(state, target, provider, redirect_uri)
+            .map(|_| ())
     }
 
     fn admit_device_code(
@@ -1485,7 +1541,7 @@ fn take_expired_locked(
 ) -> Vec<(String, OAuthFlowRecord)> {
     let expired = flows
         .iter()
-        .filter(|(_, record)| record.created_at.elapsed() > ttl)
+        .filter(|(_, record)| record.created_at.elapsed() > record.provider.lifetime(ttl))
         .map(|(flow_id, _)| flow_id.clone())
         .collect::<Vec<_>>();
     expired
@@ -1522,7 +1578,7 @@ fn release_device_poll_lease_locked(
 fn verify_browser_record(
     record: &OAuthFlowRecord,
     target: &AuthCredentialIdentity,
-    provider: OAuthProviderIdentity,
+    provider: OAuthBrowserFlowIdentity,
     redirect_uri: &str,
 ) -> Result<(), OAuthFlowError> {
     if &record.target != target {
@@ -1532,9 +1588,15 @@ fn verify_browser_record(
         });
     }
     if record.provider != provider {
-        return Err(OAuthFlowError::ProviderMismatch {
-            expected: record.provider,
-            actual: provider,
+        return Err(match (&record.provider, &provider) {
+            (
+                OAuthBrowserFlowIdentity::Provider(expected),
+                OAuthBrowserFlowIdentity::Provider(actual),
+            ) => OAuthFlowError::ProviderMismatch {
+                expected: *expected,
+                actual: *actual,
+            },
+            _ => OAuthFlowError::BrowserIdentityMismatch,
         });
     }
     if record.redirect_uri != redirect_uri {
@@ -1668,7 +1730,7 @@ mod tests {
         let persisted = PersistedOAuthBrowserFlow {
             state: "state-token".to_string(),
             target: target(),
-            provider: OAuthProviderIdentity::AnthropicClaudeAi,
+            provider: OAuthProviderIdentity::AnthropicClaudeAi.into(),
             redirect_uri: "https://example/callback".to_string(),
             pkce_verifier: "verifier".to_string(),
             created_at_millis: 1_000,
@@ -1677,7 +1739,10 @@ mod tests {
         let json = serde_json::to_string(&persisted).expect("serialize browser flow");
         let restored: PersistedOAuthBrowserFlow =
             serde_json::from_str(&json).expect("deserialize browser flow");
-        assert_eq!(restored.provider, OAuthProviderIdentity::AnthropicClaudeAi);
+        assert_eq!(
+            restored.provider,
+            OAuthBrowserFlowIdentity::from(OAuthProviderIdentity::AnthropicClaudeAi)
+        );
         assert_eq!(persisted, restored);
     }
 
@@ -1946,7 +2011,7 @@ mod tests {
             "st-old".to_string(),
             OAuthFlowRecord {
                 target: target(),
-                provider: OAuthProviderIdentity::OpenAiChatGpt,
+                provider: OAuthProviderIdentity::OpenAiChatGpt.into(),
                 redirect_uri: "http://127.0.0.1/callback".to_string(),
                 pkce_verifier: "verifier".to_string(),
                 created_at: Instant::now()
@@ -2663,5 +2728,60 @@ mod tests {
                 .collect();
             assert_eq!(endpoints.extra_authorize_params, expected_params);
         }
+    }
+}
+
+impl std::fmt::Debug for OAuthFlowRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthFlowRecord")
+            .field("provider", &self.provider)
+            .finish_non_exhaustive()
+    }
+}
+impl std::fmt::Debug for PersistedOAuthBrowserFlow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PersistedOAuthBrowserFlow")
+            .field("action", &OAuthBrowserActionRef::project(&self.state))
+            .field("expires_at_millis", &self.expires_at_millis)
+            .finish_non_exhaustive()
+    }
+}
+impl std::fmt::Debug for OAuthFlowRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthFlowRegistry").finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod legacy_browser_row_test {
+    use super::*;
+
+    // Frozen pre-change field and serde layout from eba93c15. This companion
+    // schema checks that the fixture really is a row that the old type emits.
+    // No real user credential or production persistence row is copied here.
+    #[derive(Serialize, Deserialize)]
+    struct PreConnectorBrowserRow {
+        state: String,
+        target: AuthCredentialIdentity,
+        provider: OAuthProviderIdentity,
+        redirect_uri: String,
+        pkce_verifier: String,
+        created_at_millis: u64,
+        expires_at_millis: u64,
+    }
+
+    #[test]
+    fn frozen_pre_connector_row_loads_and_serializes_byte_for_byte() {
+        let captured =
+            include_str!("../tests/fixtures/oauth-browser-pre-connector.json").trim_end();
+        let previous: PreConnectorBrowserRow = serde_json::from_str(captured).unwrap();
+        assert_eq!(serde_json::to_string(&previous).unwrap(), captured);
+        let current: PersistedOAuthBrowserFlow = serde_json::from_str(captured).unwrap();
+        assert_eq!(
+            current.provider,
+            OAuthBrowserFlowIdentity::from(OAuthProviderIdentity::OpenAiChatGpt)
+        );
+        assert_eq!(serde_json::to_string(&current).unwrap(), captured);
     }
 }

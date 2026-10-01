@@ -59,6 +59,7 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/oauth-browser-pre-connector.json",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -94,6 +95,7 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/oauth-browser-pre-connector.json",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -137,6 +139,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/oauth-browser-pre-connector.json",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -150,6 +153,10 @@ rust_test(
     ],
     size = "medium",
     data = [
+        "//:test_fixtures",
+        "//tests/fixtures/machine-dsl-tests:package_runfiles",
+        "//tests/fixtures/mcp-test-server:package_runfiles",
+        "//tests/fixtures/surface-build-fixtures:package_runfiles",
         ":package_runfiles",
     ],
     env = {
@@ -193,6 +200,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/oauth-browser-pre-connector.json",
         "tests/fixtures/test_sa_key.pem",
     ],
     srcs = [
@@ -251,6 +259,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/oauth-browser-pre-connector.json",
         "tests/fixtures/test_sa_key.pem",
     ],
     srcs = [
@@ -260,6 +269,65 @@ rust_test(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.49",
         "CARGO_BIN_NAME": "azure_ad_authorizer",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-auth-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "connector_oauth_commit_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "connector_oauth_commit",
+    crate_root = "tests/connector_oauth_commit.rs",
+    crate_features = [
+        "file-lock",
+        "gcp-auth",
+        "keyring",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "tests/fixtures/oauth-browser-pre-connector.json",
+        "tests/fixtures/test_sa_key.pem",
+    ],
+    srcs = [
+        "tests/connector_oauth_commit.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_BIN_NAME": "connector_oauth_commit",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
     tags = [
@@ -309,6 +377,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/oauth-browser-pre-connector.json",
         "tests/fixtures/test_sa_key.pem",
     ],
     srcs = [
@@ -353,6 +422,65 @@ rust_test(
 )
 
 rust_test(
+    name = "mcp_oauth_owner_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "mcp_oauth_owner",
+    crate_root = "tests/mcp_oauth_owner.rs",
+    crate_features = [
+        "file-lock",
+        "gcp-auth",
+        "keyring",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "tests/fixtures/oauth-browser-pre-connector.json",
+        "tests/fixtures/test_sa_key.pem",
+    ],
+    srcs = [
+        "tests/mcp_oauth_owner.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_BIN_NAME": "mcp_oauth_owner",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-auth-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "oauth_flow_test",
     aliases = aliases(
         package_name = "crates/meerkat-auth-core",
@@ -373,6 +501,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/oauth-browser-pre-connector.json",
         "tests/fixtures/test_sa_key.pem",
     ],
     srcs = [
@@ -431,6 +560,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/oauth-browser-pre-connector.json",
         "tests/fixtures/test_sa_key.pem",
     ],
     srcs = [
@@ -491,6 +621,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/oauth-browser-pre-connector.json",
         "tests/fixtures/test_sa_key.pem",
     ],
     srcs = [
@@ -549,6 +680,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/oauth-browser-pre-connector.json",
         "tests/fixtures/test_sa_key.pem",
     ],
     srcs = [
@@ -607,6 +739,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/oauth-browser-pre-connector.json",
         "tests/fixtures/test_sa_key.pem",
     ],
     srcs = [
@@ -649,7 +782,9 @@ test_suite(
     tests = [
         ":aws_sts_authorizer_test",
         ":azure_ad_authorizer_test",
+        ":connector_oauth_commit_test",
         ":google_auth_authorizer_test",
+        ":mcp_oauth_owner_test",
         ":meerkat_auth_core_unit_test",
         ":oauth_flow_test",
         ":refresh_coordinator_crossproc_test",

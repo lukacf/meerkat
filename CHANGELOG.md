@@ -116,6 +116,46 @@ them.
   FieldDisclosure` field, so struct literals must set it
   (`FieldDisclosure::Visible` keeps the previous behaviour).
 
+- `OAuthFlowAuthority::start` and `OAuthFlowAuthority::verify` now accept
+  `OAuthBrowserFlowIdentity`; `OAuthFlowAuthority::consume` accepts verified
+  `OAuthBrowserFlowCompletion`. Implementations must implement `expire` and
+  may expose their matched lease through `generated_credential_lifecycle`.
+- `OAuthFlowRecord::provider` and `PersistedOAuthBrowserFlow::provider` are
+  `OAuthBrowserFlowIdentity`. The existing serialized LLM provider strings are
+  unchanged. Browser registry admission/restore methods accept the same type.
+- `BrowserOAuthFlowCommit::provider` is replaced by `completion`.
+  `OAuthFlowError` adds `BrowserIdentityMismatch` and `Connector` variants;
+  `McpOAuthError` adds `Verification` and `Flow` variants. Exhaustive Rust
+  matches must be updated. `OAuthProviderIdentity` itself is unchanged.
+- Behaviour-only: MCP interactive login requires an explicit host account
+  verification strategy attached with `with_interactive_strategy`. It refuses
+  before network/browser work if absent, including stock CLI construction until
+  a host profile is supplied. Stored-token use remains available. Interactive
+  discovery requires advertised PKCE S256 support. An MCP label is never used
+  as verified account identity; explicit requested scopes must be granted.
+- Behaviour-only: MCP interactive login now uses the shared browser-flow terminal
+  transaction. A token-store save failure after OAuth consume that successfully
+  compensates its credential/lifecycle publication is reported as
+  `McpOAuthError::AuthLifecycle`, previously `McpOAuthError::TokenStore` on the
+  separate MCP commit path. The shared owner exposes a coordinated operation
+  failure; callers must not classify its diagnostic text as a typed store cause.
+  The browser attempt stays terminal and the prior credential is restored.
+  `TokenExchangeFailed` keeps its variant but authorization-code exchange detail
+  is now the fixed, secret-safe reason `authorization-code exchange failed`;
+  provider error bodies and descriptions are no longer exposed there.
+- Browser-flow, callback and `OAuthTokenResult` Debug projections redact attempt material.
+  Callback wait/cancel retains and joins the actual accepted-connection drain.
+  Drop signals accepted-I/O termination and leaves that same task draining;
+  synchronous Drop does not certify a completed join.
+
+- Behaviour-only: loopback OAuth provider errors require the exact expected
+  state. Missing state returns a fixed `CallbackParse`; a present mismatching
+  state returns `StateMismatch`. Only matching-state `access_denied` returns
+  `UserDenied`; other provider error text remains redacted. Malformed callback
+  shapes handled by the route now settle with a fixed parse error instead of
+  an accidental closed-channel diagnostic. The existing fail-fast policy is
+  unchanged.
+
 ### Added
 
 - `meerkat_mob::store::MobRunStore` gains
@@ -168,6 +208,10 @@ them.
 
 ### Fixed
 
+- Expired OAuth attempts now retire their private persisted payloads when the
+  native owner prunes them, including late callbacks and cancelled MCP login.
+  Cleanup preserves concurrent live attempts and their deadlines; a failed
+  durable write returns `PersistenceFailed` and remains retryable.
 - A GPT Live reopen whose context summary is not ready yet (a Late open) now
   seeds the most recent conversation turns (up to the recent-turns window, when
   they fit the startup limits) verbatim as startup input, instead of opening

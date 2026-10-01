@@ -1165,6 +1165,15 @@ async fn run_spec_with_mode(
 
         let completed =
             run_command(&commands.command, &cwd, &env_overrides, spec.timeout_secs).await?;
+        // Keep the scenario's own output on a passing run too: its journaled
+        // timings and verdict lines (the GPT_LIVE_* records, seed shapes,
+        // delegation durations) are how flake rates and timing distributions
+        // are read from an invocation, not only from its failures.
+        eprintln!(
+            "e2e scenario output ({}):\n{}",
+            run_label(spec),
+            completed.output
+        );
         if let Some(problem) = analyze_success_output(commands.output_policy, &completed.output) {
             return Err(format!(
                 "{}: {} ({problem})",

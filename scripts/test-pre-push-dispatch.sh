@@ -2,6 +2,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# This test runs as a pre-push hook; a SKIP inherited from the outer push would
+# change which exact-tree evidence the dispatchers under test write and reuse.
+unset SKIP
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-pre-push-dispatch.XXXXXX")"
 HARNESS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-pre-push-dispatch-harness.XXXXXX")"
 CACHE_REPO="${TEST_ROOT}-cache"
@@ -271,6 +274,103 @@ if [[ ! -d "$active_validation_tree" ]]; then
   exit 1
 fi
 git -C "$CACHE_REPO" worktree remove --force "$active_validation_tree"
+
+# A SKIP gate exits 0 without running the skipped hooks, so it must not leave
+# full-coverage evidence behind. Its evidence is reusable only by a push that
+# skips the same hooks; a full push of the same tree re-runs them, and v1
+# stamps (written even under SKIP) are ignored.
+SKIP_REPO="${CACHE_REPO}-skip"
+mkdir -p "$SKIP_REPO"
+git -C "$SKIP_REPO" init -q
+git -C "$SKIP_REPO" -c user.name=Meerkat -c user.email=meerkat@example.invalid \
+  commit --allow-empty -qm "skip base"
+skip_base_sha="$(git -C "$SKIP_REPO" rev-parse HEAD)"
+git -C "$SKIP_REPO" -c user.name=Meerkat -c user.email=meerkat@example.invalid \
+  commit --allow-empty -qm "skip candidate"
+skip_head_sha="$(git -C "$SKIP_REPO" rev-parse HEAD)"
+skip_tree="$(git -C "$SKIP_REPO" rev-parse "${skip_head_sha}^{tree}")"
+skip_stamp_dir="$(git -C "$SKIP_REPO" rev-parse --path-format=absolute --git-common-dir)/meerkat-hook-cache/exact-tree"
+
+run_skip_dispatch() {
+  local skip_value="$1"
+  (
+    cd "$SKIP_REPO"
+    PATH="${HARNESS_ROOT}:$PATH" \
+      GIT_DIR="${SKIP_REPO}/.git" \
+      GIT_WORK_TREE="$SKIP_REPO" \
+      MEERKAT_DISPATCH_INVOCATION_LOG="$INVOCATION_LOG" \
+      MEERKAT_DISPATCH_NESTED_INIT_ROOT="$NESTED_INIT_ROOT" \
+      RUST_LANE_ID="" \
+      SKIP="$skip_value" \
+      "$REPO_ROOT/scripts/pre-push-dispatch.sh" origin example.invalid \
+      <<<"refs/heads/main ${skip_head_sha} refs/heads/main ${skip_base_sha}"
+  ) 2>&1
+}
+
+expect_gate_ran() {
+  if [[ ! -s "$INVOCATION_LOG" ]]; then
+    echo "$1" >&2
+    exit 1
+  fi
+}
+
+expect_gate_reused() {
+  if [[ -s "$INVOCATION_LOG" ]]; then
+    echo "$1" >&2
+    exit 1
+  fi
+}
+
+# A stale v1 stamp for this tree (the pre-fix format) must not be trusted.
+mkdir -p "$skip_stamp_dir"
+printf 'tree=%s\ncommit=%s\n' "$skip_tree" "$skip_head_sha" > "${skip_stamp_dir}/v1-${skip_tree}.ok"
+
+: > "$INVOCATION_LOG"
+skip_output="$(run_skip_dispatch "cargo-test, other-hook ,cargo-test")"
+expect_gate_ran "dispatcher trusted a v1 exact-tree stamp written without coverage information"
+if [[ -e "${skip_stamp_dir}/v2-${skip_tree}.ok" ]]; then
+  echo "a SKIP gate wrote full-coverage exact-tree evidence" >&2
+  exit 1
+fi
+if ! grep -Fxq "skipped=cargo-test,other-hook" "${skip_stamp_dir}/v2-${skip_tree}.partial-"*.ok; then
+  echo "a SKIP gate did not label its partial evidence with the normalized skipped hook set" >&2
+  ls -la "$skip_stamp_dir" >&2
+  exit 1
+fi
+if ! grep -Fq "recorded partial evidence only" <<<"$skip_output"; then
+  echo "a SKIP gate did not report its reduced coverage" >&2
+  exit 1
+fi
+
+# The same or a broader SKIP may reuse the partial evidence.
+: > "$INVOCATION_LOG"
+skip_output="$(run_skip_dispatch "other-hook,cargo-test,extra-hook")"
+expect_gate_reused "dispatcher re-ran a gate whose skipped hooks this push also skips"
+if ! grep -Fq "partial pre-push gate (skipped: cargo-test,other-hook)" <<<"$skip_output"; then
+  echo "dispatcher reused partial evidence without labeling its coverage" >&2
+  exit 1
+fi
+
+# A narrower SKIP and a full push must both re-run the skipped hooks.
+: > "$INVOCATION_LOG"
+run_skip_dispatch "cargo-test" >/dev/null
+expect_gate_ran "dispatcher reused partial evidence for a push that skips fewer hooks"
+: > "$INVOCATION_LOG"
+run_skip_dispatch "" >/dev/null
+expect_gate_ran "dispatcher reused SKIP evidence as a full pre-push gate"
+if ! grep -Fxq "coverage=full" "${skip_stamp_dir}/v2-${skip_tree}.ok"; then
+  echo "a full gate did not record full-coverage evidence" >&2
+  exit 1
+fi
+
+# Full evidence satisfies any later push of the same tree, SKIP or not.
+: > "$INVOCATION_LOG"
+run_skip_dispatch "cargo-test" >/dev/null
+expect_gate_reused "dispatcher ignored full-coverage evidence for a SKIP push"
+: > "$INVOCATION_LOG"
+run_skip_dispatch "" >/dev/null
+expect_gate_reused "dispatcher ignored its own full-coverage evidence"
+rm -rf "$SKIP_REPO"
 
 # Concurrent pushes share one stable worktree. The later process waits for the
 # repository dispatcher lock, then reuses the exact-tree stamp written by the

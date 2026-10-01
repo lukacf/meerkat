@@ -13724,7 +13724,11 @@ pub struct State {
     pub live_assistant_turn_channel_by_ref: std::collections::BTreeMap<String, String>,
     pub live_assistant_playback_segment_by_turn: std::collections::BTreeMap<String, u64>,
     pub live_abandoned_interactions: std::collections::BTreeSet<String>,
-    pub live_delegation_steered_continuations: std::collections::BTreeSet<String>,
+    pub live_delegation_steer_operation_by_continuation:
+        std::collections::BTreeMap<String, OperationId>,
+    pub live_delegation_steer_digest_by_continuation: std::collections::BTreeMap<String, String>,
+    pub live_delegation_steer_reconciliation_by_continuation:
+        std::collections::BTreeMap<String, LiveDelegationReconciliation>,
     pub live_delegation_operation_by_interaction: std::collections::BTreeMap<String, OperationId>,
     pub live_delegation_channel_by_operation: std::collections::BTreeMap<OperationId, String>,
     pub live_delegation_schedule_state_by_operation:
@@ -17024,7 +17028,18 @@ pub mod inputs {
         pub operation_id: OperationId,
         pub provider_turn_correlation: String,
         pub continuation_id: String,
+        pub continuation_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReconcileLiveDelegationSteer {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub operation_id: OperationId,
+        pub continuation_id: String,
         pub continuation_committed: bool,
+        pub committed_digest_matches: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AbandonLiveInteraction {
@@ -18290,6 +18305,7 @@ pub enum Input {
     CancelQueuedLiveDelegation(inputs::CancelQueuedLiveDelegation),
     AuthorizeLiveDelegationNarration(inputs::AuthorizeLiveDelegationNarration),
     AuthorizeLiveDelegationSteer(inputs::AuthorizeLiveDelegationSteer),
+    ReconcileLiveDelegationSteer(inputs::ReconcileLiveDelegationSteer),
     AbandonLiveInteraction(inputs::AbandonLiveInteraction),
     CompleteLiveInteraction(inputs::CompleteLiveInteraction),
     AuthorizeLiveConsequentialEffect(inputs::AuthorizeLiveConsequentialEffect),
@@ -18781,6 +18797,7 @@ impl Input {
                 InputKind::AuthorizeLiveDelegationNarration
             }
             Self::AuthorizeLiveDelegationSteer(_) => InputKind::AuthorizeLiveDelegationSteer,
+            Self::ReconcileLiveDelegationSteer(_) => InputKind::ReconcileLiveDelegationSteer,
             Self::AbandonLiveInteraction(_) => InputKind::AbandonLiveInteraction,
             Self::CompleteLiveInteraction(_) => InputKind::CompleteLiveInteraction,
             Self::AuthorizeLiveConsequentialEffect(_) => {
@@ -19251,6 +19268,7 @@ pub enum InputKind {
     CancelQueuedLiveDelegation,
     AuthorizeLiveDelegationNarration,
     AuthorizeLiveDelegationSteer,
+    ReconcileLiveDelegationSteer,
     AbandonLiveInteraction,
     CompleteLiveInteraction,
     AuthorizeLiveConsequentialEffect,
@@ -20412,6 +20430,13 @@ pub mod effects {
         pub continuation_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveDelegationSteerReconciled {
+        pub channel_id: String,
+        pub operation_id: OperationId,
+        pub continuation_id: String,
+        pub reconciliation: LiveDelegationReconciliation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveDelegationResultReleaseAuthorized {
         pub channel_id: String,
         pub interaction_id: String,
@@ -21223,6 +21248,7 @@ pub enum Effect {
     LiveDelegationQueuedCancelled(effects::LiveDelegationQueuedCancelled),
     LiveDelegationNarrationAuthorized(effects::LiveDelegationNarrationAuthorized),
     LiveDelegationSteerAuthorized(effects::LiveDelegationSteerAuthorized),
+    LiveDelegationSteerReconciled(effects::LiveDelegationSteerReconciled),
     LiveDelegationResultReleaseAuthorized(effects::LiveDelegationResultReleaseAuthorized),
     LiveDelegationResultDeliveryAuthorized(effects::LiveDelegationResultDeliveryAuthorized),
     LiveDelegationResultDeliveryResolved(effects::LiveDelegationResultDeliveryResolved),
@@ -21476,6 +21502,7 @@ pub enum EffectKind {
     LiveDelegationQueuedCancelled,
     LiveDelegationNarrationAuthorized,
     LiveDelegationSteerAuthorized,
+    LiveDelegationSteerReconciled,
     LiveDelegationResultReleaseAuthorized,
     LiveDelegationResultDeliveryAuthorized,
     LiveDelegationResultDeliveryResolved,
@@ -23444,6 +23471,15 @@ pub enum TransitionId {
     AuthorizeLiveDelegationSteerIdle,
     AuthorizeLiveDelegationSteerAttached,
     AuthorizeLiveDelegationSteerRunning,
+    ReconcileLiveDelegationSteerConfirmedIdle,
+    ReconcileLiveDelegationSteerConfirmedAttached,
+    ReconcileLiveDelegationSteerConfirmedRunning,
+    ReconcileLiveDelegationSteerMaterialConflictIdle,
+    ReconcileLiveDelegationSteerMaterialConflictAttached,
+    ReconcileLiveDelegationSteerMaterialConflictRunning,
+    ReconcileLiveDelegationSteerMissingIdle,
+    ReconcileLiveDelegationSteerMissingAttached,
+    ReconcileLiveDelegationSteerMissingRunning,
     AuthorizeLiveConsequentialEffectIdle,
     AuthorizeLiveConsequentialEffectAttached,
     AuthorizeLiveConsequentialEffectRunning,
@@ -24768,7 +24804,9 @@ pub fn initial_state() -> State {
         live_assistant_turn_channel_by_ref: Default::default(),
         live_assistant_playback_segment_by_turn: Default::default(),
         live_abandoned_interactions: Default::default(),
-        live_delegation_steered_continuations: Default::default(),
+        live_delegation_steer_operation_by_continuation: Default::default(),
+        live_delegation_steer_digest_by_continuation: Default::default(),
+        live_delegation_steer_reconciliation_by_continuation: Default::default(),
         live_delegation_operation_by_interaction: Default::default(),
         live_delegation_channel_by_operation: Default::default(),
         live_delegation_schedule_state_by_operation: Default::default(),

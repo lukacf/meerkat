@@ -3935,7 +3935,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_assistant_turn_channel_by_ref: Map<String, String>,
             live_assistant_playback_segment_by_turn: Map<String, u64>,
             live_abandoned_interactions: Set<String>,
-            live_delegation_steered_continuations: Set<String>,
+            live_delegation_steer_operation_by_continuation: Map<String, OperationId>,
+            live_delegation_steer_digest_by_continuation: Map<String, String>,
+            live_delegation_steer_reconciliation_by_continuation: Map<String, Enum<LiveDelegationReconciliation>>,
 
             // Several delegations coexist per channel. Each provider user
             // turn (interaction) carries at most one delegation and every
@@ -4555,7 +4557,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_assistant_playback_segment_by_turn = EmptyMap,
             live_assistant_turn_channel_by_ref = EmptyMap,
             live_abandoned_interactions = EmptySet,
-            live_delegation_steered_continuations = EmptySet,
+            live_delegation_steer_operation_by_continuation = EmptyMap,
+            live_delegation_steer_digest_by_continuation = EmptyMap,
+            live_delegation_steer_reconciliation_by_continuation = EmptyMap,
             live_delegation_operation_by_interaction = EmptyMap,
             live_delegation_channel_by_operation = EmptyMap,
             live_delegation_schedule_state_by_operation = EmptyMap,
@@ -5931,7 +5935,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: OperationId,
                 provider_turn_correlation: String,
                 continuation_id: String,
+                continuation_digest: String,
+            },
+            ReconcileLiveDelegationSteer {
+                channel_id: String,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+                operation_id: OperationId,
+                continuation_id: String,
                 continuation_committed: bool,
+                committed_digest_matches: bool,
             },
             AbandonLiveInteraction {
                 channel_id: String,
@@ -7432,6 +7446,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: OperationId,
                 continuation_id: String,
             },
+            LiveDelegationSteerReconciled {
+                channel_id: String,
+                operation_id: OperationId,
+                continuation_id: String,
+                reconciliation: Enum<LiveDelegationReconciliation>,
+            },
             LiveDelegationResultReleaseAuthorized {
                 channel_id: String,
                 interaction_id: String,
@@ -8168,6 +8188,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition LiveDelegationQueuedCancelled => local seam OwnerRealizationOnly,
         disposition LiveDelegationNarrationAuthorized => external seam OwnerRealizationOnly,
         disposition LiveDelegationSteerAuthorized => external seam OwnerRealizationOnly,
+        disposition LiveDelegationSteerReconciled => external seam OwnerRealizationOnly,
         disposition LiveDelegationResultReleaseAuthorized => external seam OwnerRealizationOnly,
         disposition LiveDelegationResultDeliveryAuthorized => external seam OwnerRealizationOnly,
         disposition LiveDelegationResultDeliveryResolved => external seam OwnerRealizationOnly,
@@ -27005,18 +27026,24 @@ macro_rules! meerkat_catalog_machine_dsl {
         // turn after a delegation that took an open user turn, before any
         // other delegation, which is the closest typed stand-in for "the
         // same utterance". The worker must still accept input (start
-        // authorized or running), the continuation's own canonical row must
-        // be committed, and each continuation steers at most once; the
-        // recorded continuation is what a later delegation excludes from its
-        // request.
+        // authorized or running) and each continuation steers at most once.
+        // Authorization rests on the continuation's provider-final transcript
+        // and its digest, recorded as provisional: an existing-member worker
+        // runs on the live session itself, whose transcript cannot be
+        // extended under the running turn, so the continuation's canonical
+        // row commits only after the turn ends and is reconciled then
+        // (`ReconcileLiveDelegationSteer`). The recorded continuation is what
+        // a later delegation excludes from its request.
         transition AuthorizeLiveDelegationSteer {
             per_phase [Idle, Attached, Running]
             on input AuthorizeLiveDelegationSteer {
                 channel_id, runtime_id, fence_token, generation, interaction_id,
                 operation_id, provider_turn_correlation, continuation_id,
-                continuation_committed
+                continuation_digest
             }
-            guard "continuation_identity_present" { continuation_id != "" }
+            guard "continuation_identity_present" {
+                continuation_id != "" && continuation_digest != ""
+            }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
             }
@@ -27039,12 +27066,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
                     == Some(LiveDelegationWorkerPhase::Running)
             }
-            guard "continuation_committed" { continuation_committed == true }
             guard "continuation_steers_once" {
-                !self.live_delegation_steered_continuations.contains(continuation_id)
+                !self.live_delegation_steer_operation_by_continuation.contains_key(continuation_id)
             }
             update {
-                self.live_delegation_steered_continuations.insert(continuation_id);
+                self.live_delegation_steer_operation_by_continuation.insert(continuation_id, operation_id);
+                self.live_delegation_steer_digest_by_continuation.insert(continuation_id, continuation_digest);
+                self.live_delegation_steer_reconciliation_by_continuation.insert(
+                    continuation_id,
+                    LiveDelegationReconciliation::Provisional
+                );
             }
             to Idle
             emit LiveDelegationSteerAuthorized {
@@ -27052,6 +27083,127 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interaction_id: interaction_id,
                 operation_id: operation_id,
                 continuation_id: continuation_id
+            }
+        }
+
+        // The steered continuation's canonical row committed (after the
+        // worker's turn ended, for an existing member) with exactly the
+        // steered text: the steer is confirmed.
+        transition ReconcileLiveDelegationSteerConfirmed {
+            per_phase [Idle, Attached, Running]
+            on input ReconcileLiveDelegationSteer {
+                channel_id, runtime_id, fence_token, generation, operation_id,
+                continuation_id, continuation_committed, committed_digest_matches
+            }
+            guard "committed_exactly" {
+                continuation_committed == true && committed_digest_matches == true
+            }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "exact_steer" {
+                self.live_delegation_steer_operation_by_continuation.get_cloned(continuation_id) == Some(operation_id)
+                && self.live_delegation_steer_reconciliation_by_continuation.get_copied(continuation_id)
+                    == Some(LiveDelegationReconciliation::Provisional)
+            }
+            update {
+                self.live_delegation_steer_reconciliation_by_continuation.insert(
+                    continuation_id,
+                    LiveDelegationReconciliation::Confirmed
+                );
+            }
+            to Idle
+            emit LiveDelegationSteerReconciled {
+                channel_id: channel_id,
+                operation_id: operation_id,
+                continuation_id: continuation_id,
+                reconciliation: LiveDelegationReconciliation::Confirmed
+            }
+        }
+
+        // The row committed with different text than the worker was steered
+        // with. The worker cannot un-see it: the conflict is recorded and
+        // surfaced on the result path.
+        transition ReconcileLiveDelegationSteerMaterialConflict {
+            per_phase [Idle, Attached, Running]
+            on input ReconcileLiveDelegationSteer {
+                channel_id, runtime_id, fence_token, generation, operation_id,
+                continuation_id, continuation_committed, committed_digest_matches
+            }
+            guard "committed_differently" {
+                continuation_committed == true && committed_digest_matches == false
+            }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "exact_steer" {
+                self.live_delegation_steer_operation_by_continuation.get_cloned(continuation_id) == Some(operation_id)
+                && self.live_delegation_steer_reconciliation_by_continuation.get_copied(continuation_id)
+                    == Some(LiveDelegationReconciliation::Provisional)
+            }
+            update {
+                self.live_delegation_steer_reconciliation_by_continuation.insert(
+                    continuation_id,
+                    LiveDelegationReconciliation::MaterialConflict
+                );
+            }
+            to Idle
+            emit LiveDelegationSteerReconciled {
+                channel_id: channel_id,
+                operation_id: operation_id,
+                continuation_id: continuation_id,
+                reconciliation: LiveDelegationReconciliation::MaterialConflict
+            }
+        }
+
+        // The continuation's row was never committed (the channel closed or
+        // the session refused it): the steer stays unbacked by canonical
+        // history, recorded as missing and surfaced on the result path.
+        transition ReconcileLiveDelegationSteerMissing {
+            per_phase [Idle, Attached, Running]
+            on input ReconcileLiveDelegationSteer {
+                channel_id, runtime_id, fence_token, generation, operation_id,
+                continuation_id, continuation_committed, committed_digest_matches
+            }
+            guard "not_committed" { continuation_committed == false }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "exact_steer" {
+                self.live_delegation_steer_operation_by_continuation.get_cloned(continuation_id) == Some(operation_id)
+                && self.live_delegation_steer_reconciliation_by_continuation.get_copied(continuation_id)
+                    == Some(LiveDelegationReconciliation::Provisional)
+            }
+            update {
+                self.live_delegation_steer_reconciliation_by_continuation.insert(
+                    continuation_id,
+                    LiveDelegationReconciliation::Missing
+                );
+            }
+            to Idle
+            emit LiveDelegationSteerReconciled {
+                channel_id: channel_id,
+                operation_id: operation_id,
+                continuation_id: continuation_id,
+                reconciliation: LiveDelegationReconciliation::Missing
             }
         }
 

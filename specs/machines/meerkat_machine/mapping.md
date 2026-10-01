@@ -4493,6 +4493,33 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeLiveDelegationSteerRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerConfirmedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerConfirmedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerConfirmedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerMaterialConflictIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerMaterialConflictAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerMaterialConflictRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerMissingIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerMissingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerMissingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeLiveConsequentialEffectIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7970,6 +7997,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveDelegationSteerAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationSteerReconciled`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveDelegationResultReleaseAuthorized`

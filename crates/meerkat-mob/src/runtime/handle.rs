@@ -12859,7 +12859,6 @@ impl MobHandle {
                 Err(
                     error @ (MobError::PlacedCompletionCleanupPending { .. }
                     | MobError::PlacedKickoffCleanupPending { .. }
-                    | MobError::AutonomousStopInterruptsPending { .. }
                     | MobError::LifecycleOperationPending { .. }),
                 ) => {
                     if Instant::now() >= deadline {
@@ -13120,7 +13119,6 @@ impl MobHandle {
                 Err(
                     error @ (MobError::PlacedCompletionCleanupPending { .. }
                     | MobError::PlacedKickoffCleanupPending { .. }
-                    | MobError::AutonomousStopInterruptsPending { .. }
                     | MobError::LifecycleOperationPending { .. }),
                 ) => {
                     if Instant::now() >= deadline {

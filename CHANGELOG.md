@@ -64,6 +64,14 @@ them.
   `MobBuilder::with_runtime_adapter` (#1435). A directly constructed service
   owns a machine of its own, created on first use; the global pointer-keyed
   cache is gone.
+- Behaviour-only (not measured by the gate): a mob Stop or Shutdown no longer
+  answers `MobError::AutonomousStopInterruptsPending` while its members'
+  exact interrupts are in flight. It waits for them off the actor loop and
+  completes once they settle, so `MobHandle::stop`/`shutdown` no longer retry
+  that variant on a timer. A stop whose interrupts do not all settle within
+  the lifecycle budget reports a typed `LifecycleOperationProgressStalled`.
+  The placed-cleanup barriers (`PlacedKickoffCleanupPending`,
+  `PlacedCompletionCleanupPending`) are unchanged (#1413).
 - Behaviour-only (not measured by the gate): rkat-rpc callback routing is
   owned per connection (#1451). Over TCP, a session's callback tools route
   only to the connection that created it, and `tools/register` changes only

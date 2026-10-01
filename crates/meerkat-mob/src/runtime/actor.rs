@@ -1929,12 +1929,24 @@ enum PendingAutonomousStopKind {
     Shutdown,
 }
 
-/// A Stop or Shutdown whose members were interrupted and whose reply waits,
-/// off the actor loop, for every interrupted turn to end. Modelled on the
-/// explicit-resume deferral (`pending_resume_lifecycle`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingAutonomousStopPhase {
+    /// Exact interrupts are still in flight; each settles with an
+    /// `AutonomousStopInterruptSettled` re-entry that re-drives the stop.
+    Interrupting,
+    /// Every member is interrupted; one task awaits their end of turn.
+    AwaitingEndOfTurn,
+}
+
+/// A Stop or Shutdown whose reply waits, off the actor loop, for its members'
+/// exact interrupts to settle and then for every interrupted turn to end.
+/// Modelled on the explicit-resume deferral (`pending_resume_lifecycle`).
 pub(super) struct PendingAutonomousStop {
     ticket: u64,
     kind: PendingAutonomousStopKind,
+    phase: PendingAutonomousStopPhase,
+    /// The hang guard over both phases (`AUTONOMOUS_STOP_IDLE_HANG_GUARD`).
+    deadline: Instant,
     /// The result of the lifecycle steps before the member stops. Shutdown
     /// keeps stopping members after an earlier non-fatal failure and reports
     /// that failure first, exactly as the inline path did.
@@ -6933,6 +6945,9 @@ pub(super) struct PendingResumeRollback {
     progress: super::state::LifecycleProgressSignal,
     deadline: Instant,
     in_flight: bool,
+    /// Parked on exact stop interrupts still in flight; the next
+    /// `AutonomousStopInterruptSettled` re-drives the rollback.
+    awaiting_interrupts: bool,
 }
 
 pub(super) struct ResumeRollbackMemberOutcome {
@@ -18062,6 +18077,7 @@ impl MobActor {
             let member_ref = incarnation.member_ref.clone();
             let expected_member = incarnation.expected_member.clone();
             let (result_tx, result_rx) = oneshot::channel();
+            let command_tx = self.command_tx.clone();
             self.actor_io_tasks.spawn(async move {
                 // Subscribe to the local session's turn activity BEFORE the
                 // interrupt, pinning the exact session actor whose turn the
@@ -18082,6 +18098,13 @@ impl MobActor {
                     Err(error) => Err(error),
                 };
                 let _ = result_tx.send(result);
+                // Wake a stop or rollback parked on this interrupt. A closed
+                // channel means the actor is gone and nothing waits.
+                let _ = command_tx
+                    .send(RoutedMobCommand::internal(
+                        MobCommand::AutonomousStopInterruptSettled,
+                    ))
+                    .await;
             });
             self.autonomous_stop_interrupts.insert(
                 agent_identity.clone(),
@@ -18452,30 +18475,49 @@ impl MobActor {
         }
     }
 
-    /// Park a Stop or Shutdown whose members were interrupted: one actor-owned
-    /// task awaits every interrupted member's end of turn concurrently, off
-    /// the actor loop, and re-enters with `AutonomousMemberStopsResolved`.
-    /// The actor keeps serving commands meanwhile.
-    fn defer_autonomous_member_stops(
+    /// Park a Stop or Shutdown. The actor keeps serving commands meanwhile.
+    /// With `targets`, every member is already interrupted and their end of
+    /// turn is awaited at once; without, exact interrupts are still in flight
+    /// and their `AutonomousStopInterruptSettled` re-entries re-drive it.
+    fn park_autonomous_stop(
         &mut self,
         kind: PendingAutonomousStopKind,
         prior: Result<(), MobError>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
-        targets: Vec<(AgentIdentity, AutonomousStopInterrupted)>,
+        targets: Option<Vec<(AgentIdentity, AutonomousStopInterrupted)>>,
     ) {
-        let ticket = self.next_autonomous_stop_ticket;
-        self.next_autonomous_stop_ticket = ticket.wrapping_add(1);
         self.pending_autonomous_stop = Some(PendingAutonomousStop {
-            ticket,
+            ticket: self.next_autonomous_stop_ticket,
             kind,
+            phase: PendingAutonomousStopPhase::Interrupting,
+            deadline: Instant::now() + AUTONOMOUS_STOP_IDLE_HANG_GUARD,
             prior,
             reply_tx,
             joined: Vec::new(),
         });
+        if let Some(targets) = targets {
+            self.spawn_autonomous_member_end_of_turn_wait(targets);
+        }
+    }
+
+    /// One actor-owned task awaits every interrupted member's end of turn
+    /// concurrently, off the actor loop, and re-enters with
+    /// `AutonomousMemberStopsResolved`.
+    fn spawn_autonomous_member_end_of_turn_wait(
+        &mut self,
+        targets: Vec<(AgentIdentity, AutonomousStopInterrupted)>,
+    ) {
+        let ticket = self.next_autonomous_stop_ticket;
+        self.next_autonomous_stop_ticket = ticket.wrapping_add(1);
+        let Some(pending) = self.pending_autonomous_stop.as_mut() else {
+            return;
+        };
+        pending.ticket = ticket;
+        pending.phase = PendingAutonomousStopPhase::AwaitingEndOfTurn;
+        let deadline = pending.deadline;
         let context = self.detached_member_readiness_context();
         let command_tx = self.command_tx.clone();
         let mob_id = self.definition.id.clone();
-        let deadline = Instant::now() + AUTONOMOUS_STOP_IDLE_HANG_GUARD;
         self.actor_io_tasks.spawn(async move {
             let outcomes = context
                 .finish_autonomous_member_stops_until(targets, deadline)
@@ -18492,6 +18534,70 @@ impl MobActor {
         });
     }
 
+    /// A stop or resume rollback parked on exact stop interrupts.
+    fn autonomous_stop_awaits_interrupts(&self) -> bool {
+        self.pending_autonomous_stop
+            .as_ref()
+            .is_some_and(|pending| pending.phase == PendingAutonomousStopPhase::Interrupting)
+            || self
+                .pending_resume_rollback
+                .as_ref()
+                .is_some_and(|pending| pending.awaiting_interrupts)
+    }
+
+    /// Re-entry after one exact stop interrupt settled. A parked stop still
+    /// interrupting re-drives: it observes the settled results, launches any
+    /// interrupt the window now admits, and once every member is interrupted
+    /// moves on to awaiting their end of turn. A resume rollback waiting on
+    /// interrupts re-drives the same way.
+    async fn redrive_after_autonomous_stop_interrupt(&mut self) -> ActorLoopControl {
+        if let Some(attempt) = self
+            .pending_resume_rollback
+            .as_mut()
+            .filter(|pending| pending.awaiting_interrupts)
+            .map(|pending| {
+                pending.awaiting_interrupts = false;
+                pending.attempt.clone()
+            })
+        {
+            Box::pin(self.drive_explicit_resume_rollback(attempt)).await;
+        }
+        let Some(deadline) = self
+            .pending_autonomous_stop
+            .as_ref()
+            .filter(|pending| pending.phase == PendingAutonomousStopPhase::Interrupting)
+            .map(|pending| pending.deadline)
+        else {
+            return ActorLoopControl::ProceedBoundary;
+        };
+        if Instant::now() >= deadline {
+            let Some(pending) = self.pending_autonomous_stop.take() else {
+                return ActorLoopControl::ProceedBoundary;
+            };
+            let stalled = Err(MobError::LifecycleOperationProgressStalled {
+                intent: "autonomous stop interrupts did not all settle".to_string(),
+                member_id: None,
+                stage: "autonomous_member_stop_interrupt",
+            });
+            return Box::pin(self.finish_pending_autonomous_stop(pending, stalled)).await;
+        }
+        match Box::pin(self.prepare_all_autonomous_member_stops()).await {
+            Err(MobError::AutonomousStopInterruptsPending { .. }) => {
+                ActorLoopControl::ProceedBoundary
+            }
+            Ok(targets) if !targets.is_empty() => {
+                self.spawn_autonomous_member_end_of_turn_wait(targets);
+                ActorLoopControl::ProceedBoundary
+            }
+            result => {
+                let Some(pending) = self.pending_autonomous_stop.take() else {
+                    return ActorLoopControl::ProceedBoundary;
+                };
+                Box::pin(self.finish_pending_autonomous_stop(pending, result.map(|_| ()))).await
+            }
+        }
+    }
+
     /// Re-entry for a parked Stop or Shutdown once every interrupted member's
     /// turn has ended (or the hang guard reported the ones still active).
     async fn resolve_autonomous_member_stops(
@@ -18499,10 +18605,10 @@ impl MobActor {
         ticket: u64,
         outcomes: Vec<AutonomousMemberStopOutcome>,
     ) -> ActorLoopControl {
-        let Some(pending) = self
-            .pending_autonomous_stop
-            .take_if(|pending| pending.ticket == ticket)
-        else {
+        let Some(pending) = self.pending_autonomous_stop.take_if(|pending| {
+            pending.ticket == ticket
+                && pending.phase == PendingAutonomousStopPhase::AwaitingEndOfTurn
+        }) else {
             tracing::warn!(
                 mob_id = %self.definition.id,
                 ticket,
@@ -18511,6 +18617,15 @@ impl MobActor {
             return ActorLoopControl::ProceedBoundary;
         };
         let members = self.settle_autonomous_member_stop_outcomes(outcomes);
+        Box::pin(self.finish_pending_autonomous_stop(pending, members)).await
+    }
+
+    /// Run a parked Stop's or Shutdown's tail with its members' result.
+    async fn finish_pending_autonomous_stop(
+        &mut self,
+        pending: PendingAutonomousStop,
+        members: Result<(), MobError>,
+    ) -> ActorLoopControl {
         let PendingAutonomousStop {
             kind,
             prior,
@@ -18659,22 +18774,19 @@ impl MobActor {
     /// signals, concurrently, under the rollback deadline as a hang guard.
     async fn stop_all_autonomous_members_for_rollback(&mut self) -> Result<(), MobError> {
         let deadline = Instant::now() + ROLLBACK_AUTONOMOUS_STOP_DEADLINE;
-        // The exact interrupts are timeout-bounded bridge I/O retained by the
-        // actor; their completion is still observed level-triggered here
-        // until that lane is deferred too (#1413). Member idleness is not.
+        // Before the actor serves commands, an exact interrupt settling is
+        // observed as its actor-owned task completing; each completion
+        // re-drives the stop. The deadline is the hang guard.
         let targets = loop {
             match self.prepare_all_autonomous_member_stops().await {
                 Ok(targets) => break targets,
-                Err(
-                    error @ (MobError::AutonomousStopInterruptsPending { .. }
-                    | MobError::LifecycleOperationPending { .. }),
-                ) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Err(error);
+                Err(error @ MobError::AutonomousStopInterruptsPending { .. }) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    match tokio::time::timeout(remaining, self.actor_io_tasks.join_next()).await {
+                        Ok(Some(joined)) => self.reconcile_actor_io_task_join(joined),
+                        // Nothing in flight can settle it, or the guard passed.
+                        Ok(None) | Err(_) => return Err(error),
                     }
-                    tokio::time::sleep(ROLLBACK_AUTONOMOUS_STOP_POLL_INTERVAL.min(deadline - now))
-                        .await;
                 }
                 Err(error) => return Err(error),
             }
@@ -27015,15 +27127,26 @@ impl MobActor {
                                         // No interrupted member to wait for:
                                         // the Stop completes inline.
                                         Ok(targets) if targets.is_empty() => {}
+                                        // Interrupts still in flight or every
+                                        // member interrupted: the Stop parks
+                                        // and completes on those typed signals.
                                         Ok(targets) => {
-                                            // Every member is interrupted; their
-                                            // turns end off the actor loop and the
-                                            // Stop completes on that typed signal.
-                                            self.defer_autonomous_member_stops(
+                                            self.park_autonomous_stop(
                                                 PendingAutonomousStopKind::Stop,
                                                 Ok(()),
                                                 reply_tx,
-                                                targets,
+                                                Some(targets),
+                                            );
+                                            return ActorLoopControl::ProceedBoundary;
+                                        }
+                                        Err(MobError::AutonomousStopInterruptsPending {
+                                            ..
+                                        }) => {
+                                            self.park_autonomous_stop(
+                                                PendingAutonomousStopKind::Stop,
+                                                Ok(()),
+                                                reply_tx,
+                                                None,
                                             );
                                             return ActorLoopControl::ProceedBoundary;
                                         }
@@ -27498,6 +27621,11 @@ impl MobActor {
                     self.crash_stop_reply_tx = Some(reply_tx);
                     ActorLoopControl::BreakActor
                 }
+                MobCommand::AutonomousStopInterruptSettled => {
+                    self.inline_step_watchdog
+                        .set_step("autonomous_stop_interrupt_settled");
+                    return Box::pin(self.redrive_after_autonomous_stop_interrupt()).await;
+                }
                 MobCommand::AutonomousMemberStopsResolved { ticket, outcomes } => {
                     self.inline_step_watchdog
                         .set_step("autonomous_member_stops_resolved");
@@ -27557,15 +27685,24 @@ impl MobActor {
                             // No interrupted member to wait for: the Shutdown
                             // tail runs inline.
                             Ok(targets) if targets.is_empty() => {}
+                            // Interrupts still in flight or every member
+                            // interrupted: the Shutdown parks and its tail
+                            // runs on those typed signals.
                             Ok(targets) => {
-                                // Every member is interrupted; their turns end
-                                // off the actor loop and the Shutdown tail runs
-                                // on that typed signal.
-                                self.defer_autonomous_member_stops(
+                                self.park_autonomous_stop(
                                     PendingAutonomousStopKind::Shutdown,
                                     result,
                                     reply_tx,
-                                    targets,
+                                    Some(targets),
+                                );
+                                return ActorLoopControl::SkipBoundary;
+                            }
+                            Err(MobError::AutonomousStopInterruptsPending { .. }) => {
+                                self.park_autonomous_stop(
+                                    PendingAutonomousStopKind::Shutdown,
+                                    result,
+                                    reply_tx,
+                                    None,
                                 );
                                 return ActorLoopControl::SkipBoundary;
                             }
@@ -27928,6 +28065,17 @@ impl MobActor {
                 );
                 boxed_arm_future(|| self.quiesce_volatile_producers_after_fail_stop()).await;
                 command_rx.close();
+                break;
+            }
+            // A stop parked on its exact interrupts re-evaluates on every actor
+            // wake: an interrupt settling, or any other transition that can
+            // make a member no longer need interrupting (release, removal).
+            if self.autonomous_stop_awaits_interrupts()
+                && matches!(
+                    boxed_arm_future(|| self.redrive_after_autonomous_stop_interrupt()).await,
+                    ActorLoopControl::BreakActor
+                )
+            {
                 break;
             }
             let routed = match boxed_arm_future(|| {

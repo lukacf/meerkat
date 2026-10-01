@@ -4651,6 +4651,26 @@ impl SessionRuntime {
             .await
     }
 
+    /// `live/media_health`: judge the client's decoded-audio counters for the
+    /// requested output; a media fault closes the channel via the shared owner.
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+    pub async fn report_experimental_live_media_health(
+        &self,
+        host: &Arc<meerkat_live::LiveAdapterHost>,
+        authority: &dyn meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+        channel_id: &meerkat_live::LiveChannelId,
+        report: &meerkat_contracts::LiveMediaHealthParams,
+    ) -> Result<
+        meerkat_contracts::LiveMediaHealthResult,
+        meerkat::surface::ExperimentalLiveMediaHealthError,
+    > {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        self.live_orchestrator(&snapshot, cleanup)
+            .report_experimental_live_media_health(host, authority, channel_id, report)
+            .await
+    }
+
     /// Phase 6b: `live/status` via the shared pipeline.
     pub async fn live_channel_status(
         &self,

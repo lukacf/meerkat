@@ -445,6 +445,34 @@ pub enum ExperimentalLiveChannelCloseError {
     Semantic(#[from] LiveChannelVerbError),
 }
 
+/// A reported linear RMS (0.0 to 1.0) in the machine's millionths; anything
+/// non-finite or non-positive is silence.
+#[must_use]
+pub fn live_media_health_rms_micros(max_rms: f64) -> u64 {
+    if max_rms.is_finite() && max_rms > 0.0 {
+        // Bounded to 0..=1_000_000 before the cast, so it cannot truncate.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let micros = (max_rms.min(1.0) * 1_000_000.0).round() as u64;
+        micros
+    } else {
+        0
+    }
+}
+
+/// A `live/media_health` report that could not be judged or acted on.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ExperimentalLiveMediaHealthError {
+    /// The runtime refused the report: the channel is not active, or the
+    /// report names an output the runtime did not request, or one already
+    /// judged.
+    #[error("live media health report refused: {0}")]
+    Refused(String),
+    /// The report was judged a media fault, but the channel's close failed.
+    #[error(transparent)]
+    Close(#[from] ExperimentalLiveChannelCloseError),
+}
+
 #[cfg(feature = "live-webrtc")]
 fn live_webrtc_answer_rejection_reason(
     error: &LiveWebrtcError,
@@ -2602,6 +2630,61 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             ),
         )
         .await
+    }
+
+    /// Judge the client's raw decoded-audio counters for the output the
+    /// runtime requested media health for (the channel's first assistant
+    /// output; `live/media_health`). A media fault closes the channel through
+    /// the strict active close before the verdict returns.
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+    pub async fn report_experimental_live_media_health(
+        &self,
+        authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+        channel_id: &LiveChannelId,
+        activation_receipt: &str,
+        report: &meerkat_contracts::LiveMediaHealthParams,
+    ) -> Result<meerkat_contracts::LiveMediaHealthResult, ExperimentalLiveMediaHealthError> {
+        if report.channel_id != channel_id.as_str() {
+            return Err(ExperimentalLiveMediaHealthError::Refused(
+                "the report names another channel".to_string(),
+            ));
+        }
+        let session_id = self
+            .experimental_live_session_for_channel(channel_id)
+            .await
+            .map_err(|error| ExperimentalLiveMediaHealthError::Refused(error.to_string()))?;
+        let judgement = self
+            .runtime_adapter
+            .observe_live_media_health(
+                &session_id,
+                channel_id,
+                &report.output_id,
+                report.decoded_frames,
+                report.audible_frames,
+                live_media_health_rms_micros(report.max_rms),
+            )
+            .await
+            .map_err(|error| ExperimentalLiveMediaHealthError::Refused(error.to_string()))?;
+        if !judgement.media_faulted() {
+            return Ok(meerkat_contracts::LiveMediaHealthResult {
+                verdict: meerkat_contracts::LiveMediaHealthVerdict::Audible,
+                reopen_recommended: false,
+            });
+        }
+        tracing::warn!(
+            %session_id,
+            channel = %channel_id,
+            decoded_frames = report.decoded_frames,
+            audible_frames = report.audible_frames,
+            reopen_recommended = judgement.reopen_recommended(),
+            "the channel's first assistant output decoded silent; closing it on a media fault"
+        );
+        self.close_experimental_live_active_channel(authority, channel_id, activation_receipt)
+            .await?;
+        Ok(meerkat_contracts::LiveMediaHealthResult {
+            verdict: meerkat_contracts::LiveMediaHealthVerdict::MediaFault,
+            reopen_recommended: judgement.reopen_recommended(),
+        })
     }
 
     #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]

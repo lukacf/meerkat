@@ -82,7 +82,7 @@ export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "ser
 
 export type LlmProviderErrorRetryability = "retryable" | "non_retryable";
 
-export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable";
+export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable" | "tool_choice_unsupported";
 
 /**
  * Closed machine-owned classifier for why a turn reached a terminal failure.

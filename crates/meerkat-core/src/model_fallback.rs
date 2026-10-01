@@ -40,6 +40,10 @@ pub enum ModelFallbackSkipReason {
     ModalityParity,
     RequestUnsupported,
     AdmissionUnavailable,
+    /// The target cannot honour the failed request's forced tool choice (the
+    /// target adapter's own typed refusal), so it is skipped before any
+    /// provider call instead of being switched to and refused.
+    ToolChoiceUnsupported,
 }
 
 /// Evidence attached even when every configured candidate is rejected.

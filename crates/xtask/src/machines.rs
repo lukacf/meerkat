@@ -19,11 +19,12 @@ use meerkat_machine_codegen::{
     render_machine_mapping_coverage, render_machine_semantic_model,
 };
 use meerkat_machine_schema::{
-    CompositionCoverageManifest, CompositionSchema, CoverageClaims, CoverageSchemaTarget,
-    MachineCoverageManifest, MachineProductionOwnerRelation, MachineSchema, SemanticCoverageEntry,
-    TriggerKind, canonical_composition_coverage_manifests, canonical_composition_schemas,
-    canonical_machine_coverage_manifests, canonical_machine_production_owner_relations,
-    canonical_machine_schemas, scheduler_rule_coverage_name,
+    CompositionCoverageManifest, CompositionSchema, CompositionWitness, CoverageClaims,
+    CoverageSchemaTarget, MachineCoverageManifest, MachineProductionOwnerRelation, MachineSchema,
+    SemanticCoverageEntry, TriggerKind, canonical_composition_coverage_manifests,
+    canonical_composition_schemas, canonical_machine_coverage_manifests,
+    canonical_machine_production_owner_relations, canonical_machine_schemas,
+    scheduler_rule_coverage_name,
 };
 use quote::ToTokens;
 use serde::Serialize;
@@ -471,15 +472,22 @@ fn machine_verify_at_root(
                 let mut aggregated_coverage = main_coverage.unwrap_or_default();
                 let mut witness_covered_routes = BTreeSet::new();
                 let mut witness_covered_scheduler_rules = BTreeSet::new();
+                let mut witness_failures = Vec::new();
                 for witness in &composition.schema.witnesses {
-                    let witness_coverage = maybe_run_tlc_in_dir_with_config(
-                        &composition_dir(root, &composition.slug),
-                        &composition.slug,
-                        &composition_witness_cfg_name(&witness.name),
-                        profile,
-                        workers,
-                    )?;
-                    merge_tlc_coverage(&mut aggregated_coverage, witness_coverage.as_ref());
+                    // A witness credits its declared routes and scheduler rules
+                    // only after TLC proves its script completed. An exit-0 run
+                    // can still be a truncation by the witness state constraint,
+                    // and every generated witness invariant is vacuous until
+                    // completion, so exit status alone proves nothing.
+                    let witness_coverage =
+                        match verify_composition_witness(root, composition, witness, workers) {
+                            Ok(coverage) => coverage,
+                            Err(err) => {
+                                witness_failures.push(format!("{err:#}"));
+                                continue;
+                            }
+                        };
+                    merge_tlc_coverage(&mut aggregated_coverage, Some(&witness_coverage));
                     witness_covered_routes.extend(
                         witness
                             .expected_routes
@@ -491,6 +499,18 @@ fn machine_verify_at_root(
                             .expected_scheduler_rules
                             .iter()
                             .map(composition_scheduler_coverage_operator_name),
+                    );
+                }
+                if !witness_failures.is_empty() {
+                    bail!(
+                        "{} witness(es) of composition {} did not prove completion:\n{}",
+                        witness_failures.len(),
+                        composition.schema.name,
+                        witness_failures
+                            .iter()
+                            .map(|failure| format!("- {failure}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
                     );
                 }
                 ensure_composition_coverage(
@@ -4156,7 +4176,7 @@ fn maybe_run_tlc_in_dir_with_config(
     }
 
     if !tlc_run_succeeded(&output.status) {
-        bail!("tlc failed for {slug} ({config_name})");
+        bail!("tlc failed for {slug} ({config_name}): {}", output.status);
     }
 
     let coverage = if matches!(profile, VerifyProfile::Deep) {
@@ -4170,6 +4190,158 @@ fn maybe_run_tlc_in_dir_with_config(
 
 pub fn tlc_run_succeeded(status: &ExitStatus) -> bool {
     status.success()
+}
+
+/// Run one composition witness with TLC coverage and require proof that its
+/// script completed. Returns the witness run's coverage on success.
+///
+/// TLC exit 0 is not enough: the witness state constraint can truncate the
+/// search before the script finishes, and the generated witness invariants are
+/// all `WitnessScriptComplete => ...`, which hold vacuously in that case.
+/// Deadlock (exit 11) and invariant violation (exit 12) already fail through
+/// the TLC process status.
+fn verify_composition_witness(
+    root: &Path,
+    composition: &CompositionEntry,
+    witness: &CompositionWitness,
+    workers: usize,
+) -> Result<TlcCoverageSummary> {
+    let config_name = composition_witness_cfg_name(&witness.name);
+    // Witness runs always use the coverage-instrumented (Deep) invocation:
+    // completion is proven from the coverage of the satisfied-stutter action.
+    let coverage = maybe_run_tlc_in_dir_with_config(
+        &composition_dir(root, &composition.slug),
+        &composition.slug,
+        &config_name,
+        VerifyProfile::Deep,
+        workers,
+    )
+    .with_context(|| {
+        format!(
+            "witness {} of composition {}",
+            witness.name, composition.schema.name
+        )
+    })?
+    .ok_or_else(|| {
+        anyhow!(
+            "witness {} of composition {} produced no TLC coverage",
+            witness.name,
+            composition.schema.name
+        )
+    })?;
+    ensure_witness_completed(composition.schema.name.as_str(), witness, &coverage)?;
+    Ok(coverage)
+}
+
+/// Name of the generated action that is enabled exactly when a witness has
+/// completed: `WitnessScriptComplete_<w>` plus every declared condition for a
+/// scripted witness, or every declared condition for an unscripted one. It
+/// mirrors the codegen identifier rule; `witness_completion_operator_names_
+/// match_checked_in_models` pins it against the checked-in models.
+pub fn witness_satisfied_stutter_operator_name(witness: &str) -> String {
+    let ident: String = witness
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect();
+    format!("WitnessSatisfiedStutter_{ident}")
+}
+
+/// A witness with no script and no expected routes, scheduler rules, states,
+/// transitions or transition order renders its satisfied stutter as `FALSE`:
+/// it has nothing to complete and proves nothing.
+pub fn witness_declares_no_conditions(witness: &CompositionWitness) -> bool {
+    witness.preload_inputs.is_empty()
+        && witness.expected_routes.is_empty()
+        && witness.expected_scheduler_rules.is_empty()
+        && witness.expected_states.is_empty()
+        && witness.expected_transitions.is_empty()
+        && witness.expected_transition_order.is_empty()
+}
+
+/// Fail unless the witness's satisfied-stutter action generated at least one
+/// state, which TLC only evaluates from an explored state where the witness
+/// completed. A missing coverage line fails closed.
+pub fn ensure_witness_completed(
+    composition: &str,
+    witness: &CompositionWitness,
+    coverage: &TlcCoverageSummary,
+) -> Result<()> {
+    if witness_declares_no_conditions(witness) {
+        bail!(
+            "witness {} of composition {} is vacuous: it declares no script inputs, routes, \
+             scheduler rules, states or transitions, so TLC cannot prove anything for it",
+            witness.name,
+            composition
+        );
+    }
+    let operator = witness_satisfied_stutter_operator_name(witness.name.as_str());
+    match coverage.counts_by_operator.get(&operator) {
+        None => bail!(
+            "witness {} of composition {}: TLC coverage has no {operator} action, \
+             so completion cannot be proven",
+            witness.name,
+            composition
+        ),
+        Some(counts) if counts.evaluations == 0 => bail!(
+            "witness {} of composition {} never completed: {operator} generated 0 states \
+             (the script was truncated by the witness state constraint or never finished)",
+            witness.name,
+            composition
+        ),
+        Some(_) => Ok(()),
+    }
+}
+
+/// Arguments for `machine-verify-witness`.
+#[derive(Debug, Clone, Args)]
+pub struct VerifyWitnessArgs {
+    /// Composition name that declares the witness.
+    #[arg(long)]
+    composition: String,
+    /// Witness name inside the composition.
+    #[arg(long)]
+    witness: String,
+    /// TLC worker count. Defaults to local core count or TLC_WORKERS.
+    #[arg(long)]
+    workers: Option<usize>,
+}
+
+/// Run a single composition witness through the completion-proving harness,
+/// after drift validation of its composition. Used by the canonical TLC lane
+/// for witnesses whose composition is otherwise skipped for full TLC.
+pub fn machine_verify_witness(args: VerifyWitnessArgs) -> Result<()> {
+    let registry = CanonicalRegistry::load();
+    registry.validate()?;
+    let selection = registry.select(&SelectionArgs {
+        all: false,
+        machines: Vec::new(),
+        compositions: vec![args.composition.clone()],
+    })?;
+    let root = repo_root()?;
+    ensure_no_drift(&root, &selection)?;
+    let composition = selection
+        .compositions
+        .first()
+        .ok_or_else(|| anyhow!("unknown composition {}", args.composition))?;
+    let witness = composition
+        .schema
+        .witnesses
+        .iter()
+        .find(|witness| witness.name.as_str() == args.witness)
+        .ok_or_else(|| {
+            anyhow!(
+                "composition {} declares no witness {}",
+                composition.schema.name,
+                args.witness
+            )
+        })?;
+    let workers = resolve_tlc_workers(args.workers)?;
+    verify_composition_witness(&root, composition, witness, workers)?;
+    println!(
+        "witness {} of composition {} completed under TLC",
+        witness.name, composition.schema.name
+    );
+    Ok(())
 }
 
 pub fn ensure_machine_transition_coverage(

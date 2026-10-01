@@ -97,8 +97,17 @@ export JDK_JAVA_OPTIONS="${tlc_jdk_java_options}"
 # generated route that matters for the adaptive bundle: terminal layer-mob
 # classification is emitted, delivered, and observed through the canonical
 # `layer_terminal_reaches_adaptive_kernel` route.
+#
+# The witness runs through xtask rather than a bare `tlc` call: TLC exit 0 alone
+# does not prove the scripted route ran (the witness state constraint can
+# truncate the search, and every witness invariant is vacuous until the script
+# completes). `machine-verify-witness` runs it with coverage and fails unless the
+# witness's completion action fired.
 echo "running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness"
-tlc -workers "${tlc_workers}" -config "${adaptive_witness}" "${adaptive_model}"
+"${xtask_bin}" machine-verify-witness \
+  --composition adaptive_mob_bundle \
+  --witness layer_terminal_feedback \
+  --workers "${tlc_workers}"
 
 # The canonical meerkat_machine ci.cfg sweep is structural (it stops after one
 # step), so durable in-turn Steer delivery is model-checked by a hand-written

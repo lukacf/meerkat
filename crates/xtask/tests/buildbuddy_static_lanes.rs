@@ -193,14 +193,17 @@ fn buildbuddy_machine_authority_lane_runs_tlc_machine_verify() {
                 "running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness"
             )
             && wrapper.contains("witness-layer_terminal_feedback.cfg")
-            && wrapper.contains("tlc -workers")
+            && wrapper.contains("machine-verify-witness")
+            && wrapper.contains("--composition adaptive_mob_bundle")
+            && wrapper.contains("--witness layer_terminal_feedback")
+            && !wrapper.contains("tlc -workers \"${tlc_workers}\" -config \"${adaptive_witness}\"")
             && wrapper.contains("JAVA_TOOL_OPTIONS")
             && wrapper.contains("-Xss256m")
             && wrapper.contains("-XX:+UseParallelGC")
             && wrapper.contains("adaptive_mob_bundle` has a canonical route")
             && wrapper.contains("ci.cfg structural-invariant contract")
             && wrapper.contains("export RUSTFMT"),
-        "machine_verify_all_tlc_test wrapper must normalize RUSTFMT, give direct TLC witnesses the canonical JVM stack/GC policy, prove the bounded adaptive witness, and run hermetic machine-verify with documented broad-composition TLC scale skips"
+        "machine_verify_all_tlc_test wrapper must normalize RUSTFMT, give TLC children the canonical JVM stack/GC policy, prove the bounded adaptive witness completed (not merely exited 0), and run hermetic machine-verify with documented broad-composition TLC scale skips"
     );
     assert!(
         doctor.contains("machine_verify_all_tlc_test")

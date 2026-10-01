@@ -130,6 +130,15 @@ them.
   minting new cursors or lists more tools is refused whole with
   `McpError::ToolDiscoveryLimitExceeded` instead of being followed until the
   connect timeout (or forever, on `McpProtocol`).
+- `xtask machine-verify --profile deep` credits a composition witness's
+  declared routes and scheduler rules only after TLC proves the witness script
+  completed: its `WitnessSatisfiedStutter_<witness>` action must generate a
+  state in the coverage output. A TLC exit 0 reached by state-constraint
+  truncation, a missing completion coverage line, or a witness that declares
+  no script and no expectations now fails the run, and all witness failures of
+  a composition are reported together. The canonical TLC lane runs the bounded
+  adaptive witness through the new `xtask machine-verify-witness` command, which
+  applies the same completion proof instead of trusting a bare `tlc` exit code.
 - WorkGraph observations, including execution recovery, distinguish an
   unavailable backing store from an absent record and preserve one read-only
   snapshot across schema validation and data queries. Ordinary writes also

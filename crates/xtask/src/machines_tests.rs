@@ -203,6 +203,99 @@ fn skipped_composition_tlc_still_requires_ci_structural_invariants() {
         .expect("generated ci.cfg should include structural invariants");
 }
 
+#[cfg(feature = "machine-authority")]
+fn canonical_witness(
+    composition: &str,
+    witness: &str,
+) -> meerkat_machine_schema::CompositionWitness {
+    meerkat_machine_schema::canonical_composition_schemas()
+        .into_iter()
+        .find(|schema| schema.name.as_str() == composition)
+        .expect("composition exists")
+        .witnesses
+        .into_iter()
+        .find(|candidate| candidate.name.as_str() == witness)
+        .expect("witness exists")
+}
+
+#[cfg(feature = "machine-authority")]
+fn witness_coverage_output(witness: &str, stutter_counts: Option<&str>) -> String {
+    let mut output = String::from(
+        "<WitnessInit_x line 1, col 1 to line 1, col 9 of module model>: 3:3\n\
+         <DeliverQueuedRoute line 2, col 1 to line 2, col 18 of module model>: 2:6\n",
+    );
+    if let Some(counts) = stutter_counts {
+        output.push_str(&format!(
+            "<{} line 3, col 1 to line 3, col 40 of module model>: {counts}\n",
+            witness_satisfied_stutter_operator_name(witness)
+        ));
+    }
+    output
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn witness_exit_zero_without_completion_fails_closed() {
+    let witness = canonical_witness("job_runtime_delivery", "runtime_delivery_first_commit");
+    let name = witness.name.as_str();
+
+    // Satisfied stutter generated states: the script completed.
+    let completed = parse_tlc_coverage(&witness_coverage_output(name, Some("0:27")));
+    ensure_witness_completed("job_runtime_delivery", &witness, &completed)
+        .expect("a completed witness passes");
+
+    // Truncated or stuck run: TLC can exit 0 but the stutter never fires.
+    let truncated = parse_tlc_coverage(&witness_coverage_output(name, Some("0:0")));
+    let err = ensure_witness_completed("job_runtime_delivery", &witness, &truncated)
+        .expect_err("an incomplete witness must fail");
+    assert!(err.to_string().contains("never completed"), "{err:#}");
+
+    // No coverage line for the completion action: fail closed.
+    let missing = parse_tlc_coverage(&witness_coverage_output(name, None));
+    let err = ensure_witness_completed("job_runtime_delivery", &witness, &missing)
+        .expect_err("missing completion coverage must fail");
+    assert!(err.to_string().contains("cannot be proven"), "{err:#}");
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn vacuous_witness_fails_even_when_tlc_reports_activity() {
+    let witness = canonical_witness("schedule_bundle", "pause_resume_without_revision");
+    assert!(witness_declares_no_conditions(&witness));
+    let coverage = parse_tlc_coverage(&witness_coverage_output(witness.name.as_str(), Some("1:1")));
+    let err = ensure_witness_completed("schedule_bundle", &witness, &coverage)
+        .expect_err("a witness that declares nothing must fail");
+    assert!(err.to_string().contains("vacuous"), "{err:#}");
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn witness_completion_operator_names_match_checked_in_models() {
+    let root = repo_root().expect("repo root");
+    for schema in meerkat_machine_schema::canonical_composition_schemas() {
+        if schema.witnesses.is_empty() {
+            continue;
+        }
+        let slug = composition_slug(&schema.name);
+        let model = fs::read_to_string(composition_model_path(&root, &slug)).expect("read model");
+        for witness in &schema.witnesses {
+            let operator = witness_satisfied_stutter_operator_name(witness.name.as_str());
+            let body = model
+                .split(&format!("\n{operator} ==\n"))
+                .nth(1)
+                .and_then(|tail| tail.split("\n\n").next())
+                .unwrap_or_else(|| panic!("{slug}: checked-in model defines no {operator}"));
+            // The harness's vacuity rule must agree with codegen: a witness
+            // that declares nothing renders an always-disabled stutter.
+            assert_eq!(
+                body.trim() == "/\\ FALSE",
+                witness_declares_no_conditions(witness),
+                "{slug}: {operator} body disagrees with the vacuity rule:\n{body}"
+            );
+        }
+    }
+}
+
 fn materialize_missing_coverage_anchors(mismatches: &[String]) -> anyhow::Result<()> {
     for mismatch in mismatches {
         let Some((_, rest)) = mismatch.split_once("coverage anchor ") else {

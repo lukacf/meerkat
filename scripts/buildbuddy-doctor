@@ -631,7 +631,7 @@ if grep -Fq '//crates/xtask:machine_verify_all_tlc_test' scripts/buildbuddy-baze
   grep -Fq -- '--skip-tlc-composition adaptive_mob_bundle' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq 'running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq 'witness-layer_terminal_feedback.cfg' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
-  grep -Fq 'tlc -workers' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq 'machine-verify-witness' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq 'JAVA_TOOL_OPTIONS' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq -- '-Xss256m' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq -- '-XX:+UseParallelGC' crates/xtask/tests/machine_verify_all_tlc_test.sh &&

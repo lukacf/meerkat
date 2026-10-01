@@ -13,9 +13,9 @@ use meerkat_core::ToolDef;
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
     model::{
-        CallToolRequestParams, CallToolResult, ClientJsonRpcMessage, ListToolsResult,
-        PaginatedRequestParams, RequestId, ServerCapabilities, ServerInfo, ServerJsonRpcMessage,
-        Tool,
+        CallToolRequestParams, CallToolResult, ClientJsonRpcMessage, ClientRequest,
+        ListToolsResult, PaginatedRequestParams, RequestId, ServerCapabilities, ServerInfo,
+        ServerJsonRpcMessage, Tool,
     },
     service::RequestContext,
 };
@@ -38,6 +38,7 @@ pub struct Gate {
     pub release: Notify,
 }
 
+#[derive(Clone)]
 pub struct Server {
     pub account: &'static str,
     pub tools: Vec<Arc<ToolDef>>,
@@ -109,14 +110,123 @@ impl ServerHandler for Server {
     }
 }
 
-struct HttpState {
+// Each initialized connection owns a distinct rmcp peer. The endpoint retains
+// every peer until shutdown, including peers whose HTTP session was deleted.
+struct SessionState {
     incoming: mpsc::UnboundedSender<ClientJsonRpcMessage>,
     events: Mutex<Option<mpsc::UnboundedReceiver<ServerJsonRpcMessage>>>,
     pending: Mutex<HashMap<RequestId, oneshot::Sender<ServerJsonRpcMessage>>>,
+}
+
+#[derive(Default)]
+struct Sessions {
+    stopping: bool,
+    peers: HashMap<String, HttpPeer>,
+}
+
+struct HttpState {
+    server: Server,
+    sessions: Mutex<Sessions>,
     required_bearer: Option<&'static str>,
     requests: AtomicUsize,
     deletes: AtomicUsize,
     delete_gate: Option<Arc<Gate>>,
+}
+
+static NEXT_SESSION: AtomicUsize = AtomicUsize::new(1);
+
+impl HttpState {
+    fn new(server: Server, bearer: Option<&'static str>, delete_gate: Option<Arc<Gate>>) -> Self {
+        Self {
+            server,
+            sessions: Mutex::new(Sessions::default()),
+            required_bearer: bearer,
+            requests: AtomicUsize::new(0),
+            deletes: AtomicUsize::new(0),
+            delete_gate,
+        }
+    }
+
+    fn authorized(&self, headers: &HeaderMap) -> bool {
+        self.required_bearer.is_none_or(|expected| {
+            headers.get("authorization").and_then(|v| v.to_str().ok()) == Some(expected)
+        })
+    }
+
+    fn select_session(
+        &self,
+        headers: &HeaderMap,
+        initialize: bool,
+    ) -> Result<(String, Arc<SessionState>), StatusCode> {
+        let mut sessions = self.sessions.lock().unwrap();
+        if sessions.stopping {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        if let Some(header) = headers.get("mcp-session-id") {
+            if initialize {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            let id = header.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
+            let peer = sessions.peers.get(id).ok_or(StatusCode::NOT_FOUND)?;
+            if peer.state.incoming.is_closed() {
+                return Err(StatusCode::NOT_FOUND);
+            }
+            return Ok((id.to_owned(), Arc::clone(&peer.state)));
+        }
+        if !initialize {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let id = format!(
+            "m6-fixture-session-{}",
+            NEXT_SESSION.fetch_add(1, Ordering::SeqCst)
+        );
+        let peer = HttpPeer::start(self.server.clone());
+        let state = Arc::clone(&peer.state);
+        sessions.peers.insert(id.clone(), peer);
+        Ok((id, state))
+    }
+
+    fn release_gates(&self) {
+        if let Some(gate) = &self.server.list_gate {
+            gate.release.notify_waiters();
+            gate.release.notify_one();
+        }
+        if let Some(gate) = &self.delete_gate {
+            gate.release.notify_waiters();
+            gate.release.notify_one();
+        }
+    }
+
+    fn expected_joins(&self) -> Vec<&'static str> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .peers
+            .values()
+            .flat_map(|_| ["service", "pump"])
+            .collect()
+    }
+
+    async fn shutdown(&self) -> (bool, Vec<&'static str>, Vec<String>) {
+        // Stop admitting sessions under the same lock used by initialize.
+        // No task handle can be inserted after ownership is drained here.
+        let peers = {
+            let mut sessions = self.sessions.lock().unwrap();
+            sessions.stopping = true;
+            std::mem::take(&mut sessions.peers)
+        };
+        self.release_gates();
+        let mut initialized = !peers.is_empty();
+        let mut joined = vec![];
+        let mut errors = vec![];
+        for mut peer in peers.into_values() {
+            let (peer_initialized, peer_joined, peer_errors) = peer.shutdown().await;
+            initialized &= peer_initialized;
+            joined.extend(peer_joined);
+            errors.extend(peer_errors);
+        }
+        (initialized, joined, errors)
+    }
 }
 
 async fn receive(
@@ -125,18 +235,25 @@ async fn receive(
     Json(message): Json<ClientJsonRpcMessage>,
 ) -> Response {
     state.requests.fetch_add(1, Ordering::SeqCst);
-    if let Some(expected) = state.required_bearer
-        && headers.get("authorization").and_then(|v| v.to_str().ok()) != Some(expected)
-    {
+    if !state.authorized(&headers) {
         return (
             StatusCode::UNAUTHORIZED,
             [("www-authenticate", "Bearer realm=\"fixture\"")],
         )
             .into_response();
     }
+    let initialize = matches!(
+        &message,
+        ClientJsonRpcMessage::Request(request)
+            if matches!(&request.request, ClientRequest::InitializeRequest(_))
+    );
+    let (session_id, session) = match state.select_session(&headers, initialize) {
+        Ok(session) => session,
+        Err(status) => return status.into_response(),
+    };
     let reply = if let ClientJsonRpcMessage::Request(request) = &message {
         let (tx, rx) = oneshot::channel();
-        let mut pending = state.pending.lock().unwrap();
+        let mut pending = session.pending.lock().unwrap();
         if pending.contains_key(&request.id) {
             return StatusCode::CONFLICT.into_response();
         }
@@ -145,9 +262,9 @@ async fn receive(
     } else {
         None
     };
-    if state.incoming.unbounded_send(message).is_err() {
+    if session.incoming.unbounded_send(message).is_err() {
         if let Some((id, _)) = reply {
-            state.pending.lock().unwrap().remove(&id);
+            session.pending.lock().unwrap().remove(&id);
         }
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
@@ -164,7 +281,7 @@ async fn receive(
                 })
             });
             (
-                [("mcp-session-id", "toolkit-transport-fixture")],
+                [("mcp-session-id", session_id)],
                 Sse::new(initial.chain(reply)),
             )
                 .into_response()
@@ -172,9 +289,16 @@ async fn receive(
         None => StatusCode::ACCEPTED.into_response(),
     }
 }
-async fn events(State(state): State<Arc<HttpState>>) -> Response {
+async fn events(State(state): State<Arc<HttpState>>, headers: HeaderMap) -> Response {
     state.requests.fetch_add(1, Ordering::SeqCst);
-    let Some(rx) = state.events.lock().unwrap().take() else {
+    if !state.authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let (_, session) = match state.select_session(&headers, false) {
+        Ok(session) => session,
+        Err(status) => return status.into_response(),
+    };
+    let Some(rx) = session.events.lock().unwrap().take() else {
         return StatusCode::CONFLICT.into_response();
     };
     Sse::new(rx.map(|message| {
@@ -186,37 +310,40 @@ async fn events(State(state): State<Arc<HttpState>>) -> Response {
     }))
     .into_response()
 }
-async fn delete(State(state): State<Arc<HttpState>>) -> StatusCode {
+async fn delete(State(state): State<Arc<HttpState>>, headers: HeaderMap) -> StatusCode {
+    if !state.authorized(&headers) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    let (_, session) = match state.select_session(&headers, false) {
+        Ok(session) => session,
+        Err(status) => return status,
+    };
     state.deletes.fetch_add(1, Ordering::SeqCst);
     if let Some(gate) = &state.delete_gate {
         gate.entered.notify_one();
         gate.release.notified().await;
     }
-    state.incoming.close_channel();
+    // Closing the superseded session must not affect a replacement initialized
+    // on the same endpoint, even when it uses the same provider account.
+    session.incoming.close_channel();
     StatusCode::OK
 }
 
 struct HttpPeer {
-    state: Arc<HttpState>,
-    list_gate: Option<Arc<Gate>>,
+    state: Arc<SessionState>,
     stop_service: Option<oneshot::Sender<()>>,
     service: Option<JoinHandle<Result<bool, String>>>,
     pump: Option<JoinHandle<()>>,
 }
 impl HttpPeer {
-    fn start(server: Server, bearer: Option<&'static str>, delete_gate: Option<Arc<Gate>>) -> Self {
-        let list_gate = server.list_gate.clone();
+    fn start(server: Server) -> Self {
         let (incoming, input) = mpsc::unbounded();
         let (output, mut outgoing) = mpsc::unbounded();
         let (event_tx, event_rx) = mpsc::unbounded();
-        let state = Arc::new(HttpState {
+        let state = Arc::new(SessionState {
             incoming,
             events: Mutex::new(Some(event_rx)),
             pending: Mutex::new(HashMap::new()),
-            required_bearer: bearer,
-            requests: AtomicUsize::new(0),
-            deletes: AtomicUsize::new(0),
-            delete_gate,
         });
         let pump_state = Arc::clone(&state);
         let pump = tokio::spawn(async move {
@@ -252,22 +379,12 @@ impl HttpPeer {
         });
         Self {
             state,
-            list_gate,
             stop_service: Some(stop_service),
             service: Some(service),
             pump: Some(pump),
         }
     }
-    pub fn release_gates(&self) {
-        if let Some(gate) = &self.list_gate {
-            gate.release.notify_one();
-        }
-        if let Some(gate) = &self.state.delete_gate {
-            gate.release.notify_one();
-        }
-    }
     async fn shutdown(&mut self) -> (bool, Vec<&'static str>, Vec<String>) {
-        self.release_gates();
         self.state.incoming.close_channel();
         if let Some(stop) = self.stop_service.take() {
             let _ = stop.send(());
@@ -327,7 +444,7 @@ async fn account_events(
     let Some(peer) = accounts.select(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    events(State(peer)).await
+    events(State(peer), headers).await
 }
 async fn account_delete(
     State(accounts): State<Arc<AccountRoutes>>,
@@ -336,12 +453,12 @@ async fn account_delete(
     let Some(peer) = accounts.select(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    delete(State(peer)).await.into_response()
+    delete(State(peer), headers).await.into_response()
 }
 
 pub struct Endpoint {
     pub url: String,
-    peers: Vec<HttpPeer>,
+    peers: Vec<Arc<HttpState>>,
     stop_http: Option<oneshot::Sender<()>>,
     http: Option<JoinHandle<Result<(), std::io::Error>>>,
 }
@@ -353,10 +470,10 @@ impl Endpoint {
     ) -> std::io::Result<Self> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let url = format!("http://{}/mcp", listener.local_addr()?);
-        let peer = HttpPeer::start(server, bearer, delete_gate);
+        let peer = Arc::new(HttpState::new(server, bearer, delete_gate));
         let router = Router::new()
             .route("/mcp", get(events).post(receive).delete(delete))
-            .with_state(Arc::clone(&peer.state));
+            .with_state(Arc::clone(&peer));
         Ok(Self::serve(url, listener, router, vec![peer]))
     }
 
@@ -376,8 +493,8 @@ impl Endpoint {
         let peers = accounts
             .into_iter()
             .map(|(server, bearer)| {
-                let peer = HttpPeer::start(server, Some(bearer), None);
-                routes.insert(bearer, Arc::clone(&peer.state));
+                let peer = Arc::new(HttpState::new(server, Some(bearer), None));
+                routes.insert(bearer, Arc::clone(&peer));
                 peer
             })
             .collect();
@@ -396,7 +513,7 @@ impl Endpoint {
         url: String,
         listener: tokio::net::TcpListener,
         router: Router,
-        peers: Vec<HttpPeer>,
+        peers: Vec<Arc<HttpState>>,
     ) -> Self {
         let (stop_http, stop) = oneshot::channel();
         let http = tokio::spawn(async move {
@@ -417,13 +534,13 @@ impl Endpoint {
     pub fn requests(&self) -> usize {
         self.peers
             .iter()
-            .map(|peer| peer.state.requests.load(Ordering::SeqCst))
+            .map(|peer| peer.requests.load(Ordering::SeqCst))
             .sum()
     }
     pub fn deletes(&self) -> usize {
         self.peers
             .iter()
-            .map(|peer| peer.state.deletes.load(Ordering::SeqCst))
+            .map(|peer| peer.deletes.load(Ordering::SeqCst))
             .sum()
     }
     pub fn release_gates(&self) {
@@ -434,7 +551,7 @@ impl Endpoint {
     pub fn expected_joins(&self) -> Vec<&'static str> {
         self.peers
             .iter()
-            .flat_map(|_| ["service", "pump"])
+            .flat_map(|peer| peer.expected_joins())
             .chain(["http"])
             .collect()
     }

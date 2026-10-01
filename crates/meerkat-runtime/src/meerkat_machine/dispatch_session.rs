@@ -1823,7 +1823,9 @@ impl MeerkatMachine {
         if let Some(result_rx) = joined_result {
             drop(gate_guard);
             drop(member_lease);
-            return Self::await_user_interrupt_dispatch(result_rx, &expected_run_id).await;
+            return self
+                .await_user_interrupt_dispatch(result_rx, &expected_run_id)
+                .await;
         }
 
         let staged_interrupt = if stop.is_some() {
@@ -1938,7 +1940,8 @@ impl MeerkatMachine {
             let _ = result;
         });
 
-        Self::await_user_interrupt_dispatch(result_rx, &expected_run_id).await
+        self.await_user_interrupt_dispatch(result_rx, &expected_run_id)
+            .await
     }
 
     /// Classify a generated-machine rejection of a session lifecycle input.

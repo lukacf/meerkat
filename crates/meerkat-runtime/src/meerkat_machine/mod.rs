@@ -2315,6 +2315,12 @@ const DURABILITY_DEGRADATION_INTERRUPT_ACK_TIMEOUT: std::time::Duration =
 const DURABILITY_DEGRADATION_INTERRUPT_ACK_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(5);
 
+/// How long an interrupt caller waits for the process-owned executor callback
+/// before it reports the outcome unknown (the callback continues). Unit tests
+/// use the same bound by default and shorten it per machine only where they
+/// exercise a wedged callback (`set_user_interrupt_ack_timeout_for_test`).
+const USER_INTERRUPT_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[cfg(test)]
 const DIRECT_MEMBER_BIND_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 #[cfg(not(test))]
@@ -8669,6 +8675,12 @@ pub struct MeerkatMachineShared {
     test_executor_after_ensure_pause_reached: crate::tokio::sync::Notify,
     #[cfg(feature = "test-support")]
     test_executor_after_ensure_pause_release: crate::tokio::sync::Notify,
+    /// This machine's user-interrupt acknowledgement bound. Tests scope it
+    /// per machine: a short bound would make every success-path interrupt
+    /// race the process-global cleanup dispatcher that all in-process tests
+    /// share, so only a test that exercises a wedged callback shortens it.
+    #[cfg(test)]
+    test_user_interrupt_ack_timeout: StdMutex<std::time::Duration>,
     /// Deterministic test gate after fenced input captures its residency slot
     /// and exact session gate but before it locks that session gate.
     #[cfg(test)]
@@ -10162,6 +10174,8 @@ impl MeerkatMachine {
                 #[cfg(feature = "test-support")]
                 test_executor_after_ensure_pause_release: crate::tokio::sync::Notify::new(),
                 #[cfg(test)]
+                test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
+                #[cfg(test)]
                 test_fenced_accept_after_lease: StdMutex::new(None),
                 #[cfg(test)]
                 test_registration_transaction_contention_probe: StdMutex::new(None),
@@ -10252,6 +10266,8 @@ impl MeerkatMachine {
                 #[cfg(feature = "test-support")]
                 test_executor_after_ensure_pause_release: crate::tokio::sync::Notify::new(),
                 #[cfg(test)]
+                test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
+                #[cfg(test)]
                 test_fenced_accept_after_lease: StdMutex::new(None),
                 #[cfg(test)]
                 test_registration_transaction_contention_probe: StdMutex::new(None),
@@ -10341,6 +10357,8 @@ impl MeerkatMachine {
                 test_executor_after_ensure_pause_reached: crate::tokio::sync::Notify::new(),
                 #[cfg(feature = "test-support")]
                 test_executor_after_ensure_pause_release: crate::tokio::sync::Notify::new(),
+                #[cfg(test)]
+                test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
                 #[cfg(test)]
                 test_fenced_accept_after_lease: StdMutex::new(None),
                 #[cfg(test)]

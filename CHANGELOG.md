@@ -124,6 +124,16 @@ them.
   outbox entry's own key. The crash-retry witness now replays the terminal
   delivery under that key, and a meerkat-jobs test pins the model's route key
   to the production outbox key.
+- Six vacuous composition witnesses that declared no script and no
+  expectations (and so "passed" TLC on a single state while proving nothing)
+  are removed: `schedule_runtime_bundle` `runtime_delivery_feedback` and
+  `runtime_lease_expiry`, `schedule_mob_bundle` `mob_delivery_feedback` and
+  `materialization_failure_classification`, and `auth_lease_bundle`
+  `auth_lease_lifecycle_publication_round_trip` and
+  `auth_release_oauth_flow_drain_round_trip`. The coverage gaps they hid are
+  tracked in #1357. `schedule_bundle` `pause_resume_without_revision` is now a
+  real scripted witness (Pause then Resume, back to Active at revision 1, no
+  supersede route).
 - Retiring a mob member no longer waits on its turn-finalization boundary
   until the retire deadline when an input was admitted but not yet opened as a
   run. Retire's pre-boundary step read "no bound run" as nothing to cancel, so

@@ -1,5 +1,13 @@
 # ADR-001 implementation acceptance plan
 
+> **Acceptance scope revised, 2026-10-01.** The owner approved the
+> [local governed default](../adr-001-local-governed-default.md). Its detailed
+> contract is in review. The previous high-assurance budgets, witness requirements
+> and restricted first profile below are historical, not current default gates.
+> New target: no added hot-path RTT/fsync, under 1 ms p99 added authorization
+> per tool/model dispatch and at most 10 percent turn overhead, with broad
+> provider, streaming, tool, compaction and live coverage.
+
 Status: implementation in progress. This plan does not claim runtime support.
 Luka's objective is full ADR implementation, adversarial acceptance by the GCP
 Meerkat/MobKit lead, Homecore, OB3 and Toolkit reviewers, and PRs with green CI.

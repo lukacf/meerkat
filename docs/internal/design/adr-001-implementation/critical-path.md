@@ -1,6 +1,30 @@
 # ADR-001 integration critical path
 
-Status: active coordination plan, 2026-10-01. The complete ADR remains the delivery scope. This plan changes work ordering and evidence collection; it does not weaken acceptance or claim that a prerequisite is an integrated feature.
+## Current direction after owner confirmation
+
+Luka approved the [local governed default](../adr-001-local-governed-default.md)
+on 2026-10-01. The [review record](../adr-001-local-governed-review.md)
+tracks exact candidates and findings. Review that short delta before further
+implementation. Preserve
+existing evidence and branches. Witness/bootstrap, authenticated time, external
+anchors and their physical grant-control path are parked; GRANT-03 is withdrawn.
+No heavy build or benchmark is active or queued from this work.
+
+The next integrated milestone is native association and exact replay persisted
+in existing transactions, local policy/restriction evaluation, shared model/tool
+entry and authorized streaming output. Prove denial before sink entry, restart,
+revocation, uncertain model retry and audit-gap semantics. All built-in providers,
+live, compaction and other shared paths remain first-profile acceptance work.
+
+Root prepared an isolated native composition on the lead-agreed 8302972d at
+69d040f7e. No new native declaration was written. Two generated model conflicts
+kept the new base artifact wholesale pending canonical regeneration; those
+artifacts are not claimed current. Reserved live declarations still await the
+lead handoff. No push or broad gate has been attempted.
+
+## Prior high-assurance schedule, retained as history
+
+Status: historical coordination plan before the approved simplification.  The complete ADR remains the delivery scope. This plan changes work ordering and evidence collection; it does not weaken acceptance or claim that a prerequisite is an integrated feature.
 
 ## First governed path
 

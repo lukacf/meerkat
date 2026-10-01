@@ -1,5 +1,15 @@
 # ADR-001 implementation checkpoint
 
+## Scope change, 2026-10-01
+
+The owner explicitly approved replacing the previous first-profile requirements
+with the [local governed default](../adr-001-local-governed-default.md). Its
+candidate is undergoing adversarial review. The old 111-requirement/57-case
+inventory must be dispositioned against this amendment; it is no longer a
+blanket requirement to finish parked high-assurance work before delivery.
+Existing source/test claims below retain their exact historical scope. They
+do not establish an implemented local governed path.
+
 Checkpoint: 2026-10-01. This supplements the original static requirement
 inventory. Its 111 requirements and 57 explicit cases remain open until their
 actual owner, recovery and sink evidence is assembled. The components below

@@ -1,5 +1,13 @@
 # ADR-001: Shared runtime authorization and governed information flow
 
+> **Default-profile direction changed, 2026-10-01.** Luka approved replacing
+> the former first profile with a local, host-trusted governed default.
+> The [short amendment](adr-001-local-governed-default.md) records the
+> replacement contract and is undergoing detailed adversarial review.
+> External witnesses, authenticated time, human-only uncertain-call recovery
+> and buffered-only output are parked high-assurance work. The original
+> requirements below remain historical where this amendment supersedes them.
+
 ## Status
 
 Proposed, 2026-09-30. Decision owner: Luka. This record proposes architecture,

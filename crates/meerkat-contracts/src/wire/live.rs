@@ -246,8 +246,6 @@ pub struct LiveOpenResult {
 /// The core enum is `#[non_exhaustive]`; new transports (e.g. WebRTC
 /// reintroduction per Round-4 T4) appear here as additional typed variants
 /// rather than as a free-form JSON blob.
-///
-/// `Debug` redacts the bearer token and the URL query, which can carry it.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "transport", rename_all = "snake_case")]
@@ -284,6 +282,7 @@ pub enum WireLiveTransportBootstrap {
     Unknown { debug: String },
 }
 
+/// Redacts the bearer token and the URL query, which can carry it.
 impl std::fmt::Debug for WireLiveTransportBootstrap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use meerkat_core::redact::{REDACTED, RedactedUrl};
@@ -377,9 +376,7 @@ impl TryFrom<WireLiveTransportBootstrap> for LiveTransportBootstrap {
     }
 }
 
-/// Request payload for `live/webrtc/answer`. `Debug` redacts the token and the
-/// SDP offer, whose ICE credentials (`ice-ufrag`, `ice-pwd`) are
-/// per-connection secrets; it prints the SDP length only.
+/// Request payload for `live/webrtc/answer`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveWebrtcAnswerParams {
@@ -388,6 +385,8 @@ pub struct LiveWebrtcAnswerParams {
     pub offer_sdp: String,
 }
 
+/// Redacts the token and the SDP offer, whose ICE credentials (`ice-ufrag`,
+/// `ice-pwd`) are per-connection secrets; prints the SDP length only.
 impl std::fmt::Debug for LiveWebrtcAnswerParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LiveWebrtcAnswerParams")
@@ -401,14 +400,15 @@ impl std::fmt::Debug for LiveWebrtcAnswerParams {
     }
 }
 
-/// Response payload for `live/webrtc/answer`. `Debug` prints the SDP
-/// answer length only; its ICE credentials are per-connection secrets.
+/// Response payload for `live/webrtc/answer`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveWebrtcAnswerResult {
     pub answer_sdp: String,
 }
 
+/// Prints the SDP answer length only; its ICE credentials are per-connection
+/// secrets.
 impl std::fmt::Debug for LiveWebrtcAnswerResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LiveWebrtcAnswerResult")

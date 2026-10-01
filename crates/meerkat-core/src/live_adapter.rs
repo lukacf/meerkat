@@ -966,8 +966,6 @@ pub enum LiveInputChunk {
 /// creates an SDP offer, then calls the returned JSON-RPC answer method
 /// with `{ channel_id, token, offer_sdp }`. Meerkat answers and binds the
 /// resulting media/data channels to the already-open live channel.
-///
-/// `Debug` redacts the bearer token and the URL query, which can carry it.
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "transport", rename_all = "snake_case")]
@@ -985,6 +983,8 @@ pub enum LiveTransportBootstrap {
     },
 }
 
+/// Redacts the bearer token and the URL query, which can carry it. (Kept off
+/// the type's docs, which become the wire schema description.)
 impl std::fmt::Debug for LiveTransportBootstrap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use crate::redact::{REDACTED, RedactedUrl};

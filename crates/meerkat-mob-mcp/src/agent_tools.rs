@@ -4943,6 +4943,15 @@ mod tests {
 
     #[async_trait]
     impl meerkat_mob::MobSessionService for RealCommsSessionSvc {
+        async fn subscribe_session_activity(
+            &self,
+            _session_id: &meerkat_core::SessionId,
+        ) -> Result<meerkat_mob::MemberSessionActivity, meerkat_core::service::SessionError>
+        {
+            // This fixture's sessions never report an active turn.
+            Ok(meerkat_mob::MemberSessionActivity::inactive())
+        }
+
         async fn observe_member_status_view(
             &self,
             session_id: &SessionId,

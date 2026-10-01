@@ -469,11 +469,12 @@ pub use recovery::RestoreIncompatible;
 use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::LiveDurableSourceObservation;
 pub use session_service::{
-    AgentEventSubscription, AuthorizedSessionResume, MemberStatusSessionView,
-    MemberStatusViewSource, MobSessionService, PersistedSessionAuthorityReadCost,
-    ResumeRejectionKind, ResumeSessionLoad, ResumeVerdictTerminality, SessionResumeAuthority,
-    SessionResumeLifecycle, SessionResumeMaterialization, SessionResumePreparationReceipt,
-    SessionResumeRejection, SessionResumeVerdict, materialize_nonpersistent_session_resume_verdict,
+    AgentEventSubscription, AuthorizedSessionResume, MemberSessionActivity,
+    MemberStatusSessionView, MemberStatusViewSource, MobSessionService,
+    PersistedSessionAuthorityReadCost, ResumeRejectionKind, ResumeSessionLoad,
+    ResumeVerdictTerminality, SessionResumeAuthority, SessionResumeLifecycle,
+    SessionResumeMaterialization, SessionResumePreparationReceipt, SessionResumeRejection,
+    SessionResumeVerdict, materialize_nonpersistent_session_resume_verdict,
     observe_live_durable_source_via_projection_visibility, observe_member_status_view_via_read,
 };
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};

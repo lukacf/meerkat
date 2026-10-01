@@ -1084,6 +1084,71 @@ impl From<meerkat_core::comms::SessionEventSubscription> for AgentEventSubscript
     }
 }
 
+/// A session's turn activity as a typed signal, taken before a stop
+/// interrupts the session and awaited to learn the moment its turn ends.
+///
+/// Either the session has no live actor (no turn can be active), or it is a
+/// watch pinned to the exact live actor the subscription found.
+#[derive(Debug, Clone)]
+pub struct MemberSessionActivity {
+    source: MemberSessionActivitySource,
+}
+
+#[derive(Debug, Clone)]
+enum MemberSessionActivitySource {
+    Inactive,
+    Session(meerkat_session::SessionActivityWatch),
+    ActiveFlag(tokio::sync::watch::Receiver<bool>),
+}
+
+impl MemberSessionActivity {
+    /// A session with no live actor, so no active turn. Also the right
+    /// answer for services whose sessions never report an active turn.
+    pub fn inactive() -> Self {
+        Self {
+            source: MemberSessionActivitySource::Inactive,
+        }
+    }
+
+    /// The turn activity of one exact live session actor.
+    pub fn live(watch: meerkat_session::SessionActivityWatch) -> Self {
+        Self {
+            source: MemberSessionActivitySource::Session(watch),
+        }
+    }
+
+    /// Turn activity published by a service that keeps its own per-session
+    /// flag (`true` while a turn is active). A closed channel reads as no
+    /// active turn.
+    pub fn from_active_flag(active: tokio::sync::watch::Receiver<bool>) -> Self {
+        Self {
+            source: MemberSessionActivitySource::ActiveFlag(active),
+        }
+    }
+
+    /// Whether the session's turn is active as last published.
+    pub fn is_active(&self) -> bool {
+        match &self.source {
+            MemberSessionActivitySource::Inactive => false,
+            MemberSessionActivitySource::Session(watch) => watch.is_active(),
+            MemberSessionActivitySource::ActiveFlag(active) => *active.borrow(),
+        }
+    }
+
+    /// Resolve once the session has no active turn: at once when it already
+    /// has none, otherwise when the pinned actor's turn ends or the actor
+    /// exits.
+    pub async fn wait_inactive(self) {
+        match self.source {
+            MemberSessionActivitySource::Inactive => {}
+            MemberSessionActivitySource::Session(mut watch) => watch.wait_inactive().await,
+            MemberSessionActivitySource::ActiveFlag(mut active) => {
+                let _closed = active.wait_for(|active| !*active).await;
+            }
+        }
+    }
+}
+
 /// Extension trait for session services used by the mob runtime.
 ///
 /// Builds on `SessionServiceCommsExt` from core so mob orchestration can use
@@ -1344,6 +1409,17 @@ pub trait MobSessionService:
             "session service cannot observe exact persisted authority for {session_id}"
         )))
     }
+
+    /// Subscribe to the session's turn activity: the typed signal a mob stop
+    /// awaits, after interrupting the session, to learn that its turn has
+    /// ended. A session with no live actor is [`MemberSessionActivity::inactive`].
+    ///
+    /// Required, so a service cannot silently lack it: a stop has no other
+    /// way to observe the end of a turn without polling.
+    async fn subscribe_session_activity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<MemberSessionActivity, SessionError>;
 
     /// Mechanical presence of the live session actor, without exporting its
     /// document or reconciling durable authority. Health/revival uses this
@@ -2338,6 +2414,17 @@ where
         )
     }
 
+    async fn subscribe_session_activity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<MemberSessionActivity, SessionError> {
+        Ok(
+            meerkat_session::EphemeralSessionService::<B>::session_activity_watch(self, session_id)
+                .await
+                .map_or_else(MemberSessionActivity::inactive, MemberSessionActivity::live),
+        )
+    }
+
     async fn session_projection_visible(
         &self,
         session_id: &SessionId,
@@ -3093,6 +3180,19 @@ where
                 self, session_id,
             )
             .await,
+        )
+    }
+
+    async fn subscribe_session_activity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<MemberSessionActivity, SessionError> {
+        Ok(
+            meerkat_session::PersistentSessionService::<B>::session_activity_watch(
+                self, session_id,
+            )
+            .await
+            .map_or_else(MemberSessionActivity::inactive, MemberSessionActivity::live),
         )
     }
 

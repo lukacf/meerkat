@@ -828,6 +828,13 @@ pub(super) enum MobCommand {
         ticket: super::actor::ResumeStepTicket,
         result: Result<Vec<super::actor::ExplicitResumeMemberRebuild>, MobError>,
     },
+    /// Internal re-entry carrying the concurrent per-member end-of-turn
+    /// outcomes of a parked Stop or Shutdown. `ticket` fences a stale
+    /// resolution.
+    AutonomousMemberStopsResolved {
+        ticket: u64,
+        outcomes: Vec<super::actor::AutonomousMemberStopOutcome>,
+    },
     ResumeLifecycleMemberObserved {
         work: std::sync::Arc<super::actor::ExplicitResumeMemberWork>,
         observation: Result<super::actor::ExplicitResumeLiveObservation, MobError>,
@@ -1681,6 +1688,7 @@ impl MobCommand {
             Self::ReloadMemberRegistration { .. } => "ReloadMemberRegistration",
             Self::ResumeLifecycleReadinessResolved { .. } => "ResumeLifecycleReadinessResolved",
             Self::ResumeLifecyclePreparationResolved { .. } => "ResumeLifecyclePreparationResolved",
+            Self::AutonomousMemberStopsResolved { .. } => "AutonomousMemberStopsResolved",
             Self::ResumeLifecycleMemberObserved { .. } => "ResumeLifecycleMemberObserved",
             Self::ResumeLifecycleMemberReady { .. } => "ResumeLifecycleMemberReady",
             Self::ResumeLifecycleMemberSettled { .. } => "ResumeLifecycleMemberSettled",

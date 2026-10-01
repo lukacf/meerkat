@@ -117,27 +117,23 @@ impl MobActor {
                 return;
             }
         };
-        if let Some(pending) = self.pending_resume_rollback.as_mut() {
+        let Some(deadline) = self.pending_resume_rollback.as_mut().map(|pending| {
             pending.in_flight = true;
-        }
+            pending.deadline
+        }) else {
+            return;
+        };
         let context = self.detached_member_readiness_context();
         let command_tx = self.command_tx.clone();
         self.actor_io_tasks.spawn(async move {
-            let outcomes =
-                futures::future::join_all(targets.into_iter().map(|(identity, incarnation)| {
-                    let context = context.clone();
-                    async move {
-                        let result = context
-                            .finish_autonomous_member_stop(&identity, &incarnation)
-                            .await;
-                        ResumeRollbackMemberOutcome {
-                            identity,
-                            incarnation,
-                            result,
-                        }
-                    }
-                }))
-                .await;
+            // Each member's end of turn is a typed signal; the rollback
+            // deadline is only the hang guard over the concurrent join.
+            let outcomes = context
+                .finish_autonomous_member_stops_until(targets, deadline)
+                .await
+                .into_iter()
+                .map(ResumeRollbackMemberOutcome::from_member_stop)
+                .collect::<Vec<_>>();
             context.provisioner.cancel_all_checkpointers().await;
             if command_tx
                 .send(RoutedMobCommand::internal(
@@ -167,7 +163,11 @@ impl MobActor {
         pending.in_flight = false;
         let mut failure = None;
         for outcome in outcomes {
-            if self.autonomous_stop_interrupted.get(&outcome.identity) != Some(&outcome.incarnation)
+            if self
+                .autonomous_stop_interrupted
+                .get(&outcome.identity)
+                .map(|completed| &completed.incarnation)
+                != Some(&outcome.incarnation)
             {
                 failure.get_or_insert_with(|| MobError::LifecycleOperationPending {
                     intent: format!("member {} changed during resume rollback", outcome.identity),

@@ -1419,6 +1419,31 @@ mod session_event_stream_tests {
 /// authority.
 type SessionState = TurnAdmissionProjection;
 
+/// A live session actor's turn activity, as published by its generated
+/// turn-admission projection.
+///
+/// Obtained from [`EphemeralSessionService::session_activity_watch`]. It is
+/// pinned to the actor it was taken from: when that actor exits, the watch
+/// closes and the session reads as inactive.
+#[derive(Debug, Clone)]
+pub struct SessionActivityWatch {
+    state_rx: watch::Receiver<SessionState>,
+}
+
+impl SessionActivityWatch {
+    /// Whether the actor's turn is active as last published.
+    pub fn is_active(&self) -> bool {
+        self.state_rx.borrow().is_active
+    }
+
+    /// Resolve once the actor has no active turn. The current value is
+    /// checked first, so a turn that already ended resolves at once; an actor
+    /// that exited (closed watch) has no active turn either.
+    pub async fn wait_inactive(&mut self) {
+        let _closed = self.state_rx.wait_for(|state| !state.is_active).await;
+    }
+}
+
 /// Snapshot of session metadata for read/list operations.
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
@@ -3885,6 +3910,23 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .await
             .get(id)
             .is_some_and(|handle| !handle.command_tx.is_closed())
+    }
+
+    /// Subscribe to the live session actor's turn activity, or `None` when no
+    /// live actor is registered for `id` (no turn can be active).
+    ///
+    /// The watch carries the same generated turn-admission projection that
+    /// [`SessionService::read`] reports as `is_active`, so a caller can await
+    /// the exact moment the actor's turn ends instead of re-reading. Taking
+    /// the watch pins this actor: a later same-id replacement is not observed.
+    pub async fn session_activity_watch(&self, id: &SessionId) -> Option<SessionActivityWatch> {
+        self.sessions
+            .read()
+            .await
+            .get(id)
+            .map(|handle| SessionActivityWatch {
+                state_rx: handle.state_rx.clone(),
+            })
     }
 
     /// Observe whether the actor-owned Session document is export-visible.

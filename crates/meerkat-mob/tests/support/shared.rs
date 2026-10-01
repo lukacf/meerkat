@@ -852,6 +852,13 @@ impl meerkat_core::service::SessionServiceHistoryExt for FailingOnceSessionServi
 
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for FailingOnceSessionService {
+    async fn subscribe_session_activity(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<meerkat_mob::MemberSessionActivity, meerkat_core::service::SessionError> {
+        self.inner.subscribe_session_activity(session_id).await
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         machine: &meerkat_runtime::MeerkatMachine,

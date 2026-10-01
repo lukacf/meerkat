@@ -1695,6 +1695,14 @@ pub trait MobProvisioner: Send + Sync {
         bridge_session_id: &SessionId,
     ) -> Option<Arc<dyn SubscribableInjector>>;
     async fn is_member_active(&self, member_ref: &MemberRef) -> Result<Option<bool>, MobError>;
+    /// Subscribe to the member session's turn activity before a stop
+    /// interrupts it, so the stop can await the end of the turn as a typed
+    /// signal. `None` means the member has no observable session activity
+    /// (mirroring [`Self::is_member_active`]).
+    async fn subscribe_member_activity(
+        &self,
+        member_ref: &MemberRef,
+    ) -> Result<Option<super::session_service::MemberSessionActivity>, MobError>;
     /// Prepare one machine-owned local session for the explicit mob-resume
     /// seam. Returns `true` only when the caller must rebuild the live
     /// session: an exact attachment owned by another provisioner incarnation
@@ -9218,6 +9226,14 @@ mod tests {
 
             #[async_trait::async_trait]
             impl crate::runtime::session_service::MobSessionService for StubService {
+                async fn subscribe_session_activity(
+                    &self,
+                    _session_id: &CoreSessionId,
+                ) -> Result<crate::runtime::session_service::MemberSessionActivity, SessionError>
+                {
+                    Err(unused())
+                }
+
                 async fn observe_member_status_view(
                     &self,
                     session_id: &meerkat_core::SessionId,
@@ -12797,6 +12813,27 @@ impl MobProvisioner for SessionBackend {
         match self.session_service.read(&bridge_session_id).await {
             Ok(view) => Ok(Some(view.state.is_active)),
             Err(meerkat_core::service::SessionError::NotFound { .. }) => Ok(Some(false)),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn subscribe_member_activity(
+        &self,
+        member_ref: &MemberRef,
+    ) -> Result<Option<super::session_service::MemberSessionActivity>, MobError> {
+        let Some(bridge_session_id) = member_ref.bridge_session_id() else {
+            return Ok(None);
+        };
+        match self
+            .session_service
+            .subscribe_session_activity(bridge_session_id)
+            .await
+        {
+            Ok(activity) => Ok(Some(activity)),
+            // Matches `is_member_active`: an unknown session has no turn.
+            Err(meerkat_core::service::SessionError::NotFound { .. }) => Ok(Some(
+                super::session_service::MemberSessionActivity::inactive(),
+            )),
             Err(error) => Err(error.into()),
         }
     }
@@ -16736,6 +16773,18 @@ impl MobProvisioner for MultiBackendProvisioner {
                 session_id: None, ..
             } => Ok(None),
             _ => self.session.is_member_active(member_ref).await,
+        }
+    }
+
+    async fn subscribe_member_activity(
+        &self,
+        member_ref: &MemberRef,
+    ) -> Result<Option<super::session_service::MemberSessionActivity>, MobError> {
+        match member_ref {
+            MemberRef::BackendPeer {
+                session_id: None, ..
+            } => Ok(None),
+            _ => self.session.subscribe_member_activity(member_ref).await,
         }
     }
 

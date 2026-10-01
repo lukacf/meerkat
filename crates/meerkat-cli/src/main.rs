@@ -10696,6 +10696,14 @@ impl meerkat_core::service::SessionServiceHistoryExt for RunMobSessionService {
 #[async_trait::async_trait]
 #[cfg(feature = "mob")]
 impl meerkat_mob::MobSessionService for RunMobSessionService {
+    async fn subscribe_session_activity(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<meerkat_mob::MemberSessionActivity, meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::subscribe_session_activity(self.inner.as_ref(), session_id)
+            .await
+    }
+
     async fn session_projection_visible(
         &self,
         session_id: &SessionId,
@@ -14144,6 +14152,14 @@ impl meerkat_core::service::SessionServiceHistoryExt for MobCliSessionService {
 #[async_trait::async_trait]
 #[cfg(all(feature = "mob", feature = "session-store"))]
 impl meerkat_mob::MobSessionService for MobCliSessionService {
+    async fn subscribe_session_activity(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<meerkat_mob::MemberSessionActivity, meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::subscribe_session_activity(self.inner.as_ref(), session_id)
+            .await
+    }
+
     async fn append_system_notice_under_runtime_turn_boundary(
         &self,
         session_id: &SessionId,
@@ -22595,6 +22611,15 @@ default_model = "gemma"
     #[cfg(feature = "mob")]
     #[async_trait]
     impl meerkat_mob::MobSessionService for TestMobSessionService {
+        async fn subscribe_session_activity(
+            &self,
+            _session_id: &meerkat_core::SessionId,
+        ) -> Result<meerkat_mob::MemberSessionActivity, meerkat_core::service::SessionError>
+        {
+            // This fixture's sessions never report an active turn.
+            Ok(meerkat_mob::MemberSessionActivity::inactive())
+        }
+
         async fn observe_member_status_view(
             &self,
             session_id: &SessionId,

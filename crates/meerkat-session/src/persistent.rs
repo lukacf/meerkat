@@ -3532,6 +3532,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner.live_session_actor_registered(id).await
     }
 
+    /// Subscribe to the live inner session actor's turn activity, or `None`
+    /// when no live actor is registered (no turn can be active). See
+    /// [`EphemeralSessionService::session_activity_watch`].
+    pub async fn session_activity_watch(
+        &self,
+        id: &SessionId,
+    ) -> Option<crate::SessionActivityWatch> {
+        self.inner.session_activity_watch(id).await
+    }
+
     /// The live actor's view as its summary and state watches last published
     /// it, or `None` when no live actor is registered for `id`.
     ///

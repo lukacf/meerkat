@@ -1160,6 +1160,17 @@ impl SessionServiceHistoryExt for RpcMobSessionService {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for RpcMobSessionService {
+    async fn subscribe_session_activity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_mob::MemberSessionActivity, SessionError> {
+        meerkat_mob::MobSessionService::subscribe_session_activity(
+            self.service.as_ref(),
+            session_id,
+        )
+        .await
+    }
+
     async fn subscribe_agent_session_events_from(
         &self,
         session_id: &SessionId,

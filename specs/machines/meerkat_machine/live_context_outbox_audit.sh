@@ -64,19 +64,22 @@ if [[ " ${JDK_JAVA_OPTIONS:-} " != *" -Xss"* ]]; then
 fi
 
 workers="${TLC_WORKERS:-auto}"
+# Each TLC run is held to the canonical lane's per-run cap (fails closed as
+# TLC INCOMPLETE, exit 3).
+# shellcheck source=tlc_run_cap.sh
+source "${spec_dir}/tlc_run_cap.sh"
 cd "${spec_dir}"
 
 # run_tlc <name> <cfg> -> leaves the log at ${work_dir}/<name>.log
 run_tlc() {
   local name="$1" cfg="$2"
   local log="${work_dir}/${name}.log"
-  set +e
+  tlc_status=0
   # Goal runs end in a violation by design: -noGenerateSpecTE keeps TLC from
   # writing trace-explorer specs next to the model.
-  tlc -workers "${workers}" -metadir "${work_dir}/${name}-states" -noGenerateSpecTE -config "${cfg}" "${extra_tlc_args[@]}" \
-    live_context_outbox_audit.tla > "${log}" 2>&1
-  tlc_status=$?
-  set -e
+  tlc_run_capped live_context_outbox_audit "${name}" "${log}" \
+    -workers "${workers}" -metadir "${work_dir}/${name}-states" -noGenerateSpecTE -config "${cfg}" "${extra_tlc_args[@]}" \
+    live_context_outbox_audit.tla || tlc_status=$?
   grep -E 'states generated|distinct states|is violated|Error:' "${log}" | sed "s/^/[${name}] /" || true
 }
 extra_tlc_args=("$@")

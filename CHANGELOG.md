@@ -113,6 +113,17 @@ them.
   ended at least 1000 ms before the result landed (voiced deliveries measured
   -200 to +400 ms). The cue's receipt is consumed by the broker and never
   surfaced. New public item: `PublicLiveBrokerSession::append_delegation_result`.
+- The `job_runtime_delivery` composition model keys runtime deliveries by
+  the job-local outbox key (`"terminal"`, or the notification id) that the
+  acknowledgement returns to the job, matching what production acknowledges.
+  Before, the commit and reuse acknowledgement routes returned the runtime
+  delivery id (the job id) as `MarkDeliveryApplied.delivery_id`, which no job
+  transition accepts, so the modeled acknowledgement never applied and all
+  three delivery witnesses deadlocked. Production was not affected: the job
+  outbox projector acknowledges by sequence and the job service resolves the
+  outbox entry's own key. The crash-retry witness now replays the terminal
+  delivery under that key, and a meerkat-jobs test pins the model's route key
+  to the production outbox key.
 - Retiring a mob member no longer waits on its turn-finalization boundary
   until the retire deadline when an input was admitted but not yet opened as a
   run. Retire's pre-boundary step read "no bound run" as nothing to cancel, so

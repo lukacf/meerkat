@@ -275,8 +275,18 @@ pub fn job_runtime_delivery_composition() -> CompositionSchema {
                     mi_id("runtime_delivery"),
                     rv(RouteTargetKind::Input, "CommitDelivery"),
                 ),
+                // The runtime delivery is keyed by the job-local outbox key that
+                // the acknowledgement must return to the job ("terminal" for the
+                // terminal entry). Production namespaces the runtime id
+                // (`JobOutboxEntry::runtime_delivery_id`: the job id) and its
+                // projector acknowledges by sequence, with the job service
+                // resolving the same local key; for the single job in this
+                // composition the two keys are in bijection.
                 bindings: vec![
-                    bind("delivery_id", "job_id"),
+                    RouteFieldBinding {
+                        to_field: fld_id("delivery_id"),
+                        source: RouteBindingSource::Literal(Expr::String("terminal".into())),
+                    },
                     bind("source_sequence", "delivery_sequence"),
                 ],
                 delivery: RouteDelivery::Enqueue,
@@ -290,8 +300,11 @@ pub fn job_runtime_delivery_composition() -> CompositionSchema {
                     mi_id("runtime_delivery"),
                     rv(RouteTargetKind::Input, "CommitDelivery"),
                 ),
+                // Keyed by the job-local notification id for the same reason as
+                // the terminal route: the acknowledgement returns it to the job
+                // (production runtime id: `<job>:notification:<id>`).
                 bindings: vec![
-                    bind("delivery_id", "runtime_delivery_id"),
+                    bind("delivery_id", "notification_id"),
                     bind("source_sequence", "delivery_sequence"),
                 ],
                 delivery: RouteDelivery::Enqueue,
@@ -2557,11 +2570,14 @@ fn runtime_delivery_notification_commit_witness() -> CompositionWitness {
 
 fn runtime_delivery_crash_retry_reuse_witness() -> CompositionWitness {
     let mut preload_inputs = job_terminal_witness_inputs();
+    // Crash after the runtime commit but before the job acknowledgement: the
+    // retry re-submits the same terminal delivery, keyed exactly as
+    // `job_terminal_enters_runtime_inbox` keys it.
     preload_inputs.push(witness_input(
         "runtime_delivery",
         "CommitDelivery",
         vec![
-            witness_field("delivery_id", Expr::String("job_1".into())),
+            witness_field("delivery_id", Expr::String("terminal".into())),
             witness_field("source_sequence", Expr::U64(1)),
         ],
     ));

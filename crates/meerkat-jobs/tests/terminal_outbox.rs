@@ -198,3 +198,60 @@ async fn live_cancellation_is_a_request_until_the_current_attempt_acknowledges()
     );
     assert_eq!(cancelled.outbox.len(), 1);
 }
+
+/// The `job_runtime_delivery` composition must key the runtime delivery by the
+/// same job-local outbox key that production acknowledges, or its
+/// acknowledgement routes deliver a `MarkDeliveryApplied` no job transition
+/// accepts and the modeled ack never applies. Production acknowledges by
+/// sequence and resolves the outbox entry's `delivery_id`; this pins the
+/// model's route key to that production key.
+#[tokio::test]
+async fn runtime_delivery_composition_acknowledges_with_the_production_outbox_key() {
+    use meerkat_machine_schema::catalog::job_runtime_delivery_composition;
+    use meerkat_machine_schema::{Expr, RouteBindingSource};
+
+    let (_store, service, job, claim) = running_job("route-key", RestartClass::Adoptable).await;
+    let completed = service
+        .complete_attempt(&job, AttemptWriteAuthority::from(&claim), 900, None)
+        .await
+        .expect("complete");
+    let terminal_key = completed.outbox[0].delivery_id.clone();
+
+    let composition = job_runtime_delivery_composition();
+    let delivery_id_source = |route: &str| {
+        composition
+            .routes
+            .iter()
+            .find(|candidate| candidate.name.as_str() == route)
+            .expect("composition declares the route")
+            .bindings
+            .iter()
+            .find(|binding| binding.to_field.as_str() == "delivery_id")
+            .expect("route binds delivery_id")
+            .source
+            .clone()
+    };
+
+    assert_eq!(
+        delivery_id_source("job_terminal_enters_runtime_inbox"),
+        RouteBindingSource::Literal(Expr::String(terminal_key)),
+        "the terminal runtime delivery must carry the production terminal outbox key"
+    );
+    // Production stores a notification's outbox entry under its notification id.
+    assert!(matches!(
+        delivery_id_source("job_notification_enters_runtime_inbox"),
+        RouteBindingSource::Field { from_field, .. } if from_field.as_str() == "notification_id"
+    ));
+    for ack in [
+        "runtime_delivery_commit_acknowledges_job_outbox",
+        "runtime_delivery_reuse_acknowledges_job_outbox",
+    ] {
+        assert!(
+            matches!(
+                delivery_id_source(ack),
+                RouteBindingSource::Field { from_field, .. } if from_field.as_str() == "delivery_id"
+            ),
+            "{ack} must return the runtime delivery key to the job unchanged"
+        );
+    }
+}

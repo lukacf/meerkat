@@ -151,6 +151,7 @@ of this full catalog.
 | `turn/stop_run` | Turn | `StopRunParams` | `StopRunResult` | Stop one exact run and terminalize every contributor bound to it |
 | `live/open` | Live | `LiveOpenParams` | `LiveOpenResult` | Open a live channel; optionally bound its serialized seed messages |
 | `live/webrtc/answer` | Live | `LiveWebrtcAnswerParams` | `LiveWebrtcAnswerResult` | Answer a browser WebRTC offer for an already-open live channel |
+| `live/media_health` | Live | `LiveMediaHealthParams` | `LiveMediaHealthResult` | Report decoded-audio counters for the output a live/media_health_requested notification named |
 | `live/status` | Live | `LiveChannelParams` | `LiveStatusResult` | Get the status of a live channel |
 | `live/close` | Live | `LiveChannelParams` | `LiveCloseResult` | Close a live channel |
 | `live/send_input` | Live | `LiveSendInputParams` | `LiveSendInputResult` | Send an audio, text, or model-supported image chunk to a live channel |
@@ -2307,6 +2308,7 @@ transport details.
 |--------|---------|
 | `live/open` | Open a live channel; optional positive `seed_max_chars` bounds serialized whole-turn seed messages |
 | `live/webrtc/answer` | Answer a browser WebRTC offer for an already-open live channel |
+| `live/media_health` | Report decoded-audio counters for the output a `live/media_health_requested` notification named; a `media_fault` verdict means the runtime closed the channel |
 | `live/status` | Get the status of a live channel |
 | `live/close` | Close a live channel |
 | `live/send_input` | Send an audio, text, or model-supported image chunk to a live channel |

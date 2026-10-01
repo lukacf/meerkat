@@ -96,6 +96,8 @@ import {
   type LivePlaybackCompleteResult,
   type LiveRefreshResult,
   type LiveSendInputParams,
+  type LiveMediaHealthParams,
+  type LiveMediaHealthResult,
   type LiveStatusResult,
   type LiveTruncateParams,
   type LiveWebrtcAnswerParams,
@@ -4207,6 +4209,19 @@ export class MeerkatClient {
       params,
     );
     return MeerkatClient.parseLiveStatusResult(result, "Invalid live/status response");
+  }
+
+  /**
+   * Answer a `live/media_health_requested` notification with raw
+   * decoded-audio counters (channel media start to now). The runtime judges
+   * them; on `media_fault` it has already closed the channel, and
+   * `reopen_recommended` says whether to reopen with the retained context.
+   */
+  async liveMediaHealth(
+    params: LiveMediaHealthParams,
+  ): Promise<LiveMediaHealthResult> {
+    const result = await this.request("live/media_health", params);
+    return result as unknown as LiveMediaHealthResult;
   }
 
   async liveClose(params: LiveChannelParams): Promise<LiveCloseResult> {

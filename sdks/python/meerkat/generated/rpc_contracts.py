@@ -91,6 +91,8 @@ from .types import (
     LiveCommitInputParams,
     LiveCommitInputResult,
     LiveInterruptResult,
+    LiveMediaHealthParams,
+    LiveMediaHealthResult,
     LiveOpenParams,
     LiveOpenResult,
     LivePlaybackCompleteParams,
@@ -1133,6 +1135,14 @@ class RpcRequest(Protocol):
         params: LiveWebrtcAnswerParams,
         /,
     ) -> Awaitable[LiveWebrtcAnswerResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["live/media_health"],
+        params: LiveMediaHealthParams,
+        /,
+    ) -> Awaitable[LiveMediaHealthResult]: ...
 
     @overload
     def __call__(

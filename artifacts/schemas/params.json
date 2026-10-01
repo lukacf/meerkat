@@ -15089,7 +15089,21 @@
             "type": "object"
           },
           {
+            "description": "The channel is closed. `reason` is present when the runtime closed it\nfor a typed cause (a media fault); `reopen_recommended` says whether\nthe session may reopen it with its retained context. A plain close\nserializes as `{\"status\":\"closed\"}`, as before.",
             "properties": {
+              "reason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireLiveCloseReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
               "status": {
                 "const": "closed",
                 "type": "string"
@@ -15171,6 +15185,16 @@
           "provider_native_resume"
         ],
         "type": "object"
+      },
+      "WireLiveCloseReason": {
+        "description": "Typed cause of a runtime-initiated live channel close.",
+        "oneOf": [
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it: the media path is broken.",
+            "type": "string"
+          }
+        ]
       },
       "WireLiveContinuityMode": {
         "description": "Wire projection of [`meerkat_core::live_adapter::LiveContinuityMode`].\n\nInternally-tagged on `mode` (snake_case) — matches the core enum's serde\nshape exactly so the wire payload is byte-identical. CC6: closes the\ntyped-surface gap. SDK consumers get a discriminated union (TS) or\ntagged-variant (Python) instead of a raw JSON blob, and the\n`ProviderNativeResume { provider_session_id }` payload field is visible\nto schema codegen.\n\n**Breaking-change note (pre-1.0 dogma, no shims):** T12 already moved the\ncore enum from a bare-string serde shape (`\"transcript_only\"`) to the\ninternally-tagged form (`{\"mode\":\"transcript_only\"}`). This wire mirror\nmakes that shape change visible to schema codegen and SDK clients.",

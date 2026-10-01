@@ -300,6 +300,11 @@ them.
   summary keeps only the newest four recent items, and a Late reopen's
   recent seed (whose late summary covers the whole history) keeps the newest
   four, starting at a user row.
+- A fresh-summary GPT Live startup seed now also starts its verbatim tail at
+  a user row, the way the Late path does: a reply left at the front of the
+  newest four items is dropped (and counted in `LiveStartupInputTruncation`)
+  instead of being seeded without its question. The fresh summary covers the
+  whole history, so nothing is lost.
 
 - The Cargo test lanes provide the MCP form-elicitation fixture again. Since
   #1338, `meerkat-mcp`'s `form_elicitation` tests (which require

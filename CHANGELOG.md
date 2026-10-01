@@ -149,6 +149,20 @@ them.
   base SHA, which is read when the run is queued and goes stale when main
   advances before checkout (over-testing today, under-testing in the reverse
   race). A pull-request checkout that is not a two-parent merge fails closed.
+- The CI gate failed pull-request runs in which every lane passed when hosted
+  runners were scarce: its single 1500 s push-to-terminal budget charged
+  runner queue wait to the code (run 36809608388 failed at 1511 s with an
+  execution path of 1009 s; its closure check waited 647 s for a runner, the
+  account's 40 concurrent hosted jobs being full). The gate now budgets lane
+  execution: each lane's own run time plus the change classification's, at
+  most 1500 s. Runner queue wait of 300 s or more on the critical path is a
+  `CI runner queue wait` warning, and a 2700 s push-to-terminal ceiling, queue
+  included, still fails a stuck run. The gate writes a typed verdict
+  (`within_budget`, `queue_delayed`, `exec_over_budget`, `runaway`) and the
+  execution, terminal and queue seconds to its outputs and summary. Sized from
+  66 pull-request run attempts: execution path p50 816 s, p90 968 s, max
+  1244 s; critical-path queue p90 474 s, max 742 s.
+
 - Mob shutdown no longer fails intermittently with `failed to materialize
   committed HeadCanonical metadata ... metadata read authority is no longer
   current`. The shutdown visibility observation reads session metadata

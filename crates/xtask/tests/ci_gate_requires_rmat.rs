@@ -4,8 +4,8 @@
 //!
 //! Pull-request CI (ci.yml) is Cargo-only on GitHub-hosted runners: the lanes
 //! are selected from the changed paths by scripts/ci-cargo-lanes.mjs, which
-//! fails closed, and the aggregate "CI gate" enforces a 25-minute
-//! push-to-terminal budget. Nightly owns the full workspace test lanes, the
+//! fails closed, and the aggregate "CI gate" enforces a 25-minute lane
+//! execution budget and a 45-minute push-to-terminal runaway ceiling. Nightly owns the full workspace test lanes, the
 //! dense Mob topology stress, bounded TLC, and the whole BuildBuddy/Bazel
 //! graph; the release workflow re-runs that graph on the tag. The full
 //! GitHub-hosted Cargo workflow (cargo.yml) remains a diagnostic fallback.
@@ -115,10 +115,25 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         ci.contains("sudo apt-get install -y ripgrep") && ci.contains("rg --version"),
         "PR CI installs ripgrep and proves it is on PATH before the tombstone scans"
     );
-    assert!(ci.contains("name: Enforce push-to-terminal budget"));
+    assert!(ci.contains("name: Enforce lane execution budget"));
+    // The budget measures what the code controls: lane execution (started to
+    // completed) plus the classification it waits for. Runner queue wait is a
+    // warning, and a generous push-to-terminal ceiling still fails a stuck CI.
     assert!(
-        ci.contains("CI_MAX_SECONDS: \"1500\""),
-        "the push-to-terminal budget is 1500 seconds"
+        ci.contains("CI_MAX_EXEC_SECONDS: \"1500\""),
+        "the lane execution budget is 1500 seconds"
+    );
+    assert!(
+        ci.contains("CI_MAX_TERMINAL_SECONDS: \"2700\""),
+        "the push-to-terminal runaway ceiling is 2700 seconds"
+    );
+    assert!(
+        ci.contains("title=CI runner queue wait") && ci.contains("budget_verdict="),
+        "runner queue wait is reported as a typed warning, not budgeted"
+    );
+    assert!(
+        !ci.contains("CI_MAX_SECONDS:"),
+        "no single push-to-terminal budget that charges runner queue to the code"
     );
     // Each lane is timed from the start of the attempt it ran in: a re-run
     // lane gets a fresh clock, a carried-over lane keeps its own attempt's

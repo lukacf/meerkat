@@ -344,7 +344,7 @@ list.
 
 **CI** (`.github/workflows/ci.yml`) runs on pushes to `main`, PRs, and
 manual dispatch (a branch head runs once, via its PR). It is Cargo-only on
-GitHub-hosted runners and sized to a 25-minute push-to-terminal budget:
+GitHub-hosted runners and sized to a 25-minute lane execution budget:
 - `changes` classifies the diff with `scripts/ci-cargo-lanes.mjs` (fail
   closed: every Rust-relevant change yields lanes; unmapped Rust paths, a
   missing base, or global build configuration escalate to the workspace).
@@ -377,13 +377,17 @@ GitHub-hosted runners and sized to a 25-minute push-to-terminal budget:
 - `push: main` only (no budget): `main-unit` over the whole workspace in
   eight shards, `wasm-check`, `sdk-host`. A red main run is a failed
   `CI gate` on the main commit and blocks `require_ci_green`.
-- `gate` (`CI gate`, the only required context): fail-closed aggregate,
-  1500-second push-to-terminal budget on pull requests (each lane timed
-  from the start of the run attempt it ran in, so a re-run lane gets a fresh
-  clock but a gate-only re-run cannot launder an overrun; the slowest lane
-  and critical path are reported on every non-cancelled run, failed runs
-  included; a failure to measure only warns on `main`), schema-4 attestation (backend
-  `github-hosted-cargo`) on successful `main` pushes. It runs under
+- `gate` (`CI gate`, the only required context): fail-closed aggregate; on
+  pull requests a 1500-second lane execution budget (classification plus
+  each lane's own run time, runner queue excluded) and a 2700-second
+  push-to-terminal runaway ceiling (each lane timed from the start of the
+  run attempt it ran in); runner queue wait of 300 s or more on the critical
+  path is a `CI runner queue wait` warning with a typed verdict, never a
+  failure (the account's 40 concurrent hosted jobs are shared by every PR,
+  main push and nightly); the lane table is reported on every non-cancelled
+  run, failed runs included; a failure to measure only warns on `main`;
+  schema-4 attestation (backend `github-hosted-cargo`) on successful `main`
+  pushes. It runs under
   `!cancelled()` so superseded runs surface as cancelled.
 
 Integration-fast, e2e-fast, the dense Mob topology stress, bounded TLC, the

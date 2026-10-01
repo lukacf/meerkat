@@ -21190,7 +21190,6 @@ mod tests {
     async fn test_cli_oauth_login_save_consumes_runtime_browser_flow() {
         use meerkat_core::handles::{AuthLeasePhase, LeaseKey};
         use meerkat_providers::auth_store::{EphemeralTokenStore, TokenKey, TokenStore};
-        use meerkat_providers::oauth_flow::OAuthFlowAuthority;
 
         let raw_auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let auth_lease =

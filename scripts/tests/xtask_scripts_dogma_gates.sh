@@ -317,6 +317,7 @@ printf '%s\n' \
   'echo "Error: Action property AuditNeverCloseEndsALeftover is violated."' \
   'echo "Error: Action property AuditNeverRecoveryEndsCarriedRows is violated."' \
   'echo "Error: Invariant AuditReplacementNeverReceivesALaterRow is violated."' \
+  'echo "Error: Invariant AuditNeverReopensAfterFailedRealization is violated."' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
 

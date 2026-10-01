@@ -5534,6 +5534,105 @@ mod live_context_mirror_tests {
         );
     }
 
+    /// A recovery whose replacement could not be realized ends through the
+    /// generated cancellation (#1349 follow-up 2b): it is never left live, so
+    /// the source channel's close ends the outbox and a reopen starts with
+    /// no live obligation and no carried row.
+    #[tokio::test]
+    async fn a_failed_recovery_realization_ends_its_obligation() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let host = Arc::new(AmbiguousMirrorHost::default());
+        host.fail_recovery
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        machine.set_live_context_mirror_host(host.clone());
+        machine
+            .enqueue_committed_parent_session_boundary(
+                &session_id,
+                &user_rows_commit(&session_id, &["Ambiguous row."]),
+                "store-commit-1",
+            )
+            .await
+            .expect("queue the row");
+        machine
+            .drain_live_context_outbox(&session_id)
+            .await
+            .expect_err("the failed realization is still reported");
+        let replacement = host.recoveries.lock().expect("recoveries")[0].1.clone();
+        let state = machine.session_dsl_state(&session_id).await.expect("state");
+        assert!(
+            state
+                .live_cancelled_recovery_channels
+                .contains(&replacement),
+            "the unrealized recovery is cancelled"
+        );
+        assert!(
+            !state
+                .live_context_recovery_replacement_by_channel
+                .values()
+                .any(|other| !state.live_cancelled_recovery_channels.contains(other)),
+            "no live recovery obligation remains"
+        );
+
+        // A row committed afterwards is not carried for the cancelled
+        // replacement: the source's close ends the outbox.
+        machine
+            .enqueue_committed_parent_session_boundary(
+                &session_id,
+                &user_rows_commit(&session_id, &["Ambiguous row.", "Typed after the failure."]),
+                "store-commit-2",
+            )
+            .await
+            .expect("queue the later row");
+        let binding = machine
+            .live_delegation_runtime_binding(&session_id, &channel_id)
+            .await
+            .expect("source binding");
+        machine
+            .__test_close_live_context_channel(&binding)
+            .await
+            .expect("close the source channel");
+        let state = machine.session_dsl_state(&session_id).await.expect("state");
+        assert_live_context_outbox_is_empty(
+            &machine,
+            &state,
+            &session_id,
+            "after the source closes",
+        );
+
+        // The reopen is a plain channel with no obligation to wait on.
+        let reopened = meerkat_live::LiveChannelId::new("bound-experimental-live-reopened");
+        machine
+            .resolve_live_open_admission(
+                &session_id,
+                &reopened,
+                &meerkat_core::SessionLlmIdentity {
+                    model: "experimental-realtime-model".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+            )
+            .await
+            .expect("admit the reopen");
+        stage_experimental_live_machine(&machine, &session_id, &reopened, 2).await;
+        bind_experimental_live_machine(&machine, &session_id, &reopened, 2).await;
+        let state = machine.session_dsl_state(&session_id).await.expect("state");
+        assert_live_context_outbox_is_empty(
+            &machine,
+            &state,
+            &session_id,
+            "after the reopen binds",
+        );
+        assert_eq!(
+            state
+                .live_context_cursor_by_channel
+                .get(&reopened.to_string())
+                .copied(),
+            Some(2)
+        );
+    }
+
     #[tokio::test]
     async fn ambiguity_recovery_io_failure_never_restores_retryable_append() {
         let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
@@ -11612,9 +11711,19 @@ impl MeerkatMachine {
                     self.retain_live_context_rows_owed_by_generated_outbox(session_id)
                         .await?;
                     drop(projection_guard);
-                    host.recover_ambiguous_append(recovery)
-                        .await
-                        .map_err(RuntimeDriverError::Internal)?;
+                    let closing = recovery.closing_channel_id().clone();
+                    let replacement = recovery.replacement_channel_id().clone();
+                    if let Err(error) = host.recover_ambiguous_append(recovery).await {
+                        // The replacement was never realized: end its
+                        // obligation instead of leaving it live forever.
+                        self.cancel_unrealized_live_recovery_obligation(
+                            session_id,
+                            &closing,
+                            &replacement,
+                        )
+                        .await?;
+                        return Err(RuntimeDriverError::Internal(error));
+                    }
                     return Ok(());
                 }
             }
@@ -12773,21 +12882,139 @@ impl MeerkatMachine {
     }
 
     /// Hand committed ambiguity recovery authority to the installed recovery
-    /// host. A host failure leaves typed recovery pending; callers must not
-    /// retry result resolution or replay the provider context append.
+    /// host. A host failure ends the recovery through the generated
+    /// cancellation (its replacement was never realized and can never bind);
+    /// callers must not retry result resolution or replay the provider
+    /// context append.
     #[cfg(feature = "live")]
     pub async fn realize_live_delegation_result_ambiguity_recovery(
         &self,
         authority: crate::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority,
     ) -> Result<(), RuntimeDriverError> {
-        let host = self.live_context_mirror_host().ok_or_else(|| {
-            RuntimeDriverError::ValidationFailed {
+        let session_id = authority.session_id().clone();
+        let closing = authority.closing_channel_id().clone();
+        let replacement = authority.replacement_channel_id().clone();
+        let outcome = match self.live_context_mirror_host() {
+            Some(host) => host
+                .recover_ambiguous_delegation_result(authority)
+                .await
+                .map_err(RuntimeDriverError::Internal),
+            None => Err(RuntimeDriverError::ValidationFailed {
                 reason: "live result ambiguity recovery host is not installed".to_string(),
+            }),
+        };
+        if outcome.is_err() {
+            self.cancel_unrealized_live_recovery_obligation(&session_id, &closing, &replacement)
+                .await?;
+        }
+        outcome
+    }
+
+    /// End an ambiguity recovery whose replacement was never admitted (its
+    /// realization failed), through the generated cancellation, and release
+    /// the runtime rows of the outbox rows only that replacement was owed.
+    /// Returns whether an obligation was ended: a replacement that was
+    /// admitted ends its recovery through its own close or abandonment, and a
+    /// recovery already bound or cancelled needs nothing.
+    #[cfg(feature = "live")]
+    pub(crate) async fn cancel_unrealized_live_recovery_obligation(
+        &self,
+        session_id: &SessionId,
+        closing: &meerkat_core::LiveChannelId,
+        replacement: &meerkat_core::LiveChannelId,
+    ) -> Result<bool, RuntimeDriverError> {
+        let projection_gate = self.live_context_projection_gate(session_id);
+        let _projection_guard = projection_gate.lock().await;
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
             }
         })?;
-        host.recover_ambiguous_delegation_result(authority)
-            .await
-            .map_err(RuntimeDriverError::Internal)
+        let session_key = session_id.to_string();
+        let closing = closing.to_string();
+        let replacement = replacement.to_string();
+        let owns = |recoveries: &std::collections::BTreeMap<String, String>| {
+            recoveries.get(&closing) == Some(&replacement)
+        };
+        if !(owns(&state.live_context_recovery_replacement_by_channel)
+            || owns(&state.live_result_recovery_replacement_by_channel))
+            || state
+                .live_cancelled_recovery_channels
+                .contains(&replacement)
+            || state
+                .live_channel_session_by_channel
+                .contains_key(&replacement)
+        {
+            return Ok(false);
+        }
+        // The exact complement the generated guard requires: a row stays only
+        // while another live obligation or the active channel is still owed it.
+        let other_live_obligation = state
+            .live_context_recovery_replacement_by_channel
+            .values()
+            .chain(state.live_result_recovery_replacement_by_channel.values())
+            .any(|other| {
+                other != &replacement && !state.live_cancelled_recovery_channels.contains(other)
+            });
+        let active_floor = state
+            .live_active_channel_by_session
+            .get(&session_key)
+            .and_then(|active| {
+                state
+                    .live_context_cursor_by_channel
+                    .get(active)
+                    .or_else(|| {
+                        state
+                            .live_experimental_staged_seed_cursor_by_channel
+                            .get(active)
+                    })
+            })
+            .copied();
+        let keep = |append: &String| {
+            other_live_obligation
+                || state
+                    .live_context_queued_cursor_by_append
+                    .get(append)
+                    .zip(active_floor)
+                    .is_some_and(|(cursor, floor)| *cursor > floor)
+        };
+        let mut retained_sessions = state.live_context_queued_session_by_append.clone();
+        retained_sessions.retain(|append, _| keep(append));
+        let mut retained_cursors = state.live_context_queued_cursor_by_append.clone();
+        retained_cursors.retain(|append, _| keep(append));
+        let mut retained_digests = state.live_context_queued_digest_by_append.clone();
+        retained_digests.retain(|append, _| keep(append));
+        let mut retained_commits = state.live_context_queued_commit_token_by_append.clone();
+        retained_commits.retain(|append, _| keep(append));
+        let mut retained_dispositions = state.live_context_queued_disposition_by_append.clone();
+        retained_dispositions.retain(|append, _| keep(append));
+        let mut retained_append_by_cursor = state.live_context_queued_append_by_cursor.clone();
+        retained_append_by_cursor.retain(|_, append| keep(append));
+        self.apply_session_dsl_input(
+            session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::CancelLiveRecoveryObligation {
+                session_id: session_key,
+                closing_channel_id: closing,
+                replacement_channel_id: replacement,
+                retained_sessions,
+                retained_cursors,
+                retained_digests,
+                retained_commits,
+                retained_dispositions,
+                retained_append_by_cursor,
+            },
+            "CancelLiveRecoveryObligation",
+        )
+        .await
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.persist_live_bridge_recovery_state(session_id, "CancelLiveRecoveryObligation")
+            .await?;
+        self.retain_live_context_rows_owed_by_generated_outbox(session_id)
+            .await?;
+        Ok(true)
     }
 
     #[cfg(feature = "live")]

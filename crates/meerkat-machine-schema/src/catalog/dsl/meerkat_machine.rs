@@ -6211,6 +6211,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                 canonical_seed_cursor: u64,
                 observation: Enum<LiveContextAppendObservation>,
             },
+            // A recovery whose replacement was never admitted (its realization
+            // failed) ends here; the retained maps are the exact outbox
+            // complement the cancellation keeps.
+            CancelLiveRecoveryObligation {
+                session_id: String,
+                closing_channel_id: String,
+                replacement_channel_id: String,
+                retained_sessions: Map<String, String>,
+                retained_cursors: Map<String, u64>,
+                retained_digests: Map<String, String>,
+                retained_commits: Map<String, String>,
+                retained_dispositions: Map<String, Enum<LiveContextRowDisposition>>,
+                retained_append_by_cursor: Map<u64, String>,
+            },
             BindLiveContextRecoveryChannel {
                 activation_receipt: String,
                 session_id: String,
@@ -7652,6 +7666,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 fence_token: FenceToken,
                 generation: Generation,
             },
+            LiveRecoveryObligationCancelled {
+                session_id: String,
+                closing_channel_id: String,
+                replacement_channel_id: String,
+            },
             LiveContextRecoveryChannelBound {
                 activation_receipt: String,
                 session_id: String,
@@ -8164,6 +8183,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition LiveContextAppendResolved => external seam OwnerRealizationOnly,
         disposition LiveContextAmbiguityRecoveryAuthorized => external seam OwnerRealizationOnly,
         disposition LiveContextRecoveryChannelBound => local seam OwnerRealizationOnly,
+        disposition LiveRecoveryObligationCancelled => local seam OwnerRealizationOnly,
         disposition SessionEventStreamOpenResolved => local seam SurfaceResultAlignment,
         disposition SessionEventStreamTerminalResolved => local seam SurfaceResultAlignment,
         disposition SessionEventStreamCloseResolved => local seam SurfaceResultAlignment,
@@ -24659,7 +24679,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 // An abandoned admission ends its outbox exactly as a close does.
                 // An admitted replacement that unbinds before its recovery bind can
-                // never realize that recovery: its obligation is cancelled with it.
+                // never realize that recovery: its obligation is cancelled with it. A
+                // replacement never admitted ends through CancelLiveRecoveryObligation,
+                // which keeps the exact outbox complement still owed.
                 if self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
                     && (self.live_context_recovery_source_by_replacement.contains_key(channel_id)
                         || self.live_result_recovery_source_by_replacement.contains_key(channel_id)) {
@@ -29702,6 +29724,170 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // A context recovery whose realization failed before its replacement was admitted can never bind: it ends here, typed, instead of staying live forever.
+        transition CancelLiveContextRecoveryObligation {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CancelLiveRecoveryObligation {
+                session_id, closing_channel_id, replacement_channel_id,
+                retained_sessions, retained_cursors, retained_digests, retained_commits,
+                retained_dispositions, retained_append_by_cursor
+            }
+            guard "unrealized_live_obligation" {
+                self.live_context_recovery_replacement_by_channel.get_cloned(closing_channel_id)
+                    == Some(replacement_channel_id)
+                && self.live_context_recovery_session_by_channel.get_cloned(closing_channel_id) == Some(session_id)
+                && !self.live_cancelled_recovery_channels.contains(replacement_channel_id)
+                && !self.live_channel_session_by_channel.contains_key(replacement_channel_id)
+            }
+            // A row stays only while it is still owed: to another live
+            // obligation, or above the active channel's bound cursor or staged
+            // seed. Rows owed only to this replacement are never needed again.
+            guard "retained_outbox_is_exact_complement" {
+                for_all(queued in self.live_context_queued_cursor_by_append.keys(),
+                    if (exists(source in self.live_context_recovery_replacement_by_channel.keys(),
+                            !self.live_cancelled_recovery_channels.contains(
+                                self.live_context_recovery_replacement_by_channel.get_cloned(source).get("value"))
+                            && self.live_context_recovery_replacement_by_channel.get_cloned(source) != Some(replacement_channel_id))
+                        || exists(source in self.live_result_recovery_replacement_by_channel.keys(),
+                            !self.live_cancelled_recovery_channels.contains(
+                                self.live_result_recovery_replacement_by_channel.get_cloned(source).get("value"))
+                            && self.live_result_recovery_replacement_by_channel.get_cloned(source) != Some(replacement_channel_id))
+                        || (self.live_active_channel_by_session.contains_key(session_id)
+                            && ((self.live_context_cursor_by_channel.contains_key(
+                                    self.live_active_channel_by_session.get_cloned(session_id).get("value"))
+                                && self.live_context_queued_cursor_by_append.get_copied(queued).get("value")
+                                    > self.live_context_cursor_by_channel.get_copied(
+                                        self.live_active_channel_by_session.get_cloned(session_id).get("value")).get("value"))
+                                || (!self.live_context_cursor_by_channel.contains_key(
+                                        self.live_active_channel_by_session.get_cloned(session_id).get("value"))
+                                    && self.live_experimental_staged_seed_cursor_by_channel.contains_key(
+                                        self.live_active_channel_by_session.get_cloned(session_id).get("value"))
+                                    && self.live_context_queued_cursor_by_append.get_copied(queued).get("value")
+                                        > self.live_experimental_staged_seed_cursor_by_channel.get_copied(
+                                            self.live_active_channel_by_session.get_cloned(session_id).get("value")).get("value")))))
+                    { retained_cursors.get_copied(queued)
+                        == self.live_context_queued_cursor_by_append.get_copied(queued) }
+                    else { !retained_cursors.contains_key(queued) })
+                && for_all(queued in retained_cursors.keys(),
+                    self.live_context_queued_cursor_by_append.contains_key(queued))
+                && retained_sessions.keys() == retained_cursors.keys()
+                && retained_digests.keys() == retained_cursors.keys()
+                && retained_commits.keys() == retained_cursors.keys()
+                && retained_dispositions.keys() == retained_cursors.keys()
+                && for_all(queued in retained_cursors.keys(),
+                    retained_sessions.get_cloned(queued)
+                        == self.live_context_queued_session_by_append.get_cloned(queued)
+                    && retained_digests.get_cloned(queued)
+                        == self.live_context_queued_digest_by_append.get_cloned(queued)
+                    && retained_commits.get_cloned(queued)
+                        == self.live_context_queued_commit_token_by_append.get_cloned(queued)
+                    && retained_dispositions.get_copied(queued)
+                        == self.live_context_queued_disposition_by_append.get_copied(queued)
+                    && retained_append_by_cursor.get_cloned(retained_cursors.get_copied(queued).get("value"))
+                        == Some(queued))
+                && for_all(cursor in retained_append_by_cursor.keys(),
+                    retained_cursors.get_copied(retained_append_by_cursor.get_cloned(cursor).get("value"))
+                        == Some(cursor))
+            }
+            update {
+                self.live_cancelled_recovery_channels.insert(replacement_channel_id);
+                self.live_context_queued_session_by_append = retained_sessions;
+                self.live_context_queued_cursor_by_append = retained_cursors;
+                self.live_context_queued_digest_by_append = retained_digests;
+                self.live_context_queued_commit_token_by_append = retained_commits;
+                self.live_context_queued_disposition_by_append = retained_dispositions;
+                self.live_context_queued_append_by_cursor = retained_append_by_cursor;
+            }
+            to Idle
+            emit LiveRecoveryObligationCancelled {
+                session_id: session_id,
+                closing_channel_id: closing_channel_id,
+                replacement_channel_id: replacement_channel_id
+            }
+        }
+
+        // The same typed end for a delegation result recovery whose replacement was never admitted.
+        transition CancelLiveDelegationResultRecoveryObligation {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CancelLiveRecoveryObligation {
+                session_id, closing_channel_id, replacement_channel_id,
+                retained_sessions, retained_cursors, retained_digests, retained_commits,
+                retained_dispositions, retained_append_by_cursor
+            }
+            guard "unrealized_live_obligation" {
+                self.live_result_recovery_replacement_by_channel.get_cloned(closing_channel_id)
+                    == Some(replacement_channel_id)
+                && self.live_result_recovery_session_by_channel.get_cloned(closing_channel_id) == Some(session_id)
+                && !self.live_cancelled_recovery_channels.contains(replacement_channel_id)
+                && !self.live_channel_session_by_channel.contains_key(replacement_channel_id)
+            }
+            // A row stays only while it is still owed: to another live
+            // obligation, or above the active channel's bound cursor or staged
+            // seed. Rows owed only to this replacement are never needed again.
+            guard "retained_outbox_is_exact_complement" {
+                for_all(queued in self.live_context_queued_cursor_by_append.keys(),
+                    if (exists(source in self.live_context_recovery_replacement_by_channel.keys(),
+                            !self.live_cancelled_recovery_channels.contains(
+                                self.live_context_recovery_replacement_by_channel.get_cloned(source).get("value"))
+                            && self.live_context_recovery_replacement_by_channel.get_cloned(source) != Some(replacement_channel_id))
+                        || exists(source in self.live_result_recovery_replacement_by_channel.keys(),
+                            !self.live_cancelled_recovery_channels.contains(
+                                self.live_result_recovery_replacement_by_channel.get_cloned(source).get("value"))
+                            && self.live_result_recovery_replacement_by_channel.get_cloned(source) != Some(replacement_channel_id))
+                        || (self.live_active_channel_by_session.contains_key(session_id)
+                            && ((self.live_context_cursor_by_channel.contains_key(
+                                    self.live_active_channel_by_session.get_cloned(session_id).get("value"))
+                                && self.live_context_queued_cursor_by_append.get_copied(queued).get("value")
+                                    > self.live_context_cursor_by_channel.get_copied(
+                                        self.live_active_channel_by_session.get_cloned(session_id).get("value")).get("value"))
+                                || (!self.live_context_cursor_by_channel.contains_key(
+                                        self.live_active_channel_by_session.get_cloned(session_id).get("value"))
+                                    && self.live_experimental_staged_seed_cursor_by_channel.contains_key(
+                                        self.live_active_channel_by_session.get_cloned(session_id).get("value"))
+                                    && self.live_context_queued_cursor_by_append.get_copied(queued).get("value")
+                                        > self.live_experimental_staged_seed_cursor_by_channel.get_copied(
+                                            self.live_active_channel_by_session.get_cloned(session_id).get("value")).get("value")))))
+                    { retained_cursors.get_copied(queued)
+                        == self.live_context_queued_cursor_by_append.get_copied(queued) }
+                    else { !retained_cursors.contains_key(queued) })
+                && for_all(queued in retained_cursors.keys(),
+                    self.live_context_queued_cursor_by_append.contains_key(queued))
+                && retained_sessions.keys() == retained_cursors.keys()
+                && retained_digests.keys() == retained_cursors.keys()
+                && retained_commits.keys() == retained_cursors.keys()
+                && retained_dispositions.keys() == retained_cursors.keys()
+                && for_all(queued in retained_cursors.keys(),
+                    retained_sessions.get_cloned(queued)
+                        == self.live_context_queued_session_by_append.get_cloned(queued)
+                    && retained_digests.get_cloned(queued)
+                        == self.live_context_queued_digest_by_append.get_cloned(queued)
+                    && retained_commits.get_cloned(queued)
+                        == self.live_context_queued_commit_token_by_append.get_cloned(queued)
+                    && retained_dispositions.get_copied(queued)
+                        == self.live_context_queued_disposition_by_append.get_copied(queued)
+                    && retained_append_by_cursor.get_cloned(retained_cursors.get_copied(queued).get("value"))
+                        == Some(queued))
+                && for_all(cursor in retained_append_by_cursor.keys(),
+                    retained_cursors.get_copied(retained_append_by_cursor.get_cloned(cursor).get("value"))
+                        == Some(cursor))
+            }
+            update {
+                self.live_cancelled_recovery_channels.insert(replacement_channel_id);
+                self.live_context_queued_session_by_append = retained_sessions;
+                self.live_context_queued_cursor_by_append = retained_cursors;
+                self.live_context_queued_digest_by_append = retained_digests;
+                self.live_context_queued_commit_token_by_append = retained_commits;
+                self.live_context_queued_disposition_by_append = retained_dispositions;
+                self.live_context_queued_append_by_cursor = retained_append_by_cursor;
+            }
+            to Idle
+            emit LiveRecoveryObligationCancelled {
+                session_id: session_id,
+                closing_channel_id: closing_channel_id,
+                replacement_channel_id: replacement_channel_id
+            }
+        }
+
         // Recovery reaches public Answered truth and execution binding in one
         // generated commit, after the provider proves SessionReady plus exact
         // canonical seed acknowledgement. A normal bind remains forbidden for
@@ -29978,7 +30164,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 // recovery obligation anywhere in the session (the closing channel's own
                 // or one whose replacement this is not) carries the outbox over.
                 // An admitted replacement that unbinds before its recovery bind can
-                // never realize that recovery: its obligation is cancelled with it.
+                // never realize that recovery: its obligation is cancelled with it. A
+                // replacement never admitted ends through CancelLiveRecoveryObligation,
+                // which keeps the exact outbox complement still owed.
                 if self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
                     && (self.live_context_recovery_source_by_replacement.contains_key(channel_id)
                         || self.live_result_recovery_source_by_replacement.contains_key(channel_id)) {

@@ -3113,6 +3113,7 @@ runtime_internal_inputs!(
         AdvanceLiveContextCanonicalCoverage,
         ResolveLiveContextAppend,
         BindLiveContextRecoveryChannel,
+        CancelLiveRecoveryObligation,
         RecordLiveWebrtcAnswerAcceptedAndBindExecution,
     ]
 );

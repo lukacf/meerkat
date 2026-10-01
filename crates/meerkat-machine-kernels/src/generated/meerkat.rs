@@ -17373,6 +17373,18 @@ pub mod inputs {
         pub observation: LiveContextAppendObservation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CancelLiveRecoveryObligation {
+        pub session_id: String,
+        pub closing_channel_id: String,
+        pub replacement_channel_id: String,
+        pub retained_sessions: std::collections::BTreeMap<String, String>,
+        pub retained_cursors: std::collections::BTreeMap<String, u64>,
+        pub retained_digests: std::collections::BTreeMap<String, String>,
+        pub retained_commits: std::collections::BTreeMap<String, String>,
+        pub retained_dispositions: std::collections::BTreeMap<String, LiveContextRowDisposition>,
+        pub retained_append_by_cursor: std::collections::BTreeMap<u64, String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BindLiveContextRecoveryChannel {
         pub activation_receipt: String,
         pub session_id: String,
@@ -18302,6 +18314,7 @@ pub enum Input {
     EnqueueLiveContextRow(inputs::EnqueueLiveContextRow),
     AdvanceLiveContextCanonicalCoverage(inputs::AdvanceLiveContextCanonicalCoverage),
     ResolveLiveContextAppend(inputs::ResolveLiveContextAppend),
+    CancelLiveRecoveryObligation(inputs::CancelLiveRecoveryObligation),
     BindLiveContextRecoveryChannel(inputs::BindLiveContextRecoveryChannel),
     AbandonLiveOpenAdmission(inputs::AbandonLiveOpenAdmission),
     RecordLiveRefreshQueued(inputs::RecordLiveRefreshQueued),
@@ -18825,6 +18838,7 @@ impl Input {
                 InputKind::AdvanceLiveContextCanonicalCoverage
             }
             Self::ResolveLiveContextAppend(_) => InputKind::ResolveLiveContextAppend,
+            Self::CancelLiveRecoveryObligation(_) => InputKind::CancelLiveRecoveryObligation,
             Self::BindLiveContextRecoveryChannel(_) => InputKind::BindLiveContextRecoveryChannel,
             Self::AbandonLiveOpenAdmission(_) => InputKind::AbandonLiveOpenAdmission,
             Self::RecordLiveRefreshQueued(_) => InputKind::RecordLiveRefreshQueued,
@@ -19257,6 +19271,7 @@ pub enum InputKind {
     EnqueueLiveContextRow,
     AdvanceLiveContextCanonicalCoverage,
     ResolveLiveContextAppend,
+    CancelLiveRecoveryObligation,
     BindLiveContextRecoveryChannel,
     AbandonLiveOpenAdmission,
     RecordLiveRefreshQueued,
@@ -20673,6 +20688,12 @@ pub mod effects {
         pub generation: Generation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveRecoveryObligationCancelled {
+        pub session_id: String,
+        pub closing_channel_id: String,
+        pub replacement_channel_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveContextRecoveryChannelBound {
         pub activation_receipt: String,
         pub session_id: String,
@@ -21214,6 +21235,7 @@ pub enum Effect {
     LiveContextCanonicalCoverageAdvanced(effects::LiveContextCanonicalCoverageAdvanced),
     LiveContextAppendResolved(effects::LiveContextAppendResolved),
     LiveContextAmbiguityRecoveryAuthorized(effects::LiveContextAmbiguityRecoveryAuthorized),
+    LiveRecoveryObligationCancelled(effects::LiveRecoveryObligationCancelled),
     LiveContextRecoveryChannelBound(effects::LiveContextRecoveryChannelBound),
     SessionEventStreamOpenResolved(effects::SessionEventStreamOpenResolved),
     SessionEventStreamTerminalResolved(effects::SessionEventStreamTerminalResolved),
@@ -21463,6 +21485,7 @@ pub enum EffectKind {
     LiveContextCanonicalCoverageAdvanced,
     LiveContextAppendResolved,
     LiveContextAmbiguityRecoveryAuthorized,
+    LiveRecoveryObligationCancelled,
     LiveContextRecoveryChannelBound,
     SessionEventStreamOpenResolved,
     SessionEventStreamTerminalResolved,
@@ -23577,6 +23600,16 @@ pub enum TransitionId {
     ResolveLiveContextAppendAmbiguousIdle,
     ResolveLiveContextAppendAmbiguousAttached,
     ResolveLiveContextAppendAmbiguousRunning,
+    CancelLiveContextRecoveryObligationIdle,
+    CancelLiveContextRecoveryObligationAttached,
+    CancelLiveContextRecoveryObligationRunning,
+    CancelLiveContextRecoveryObligationRetired,
+    CancelLiveContextRecoveryObligationStopped,
+    CancelLiveDelegationResultRecoveryObligationIdle,
+    CancelLiveDelegationResultRecoveryObligationAttached,
+    CancelLiveDelegationResultRecoveryObligationRunning,
+    CancelLiveDelegationResultRecoveryObligationRetired,
+    CancelLiveDelegationResultRecoveryObligationStopped,
     BindLiveContextRecoveryChannelIdle,
     BindLiveContextRecoveryChannelAttached,
     BindLiveContextRecoveryChannelRunning,

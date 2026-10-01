@@ -1047,6 +1047,7 @@ meerkat_machine_runtime_internal_inputs!(
         AdvanceLiveContextCanonicalCoverage,
         ResolveLiveContextAppend,
         BindLiveContextRecoveryChannel,
+        CancelLiveRecoveryObligation,
         BeginLiveContextPreparation,
         RecordLiveContextObservation,
         RecordLiveContextBootstrapAckCut,

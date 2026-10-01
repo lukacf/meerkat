@@ -89,6 +89,28 @@ them.
   `AdvanceLiveExperimentalStagedSeedRunning` are added (`TransitionId::*`
   discriminants move). Exhaustive matches on these enums must handle the new
   variants.
+- Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
+  meerkat-runtime `meerkat_machine::dsl`) gains the input
+  `CancelLiveRecoveryObligation { session_id, closing_channel_id,
+  replacement_channel_id, retained_sessions, retained_cursors,
+  retained_digests, retained_commits, retained_dispositions,
+  retained_append_by_cursor }` and the effect `LiveRecoveryObligationCancelled
+  { session_id, closing_channel_id, replacement_channel_id }`, both added
+  mid-enum (`MeerkatMachineInput::*`, `MeerkatMachineInputVariant::*`,
+  `MeerkatMachineEffect::*`, `MeerkatMachineEffectVariant::*`, kernel
+  `Input::*`, `InputKind::*`, `Effect::*` and `EffectKind::*` discriminants
+  move). The transitions `CancelLiveContextRecoveryObligationIdle`,
+  `CancelLiveContextRecoveryObligationAttached`,
+  `CancelLiveContextRecoveryObligationRunning`,
+  `CancelLiveContextRecoveryObligationRetired`,
+  `CancelLiveContextRecoveryObligationStopped`,
+  `CancelLiveDelegationResultRecoveryObligationIdle`,
+  `CancelLiveDelegationResultRecoveryObligationAttached`,
+  `CancelLiveDelegationResultRecoveryObligationRunning`,
+  `CancelLiveDelegationResultRecoveryObligationRetired` and
+  `CancelLiveDelegationResultRecoveryObligationStopped` are added
+  (`TransitionId::*` discriminants move). Exhaustive matches on
+  these enums must handle the new variants.
 
 - `meerkat_machine_schema::FieldSchema` gains a public `disclosure:
   FieldDisclosure` field, so struct literals must set it
@@ -479,6 +501,21 @@ them.
   20 steps (4,718 distinct states), and TLC must reach each of three goals: a
   close ending a leftover, a recovery authorization ending the rows its seed
   carries, and a row queued after the authorization reaching the replacement.
+- A GPT Live ambiguity recovery whose replacement could not be realized (the
+  replacement open failed before admission, for example when a row committed
+  between the ambiguity and the replacement open) now ends through the
+  generated input `CancelLiveRecoveryObligation` instead of staying live
+  forever. The runtime applies it when the host's recovery realization
+  fails, and it drops the outbox rows owed only to that replacement. It keeps
+  the exact complement: rows still owed to another live recovery, or above
+  the active channel's bound cursor or staged seed. Before, the obligation
+  outlived the failure, so the session's outbox kept its rows indefinitely
+  and every later close kept them too. A replacement that was admitted still
+  ends its recovery through its own close or abandonment, and a close of a
+  channel never admitted no longer cancels anything. The bounded TLC audit
+  gains a third channel and a fourth goal: a failed realization followed by a
+  plain reopen binds with no live obligation left. Safety holds at 20 steps
+  (54,742 distinct states).
 - On a GPT Live channel seeded at open, runtime work output committed after the
   voice session was created (the member's reply to a job result merged after
   the previous call ended) is no longer replayed on the thinking lane while the

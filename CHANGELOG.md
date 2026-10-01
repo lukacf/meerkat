@@ -79,8 +79,6 @@ them.
   `meerkat_live::LiveSidebandObservationKind` gains `ProviderInputLatency`
   and `meerkat_openai::GptLiveBrokerObservation` gains
   `ProviderInputLatency`; exhaustive matches must handle them.
-- `meerkat_core::mcp_config::McpHttpConfig` and the HTTP variant of
-  `meerkat_contracts::wire::PortableMcpDecl` gain `oauth_account: Option<String>`.
 - `meerkat_core::mcp_config::McpServerConfig`,
   `meerkat_contracts::wire::PortableMcpDecl::Stdio` and
   `meerkat_contracts::wire::PortableMcpDecl::Http` gain
@@ -390,8 +388,10 @@ them.
   server process behind. `McpRouter::shutdown` now aborts and joins the
   connect-and-enumerate tasks it spawned instead of letting them run until the
   connect timeout, and stdio server children are spawned kill-on-drop, so a
-  dropped or aborted connection kills the child synchronously instead of
-  relying on a deferred kill task that a stopping runtime may never run.
+  dropped or aborted connection triggers the child's kill even when a stopping
+  runtime never runs rmcp's deferred cleanup task. Shutdown returns once the
+  connect tasks are aborted and joined; the child's exit follows
+  asynchronously.
 - `meerkat-rpc` lib tests pass under the threaded `cargo test` runner. Tests
   created live mobs with fixed ids (`test_mob` three times,
   `router-session-archive-live-retire-failure` and
@@ -726,11 +726,6 @@ them.
   a composition are reported together. The canonical TLC lane runs the bounded
   adaptive witness through the new `xtask machine-verify-witness` command, which
   applies the same completion proof instead of trusting a bare `tlc` exit code.
-- `Debug` output of MCP server configuration no longer exposes credentials.
-  `McpStdioConfig` keeps the command and env names but redacts argument and env
-  values; `McpHttpConfig` keeps header names but redacts header values and URL
-  userinfo, query and fragment. This also covers `McpServerConfig`, `McpConfig`
-  and `McpAddParams`, which embed them, and the internal SSE and streamable HTTP
 - `Debug` output of MCP, skill-repository and hook configuration no longer
   exposes credentials. Names stay visible; argument values, env values, header
   values and URL userinfo, query and fragment print as `"<redacted>"`. Covered:

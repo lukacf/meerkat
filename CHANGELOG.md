@@ -163,6 +163,15 @@ them.
   66 pull-request run attempts: execution path p50 816 s, p90 968 s, max
   1244 s; critical-path queue p90 474 s, max 742 s.
 
+- `xtask machine-verify` runs every composition witness in every profile,
+  not only `--profile deep`, so the canonical TLC lane (`make machine-verify`:
+  nightly, the machine pre-push hook, and the release BuildBuddy graph) now
+  requires each non-skipped composition's witnesses to prove completion. Each
+  TLC run is bounded by a harness-enforced per-run cap (`--tlc-run-cap-secs`,
+  `TLC_RUN_CAP_SECS`, default 900 s); a run that hits it is killed and fails
+  as a typed TLC INCOMPLETE error instead of riding to the job timeout.
+  Nightly adds `machine-verify-deep`, Deep-profile TLC over the compositions
+  that fit the cap (`make machine-verify-deep-compositions`).
 - Mob shutdown no longer fails intermittently with `failed to materialize
   committed HeadCanonical metadata ... metadata read authority is no longer
   current`. The shutdown visibility observation reads session metadata

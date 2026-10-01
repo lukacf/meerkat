@@ -296,6 +296,41 @@ fn witness_completion_operator_names_match_checked_in_models() {
     }
 }
 
+#[cfg(all(unix, feature = "machine-authority"))]
+#[test]
+fn capped_tlc_run_is_killed_and_reported_incomplete() {
+    let started = std::time::Instant::now();
+    let run = run_tlc_with_cap(
+        std::process::Command::new("sleep").arg("30"),
+        std::time::Duration::from_secs(1),
+    )
+    .expect("spawn sleep");
+    assert!(
+        run.status.is_none(),
+        "a run past its cap has no exit status"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "the cap must kill the child, not wait for it"
+    );
+
+    let finished = run_tlc_with_cap(
+        std::process::Command::new("sh").args(["-c", "echo done; exit 11"]),
+        std::time::Duration::from_secs(30),
+    )
+    .expect("spawn sh");
+    assert_eq!(finished.status.and_then(|status| status.code()), Some(11));
+    assert_eq!(String::from_utf8_lossy(&finished.stdout).trim(), "done");
+
+    let incomplete = TlcRunError::Incomplete {
+        slug: "meerkat_mob_seam".into(),
+        config: "ci.cfg".into(),
+        cap_secs: 900,
+    };
+    assert!(incomplete.to_string().contains("TLC INCOMPLETE"));
+    assert!(incomplete.to_string().contains("not a pass"));
+}
+
 fn materialize_missing_coverage_anchors(mismatches: &[String]) -> anyhow::Result<()> {
     for mismatch in mismatches {
         let Some((_, rest)) = mismatch.split_once("coverage anchor ") else {

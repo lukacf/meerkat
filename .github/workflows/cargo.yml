@@ -523,10 +523,13 @@ jobs:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Integration-fast tests (singleton crate group)
-        run: >-
-          ./scripts/repo-cargo nextest run ${{ matrix.scope }} --tests
-          --profile fast --show-progress none --status-level none
-          --final-status-level fail --partition hash:1/1
+        run: |
+          # meerkat-mcp's form-elicitation tests spawn this exact fixture.
+          MEERKAT_MCP_TEST_SERVER="$(scripts/mcp-test-server-fixture)"
+          export MEERKAT_MCP_TEST_SERVER
+          ./scripts/repo-cargo nextest run ${{ matrix.scope }} --tests \
+            --profile fast --show-progress none --status-level none \
+            --final-status-level fail --partition hash:1/1
 
   e2e-fast:
     name: Deterministic e2e lane

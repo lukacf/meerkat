@@ -126,6 +126,17 @@ them.
 
 ### Fixed
 
+- The Cargo test lanes provide the MCP form-elicitation fixture again. Since
+  #1338, `meerkat-mcp`'s `form_elicitation` tests (which require
+  `MEERKAT_MCP_TEST_SERVER` to name the exact `mcp-test-server` binary and
+  never search for one) failed in every local pre-push gate, `make test`,
+  `make test-int` (also nightly `workspace-int`), `make test-all`,
+  `scripts/cargo-agent-gate` and the `cargo.yml` integration groups; only
+  Bazel set the variable, from runfiles. `scripts/mcp-test-server-fixture`
+  builds the fixture with the caller's cargo (`--locked`, same target
+  directory and profile), reads the executable path from cargo's artifact
+  message and prints it; those lanes export it before running nextest. An
+  explicitly set variable is kept as is.
 - Mob shutdown no longer fails intermittently with `failed to materialize
   committed HeadCanonical metadata ... metadata read authority is no longer
   current`. The shutdown visibility observation reads session metadata

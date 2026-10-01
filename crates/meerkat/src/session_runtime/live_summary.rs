@@ -293,6 +293,94 @@ pub(crate) struct LiveContextSummaryBoundary {
     policy: LiveContextSummaryPolicy,
 }
 
+/// What the recent-turns read needs from a [`LiveContextSummaryBoundary`],
+/// owned so the read can run beside the summary generation that consumes the
+/// boundary.
+struct RecentTailSource {
+    session_id: SessionId,
+    canonical_message_cursor: u64,
+    rewrite_generation: u64,
+    llm_identity: SessionLlmIdentity,
+    source_reader: Arc<dyn LiveSummarySource>,
+}
+
+impl RecentTailSource {
+    async fn rows(&self, max_turns: usize) -> Result<Vec<Message>, LiveContextSummaryError> {
+        /// Rows read back from the admitted cursor: enough for the recent
+        /// turns window with tool rows inside its turns.
+        const RECENT_TAIL_ROWS: u64 = 64;
+        let from = self
+            .canonical_message_cursor
+            .saturating_sub(RECENT_TAIL_ROWS);
+        let tail = match self
+            .source_reader
+            .read_committed_tail(&self.session_id, from)
+            .await
+        {
+            Ok(tail) => tail,
+            Err(LiveContextSummaryError::Unsupported) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        if tail.identity != self.llm_identity
+            || tail.rewrite_generation != self.rewrite_generation
+            || tail.message_count < self.canonical_message_cursor
+        {
+            return Err(LiveContextSummaryError::StaleSnapshot);
+        }
+        let admitted = usize::try_from(self.canonical_message_cursor - from)
+            .map_err(|_| LiveContextSummaryError::StaleSnapshot)?;
+        let rows = tail
+            .rows
+            .get(..admitted)
+            .ok_or(LiveContextSummaryError::StaleSnapshot)?;
+        // A tail that starts after the transcript's first row can start
+        // mid-turn: an assistant reply or tool rows whose question lies
+        // before the read. Start at the first utterance so no reply is
+        // seeded without its question.
+        let rows = if from > 0 {
+            let first_utterance = rows
+                .iter()
+                .position(|message| matches!(message, Message::User(_)))
+                .unwrap_or(rows.len());
+            &rows[first_utterance..]
+        } else {
+            rows
+        };
+        Ok(last_conversation_turns(rows, max_turns))
+    }
+}
+
+/// A recent-turns read running beside the summary wait (see
+/// [`LiveContextSummaryBoundary::spawn_recent_conversation_rows`]). Dropping
+/// it aborts the read.
+pub(crate) struct LiveRecentTurnsRead {
+    task: tokio::task::JoinHandle<Result<Vec<Message>, LiveContextSummaryError>>,
+}
+
+impl LiveRecentTurnsRead {
+    /// The recent turns, or none when they cannot be read: the open then
+    /// carries only the pending notice, as before recent turns were seeded.
+    pub(crate) async fn rows(mut self) -> Vec<Message> {
+        match (&mut self.task).await {
+            Ok(Ok(rows)) => rows,
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "recent turns for an unseeded open are unavailable");
+                Vec::new()
+            }
+            Err(error) => {
+                tracing::debug!(%error, "recent turns read for an unseeded open did not finish");
+                Vec::new()
+            }
+        }
+    }
+}
+
+impl Drop for LiveRecentTurnsRead {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 impl std::fmt::Debug for LiveContextSummaryBoundary {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("LiveContextSummaryBoundary([REDACTED])")
@@ -302,6 +390,43 @@ impl std::fmt::Debug for LiveContextSummaryBoundary {
 impl LiveContextSummaryBoundary {
     pub(crate) fn canonical_message_cursor(&self) -> u64 {
         self.canonical_message_cursor
+    }
+
+    /// [`Self::spawn_recent_conversation_rows`] awaited in place, with its
+    /// typed failure.
+    #[cfg(test)]
+    pub(crate) async fn recent_conversation_rows(
+        &self,
+        max_turns: usize,
+    ) -> Result<Vec<Message>, LiveContextSummaryError> {
+        self.recent_tail_source().rows(max_turns).await
+    }
+
+    /// Start reading the last `max_turns` conversation turns of exactly the
+    /// admitted prefix (the rows a late summary will cover), for a channel
+    /// that opens before that summary is ready: they can ride the provider's
+    /// startup input verbatim. Reads only a bounded tail ending at the
+    /// admitted cursor (the open path never materializes the committed body),
+    /// and only while the transcript is unchanged since admission (same
+    /// identity and rewrite generation). A source without a committed-tail
+    /// read yields nothing. The read runs in the background while the open
+    /// waits for the summary, so an open that ends Late does not pay it after
+    /// the bounded wait and one that ends Seeded drops it unawaited.
+    pub(crate) fn spawn_recent_conversation_rows(&self, max_turns: usize) -> LiveRecentTurnsRead {
+        let source = self.recent_tail_source();
+        LiveRecentTurnsRead {
+            task: tokio::spawn(async move { source.rows(max_turns).await }),
+        }
+    }
+
+    fn recent_tail_source(&self) -> RecentTailSource {
+        RecentTailSource {
+            session_id: self.session_id.clone(),
+            canonical_message_cursor: self.canonical_message_cursor,
+            rewrite_generation: self.rewrite_generation,
+            llm_identity: self.llm_identity.clone(),
+            source_reader: Arc::clone(&self.source_reader),
+        }
     }
 
     /// Read the committed source and seal exactly the admitted prefix.
@@ -1195,6 +1320,27 @@ pub(crate) enum SeedResealSkip {
     SourceUnavailable,
 }
 
+/// The longest suffix of `rows` that is at most `max_turns` conversation
+/// turns (see [`conversation_turns`]), conversation rows only: system rows,
+/// notices and tool rows are not dialogue a voice model can be seeded with.
+pub(crate) fn last_conversation_turns(rows: &[Message], max_turns: usize) -> Vec<Message> {
+    let dialogue: Vec<Message> = rows
+        .iter()
+        .filter(|message| {
+            !matches!(
+                message,
+                Message::System(_) | Message::SystemNotice(_) | Message::ToolResults { .. }
+            )
+        })
+        .cloned()
+        .collect();
+    let mut start = dialogue.len();
+    while start > 0 && conversation_turns(&dialogue[start - 1..]) <= max_turns {
+        start -= 1;
+    }
+    dialogue[start..].to_vec()
+}
+
 /// Conversation turns in `rows`, the unit of the recent-turns window: a turn
 /// is a user utterance plus the assistant reply to it, with tool rows riding
 /// inside the turn. Consecutive user rows (an utterance transcribed as
@@ -1845,6 +1991,116 @@ mod tests {
             source_reader: Arc::new(Source(current, identity)),
             policy: policy.clone(),
         }
+    }
+
+    /// A Late open's recent turns are the newest turns of exactly the
+    /// admitted prefix, read from a bounded tail: a row committed after
+    /// admission is not among them, and a rewritten transcript is stale.
+    #[tokio::test]
+    async fn recent_conversation_rows_are_the_newest_admitted_turns() {
+        let (mut admitted, config) = source("first question");
+        admitted.push(assistant("first answer"));
+        admitted.push(Message::User(meerkat_core::types::UserMessage::text(
+            "second question",
+        )));
+        admitted.push(assistant("second answer"));
+        admitted.push(Message::ToolResults {
+            results: Vec::new(),
+            created_at: meerkat_core::types::message_timestamp_now(),
+        });
+        admitted.push(Message::User(meerkat_core::types::UserMessage::text(
+            "typed while the call was closed: budget code kestrel",
+        )));
+        let identity = config.llm_identity.clone();
+        let policy =
+            LiveContextSummaryPolicy::new(producer("unused"), 4096, 100, Duration::from_secs(1))
+                .unwrap();
+        let mut current = admitted.clone();
+        current.push(Message::User(meerkat_core::types::UserMessage::text(
+            "committed after admission",
+        )));
+        let boundary = boundary_for(&policy, &admitted, identity.clone(), current);
+        let recent = boundary.recent_conversation_rows(2).await.unwrap();
+        assert_eq!(conversation_turns(&recent), 2);
+        let texts: Vec<String> = recent
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => Some(user.text_content()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "second question".to_string(),
+                "typed while the call was closed: budget code kestrel".to_string()
+            ]
+        );
+        assert!(
+            !recent
+                .iter()
+                .any(|message| matches!(message, Message::System(_))),
+            "system rows never ride the voice startup input"
+        );
+        assert!(
+            !recent
+                .iter()
+                .any(|message| matches!(message, Message::ToolResults { .. })),
+            "a tool-result row inside the recent turns is not seeded"
+        );
+
+        // A transcript whose identity changed since admission is stale.
+        let mut other = identity.clone();
+        other.model = "gpt-5.5-mini".into();
+        let boundary = LiveContextSummaryBoundary {
+            session_id: admitted.id().clone(),
+            canonical_message_cursor: admitted.messages().len() as u64,
+            transcript_revision: admitted.transcript_revision().unwrap(),
+            rewrite_generation: admitted.transcript_rewrite_generation().unwrap(),
+            llm_identity: identity,
+            source_reader: Arc::new(Source(admitted.clone(), other)),
+            policy,
+        };
+        assert!(matches!(
+            boundary.recent_conversation_rows(2).await,
+            Err(LiveContextSummaryError::StaleSnapshot)
+        ));
+    }
+
+    /// The bounded tail read can start mid-turn: when it begins on an
+    /// assistant reply whose question lies before the read, the seed starts at
+    /// the next utterance instead of carrying the orphan reply.
+    #[tokio::test]
+    async fn recent_conversation_rows_never_start_with_a_reply_cut_from_its_question() {
+        let (mut admitted, config) = source("question 0");
+        admitted.push(assistant("answer 0"));
+        for turn in 1..=40 {
+            admitted.push(Message::User(meerkat_core::types::UserMessage::text(
+                format!("question {turn}"),
+            )));
+            admitted.push(assistant(&format!("answer {turn}")));
+        }
+        admitted.push(Message::User(meerkat_core::types::UserMessage::text(
+            "typed: budget code kestrel",
+        )));
+        // 84 rows: the 64-row tail starts at row 20, the reply "answer 9".
+        assert_eq!(admitted.messages().len(), 84);
+        assert!(matches!(
+            &admitted.messages()[20],
+            Message::BlockAssistant(_)
+        ));
+        let identity = config.llm_identity.clone();
+        let policy =
+            LiveContextSummaryPolicy::new(producer("unused"), 4096, 100, Duration::from_secs(1))
+                .unwrap();
+        let boundary = boundary_for(&policy, &admitted, identity, admitted.clone());
+        let recent = boundary.recent_conversation_rows(100).await.unwrap();
+        match recent.first() {
+            Some(Message::User(user)) => assert_eq!(user.text_content(), "question 10"),
+            other => panic!("the seed must start at an utterance, got {other:?}"),
+        }
+        // Turns "question 10" through "question 40", then the typed row.
+        assert_eq!(conversation_turns(&recent), 32);
     }
 
     #[tokio::test]
@@ -2613,6 +2869,50 @@ mod tests {
                 .unwrap();
         assert!(replacement.retention().get(summary.session_id()).is_none());
         assert_eq!(replacement.retention().len(), 0);
+    }
+
+    #[test]
+    fn last_conversation_turns_keeps_the_newest_turns_and_only_dialogue() {
+        let user = |text: &str| Message::User(meerkat_core::types::UserMessage::text(text));
+        let rows = vec![
+            user("one"),
+            assistant("reply one"),
+            user("two"),
+            assistant("reply two"),
+            Message::SystemNotice(meerkat_core::types::SystemNoticeMessage::new(
+                meerkat_core::types::SystemNoticeKind::Generic,
+                "notice",
+            )),
+            user("three"),
+            assistant("reply three"),
+            Message::ToolResults {
+                results: Vec::new(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+            user("typed: budget code kestrel"),
+        ];
+        let last = last_conversation_turns(&rows, 2);
+        assert!(
+            !last
+                .iter()
+                .any(|message| matches!(message, Message::ToolResults { .. })),
+            "tool results never ride the voice startup input"
+        );
+        assert_eq!(conversation_turns(&last), 2);
+        assert_eq!(last.len(), 3, "turn three and the typed row");
+        assert!(matches!(last.last(), Some(Message::User(_))));
+        assert!(
+            !last
+                .iter()
+                .any(|message| matches!(message, Message::SystemNotice(_))),
+            "notices are not dialogue"
+        );
+        assert_eq!(
+            last_conversation_turns(&rows, 10).len(),
+            7,
+            "every dialogue row, without the notice and the tool results"
+        );
+        assert!(last_conversation_turns(&[], 4).is_empty());
     }
 
     #[test]

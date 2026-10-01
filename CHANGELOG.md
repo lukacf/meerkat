@@ -139,6 +139,16 @@ them.
 
 ### Fixed
 
+- A GPT Live reopen whose context summary is not ready yet (a Late open) now
+  seeds the most recent conversation turns (up to the recent-turns window, when
+  they fit the startup limits) verbatim as startup input, instead of opening
+  with no history. A fact from the last turns, such as one typed while the
+  call was closed, is answered natively; before, the model sometimes
+  delegated the recall to the executor because the late summary carrying it
+  landed at the same moment it decided (6 of 151 Late reopens in S106, never
+  on a seeded reopen). The canonical projection stays unseeded and the late
+  summary still covers those rows, so no row enters the live outbox twice. The open
+  reads only a bounded committed tail, never the transcript body.
 - The Cargo test lanes provide the MCP form-elicitation fixture again. Since
   #1338, `meerkat-mcp`'s `form_elicitation` tests (which require
   `MEERKAT_MCP_TEST_SERVER` to name the exact `mcp-test-server` binary and

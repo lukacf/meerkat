@@ -180,9 +180,12 @@ TLC_WORKERS="${tlc_workers}" "${live_steer_audit}" "${LIVE_STEER_AUDIT_MAX_STEPS
 # well under a minute at its default bound).
 #
 # Scheduling: the two audits and `machine-verify` are independent TLC work.
-# With a total budget of at least three 4-worker shares (TLC_WORKERS, or the
+# With a total budget of at least four 4-worker shares (TLC_WORKERS, or the
 # core count), the audits run concurrently with `machine-verify`, which itself
-# runs its TLC jobs concurrently within the remaining workers. Each concurrent
+# runs its TLC jobs concurrently within the remaining workers. Below that,
+# `machine-verify` would keep a single 4-worker share and its longest sweep
+# would set the lane time (a 12-worker budget took 688 s that way, slower than
+# an 8-worker budget running everything in sequence), so it runs sequentially. Each concurrent
 # audit JVM gets 4 workers, GC threads capped to match, and a heap share
 # proportional to its workers; `machine-verify` gets the rest of both budgets,
 # so the totals are never exceeded. Outputs are captured and printed in the
@@ -203,10 +206,12 @@ if [[ -z "${total_heap_mb}" ]]; then
     total_heap_mb="$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 / 1024 / 2 ))"
   fi
 fi
-# Each concurrent TLC JVM needs a heap floor (the largest generated models do);
+# Each concurrent TLC JVM needs a heap floor (the audits extend the
+# meerkat_machine model, which SANY needs 4 GiB to process at full speed;
+# matches MIN_HEAP_MB_PER_PARALLEL_JOB in crates/xtask/src/machines.rs);
 # without three floors of heap budget, run sequentially.
-min_heap_mb_per_job=16384
-if (( tlc_workers < 3 * audit_workers )) \
+min_heap_mb_per_job=4096
+if (( tlc_workers < 4 * audit_workers )) \
   || (( total_heap_mb > 0 && total_heap_mb < 3 * min_heap_mb_per_job )); then
   echo "running bounded durable in-turn steer TLC audit"
   TLC_WORKERS="${tlc_workers}" "${durable_steer_audit}" "${DURABLE_STEER_AUDIT_MAX_STEPS:-16}"

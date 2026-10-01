@@ -379,14 +379,29 @@ them.
   count), and the lane script runs the two meerkat_machine audits alongside it
   when the budget allows. Workers are split so their sum never exceeds the
   total, concurrent JVMs get GC threads proportional to their workers and an
-  equal heap share (at least 16 GiB, the largest generated models need it;
-  TLC_HEAP_BUDGET_MB overrides half of RAM), outputs and failures are reported
+  equal heap share (at least 4 GiB; TLC_HEAP_BUDGET_MB overrides half of
+  RAM), outputs and failures are reported
   in the fixed lane order, a failing job does not cancel the others, and every
   job keeps its 900 s cap. A lone TLC JVM now gets the whole heap budget
   rather than the JVM default, which ran the meerkat_mob_seam witnesses out of
   memory on 32 GiB machines. TLC metadirs are unique per run. State counts are
   identical to the sequential lane; on a 192-core host the lane takes 267 s
   instead of 889 s, and 634 s with TLC_WORKERS=8.
+- Composition witnesses run TLC on the generated model pruned to the
+  definitions their config reaches (SPECIFICATION, invariants, properties,
+  constraints and `<-` substitutions, closed over identifier references;
+  THEOREMs dropped). SANY no longer processes the whole 30 MiB
+  meerkat_mob_seam model for a 15-17 state witness: those witnesses ran out
+  of memory below 16 GiB of heap and now pass in 2 GiB on a 4.8 MiB model,
+  with identical state counts and completion proofs. The concurrent-lane heap
+  floor drops from 16 GiB to 4 GiB per JVM, the need of the largest model TLC
+  still parses in full (meerkat_machine, also extended by the two lane
+  audits), so a 16 GiB machine runs the whole lane, two jobs at a time, in
+  600-650 s where the meerkat_mob_seam witnesses used to run out of memory. The
+  lane runs at most 8 TLC JVMs at once, so a large budget gives its long
+  sweeps more workers (192 cores: 213-246 s, from 267 s), and the lane script
+  runs the audits beside `machine-verify` only from 16 workers up (a
+  12-worker, 32 GiB machine: 525 s instead of 688 s).
 - Live structural mob event subscriptions no longer fall back to reading the
   event store when appends race. `InMemoryMobEventStore` released its write
   lock before broadcasting an append, so a preempted append was overtaken by

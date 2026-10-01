@@ -4304,6 +4304,172 @@ pub fn merge_tlc_coverage(target: &mut TlcCoverageSummary, other: Option<&TlcCov
     }
 }
 
+/// Prune a generated TLA+ module to the definitions reachable from the roots
+/// a TLC config names (SPECIFICATION, INIT/NEXT, invariants, properties,
+/// constraints, and `<-` operator substitutions), plus whatever an
+/// always-kept block names. Column-0 blocks are kept in order: the module
+/// header, declarations and unrecognised blocks always, a definition (and its
+/// `RECURSIVE` declaration) only if reachable, `THEOREM`s never (TLC does not
+/// check them, and they reference the full `Spec`). Reachability scans
+/// identifiers, so it over-approximates: an unused operator can be kept, a
+/// used one is never dropped, and TLC's semantics for the config are those of
+/// the full module.
+pub fn prune_tla_module_for_cfg(module: &str, cfg: &str) -> String {
+    // Identifiers start with a letter. In particular the `_` of a TLA+
+    // subscript (`[][Next]_vars`) is not part of the identifier `vars`.
+    fn is_ident_start(byte: u8) -> bool {
+        byte.is_ascii_alphabetic()
+    }
+    fn identifiers(text: &str) -> impl Iterator<Item = &str> {
+        let bytes = text.as_bytes();
+        let mut index = 0;
+        std::iter::from_fn(move || {
+            while index < bytes.len() {
+                if is_ident_start(bytes[index]) {
+                    let start = index;
+                    while index < bytes.len()
+                        && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+                    {
+                        index += 1;
+                    }
+                    return Some(&text[start..index]);
+                }
+                index += 1;
+            }
+            None
+        })
+    }
+    fn defined_name(header: &str) -> Option<&str> {
+        let name = identifiers(header).next()?;
+        if !header.starts_with(name) {
+            return None;
+        }
+        let rest = header[name.len()..].trim_start();
+        let rest = if let Some(params) = rest.strip_prefix('(') {
+            params.split_once(')')?.1.trim_start()
+        } else {
+            rest
+        };
+        rest.starts_with("==").then_some(name)
+    }
+
+    // Split into column-0 blocks; a line starting with anything other than an
+    // identifier or a module delimiter continues the previous block.
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    for line in module.lines() {
+        let starts = line
+            .as_bytes()
+            .first()
+            .is_some_and(|&byte| is_ident_start(byte))
+            || line.starts_with("----")
+            || line.starts_with("====");
+        match blocks.last_mut() {
+            Some(block) if !starts => block.push(line),
+            _ => blocks.push(vec![line]),
+        }
+    }
+
+    enum Block<'a> {
+        Keep,
+        Drop,
+        Recursive(&'a str),
+        Definition(&'a str),
+    }
+    let kinds = blocks
+        .iter()
+        .map(|block| {
+            let header = block[0];
+            if ["----", "====", "EXTENDS", "CONSTANT", "VARIABLE"]
+                .iter()
+                .any(|prefix| header.starts_with(prefix))
+            {
+                Block::Keep
+            } else if header.starts_with("THEOREM") {
+                Block::Drop
+            } else if let Some(rest) = header.strip_prefix("RECURSIVE") {
+                identifiers(rest)
+                    .next()
+                    .map_or(Block::Keep, Block::Recursive)
+            } else {
+                defined_name(header).map_or(Block::Keep, Block::Definition)
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut definitions: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (index, kind) in kinds.iter().enumerate() {
+        if let Block::Definition(name) = kind {
+            definitions.entry(name).or_default().push(index);
+        }
+    }
+
+    let mut roots = Vec::new();
+    let mut section = "";
+    for raw in cfg.lines() {
+        let line = raw.split("\\*").next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut words = line.split_whitespace();
+        let first = words.next().unwrap_or("");
+        let rest: Vec<&str> = if first.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+            section = first;
+            words.collect()
+        } else {
+            line.split_whitespace().collect()
+        };
+        if section.starts_with("CONSTANT") {
+            if let Some((_, operator)) = line.split_once("<-") {
+                roots.push(operator.trim());
+            }
+            continue;
+        }
+        roots.extend(rest);
+    }
+    // Blocks that are always kept (declarations and anything unrecognised,
+    // such as an ASSUME) must still resolve, so what they name is a root too.
+    for (block, kind) in blocks.iter().zip(&kinds) {
+        if matches!(kind, Block::Keep) {
+            roots.extend(block.iter().flat_map(|line| identifiers(line)));
+        }
+    }
+
+    let mut keep = BTreeSet::new();
+    let mut stack = roots
+        .into_iter()
+        .filter(|root| definitions.contains_key(root))
+        .collect::<Vec<_>>();
+    while let Some(name) = stack.pop() {
+        if !keep.insert(name) {
+            continue;
+        }
+        for &index in &definitions[name] {
+            for line in &blocks[index] {
+                for ident in identifiers(line) {
+                    if definitions.contains_key(ident) && !keep.contains(ident) {
+                        stack.push(ident);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut pruned = String::new();
+    for (block, kind) in blocks.iter().zip(&kinds) {
+        let retained = match kind {
+            Block::Keep => true,
+            Block::Drop => false,
+            Block::Recursive(name) | Block::Definition(name) => keep.contains(name),
+        };
+        if retained {
+            for line in block {
+                pruned.push_str(line);
+                pruned.push('\n');
+            }
+        }
+    }
+    pruned
+}
+
 /// Output and outcome of one TLC child, captured so concurrent runs can be
 /// reported in a fixed order.
 struct TlcCapture {
@@ -4350,6 +4516,30 @@ fn run_tlc_capture_inner(
     let metadir = verification_metadir(slug, profile)?;
     fs::create_dir_all(&metadir)
         .with_context(|| format!("create TLC metadir {}", metadir.display()))?;
+
+    // A witness config reaches only a slice of the generated model; the
+    // largest composition models (tens of MiB of TLA+) need far more heap for
+    // SANY to process in full than the witness ever explores. Run TLC on the
+    // module pruned to the definitions the config's roots reach (semantics
+    // unchanged: TLC evaluates only reachable operators).
+    let mut pruned_model_text = None;
+    let model = if config_name.starts_with("witness-") {
+        let full = fs::read_to_string(&model)
+            .with_context(|| format!("read TLC model {}", model.display()))?;
+        let cfg = fs::read_to_string(&config)
+            .with_context(|| format!("read TLC config {}", config.display()))?;
+        let pruned = prune_tla_module_for_cfg(&full, &cfg);
+        let pruned_dir = metadir.join("pruned-model");
+        fs::create_dir_all(&pruned_dir)
+            .with_context(|| format!("create {}", pruned_dir.display()))?;
+        let pruned_path = pruned_dir.join("model.tla");
+        fs::write(&pruned_path, &pruned)
+            .with_context(|| format!("write {}", pruned_path.display()))?;
+        pruned_model_text = Some(pruned);
+        pruned_path
+    } else {
+        model
+    };
 
     let mut cmd = Command::new("tlc");
     cmd.arg("-workers")
@@ -4408,8 +4598,11 @@ fn run_tlc_capture_inner(
     }
 
     let coverage = if matches!(profile, VerifyProfile::Deep) {
-        let model_text = fs::read_to_string(&model)
-            .with_context(|| format!("read TLC model {}", model.display()))?;
+        let model_text = match pruned_model_text {
+            Some(text) => text,
+            None => fs::read_to_string(&model)
+                .with_context(|| format!("read TLC model {}", model.display()))?,
+        };
         Some(parse_tlc_coverage_with_model(&combined, &model_text))
     } else {
         None
@@ -4468,17 +4661,19 @@ impl TlcRunBudget {
     /// concurrent workers never exceeds it: each job keeps at least
     /// `MIN_WORKERS_PER_PARALLEL_JOB` workers, so a small budget degrades to
     /// fewer concurrent jobs rather than starved ones (a 4-worker budget runs
-    /// sequentially, exactly as before). Concurrent JVMs also get GC threads
+    /// sequentially, exactly as before), and at most `MAX_CONCURRENT_TLC_JOBS`
+    /// run at once, so a large budget gives each job more workers. Concurrent JVMs also get GC threads
     /// proportional to their workers and an equal share of the heap budget.
     pub fn split_for_jobs(self, jobs: usize) -> (usize, Self) {
         self.split_for_jobs_with_heap(jobs, tlc_heap_budget_mb())
     }
 
     fn split_for_jobs_with_heap(self, jobs: usize, heap_budget_mb: Option<u64>) -> (usize, Self) {
-        let mut concurrency = (self.workers / MIN_WORKERS_PER_PARALLEL_JOB).clamp(1, jobs.max(1));
+        let mut concurrency = (self.workers / MIN_WORKERS_PER_PARALLEL_JOB)
+            .clamp(1, jobs.clamp(1, MAX_CONCURRENT_TLC_JOBS));
         // Every concurrent JVM must get at least MIN_HEAP_MB_PER_PARALLEL_JOB
-        // (the largest generated models need it), so a small heap budget
-        // runs fewer jobs at once rather than starving them.
+        // (the largest model TLC parses in full needs it), so a small heap
+        // budget runs fewer jobs at once rather than starving them.
         if let Some(total) = heap_budget_mb {
             let by_heap =
                 usize::try_from(total / MIN_HEAP_MB_PER_PARALLEL_JOB).unwrap_or(usize::MAX);
@@ -4486,8 +4681,8 @@ impl TlcRunBudget {
         }
         if concurrency == 1 {
             // A lone JVM keeps the default GC threads but still gets the whole
-            // heap budget: the JVM default (a quarter of RAM) is too small for
-            // the largest generated models on a 32 GB machine.
+            // heap budget rather than the JVM default (a quarter of RAM), so
+            // the heap follows TLC_HEAP_BUDGET_MB on every machine.
             return (
                 1,
                 Self {
@@ -4513,8 +4708,21 @@ impl TlcRunBudget {
 /// Smallest worker share a concurrently scheduled TLC job receives.
 pub const MIN_WORKERS_PER_PARALLEL_JOB: usize = 4;
 
-/// Smallest heap (MiB) a concurrently scheduled TLC JVM receives.
-pub const MIN_HEAP_MB_PER_PARALLEL_JOB: u64 = 16 * 1024;
+/// Most TLC JVMs the lane runs at once. The lane's time is set by its few
+/// long sweeps, whose TLC time scales with their workers, while the dozens of
+/// other jobs take seconds; spreading a large budget over more JVMs starves
+/// the long sweeps. On a 192-core host the lane took 421 s at 42 concurrent
+/// x 4 workers, 239 s at 14 x 13 and 210 s at 8 x 23.
+pub const MAX_CONCURRENT_TLC_JOBS: usize = 8;
+
+/// Smallest heap (MiB) a concurrently scheduled TLC JVM receives. The
+/// largest model TLC still parses in full is meerkat_machine (about 9 MiB of
+/// TLA+, also extended by the two lane audits): at 4 GiB SANY processes it
+/// and the jobs run at full speed, at 3 GiB the live-context audit thrashes
+/// in GC (483 s instead of 69 s) and at 2 GiB both audits run out of memory.
+/// Witnesses run on pruned models (see `prune_tla_module_for_cfg`) and fit
+/// in 2 GiB.
+pub const MIN_HEAP_MB_PER_PARALLEL_JOB: u64 = 4 * 1024;
 
 /// Total heap (MiB) shared by concurrently running TLC JVMs: TLC_HEAP_BUDGET_MB,
 /// or half of physical memory. `None` when neither is known, in which case

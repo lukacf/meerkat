@@ -8170,6 +8170,14 @@ mod tests {
         .expect("valid supervisor spec")
     }
 
+    /// A mob supervisor endpoint name that no other test claims. The
+    /// in-process comms registry is process-global and admits one holder per
+    /// name, so tests that share a process (libtest threads) must not each
+    /// register a fixed supervisor name.
+    fn unique_supervisor_name() -> String {
+        format!("mob-{}/__mob_supervisor__", uuid::Uuid::new_v4().simple())
+    }
+
     fn trusted_peer_from_runtime(
         name: &str,
         runtime: &meerkat_comms::CommsRuntime,
@@ -13022,9 +13030,9 @@ mod tests {
             meerkat_comms::CommsRuntime::inproc_only("bind-rebind-receiver")
                 .expect("receiver runtime"),
         );
+        let supervisor_name = unique_supervisor_name();
         let supervisor_runtime = Arc::new(
-            meerkat_comms::CommsRuntime::inproc_only("mob/__mob_supervisor__")
-                .expect("supervisor runtime"),
+            meerkat_comms::CommsRuntime::inproc_only(&supervisor_name).expect("supervisor runtime"),
         );
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
@@ -13032,8 +13040,7 @@ mod tests {
             .register_session(session_id.clone())
             .await
             .expect("register session");
-        let current_supervisor =
-            trusted_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
+        let current_supervisor = trusted_peer_from_runtime(&supervisor_name, &supervisor_runtime);
         adapter
             .stage_supervisor_bind(
                 &session_id,
@@ -14748,15 +14755,16 @@ mod tests {
     #[tokio::test]
     async fn wire_member_rejects_invalid_peer_spec_before_trusting_it() {
         let runtime = Arc::new(meerkat_comms::CommsRuntime::inproc_only("receiver-wire").unwrap());
+        let supervisor_name = unique_supervisor_name();
         let supervisor_runtime =
-            Arc::new(meerkat_comms::CommsRuntime::inproc_only("mob/__mob_supervisor__").unwrap());
+            Arc::new(meerkat_comms::CommsRuntime::inproc_only(&supervisor_name).unwrap());
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter
             .register_session(session_id.clone())
             .await
             .expect("register session");
-        let supervisor = trusted_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
+        let supervisor = trusted_peer_from_runtime(&supervisor_name, &supervisor_runtime);
         add_test_projection_trust(runtime.as_ref(), supervisor.clone(), "trust supervisor").await;
         adapter
             .stage_supervisor_bind(

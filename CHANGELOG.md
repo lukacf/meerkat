@@ -67,6 +67,8 @@ them.
   `ProviderInputLatency`; exhaustive matches must handle them.
 - `meerkat_core::mcp_config::McpHttpConfig` and the HTTP variant of
   `meerkat_contracts::wire::PortableMcpDecl` gain `oauth_account: Option<String>`.
+- `meerkat_core::mcp_config::McpHttpConfig` and
+  `meerkat_contracts::wire::PortableMcpDecl::Http` gain `oauth_account: Option<String>`.
   Rust struct/variant literals must supply the field; serialized configurations
   may omit it. Existing constructors select `None`.
 - `meerkat_core::auth::RefreshError` gains `CredentialIdentityMismatch`;

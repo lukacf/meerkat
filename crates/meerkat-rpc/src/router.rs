@@ -1657,8 +1657,12 @@ impl MethodRouter {
             .await
             .map_err(|error| RpcResponse::from_error(None, error))?;
         if archived && !self.runtime.pending_session_exists(session_id).await {
+            // Join the archived registration's teardown until terminal: the
+            // plain unregister's caller grace answered a saga still completing
+            // with `UnregisterInProgress`, reported here as an internal error
+            // instead of the session's absence.
             self.runtime_adapter
-                .unregister_session(session_id)
+                .unregister_current_session_registration_until_terminal(session_id)
                 .await
                 .map_err(|unregister_error| {
                     RpcResponse::error(
@@ -3797,8 +3801,15 @@ impl MethodRouter {
                     {
                         return mob_destroy_cleanup_error_response(id, error);
                     }
-                    if let Err(error) =
-                        routed_arm(|| self.runtime_adapter.unregister_session(&session_id)).await
+                    // The archive committed; join the runtime teardown until
+                    // terminal rather than reporting a saga still completing
+                    // (`UnregisterInProgress` after the caller grace) as a
+                    // failed unregister.
+                    if let Err(error) = routed_arm(|| {
+                        self.runtime_adapter
+                            .unregister_current_session_registration_until_terminal(&session_id)
+                    })
+                    .await
                     {
                         return RpcResponse::error(
                             id,

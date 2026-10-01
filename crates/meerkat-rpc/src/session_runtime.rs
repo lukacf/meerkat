@@ -3578,9 +3578,14 @@ impl SessionRuntime {
                 });
             }
         }
+        // Join the new registration's teardown until terminal. The plain
+        // unregister's caller grace answers a saga still completing with
+        // `UnregisterInProgress`, which turned an accepted admission into an
+        // error.
         adapter
-            .unregister_session(session_id)
+            .unregister_current_session_registration_until_terminal(session_id)
             .await
+            .map(|_| ())
             .map_err(runtime_driver_error_to_rpc)
     }
 

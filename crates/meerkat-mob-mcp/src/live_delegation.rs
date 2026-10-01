@@ -756,6 +756,17 @@ pub struct ExperimentalLiveBridgeExecutionCompletion {
     output: Option<String>,
 }
 
+/// A retire answered with a typed in-progress (the budget elapsed while the
+/// process-owned saga keeps running) or not-yet-admitted state: the
+/// retirement is still settling, not broken.
+fn retirement_still_settling(error: &meerkat_mob::MobError) -> bool {
+    error.is_retirement_in_progress()
+        || matches!(
+            error,
+            meerkat_mob::MobError::MemberRetirementAdmissionPending { .. }
+        )
+}
+
 /// Read-only restart reconciliation outcome for one durable Responses bridge
 /// operation. This carries no provider send or work admission authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1674,6 +1685,11 @@ impl ExperimentalLiveDelegationCoordinator {
                             | DurableBoundedMemberState::Retiring { .. }
                     ) && let Err(error) = mob_handle.retire(child_identity.clone()).await
                     {
+                        // A retirement still running past its budget (or not
+                        // yet admitted) is not broken: re-observe next pass.
+                        if retirement_still_settling(&error) {
+                            return ExperimentalResponsesRestartDisposition::InFlight;
+                        }
                         return ExperimentalResponsesRestartDisposition::Broken {
                             reason: format!(
                                 "durable executor outcome projected with retirement debt: {error}"
@@ -1810,6 +1826,11 @@ impl ExperimentalLiveDelegationCoordinator {
                     if snapshot.worker_ownership()
                         == meerkat_runtime::live_execution::LiveDelegationWorkerOwnership::OwnedMember
                         && let Err(error) = mob_handle.retire(child_identity.clone()).await {
+                        // A retirement still running past its budget (or not
+                        // yet admitted) is not broken: re-observe next pass.
+                        if retirement_still_settling(&error) {
+                            return ExperimentalClientContextRestartDisposition::InFlight;
+                        }
                         return ExperimentalClientContextRestartDisposition::Broken {
                             reason: format!(
                                 "durable ClientContext executor retirement remains pending: {error}"
@@ -5704,6 +5725,29 @@ mod tests {
         not(target_arch = "wasm32")
     ))]
     mod parallel;
+
+    /// Restart reconciliation reports a retirement still running past its
+    /// budget (or not yet admitted) as in flight, never as broken.
+    #[test]
+    fn retirement_still_settling_covers_in_progress_and_pending_admission() {
+        let in_progress = meerkat_mob::MobError::MemberRetirementInProgress {
+            member_id: AgentIdentity::from("worker"),
+            stage: "actor_retirement_saga".to_string(),
+        };
+        assert!(retirement_still_settling(&in_progress));
+        assert!(retirement_still_settling(
+            &meerkat_mob::MobError::SharedRetirementFailure(std::sync::Arc::new(in_progress))
+        ));
+        assert!(retirement_still_settling(
+            &meerkat_mob::MobError::MemberRetirementAdmissionPending {
+                member_id: AgentIdentity::from("worker"),
+                stage: "actor_command_admission".to_string(),
+            }
+        ));
+        assert!(!retirement_still_settling(
+            &meerkat_mob::MobError::Internal("boom".to_string())
+        ));
+    }
 
     #[test]
     fn delegation_request_text_keeps_assistant_speech_as_a_labelled_section() {

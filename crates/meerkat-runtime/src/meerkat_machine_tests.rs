@@ -17042,6 +17042,86 @@ mod stop_teardown_coordinator_class {
         assert!(!machine.contains_session(&session_id).await);
     }
 
+    /// The session-id convenience the surfaces use for post-archive cleanup
+    /// and compensation joins the current registration's owned saga past the
+    /// caller grace that makes the plain unregister answer
+    /// `UnregisterInProgress`, and is an idempotent `Ok(false)` once nothing
+    /// is registered.
+    #[tokio::test]
+    async fn current_registration_unregister_until_terminal_outlasts_caller_grace() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let cleanup_started = Arc::new(Notify::new());
+        let release_cleanup = Arc::new(Notify::new());
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedCleanupExecutor {
+                    machine: Arc::clone(&machine),
+                    session_id: session_id.clone(),
+                    cleanup_started: Arc::clone(&cleanup_started),
+                    release_cleanup: Arc::clone(&release_cleanup),
+                    unregister_during_cleanup: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    fail_cleanup_attempts: Arc::new(AtomicUsize::new(0)),
+                    cleanup_calls: Arc::new(AtomicUsize::new(0)),
+                    loop_task_id: Arc::new(std::sync::Mutex::new(None)),
+                    cleanup_task_id: Arc::new(std::sync::Mutex::new(None)),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+
+        let bounded_caller = {
+            let machine = Arc::clone(&machine);
+            let session_id = session_id.clone();
+            tokio::spawn(async move { machine.unregister_session(&session_id).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), cleanup_started.notified())
+            .await
+            .expect("owned teardown must reach the deterministic cleanup gate");
+        let bounded_error = tokio::time::timeout(Duration::from_secs(3), bounded_caller)
+            .await
+            .expect("ordinary caller grace must remain bounded")
+            .expect("bounded unregister task should not panic")
+            .expect_err("blocked cleanup must surface typed in-progress truth");
+        assert!(matches!(
+            bounded_error,
+            RuntimeDriverError::UnregisterInProgress { .. }
+        ));
+
+        let joined = {
+            let machine = Arc::clone(&machine);
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                machine
+                    .unregister_current_session_registration_until_terminal(&session_id)
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !joined.is_finished(),
+            "the join must wait on the owned saga past the caller grace"
+        );
+        release_cleanup.notify_one();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), joined)
+                .await
+                .expect("the join must finish after cleanup release")
+                .expect("join task should not panic")
+                .expect("the current registration's teardown should succeed"),
+            "the current registration must be the one removed"
+        );
+        assert!(!machine.contains_session(&session_id).await);
+        assert!(
+            !machine
+                .unregister_current_session_registration_until_terminal(&session_id)
+                .await
+                .expect("an absent registration is not an error"),
+            "nothing is registered any more"
+        );
+    }
+
     #[tokio::test]
     async fn prepare_bindings_joins_retained_unregister_before_fresh_registration() {
         let machine = Arc::new(MeerkatMachine::ephemeral());

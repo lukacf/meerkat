@@ -142,9 +142,12 @@ async fn unregister_session_compensation(
     session_id: &SessionId,
     primary_error: &impl std::fmt::Display,
 ) -> Result<(), SessionError> {
+    // Join the compensation teardown until terminal; the plain unregister's
+    // caller grace would report a saga still completing as a failure.
     runtime_adapter
-        .unregister_session(session_id)
+        .unregister_current_session_registration_until_terminal(session_id)
         .await
+        .map(|_| ())
         .map_err(|cleanup_error| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
                 "{primary_error}; additionally failed to unregister runtime session {session_id} during staged-session compensation: {cleanup_error}"

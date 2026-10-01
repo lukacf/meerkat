@@ -1194,7 +1194,13 @@ impl MeerkatMachine {
             let machine = self.clone();
             let retry_session_id = session_id.clone();
             drop(cleanup_spawner.spawn(async move {
-                if let Err(error) = machine.try_unregister_session(&retry_session_id).await {
+                // Detached, so join the teardown until terminal: the plain
+                // unregister's caller grace would log a saga that is still
+                // completing as a failed retry.
+                if let Err(error) = machine
+                    .unregister_current_session_registration_until_terminal(&retry_session_id)
+                    .await
+                {
                     tracing::warn!(
                         session_id = %retry_session_id,
                         %error,

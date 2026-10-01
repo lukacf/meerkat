@@ -1280,8 +1280,12 @@ impl McpRuntimeIngressContext {
                 // session is already terminal; active or unreadable authority
                 // still requires an explicit resume and an exact witness.
                 if self.authoritative_session_archived(session_id).await? {
+                    // Join the teardown until terminal: the plain
+                    // unregister's caller grace answered a saga still
+                    // completing with `UnregisterInProgress`, which failed
+                    // this cleanup and left the logical identity behind.
                     self.runtime_adapter
-                        .try_unregister_session(session_id)
+                        .unregister_current_session_registration_until_terminal(session_id)
                         .await
                         .map_err(runtime_driver_error_to_session_error)?;
                     if self.runtime_adapter.contains_session(session_id).await {

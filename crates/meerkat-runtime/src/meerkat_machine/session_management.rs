@@ -6661,6 +6661,30 @@ impl MeerkatMachine {
         .require_completed()
     }
 
+    /// Unregister `session_id`'s current registration and join its teardown
+    /// until terminal: the exact current registration witness is captured and
+    /// joined through
+    /// [`Self::unregister_session_registration_until_terminal_if_current`].
+    /// `Ok(false)` when no registration is current, or when the captured one
+    /// was replaced before admission (a replacement is never torn down).
+    ///
+    /// Use this where the caller acts on the runtime being gone (post-archive
+    /// surface cleanup, compensation of a registration the caller created)
+    /// rather than [`Self::unregister_session`]. Its bounded caller grace
+    /// answers a still-running saga with typed `UnregisterInProgress`, which
+    /// such a caller would otherwise misreport as a failed cleanup. The saga
+    /// is coordinator-owned, so dropping this future never cancels teardown.
+    pub async fn unregister_current_session_registration_until_terminal(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, RuntimeDriverError> {
+        let Some(registration) = self.current_session_registration_witness(session_id).await else {
+            return Ok(false);
+        };
+        self.unregister_session_registration_until_terminal_if_current(&registration)
+            .await
+    }
+
     /// Atomically start or join unregister for `registration` and return a
     /// read-only observer when its exact coordinator remains in progress.
     /// This never waits for teardown and never retries by SessionId after the

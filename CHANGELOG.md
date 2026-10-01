@@ -191,6 +191,16 @@ them.
   `SessionError::is_runtime_teardown_in_progress` recognizes it.
   `meerkat_runtime::RuntimeDriverError::teardown_in_progress_session_error`
   converts `UnregisterInProgress` / `RuntimeStopInProgress` into it.
+- `meerkat_runtime::MeerkatMachine::unregister_current_session_registration_until_terminal`
+  captures the session's exact current registration witness and joins its
+  teardown until terminal through
+  `unregister_session_registration_until_terminal_if_current`. It returns
+  `Ok(false)` when nothing is registered. It is for callers that act on the
+  runtime being gone, where the plain `unregister_session`'s 2 s caller
+  grace answers a still-running saga with `UnregisterInProgress`.
+- `meerkat_mob::MobError::is_retirement_in_progress` classifies the typed
+  "retirement still in progress" answers (`RetirementInProgress`,
+  `MemberRetirementInProgress`, also inside `SharedRetirementFailure`).
 - `meerkat_mob::store::MobRunStore` gains
   `flow_authority_validation_boundary`, a `#[doc(hidden)]` method with a
   default body. Not a break: existing implementations compile unchanged. Its
@@ -284,6 +294,35 @@ them.
   ci.cfg/deep.cfg sweep; its witnesses still run with the completion proof,
   so the canonical TLC lane checks them. `meerkat_mob_seam` ci.cfg stays
   skipped (#1364).
+- Production callers no longer misreport a runtime teardown that is still
+  completing as a failure. A plain `unregister_session` returns typed
+  `UnregisterInProgress` once its caller grace elapses while the
+  coordinator-owned saga keeps running. These callers act on the runtime
+  being gone, and now join the exact current registration's teardown until
+  terminal:
+  - REST and RPC compensation of a runtime they created for a request.
+    Before, an accepted admission came back as an error and an API error's
+    class became Internal.
+  - REST archive cleanup (`cleanup_archived_session_runtime`, the surface
+    variant) and the shared `ArchiveRuntimeCleanup::run` used by RPC. Before,
+    the cleanup failed after a committed archive and skipped the MCP,
+    bridge-mob, event-stream and comms steps after it.
+  - RPC archive (`session archived but runtime unregister failed`) and the
+    archived-session lookup, which answered INTERNAL_ERROR instead of
+    SESSION_NOT_FOUND.
+  - The MCP server's archived witness-less registration cleanup, which left
+    the logical identity behind.
+  - Compensation in REST schedule creation, facade recovery and staged
+    promotion, which reported "additionally failed to unregister".
+  - The runtime's detached lifecycle-overlap unregister retry, which logged a
+    still-completing saga as a failed retry.
+
+  GPT Live restart reconciliation (`reconcile_responses_after_restart`,
+  ClientContext) now reports a worker retirement that is still running past
+  its budget, or not yet admitted, as `InFlight` instead of `Broken`. `Broken`
+  stopped reconciling the operation and skipped its bridge settlement.
+  Temporary-council cleanup records such a retirement as "still in progress"
+  instead of "failed" (the debt stays the retry anchor).
 - A GPT Live reopen whose context summary is not ready yet (a Late open) now
   seeds the most recent conversation turns (up to the recent-turns window, when
   they fit the startup limits) verbatim as startup input, instead of opening

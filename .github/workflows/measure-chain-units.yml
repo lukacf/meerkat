@@ -1,0 +1,97 @@
+name: Measure chain unit lanes (throwaway)
+
+# Throwaway measurement for the meerkat-mob chain deferral: does each
+# crate's PR unit lane fit the 16-minute budget when meerkat-mob itself is
+# unchanged (its library an sccache hit)? One job per crate; the PR that
+# adds this file is closed after one run and never merged.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/measure-chain-units.yml
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_HOME: /home/runner/.cargo
+  RUSTUP_TOOLCHAIN: 1.94.1
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  SCCACHE_ERROR_LOG: /home/runner/work/_temp/sccache.log
+  SCCACHE_LOG: info
+  SCCACHE_IDLE_TIMEOUT: "0"
+  RUST_LANE_ID: ci
+  SCCACHE_GCS_BUCKET_NAME: ${{ vars.MEERKAT_SCCACHE_GCS_BUCKET || 'meerkat-sccache-king-dnn-training-dev' }}
+
+jobs:
+  unit:
+    name: Measure unit (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { package: meerkat-rpc, entry: crates/meerkat-rpc/src/lib.rs }
+          - { package: meerkat-rest, entry: crates/meerkat-rest/src/lib.rs }
+          - { package: rkat, entry: crates/meerkat-cli/src/main.rs }
+          - { package: meerkat-mob-mcp, entry: crates/meerkat-mob-mcp/src/lib.rs }
+          - { package: meerkat-mcp-server, entry: crates/meerkat-mcp-server/src/lib.rs }
+    env:
+      RUSTC_WRAPPER: sccache
+      PACKAGE: ${{ matrix.package }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
+
+      - name: Change the package source (as a pull request touching it would)
+        run: printf '\n// ci measurement %s\n' "${GITHUB_RUN_ID}" >> "${{ matrix.entry }}"
+
+      - name: meerkat-mob features in this lane
+        run: ./scripts/repo-cargo tree -p "${PACKAGE}" -e features,normal,build,dev -i meerkat-mob --prefix none --depth 1 | head -40
+
+      - name: Build (lib and bin test targets)
+        run: |
+          start=$(date +%s)
+          ./scripts/repo-cargo nextest run -p "${PACKAGE}" --lib --bins --profile ci-pr --no-run
+          echo "MEASURE build_seconds=$(( $(date +%s) - start )) package=${PACKAGE}"
+          sccache --show-stats | grep -E 'Compile requests|Cache hits|Cache misses|Cache hits rate'
+
+      - name: Test
+        run: |
+          start=$(date +%s)
+          ./scripts/repo-cargo nextest run -p "${PACKAGE}" --lib --bins --profile ci-pr \
+            --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail || echo "MEASURE tests_failed=1"
+          echo "MEASURE test_seconds=$(( $(date +%s) - start )) package=${PACKAGE}"

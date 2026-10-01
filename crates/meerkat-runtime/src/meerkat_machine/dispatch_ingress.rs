@@ -522,8 +522,10 @@ impl MeerkatMachine {
                 drop(prepared);
                 return Ok(LiveOwnerContextDelivery::NotDelivered);
             }
-            Err(meerkat_core::lifecycle::CoreBoundaryStageError::Unavailable { .. })
-            | Err(meerkat_core::lifecycle::CoreBoundaryStageError::Stale { .. }) => {
+            Err(
+                meerkat_core::lifecycle::CoreBoundaryStageError::Unavailable { .. }
+                | meerkat_core::lifecycle::CoreBoundaryStageError::Stale { .. },
+            ) => {
                 return Ok(LiveOwnerContextDelivery::NotDelivered);
             }
             Err(meerkat_core::lifecycle::CoreBoundaryStageError::Fault { reason }) => {

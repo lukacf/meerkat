@@ -26,7 +26,8 @@ fi
 spec_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ci_cfg="${spec_dir}/ci.cfg"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/live-context-outbox-audit.XXXXXX")"
-trap 'rm -rf "${work_dir}"' EXIT
+# An interrupted or killed run ends its TLC child too (tlc_run_cap.sh).
+trap 'if declare -F tlc_run_cap_reap >/dev/null; then tlc_run_cap_reap; fi; rm -rf "${work_dir}"' EXIT
 audit_cfg="${work_dir}/audit.cfg"
 
 replace_exact_line() {

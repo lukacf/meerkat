@@ -54,6 +54,15 @@ them.
 
 ### Fixed
 
+- Retiring a mob member no longer waits on its turn-finalization boundary
+  until the retire deadline when an input was admitted but not yet opened as a
+  run. Retire's pre-boundary step read "no bound run" as nothing to cancel, so
+  the queued input could open a run mid-retire whose turn held the boundary,
+  failing retire with `RetirementInProgress`. With new admission already fenced
+  by the durable Retiring state and the ingress detach, the step now cancels
+  every queued input through its exact input cancellation (the input is
+  abandoned `Cancelled` and its waiter resolves typed) before it acquires the
+  boundary.
 - The `meerkat_schedule_create` and `meerkat_schedule_update` tool schemas
   advertise the existing `host_runnable` target (`target_kind`
   `"host_runnable"`, a required non-empty `runnable` name and optional opaque

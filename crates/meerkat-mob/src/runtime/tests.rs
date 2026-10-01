@@ -6973,6 +6973,22 @@ impl MobRuntimeMetadataStore for FaultInjectedRuntimeMetadataStore {
 // Helpers
 // -----------------------------------------------------------------------
 
+/// This test's mob id: `test-mob-<suffix>`, stable for every call on the
+/// current test's thread and distinct across tests. A mob's supervisor claims
+/// `{mob_id}/__mob_supervisor__` in the process-global in-process comms
+/// registry, and dropping a `MobHandle` does not release it (only `shutdown`
+/// or a crash-stop does; see `crash_stop_and_release_routes`). With one shared
+/// id, the first test in a threaded `cargo test` run to end without shutting
+/// its mob down kept the name, and every later test's mob creation failed with
+/// `ParticipantNameOccupied`.
+fn test_mob_id() -> MobId {
+    thread_local! {
+        static TEST_MOB_ID: MobId =
+            MobId::from(format!("test-mob-{}", uuid::Uuid::new_v4().simple()));
+    }
+    TEST_MOB_ID.with(Clone::clone)
+}
+
 fn sample_definition() -> MobDefinition {
     let mut profiles = BTreeMap::new();
     profiles.insert(
@@ -7034,7 +7050,7 @@ fn sample_definition() -> MobDefinition {
         })),
     );
 
-    let mut definition = MobDefinition::explicit("test-mob");
+    let mut definition = MobDefinition::explicit(test_mob_id());
     definition.orchestrator = Some(OrchestratorConfig {
         profile: ProfileName::from("lead"),
     });
@@ -11686,7 +11702,7 @@ async fn seed_test_body_frame_in_mob_machine(
 }
 
 fn test_comms_name(profile: &str, agent_identity: &str) -> String {
-    format!("test-mob/{profile}/{agent_identity}")
+    format!("{}/{profile}/{agent_identity}", test_mob_id())
 }
 
 fn test_comms_name_for(mob_id: &MobId, profile: &str, agent_identity: &str) -> String {
@@ -13174,7 +13190,7 @@ async fn archived_document_without_runtime_record_is_revivable() {
                 event_tx: None,
                 build: Some(meerkat_core::service::SessionBuildOptions {
                     resume_session: Some(*revivable),
-                    comms_name: Some("test-mob/worker/imported-archive".to_string()),
+                    comms_name: Some(format!("{}/worker/imported-archive", test_mob_id())),
                     keep_alive: true,
                     ..Default::default()
                 }),
@@ -13541,7 +13557,7 @@ async fn create_test_mob_with_overlay_probe_service_and_workgraph(
 async fn test_mob_create_returns_handle() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     assert_eq!(handle.status().await.unwrap(), MobState::Running);
-    assert_eq!(handle.mob_id().as_str(), "test-mob");
+    assert_eq!(handle.mob_id(), &test_mob_id());
 }
 
 #[tokio::test]
@@ -14526,7 +14542,7 @@ async fn test_ephemeral_session_service_exposes_live_session_to_mob_read_seam() 
 async fn test_mob_handle_is_clone() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let handle2 = handle.clone();
-    assert_eq!(handle2.mob_id().as_str(), "test-mob");
+    assert_eq!(handle2.mob_id(), &test_mob_id());
 }
 
 #[tokio::test]
@@ -25819,7 +25835,7 @@ async fn assert_child_built_as_source(
         child.fork_source,
         Some(meerkat_core::ForkBuildSource::new(
             meerkat_core::MobMemberBinding {
-                mob_id: "test-mob".to_string(),
+                mob_id: test_mob_id().to_string(),
                 role: "worker".to_string(),
                 member: source_identity.to_string(),
             },
@@ -26092,7 +26108,7 @@ async fn fork_child_never_inherits_the_source_member_naming_labels() {
     }
     assert_eq!(
         build.peer_meta_labels.get("mob_id").map(String::as_str),
-        Some("test-mob")
+        Some(test_mob_id().as_str())
     );
     assert_eq!(
         handle
@@ -26208,7 +26224,7 @@ async fn revived_fork_child_is_rebuilt_with_its_first_build_inputs() {
     let first = last_member_build(&service, &child_identity).await;
     let expected_source = meerkat_core::ForkBuildSource::new(
         meerkat_core::MobMemberBinding {
-            mob_id: "test-mob".to_string(),
+            mob_id: test_mob_id().to_string(),
             role: "worker".to_string(),
             member: source_identity.to_string(),
         },
@@ -26338,7 +26354,7 @@ async fn seat_fork_child_then_crash_with(
     let first = last_member_build(&service, &child_identity).await;
     let expected_source = meerkat_core::ForkBuildSource::new(
         meerkat_core::MobMemberBinding {
-            mob_id: "test-mob".to_string(),
+            mob_id: test_mob_id().to_string(),
             role: "worker".to_string(),
             member: source_identity.to_string(),
         },
@@ -27615,7 +27631,7 @@ async fn test_spawn_spec_tool_access_policy_reaches_session_metadata() {
     handle.spawn_spec(spec).await.expect("spawn gated member");
 
     let session_id = service
-        .session_id_for_comms_name("test-mob/worker/gated-worker")
+        .session_id_for_comms_name(&format!("{}/worker/gated-worker", test_mob_id()))
         .await
         .expect("gated member session must exist");
     let metadata = service
@@ -29551,7 +29567,7 @@ async fn test_for_resume_rebuilds_definition_and_roster() {
     .await
     .expect("resume");
 
-    assert_eq!(resumed.mob_id().as_str(), "test-mob");
+    assert_eq!(resumed.mob_id(), &test_mob_id());
     let entry_1 = resumed
         .get_member(&AgentIdentity::from("w-1"))
         .await
@@ -29976,7 +29992,7 @@ async fn test_resume_ignores_legacy_owner_projection_without_generated_authority
     storage
         .events
         .append(NewMobEvent {
-            mob_id: MobId::from("test-mob"),
+            mob_id: test_mob_id(),
             timestamp: None,
             kind: MobEventKind::MobCreated {
                 definition: Box::new(legacy_definition),
@@ -30092,7 +30108,7 @@ async fn test_resume_reconciles_orphaned_sessions() {
             max_tokens: None,
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
-                comms_name: Some("test-mob/worker/orphan".to_string()),
+                comms_name: Some(format!("{}/worker/orphan", test_mob_id())),
                 ..Default::default()
             }),
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
@@ -30573,7 +30589,7 @@ async fn test_resume_repoints_snapshotless_member_head_to_latest_persisted_sessi
             max_tokens: None,
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
-                comms_name: Some("test-mob/worker/rt:review:singleton:0".to_string()),
+                comms_name: Some(format!("{}/worker/rt:review:singleton:0", test_mob_id())),
                 mob_member_binding: None,
                 ..Default::default()
             }),
@@ -30830,7 +30846,7 @@ async fn test_snapshotless_recovery_never_publishes_foreign_attachment_endpoint(
         .expect("discard old live session");
     service.delete_persisted_session(&old_sid).await;
 
-    let recovered_comms_name = "test-mob/worker/rt:review:singleton:0";
+    let recovered_comms_name: &str = &format!("{}/worker/rt:review:singleton:0", test_mob_id());
     let replacement = service
         .create_session(CreateSessionRequest {
             injected_context: Vec::new(),
@@ -31215,7 +31231,7 @@ fn test_mob_machine_rejects_peer_id_reuse_across_generation_owners() {
     dsl::MobMachineMutator::apply(
         &mut authority,
         dsl::MobMachineInput::Retire {
-            mob_id: dsl::MobId::from_domain(&MobId::from("test-mob")),
+            mob_id: dsl::MobId::from_domain(&test_mob_id()),
             agent_runtime_id: dsl::AgentRuntimeId::from_domain(&first_runtime),
             agent_identity: dsl::AgentIdentity::from_domain(&first_identity),
             generation: dsl::Generation::from_domain(crate::ids::Generation::INITIAL),
@@ -31328,7 +31344,7 @@ async fn test_resume_stamps_legacy_recovered_binding_endpoint_exactly_once() {
     // cannot silently authorize a migration.
     events
         .append(NewMobEvent {
-            mob_id: MobId::from("test-mob"),
+            mob_id: test_mob_id(),
             timestamp: None,
             kind: MobEventKind::MemberSessionBindingRecovered(
                 crate::event::MemberSessionBindingRecoveredEvent::new(
@@ -31454,7 +31470,7 @@ async fn test_retire_after_snapshotless_member_head_recovery_removes_old_and_new
         .await
         .expect("wire members before snapshotless recovery");
 
-    let recovered_comms_name = "test-mob/worker/rt:review:singleton:0";
+    let recovered_comms_name: &str = &format!("{}/worker/rt:review:singleton:0", test_mob_id());
     let old_runtime = service
         .comms_runtime(&old_sid)
         .await
@@ -31520,7 +31536,10 @@ async fn test_retire_after_snapshotless_member_head_recovery_removes_old_and_new
     service
         .set_comms_identity_seed(
             &replacement.session_id,
-            "test-mob/worker/rt:review:singleton:0#replacement-key",
+            &format!(
+                "{}/worker/rt:review:singleton:0#replacement-key",
+                test_mob_id()
+            ),
         )
         .await;
     service
@@ -31597,7 +31616,7 @@ async fn test_retire_after_snapshotless_member_head_recovery_removes_old_and_new
     // the runtime may already be gone and the member is already Retiring.
     events
         .append(NewMobEvent {
-            mob_id: MobId::from("test-mob"),
+            mob_id: test_mob_id(),
             timestamp: None,
             kind: MobEventKind::MemberRetirementStarted {
                 agent_identity: retiring.clone(),
@@ -32596,7 +32615,7 @@ async fn test_resume_marks_comms_name_mismatch_as_broken() {
         .await
         .expect("live session");
     let mut metadata = persisted.session_metadata().expect("metadata");
-    metadata.comms_name = Some("test-mob/worker/other-name".to_string());
+    metadata.comms_name = Some(format!("{}/worker/other-name", test_mob_id()));
     persisted
         .set_session_metadata(metadata)
         .expect("set metadata");
@@ -32657,7 +32676,7 @@ async fn test_attach_existing_session_rejects_comms_name_mismatch() {
             max_tokens: Some(4096),
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
-                comms_name: Some("test-mob/worker/w-resume".to_string()),
+                comms_name: Some(format!("{}/worker/w-resume", test_mob_id())),
                 ..Default::default()
             }),
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -32672,7 +32691,7 @@ async fn test_attach_existing_session_rejects_comms_name_mismatch() {
         .await
         .expect("live session");
     let mut metadata = persisted.session_metadata().expect("metadata");
-    metadata.comms_name = Some("test-mob/worker/not-w-resume".to_string());
+    metadata.comms_name = Some(format!("{}/worker/not-w-resume", test_mob_id()));
     persisted
         .set_session_metadata(metadata)
         .expect("set metadata");
@@ -32719,7 +32738,7 @@ async fn test_explicit_durable_resume_preparation_does_not_block_actor_commands(
             max_tokens: Some(4096),
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
-                comms_name: Some("test-mob/worker/w-resume-nonblocking".to_string()),
+                comms_name: Some(format!("{}/worker/w-resume-nonblocking", test_mob_id())),
                 ..Default::default()
             }),
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -32803,7 +32822,7 @@ async fn test_explicit_durable_resume_preparation_runs_concurrently() {
                 max_tokens: Some(4096),
                 event_tx: None,
                 build: Some(meerkat_core::service::SessionBuildOptions {
-                    comms_name: Some(format!("test-mob/worker/{identity}")),
+                    comms_name: Some(format!("{}/worker/{identity}", test_mob_id())),
                     ..Default::default()
                 }),
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -32855,7 +32874,7 @@ async fn test_explicit_durable_resume_preparation_runs_concurrently() {
 #[tokio::test]
 async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
     let definition = sample_definition();
-    let mob_id = MobId::from("test-mob");
+    let mob_id = test_mob_id();
     let profile_name = ProfileName::from("worker");
     let member_identity = AgentIdentity::from("w-1");
     let profile = definition
@@ -32896,7 +32915,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
             comms_name: Some(test_comms_name("worker", "w-1")),
             peer_meta: Some(
                 meerkat_core::PeerMeta::default()
-                    .with_label("mob_id", "test-mob")
+                    .with_label("mob_id", test_mob_id().as_str())
                     .with_label("role", "worker")
                     .with_label("member_id", "w-1"),
             ),
@@ -32906,7 +32925,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
             config_generation: None,
             auth_binding: None,
             mob_member_binding: Some(meerkat_core::MobMemberBinding {
-                mob_id: "test-mob".to_string(),
+                mob_id: test_mob_id().to_string(),
                 role: "worker".to_string(),
                 member: "w-1".to_string(),
             }),
@@ -32960,7 +32979,7 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
             max_tokens: Some(4096),
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
-                comms_name: Some("test-mob/worker/w-resume".to_string()),
+                comms_name: Some(format!("{}/worker/w-resume", test_mob_id())),
                 ..Default::default()
             }),
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -34977,7 +34996,7 @@ async fn test_for_resume_rejects_non_persistent_session_service_by_default() {
     storage
         .events
         .append(NewMobEvent {
-            mob_id: MobId::from("test-mob"),
+            mob_id: test_mob_id(),
             timestamp: None,
             kind: MobEventKind::MobCreated {
                 definition: Box::new(sample_definition()),
@@ -35005,14 +35024,14 @@ async fn test_for_resume_allows_ephemeral_session_service_when_opted_in() {
     let storage = MobStorage::in_memory();
     persist_supervisor_authority_for_test(
         storage.runtime_metadata.as_ref(),
-        &MobId::from("test-mob"),
+        &test_mob_id(),
         &default_supervisor_authority_record(),
     )
     .await;
     storage
         .events
         .append(NewMobEvent {
-            mob_id: MobId::from("test-mob"),
+            mob_id: test_mob_id(),
             timestamp: None,
             kind: MobEventKind::MobCreated {
                 definition: Box::new(sample_definition()),
@@ -35088,10 +35107,13 @@ async fn test_spawn_create_session_request_sets_peer_meta_labels() {
         meerkat_core::service::InitialTurnPolicy::Defer,
         "spawn must defer initial turn; mob actor starts autonomous loop explicitly"
     );
-    assert_eq!(req.comms_name.as_deref(), Some("test-mob/worker/w-1"));
+    assert_eq!(
+        req.comms_name.as_deref(),
+        Some(format!("{}/worker/w-1", test_mob_id()).as_str())
+    );
     assert_eq!(
         req.peer_meta_labels.get("mob_id").map(String::as_str),
-        Some("test-mob")
+        Some(test_mob_id().as_str())
     );
     assert_eq!(
         req.peer_meta_labels.get("role").map(String::as_str),
@@ -42078,7 +42100,7 @@ async fn provision_runtime_backed_disposal_fixture(
                 event_tx: None,
                 build: Some(meerkat_core::service::SessionBuildOptions {
                     resume_session: Some(session),
-                    comms_name: Some(format!("test-mob/worker/{fixture_name}")),
+                    comms_name: Some(format!("{}/worker/{fixture_name}", test_mob_id())),
                     keep_alive: true,
                     ..Default::default()
                 }),
@@ -43036,7 +43058,7 @@ async fn cleanup_without_exact_actor_witness_fails_closed_with_retry_anchors() {
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
                 resume_session: Some(session),
-                comms_name: Some("test-mob/worker/idle-cleanup-ordering".to_string()),
+                comms_name: Some(format!("{}/worker/idle-cleanup-ordering", test_mob_id())),
                 keep_alive: true,
                 ..Default::default()
             }),
@@ -43343,7 +43365,7 @@ async fn test_retire_member_waits_for_active_runtime_turn_before_unregister() {
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
                 resume_session: Some(session),
-                comms_name: Some("test-mob/worker/retire-active-turn".to_string()),
+                comms_name: Some(format!("{}/worker/retire-active-turn", test_mob_id())),
                 keep_alive: true,
                 ..Default::default()
             }),
@@ -43546,7 +43568,10 @@ async fn test_retire_member_cancels_visible_retired_drain_run_before_archive() {
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
                 resume_session: Some(session),
-                comms_name: Some("test-mob/worker/retire-visible-retired-drain".to_string()),
+                comms_name: Some(format!(
+                    "{}/worker/retire-visible-retired-drain",
+                    test_mob_id()
+                )),
                 keep_alive: true,
                 ..Default::default()
             }),
@@ -43703,7 +43728,7 @@ async fn test_retire_member_bounds_finalization_boundary_and_retry_keeps_authori
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
                 resume_session: Some(session),
-                comms_name: Some("test-mob/worker/bounded-retire-boundary".to_string()),
+                comms_name: Some(format!("{}/worker/bounded-retire-boundary", test_mob_id())),
                 keep_alive: true,
                 ..Default::default()
             }),
@@ -44032,7 +44057,7 @@ async fn test_retire_member_bounds_wedged_exact_control_and_retry_converges() {
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
                 resume_session: Some(session),
-                comms_name: Some("test-mob/worker/wedged-retire-control".to_string()),
+                comms_name: Some(format!("{}/worker/wedged-retire-control", test_mob_id())),
                 keep_alive: true,
                 ..Default::default()
             }),
@@ -44312,7 +44337,7 @@ async fn test_retire_retains_late_exact_hard_cancel_rejection_and_retries() {
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
                 resume_session: Some(session),
-                comms_name: Some("test-mob/worker/rejecting-retire-control".to_string()),
+                comms_name: Some(format!("{}/worker/rejecting-retire-control", test_mob_id())),
                 keep_alive: true,
                 ..Default::default()
             }),
@@ -45302,7 +45327,7 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
                 event_tx: None,
                 build: Some(meerkat_core::service::SessionBuildOptions {
                     resume_session: Some(bridge_session),
-                    comms_name: Some("test-mob/worker/local-binding".to_string()),
+                    comms_name: Some(format!("{}/worker/local-binding", test_mob_id())),
                     keep_alive: true,
                     ..Default::default()
                 }),
@@ -45706,7 +45731,10 @@ async fn test_multi_backend_session_provision_forwards_injected_authorized_resum
                 event_tx: None,
                 build: Some(meerkat_core::service::SessionBuildOptions {
                     resume_session: Some(session),
-                    comms_name: Some("test-mob/worker/forward-authorized-resume".to_string()),
+                    comms_name: Some(format!(
+                        "{}/worker/forward-authorized-resume",
+                        test_mob_id()
+                    )),
                     keep_alive: true,
                     ..Default::default()
                 }),
@@ -45773,7 +45801,10 @@ async fn test_multi_backend_session_provision_forwards_injected_authorized_resum
                 event_tx: None,
                 build: Some(meerkat_core::service::SessionBuildOptions {
                     resume_session: Some(retry_session),
-                    comms_name: Some("test-mob/worker/forward-authorized-resume".to_string()),
+                    comms_name: Some(format!(
+                        "{}/worker/forward-authorized-resume",
+                        test_mob_id()
+                    )),
                     keep_alive: true,
                     ..Default::default()
                 }),
@@ -46058,7 +46089,7 @@ async fn test_fresh_provision_failure_preserves_resumable_document_and_quiesces_
                 event_tx: None,
                 build: Some(meerkat_core::service::SessionBuildOptions {
                     resume_session: Some(session),
-                    comms_name: Some("test-mob/worker/fresh-cancelled".to_string()),
+                    comms_name: Some(format!("{}/worker/fresh-cancelled", test_mob_id())),
                     keep_alive: true,
                     ..Default::default()
                 }),
@@ -46134,7 +46165,7 @@ async fn test_fresh_provision_failure_preserves_resumable_document_and_quiesces_
                 event_tx: None,
                 build: Some(meerkat_core::service::SessionBuildOptions {
                     resume_session: Some(durable),
-                    comms_name: Some("test-mob/worker/fresh-cancelled".to_string()),
+                    comms_name: Some(format!("{}/worker/fresh-cancelled", test_mob_id())),
                     keep_alive: true,
                     ..Default::default()
                 }),
@@ -46210,7 +46241,7 @@ async fn test_retired_session_revival_failure_preserves_resumable_document() {
                 event_tx: None,
                 build: Some(meerkat_core::service::SessionBuildOptions {
                     resume_session: Some(session),
-                    comms_name: Some("test-mob/worker/revival-rollback".to_string()),
+                    comms_name: Some(format!("{}/worker/revival-rollback", test_mob_id())),
                     keep_alive: true,
                     ..Default::default()
                 }),
@@ -46287,7 +46318,7 @@ async fn test_retired_session_revival_failure_preserves_resumable_document() {
                 event_tx: None,
                 build: Some(meerkat_core::service::SessionBuildOptions {
                     resume_session: Some(archived),
-                    comms_name: Some("test-mob/worker/revival-rollback".to_string()),
+                    comms_name: Some(format!("{}/worker/revival-rollback", test_mob_id())),
                     keep_alive: true,
                     ..Default::default()
                 }),
@@ -46373,7 +46404,7 @@ async fn test_retired_session_revival_failure_preserves_resumable_document() {
                 event_tx: None,
                 build: Some(meerkat_core::service::SessionBuildOptions {
                     resume_session: Some(preserved),
-                    comms_name: Some("test-mob/worker/revival-rollback".to_string()),
+                    comms_name: Some(format!("{}/worker/revival-rollback", test_mob_id())),
                     keep_alive: true,
                     ..Default::default()
                 }),
@@ -46411,7 +46442,7 @@ async fn test_cancel_all_work_without_adapter_uses_boundary_cancel_not_hard_inte
             max_tokens: None,
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
-                comms_name: Some("test-mob/worker/w-boundary".to_string()),
+                comms_name: Some(format!("{}/worker/w-boundary", test_mob_id())),
                 keep_alive: true,
                 ..Default::default()
             }),
@@ -46468,7 +46499,7 @@ async fn test_interrupt_member_without_adapter_rejects_unsupported_boundary_canc
             max_tokens: None,
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
-                comms_name: Some("test-mob/worker/w-unsupported-boundary".to_string()),
+                comms_name: Some(format!("{}/worker/w-unsupported-boundary", test_mob_id())),
                 keep_alive: true,
                 ..Default::default()
             }),
@@ -46541,7 +46572,7 @@ async fn test_explicit_hard_cancel_member_without_adapter_is_rejected() {
             max_tokens: None,
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
-                comms_name: Some("test-mob/worker/w-hard-cancel".to_string()),
+                comms_name: Some(format!("{}/worker/w-hard-cancel", test_mob_id())),
                 ..Default::default()
             }),
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -47117,7 +47148,7 @@ async fn test_mob_created_event_stores_definition() {
     assert!(!events.is_empty(), "should have at least one event");
     match &events[0].kind {
         MobEventKind::MobCreated { definition } => {
-            assert_eq!(definition.id.as_str(), "test-mob");
+            assert_eq!(definition.id, test_mob_id());
             assert_eq!(definition.profiles.len(), 2);
             assert!(definition.profiles.contains_key(&ProfileName::from("lead")));
             assert!(
@@ -52707,7 +52738,7 @@ async fn test_spawn_without_initial_message_uses_default() {
         prompts[0].1
     );
     assert!(
-        prompts[0].1.contains("mob 'test-mob'"),
+        prompts[0].1.contains(&format!("mob '{}'", test_mob_id())),
         "default message should contain mob id, got: '{}'",
         prompts[0].1
     );
@@ -56782,7 +56813,7 @@ impl RealCommsSessionService {
             .build
             .as_ref()
             .and_then(|b| b.comms_name.clone())
-            .unwrap_or_else(|| format!("real-comms-session-{n}"));
+            .unwrap_or_else(|| format!("real-comms-session-{session_id}"));
 
         let keypair = self
             .session_keypairs
@@ -57914,7 +57945,7 @@ impl RuntimeBackedRealCommsSessionService {
             .build
             .as_ref()
             .and_then(|b| b.comms_name.clone())
-            .unwrap_or_else(|| format!("real-runtime-comms-session-{n}"));
+            .unwrap_or_else(|| format!("real-runtime-comms-session-{session_id}"));
 
         let comms = Arc::new(
             meerkat_comms::CommsRuntime::inproc_only(&comms_name)
@@ -59822,7 +59853,7 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
     .expect("peer message should reach runtime apply path");
     let delivered_text = delivered.text_content();
     assert!(
-        delivered_text.contains("Peer message from test-mob/lead/l-1"),
+        delivered_text.contains(&format!("Peer message from {}/lead/l-1", test_mob_id())),
         "peer message should carry typed comms source projection: {delivered_text:?}"
     );
     assert!(
@@ -59985,7 +60016,10 @@ async fn test_peer_message_reaches_ready_autonomous_member_before_kickoff_settle
     .expect("peer message should reach a startup-ready autonomous member");
     let delivered_text = delivered.text_content();
     assert!(
-        delivered_text.contains("Peer message from test-mob/lead/l-prekickoff"),
+        delivered_text.contains(&format!(
+            "Peer message from {}/lead/l-prekickoff",
+            test_mob_id()
+        )),
         "peer message should carry typed comms source projection: {delivered_text:?}"
     );
     assert!(
@@ -60119,7 +60153,7 @@ async fn test_peer_messages_reach_all_ready_autonomous_members_before_kickoff_se
 
         let delivered_text = delivered.text_content();
         assert!(
-            delivered_text.contains("Peer message from test-mob/lead/l-multi"),
+            delivered_text.contains(&format!("Peer message from {}/lead/l-multi", test_mob_id())),
             "peer message should carry typed comms source projection for {agent_identity}: {delivered_text:?}"
         );
         assert!(
@@ -62308,6 +62342,55 @@ async fn test_retirement_singleflight_scopes_identical_semantic_keys_to_exact_mo
         first_key, independent_store_key,
         "independent MobStorage allocations may reuse every semantic id without sharing a task"
     );
+}
+
+/// Production contract behind the per-test mob ids: a successful
+/// `MobHandle::shutdown` releases `{mob_id}/__mob_supervisor__` before it
+/// replies (the actor's teardown retires the generation-exact route ahead of
+/// the reply), so a host can recreate the same mob id in the same process at
+/// once, with the old handle still held and no wait. Only a mob that was never
+/// shut down keeps its name, and a newcomer is then refused typed.
+#[tokio::test]
+async fn test_shutdown_releases_the_supervisor_name_for_a_same_id_successor() {
+    let (first, _first_service) = create_test_mob(sample_definition()).await;
+    let mob_id = first.mob_id().clone();
+    let participant_name = format!("{mob_id}/__mob_supervisor__");
+    assert!(
+        meerkat_comms::InprocRegistry::global().contains_name(&participant_name),
+        "a running mob holds its supervisor name"
+    );
+    let newcomer_service = Arc::new(MockSessionService::new());
+    let _ = newcomer_service.enable_runtime_adapter();
+    let refused = match MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(newcomer_service)
+        .create()
+        .await
+    {
+        Ok(_) => panic!("a second live mob under the same id is refused"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &refused,
+            MobError::ParticipantNameOccupied { participant_name: name, .. }
+                if name == &participant_name
+        ),
+        "the refusal is the typed name occupancy: {refused:?}"
+    );
+
+    first.shutdown().await.expect("shut the first mob down");
+    assert!(
+        !meerkat_comms::InprocRegistry::global().contains_name(&participant_name),
+        "shutdown released the supervisor name before replying"
+    );
+    let (second, _second_service) = create_test_mob(sample_definition()).await;
+    assert_eq!(
+        second.mob_id(),
+        &mob_id,
+        "the successor reuses the same mob id"
+    );
+    second.shutdown().await.expect("shut the successor down");
+    drop(first);
 }
 
 #[tokio::test]

@@ -6214,7 +6214,10 @@ mod tests {
             meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
             ),
         );
-        let mob_id = crate::MobId::from("pump-tap-survives-join-test");
+        let mob_id = crate::MobId::from(format!(
+            "pump-tap-survives-join-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         let bridge = Arc::new(
             super::super::MobSupervisorBridge::new(&mob_id, authority, None)
                 .await

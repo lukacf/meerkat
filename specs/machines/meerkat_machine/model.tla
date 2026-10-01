@@ -37599,6 +37599,7 @@ Next ==
     \/ TerminalStutter
 
 live_delegation_steer_records_are_authorized_and_single == ((DOMAIN live_delegation_steer_digest_by_continuation = DOMAIN live_delegation_steer_operation_by_continuation) /\ (DOMAIN live_delegation_steer_reconciliation_by_continuation = DOMAIN live_delegation_steer_operation_by_continuation) /\ (\A continuation_id \in DOMAIN live_delegation_steer_delivered_by_continuation : (continuation_id \in DOMAIN live_delegation_steer_operation_by_continuation)))
+live_media_health_budget_and_verdicts_are_consistent == ((\A budget_session \in DOMAIN live_media_fault_reopens_by_session : ((IF "value" \in DOMAIN (IF (budget_session \in DOMAIN live_media_fault_reopens_by_session) THEN Some((IF budget_session \in DOMAIN live_media_fault_reopens_by_session THEN live_media_fault_reopens_by_session[budget_session] ELSE 0)) ELSE None) THEN (IF (budget_session \in DOMAIN live_media_fault_reopens_by_session) THEN Some((IF budget_session \in DOMAIN live_media_fault_reopens_by_session THEN live_media_fault_reopens_by_session[budget_session] ELSE 0)) ELSE None)["value"] ELSE None) <= 1)) /\ (\A verdict_channel \in DOMAIN live_media_fault_reopen_recommended_by_channel : (verdict_channel \in live_media_health_judged_channels)) /\ (\A judged_channel \in live_media_health_judged_channels : (judged_channel \in DOMAIN live_media_health_requested_output_by_channel)))
 fence_requires_bound_runtime == (IF (active_fence_token = None) THEN TRUE ELSE (active_runtime_id # None))
 runtime_generation_requires_bound_runtime == (IF (active_runtime_generation = None) THEN TRUE ELSE (active_runtime_id # None))
 live_execution_binding_is_complete_and_channel_scoped == ((DOMAIN live_execution_runtime_id_by_channel = DOMAIN live_execution_fence_by_channel) /\ (DOMAIN live_execution_runtime_id_by_channel = DOMAIN live_execution_generation_by_channel) /\ (\A channel_id \in DOMAIN live_execution_runtime_id_by_channel : (channel_id \in DOMAIN live_channel_session_by_channel)))
@@ -37667,6 +37668,7 @@ DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(pending_op_refs) 
 Spec == Init /\ [][Next]_vars
 
 THEOREM Spec => []live_delegation_steer_records_are_authorized_and_single
+THEOREM Spec => []live_media_health_budget_and_verdicts_are_consistent
 THEOREM Spec => []fence_requires_bound_runtime
 THEOREM Spec => []runtime_generation_requires_bound_runtime
 THEOREM Spec => []live_execution_binding_is_complete_and_channel_scoped

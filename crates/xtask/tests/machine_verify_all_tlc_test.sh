@@ -174,6 +174,24 @@ fi
 echo "running bounded live unregister cleanup TLC audit"
 TLC_WORKERS="${tlc_workers}" "${live_unregister_audit}" "${LIVE_UNREGISTER_AUDIT_MAX_STEPS:-16}"
 
+# The live media health edges (request at a channel's first output, the three
+# judgements, the per-session reopen budget) guard an Active, exactly bound
+# channel, which the ci sweep never reaches. A third hand-written audit over
+# the same generated model binds one channel, explores requests, judgements,
+# closed status, close and the second channel's open and bind on the same
+# session, under every generated invariant (including
+# live_media_health_budget_and_verdicts_are_consistent) plus its own
+# invariants and action properties (judged once, first output only). It
+# proves every judgement reachable by requiring a counterexample to its
+# negation; the exhausted budget needs 12 steps. Under a minute at 16 steps.
+live_media_health_audit="${workspace_root}/specs/machines/meerkat_machine/live_media_health_audit.sh"
+if [[ ! -x "${live_media_health_audit}" ]]; then
+  echo "error: live media health audit runner is missing from workspace runfiles: ${live_media_health_audit}" >&2
+  exit 1
+fi
+echo "running bounded live media health TLC audit"
+TLC_WORKERS="${tlc_workers}" "${live_media_health_audit}" "${LIVE_MEDIA_HEALTH_AUDIT_MAX_STEPS:-16}"
+
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
 # codegen defects. `machine-verify` still validates drift and the generated
 # ci.cfg structural-invariant contract before honoring these skips. The earlier
@@ -195,8 +213,8 @@ TLC_WORKERS="${tlc_workers}" "${live_unregister_audit}" "${LIVE_UNREGISTER_AUDIT
 # the bounded witness TLC proof above. It still composes two full MobMachine
 # instances, so the full composition TLC sweep exceeds the required CI budget.
 #
-# The live delegation steer audit above runs on its own first (it is small:
-# well under a minute at its default bound).
+# The live delegation steer and live media health audits above run on their
+# own first (each is small: well under a minute at its default bound).
 #
 # Scheduling: the two audits and `machine-verify` are independent TLC work.
 # With a total budget of at least four 4-worker shares (TLC_WORKERS, or the

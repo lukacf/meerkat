@@ -8319,6 +8319,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `live_delegation_steer_records_are_authorized_and_single`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `live_media_health_budget_and_verdicts_are_consistent`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `fence_requires_bound_runtime`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

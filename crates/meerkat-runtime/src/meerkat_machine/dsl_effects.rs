@@ -158,6 +158,28 @@ impl std::ops::Deref for DslTransitionEffects {
     }
 }
 
+/// Why staging one session DSL input did not commit.
+#[derive(Debug)]
+pub(super) enum SessionDslStageError {
+    /// The generated authority refused the input; `error` is its typed
+    /// decision and `reason` the contextual rendering.
+    Refused {
+        error: dsl::MeerkatMachineTransitionError,
+        reason: String,
+    },
+    /// The shell could not reach the session's authority (unregistered,
+    /// fenced by unregister, or a raw runtime-internal input).
+    Unavailable(String),
+}
+
+impl SessionDslStageError {
+    pub(super) fn into_reason(self) -> String {
+        match self {
+            Self::Refused { reason, .. } | Self::Unavailable(reason) => reason,
+        }
+    }
+}
+
 impl MeerkatMachine {
     pub(super) async fn stage_session_runtime_internal_dsl_transition(
         &self,
@@ -260,18 +282,42 @@ impl MeerkatMachine {
         input: dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<StagedSessionDslInput, String> {
+        self.stage_session_dsl_transition_typed(session_id, input, context)
+            .await
+            .map_err(SessionDslStageError::into_reason)
+    }
+
+    /// [`Self::stage_session_dsl_transition`] keeping the generated
+    /// authority's refusal typed, for callers that classify the machine's
+    /// decision instead of reading its rendering.
+    pub(super) async fn stage_session_dsl_transition_typed(
+        &self,
+        session_id: &SessionId,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<StagedSessionDslInput, SessionDslStageError> {
         let sessions = self.sessions.read().await;
         let entry = sessions.get(session_id).ok_or_else(|| {
-            RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            }
-            .to_string()
+            SessionDslStageError::Unavailable(
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                }
+                .to_string(),
+            )
         })?;
         if let Some(error) = entry.dsl_mutation_blocked_by_unregister(session_id) {
-            return Err(error.to_string());
+            return Err(SessionDslStageError::Unavailable(error.to_string()));
         }
-        let mut staged =
-            Self::stage_dsl_transition_on_authority(&entry.dsl_authority, input, context)?;
+        Self::reject_raw_fieldless_runtime_internal_dsl_input(&input)
+            .map_err(SessionDslStageError::Unavailable)?;
+        let mut staged = Self::stage_dsl_transition_on_locked_authority_typed(
+            &mut entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            input,
+            context,
+        )?;
         staged.signal_dispatcher = entry.composition_signal_dispatcher.clone();
         Ok(staged)
     }
@@ -318,10 +364,22 @@ impl MeerkatMachine {
         input: dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<StagedSessionDslInput, String> {
+        Self::stage_dsl_transition_on_locked_authority_typed(authority, input, context)
+            .map_err(SessionDslStageError::into_reason)
+    }
+
+    fn stage_dsl_transition_on_locked_authority_typed(
+        authority: &mut dsl::MeerkatMachineAuthority,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<StagedSessionDslInput, SessionDslStageError> {
         let previous_snapshot = authority.snapshot();
         let effects = dsl::MeerkatMachineMutator::apply(authority, input)
             .map(|transition| DslTransitionEffects::new(transition.into_effects()))
-            .map_err(|err| dsl_authority::map_error(err, context))?;
+            .map_err(|error| SessionDslStageError::Refused {
+                reason: dsl_authority::map_error(error.clone(), context),
+                error,
+            })?;
         let committed_snapshot = authority.snapshot();
         Ok(StagedSessionDslInput {
             previous_snapshot,

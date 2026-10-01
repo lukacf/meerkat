@@ -56,6 +56,23 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 filter = 'test(=machines::tests::machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts)'
 slow-timeout = { period = "60s", terminate-after = 8 }
 
+[[profile.ci-pr.overrides]]
+# xtask integration suite (ci.yml `integration`, xtask with machine-authority):
+# two tests do fixed-size CPU work in the unoptimized xtask build. The strict
+# RMAT audit parses the whole live workspace (the same check the BuildBuddy
+# governance lane runs only nightly and at release), and the drift check
+# generates the meerkat_machine and meerkat_mob_seam codegen outputs and diffs
+# them three times. Both finished inside the suite's 164 s on 4 local cores
+# (2026-10-01) but hit the four-period bound (240 s) on a hosted runner (job
+# 110307057986). Exact-case headroom, like the workflow test above; the lane
+# prints their durations (status level slow) so the bound can follow them.
+filter = 'test(=live_workspace_rmat_audit_is_strictly_clean)'
+slow-timeout = { period = "60s", terminate-after = 8 }
+
+[[profile.ci-pr.overrides]]
+filter = 'test(=drift_check_reports_missing_and_stale_generated_files_for_canonical_selection)'
+slow-timeout = { period = "60s", terminate-after = 8 }
+
 [profile.fast]
 # Cargo's default fast lane: unit + integration-fast, with dedicated e2e lane
 # wrappers left behind explicit `cargo e2e-*` aliases. Report every test still

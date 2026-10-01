@@ -540,6 +540,20 @@ them.
   cores: xtask's lane 249 s (about 245 s of it one workflow test), the
   machine-authority suite 149 s; on main the suite's hosted job took 467 s.
 
+- PR CI runs xtask's integration tests (`ci_gate_requires_rmat` and the
+  other `crates/xtask/tests/*` pins, with `machine-authority`) when
+  `crates/xtask` or any `.github/workflows/` file changes. They pin the
+  workflow files, yet ran in no PR lane: on 2026-10-01 a nightly job added
+  outside the slot-cap chains broke `nightly_holds_a_bounded_number_of_hosted_slots`
+  unnoticed. Integration suites can now be selected by changed paths in a
+  plan with no Rust change; the lane and the gate key off the suite count.
+  163 tests, 169 s on 4 cores. Two of them do fixed-size CPU work (the
+  strict RMAT audit of the live workspace, which otherwise runs only in the
+  nightly and release BuildBuddy governance lane, and the codegen drift
+  check) and hit the 240 s hang bound on a hosted runner; they get
+  exact-case 480 s bounds in the `ci-pr` nextest profile, and the lane
+  prints slow-test durations.
+
 - CI on `main`: a newer main commit now supersedes (cancels) the
   still-running first attempt of an older one, so a merge burst no longer
   fills the account's 40 concurrent hosted jobs with main runs (35-50 jobs

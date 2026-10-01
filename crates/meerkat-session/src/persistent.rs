@@ -5342,6 +5342,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(true)
     }
 
+    /// Bring the live session to durable authority exactly as a runtime turn
+    /// does on entry, for a pre-turn step (an LLM identity reconfiguration)
+    /// that reads live state before the turn itself runs.
+    ///
+    /// A stopped or errored runtime turn commits no boundary: the live actor
+    /// keeps the uncommitted image only so the runtime can publish the exact
+    /// terminal, and live authority reads `DurableAuthoritative` (typically
+    /// `LiveUncommittedTranscript`) until the next turn resyncs. This performs
+    /// that resync now: the live transcript is synchronized from durable
+    /// authority in place, or, where the agent cannot synchronize, the stale
+    /// actor is discarded so the turn rematerializes it. The caller holds the
+    /// same runtime-loop position and boundary as turn entry. Returns `true`
+    /// when the live actor was discarded rather than synchronized.
+    pub async fn synchronize_live_session_for_runtime_turn(
+        &self,
+        id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        let recovery_gate = self.recovery_gate_for_session(id).await;
+        let _recovery_guard = recovery_gate.lock().await;
+        self.discard_stale_live_session_if_needed(id).await
+    }
+
     pub async fn synchronize_live_session_from_durable_authority_if_needed(
         &self,
         id: &SessionId,

@@ -887,8 +887,13 @@ pub struct ProviderParamsOverride {
     pub thinking_budget_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_tag: Option<ProviderTag>,
-    /// Tool choice for this turn's provider calls; `None` keeps `Auto`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Request-local tool choice for one provider call. The agent loop sets
+    /// it on each request's own copy from the turn's tool-choice plan
+    /// (`TurnToolOverlay::tool_choice_plan`) and replaces any value that
+    /// arrived with session or turn params. Never serialized: it cannot be
+    /// persisted into session defaults or sent on a wire. `None` is `Auto`.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
     pub tool_choice: Option<ToolChoice>,
 }
 

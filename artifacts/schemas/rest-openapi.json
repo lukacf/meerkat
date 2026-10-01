@@ -13466,17 +13466,6 @@
               "null"
             ]
           },
-          "tool_choice": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ToolChoice"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Tool choice for this turn's provider calls; `None` keeps `Auto`."
-          },
           "top_p": {
             "format": "float",
             "type": [
@@ -13998,6 +13987,13 @@
               "array",
               "null"
             ]
+          },
+          "tool_choice_plan": {
+            "description": "Tool choice for this turn's model requests, in order: entry `k`\napplies to the run's `k`-th provider call, and every call after the\nplan is exhausted is `Auto`. Run-local: it lives only as long as the\noverlay and never reaches session defaults, later turns or fallback.",
+            "items": {
+              "$ref": "#/components/schemas/ToolChoice"
+            },
+            "type": "array"
           }
         },
         "type": "object"

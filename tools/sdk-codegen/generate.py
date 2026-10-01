@@ -663,9 +663,12 @@ SKILL_LIST_RPC_CONTRACT_ALIAS_TYPES = [
 # K8a: canonical typed tool identity. `ToolName` is a transparent string
 # newtype on the wire; promote and alias it so `PublicTurnToolOverlay`
 # (and the deferred-catalog delta event payloads) keep `string`-shaped SDK
-# types instead of widening to `unknown[]` / `list[Any]`.
+# types instead of widening to `unknown[]` / `list[Any]`. `ToolChoice` (the
+# `oneOf` entries of `PublicTurnToolOverlay.tool_choice_plan`) is promoted
+# the same way so the plan is a typed union, not `unknown[]`.
 TOOL_IDENTITY_ALIAS_TYPES = [
     "ToolName",
+    "ToolChoice",
 ]
 
 MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
@@ -3607,7 +3610,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     for name in SKILL_LIST_RPC_CONTRACT_ALIAS_TYPES:
         append_python_alias(name, wire_schema, f"Wire payload for {name}.")
     for name in TOOL_IDENTITY_ALIAS_TYPES:
-        append_python_alias(name, wire_schema, f"Canonical typed tool identity {name}.")
+        append_python_alias(name, wire_schema, f"Canonical typed tool contract {name}.")
     for name in SKILL_LIST_RPC_CONTRACT_HELPER_TYPES:
         append_python_contract_dataclass(name)
     # FIX-9: emit the live-config propagation report wire mirrors **before**

@@ -1,7 +1,8 @@
 //! Typed tool choice lowered to Anthropic's `tool_choice`. `Auto` keeps
-//! today's bytes. A forced choice is refused where Anthropic would answer
-//! 400: under explicit thinking, and on cataloged models whose thinking
-//! cannot be disabled (Opus 5.5 documents the 400 for `any`/`tool`).
+//! today's bytes. A forced choice is refused locally under explicit thinking
+//! and on models proven to reject it (Claude Opus 5.5: live 400 "not
+//! supported for this model"); elsewhere it is sent, and the provider's own
+//! rejection maps to the same typed error.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::sync::Arc;
@@ -79,24 +80,141 @@ fn every_choice_lowers_to_its_native_value_on_a_forceable_model() {
 }
 
 #[test]
-fn forced_choice_is_refused_on_models_whose_thinking_cannot_be_disabled() {
+fn forced_choice_is_refused_only_on_models_proven_to_reject_it() {
+    for choice in forced() {
+        assert_eq!(
+            refusal(body(&request("claude-opus-5-5", choice.clone()))),
+            ToolChoiceRefusal::ModelDoesNotSupportForcedToolChoice,
+            "{choice:?}"
+        );
+    }
+    // Forbidding tool calls stays available.
+    let none = body(&request("claude-opus-5-5", ToolChoice::None)).unwrap();
+    assert_eq!(none["tool_choice"], json!({"type": "none"}));
+    // Live-accepted (claude-sonnet-5, claude-haiku-4-5-20251001) and unproven
+    // cataloged models send the forced choice.
     for model in [
-        "claude-opus-5-5",
-        "claude-opus-5",
-        "claude-fable-5",
-        "claude-fable-5-1",
+        "claude-sonnet-5",
+        "claude-haiku-4-5-20251001",
         "claude-sonnet-5-5",
+        "claude-opus-5",
+        "claude-fable-5-1",
     ] {
-        for choice in forced() {
+        let body = body(&request(model, ToolChoice::Required)).unwrap();
+        assert_eq!(body["tool_choice"], json!({"type": "any"}), "{model}");
+    }
+}
+
+#[test]
+fn catalog_facts_match_the_live_probes() {
+    use meerkat_core::Provider;
+    let forced = |model: &str| {
+        meerkat_models::capabilities_for(Provider::Anthropic, model)
+            .map(|caps| caps.supports_forced_tool_choice)
+    };
+    assert_eq!(forced("claude-opus-5-5"), Some(false));
+    assert_eq!(forced("claude-haiku-4-5-20251001"), Some(true));
+    // claude-sonnet-5 is not a catalog row: the call is attempted.
+    assert_ne!(forced("claude-sonnet-5"), Some(false));
+}
+
+/// Anthropic's own 400 for an unsupported forced choice, on a request that
+/// forced one, is the typed non-retryable refusal; other 400s are not.
+#[test]
+fn provider_rejection_of_a_forced_choice_maps_to_the_typed_refusal() {
+    let rejection = r#"{"type":"error","error":{"type":"invalid_request_error","message":"tool_choice: type \"tool\" and \"any\" are not supported for this model."}}"#;
+    let forced_request = request("claude-future-9", ToolChoice::Required);
+    match crate::request_support::provider_forced_tool_choice_rejection(
+        &forced_request,
+        400,
+        rejection,
+    ) {
+        Some(LlmError::ToolChoiceUnsupported { reason, choice, .. }) => {
             assert_eq!(
-                refusal(body(&request(model, choice.clone()))),
-                ToolChoiceRefusal::ForcedToolWithThinking,
-                "{model} {choice:?}"
+                reason,
+                ToolChoiceRefusal::ModelDoesNotSupportForcedToolChoice
+            );
+            assert_eq!(choice, ToolChoice::Required);
+        }
+        other => panic!("expected the typed refusal, got {other:?}"),
+    }
+    let auto = request("claude-future-9", ToolChoice::Auto);
+    assert!(
+        crate::request_support::provider_forced_tool_choice_rejection(&auto, 400, rejection)
+            .is_none(),
+        "only a forced request maps"
+    );
+    let other = r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages: at least one message is required"}}"#;
+    assert!(
+        crate::request_support::provider_forced_tool_choice_rejection(&forced_request, 400, other)
+            .is_none()
+    );
+    assert!(
+        crate::request_support::provider_forced_tool_choice_rejection(
+            &forced_request,
+            500,
+            rejection
+        )
+        .is_none()
+    );
+}
+
+/// The real stream path: a 400 from the provider on a forced request
+/// surfaces as the typed refusal, not a generic invalid request.
+#[tokio::test]
+async fn stream_maps_the_provider_400_for_a_forced_choice() {
+    use axum::{Router, http::StatusCode, response::IntoResponse, routing::post};
+    use futures::StreamExt;
+    use meerkat_llm_core::LlmClient;
+    async fn reject() -> impl IntoResponse {
+        (
+            StatusCode::BAD_REQUEST,
+            [("content-type", "application/json")],
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"tool_choice: type \"tool\" and \"any\" are not supported for this model."}}"#,
+        )
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, Router::new().route("/v1/messages", post(reject)))
+            .await
+            .unwrap();
+    });
+    let client = AnthropicClient::new("test-key".to_string())
+        .unwrap()
+        .with_base_url(format!("http://{addr}"));
+    let request = request(
+        "claude-future-9",
+        ToolChoice::Tool {
+            name: "deny_probe".into(),
+        },
+    );
+    let mut stream = client.stream(&request);
+    let mut typed = None;
+    while let Some(event) = stream.next().await {
+        match event {
+            Err(error) => {
+                typed = Some(error);
+                break;
+            }
+            Ok(meerkat_llm_core::LlmEvent::Done {
+                outcome: meerkat_llm_core::LlmDoneOutcome::Error { error },
+            }) => {
+                typed = Some(error);
+                break;
+            }
+            Ok(_) => {}
+        }
+    }
+    server.abort();
+    match typed {
+        Some(LlmError::ToolChoiceUnsupported { reason, .. }) => {
+            assert_eq!(
+                reason,
+                ToolChoiceRefusal::ModelDoesNotSupportForcedToolChoice
             );
         }
-        // Forbidding tool calls stays available everywhere.
-        let none = body(&request(model, ToolChoice::None)).unwrap();
-        assert_eq!(none["tool_choice"], json!({"type": "none"}), "{model}");
+        other => panic!("expected the typed refusal from the stream, got {other:?}"),
     }
 }
 

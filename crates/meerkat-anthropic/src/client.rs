@@ -636,14 +636,14 @@ impl AnthropicClient {
     }
 
     /// Lower the typed tool choice to Anthropic's `tool_choice`. `Auto`
-    /// sends nothing (as before). Anthropic rejects a forced tool call
-    /// (`any` or a named tool) under extended thinking, so a forcing choice on
-    /// a request that thinks is refused with a typed error; thinking is never
-    /// switched off implicitly to make the choice fit.
+    /// sends nothing (as before). A forced call (`any` or a named tool) is
+    /// refused with a typed error under explicit thinking and on models proven
+    /// to reject it; thinking is never switched off implicitly. Elsewhere it is
+    /// sent, and the provider's own rejection maps to the same typed error.
     fn apply_tool_choice(&self, request: &LlmRequest, body: &mut Value) -> Result<(), LlmError> {
         request.validate_tool_choice("anthropic")?;
         if request.tool_choice.forces_a_tool_call()
-            && crate::request_support::forced_tool_choice_refused(
+            && let Some(reason) = crate::request_support::forced_tool_choice_refusal(
                 &request.model,
                 anthropic_tag(request),
             )
@@ -651,7 +651,7 @@ impl AnthropicClient {
             return Err(LlmError::ToolChoiceUnsupported {
                 provider: "anthropic".to_owned(),
                 choice: request.tool_choice.clone(),
-                reason: meerkat_llm_core::ToolChoiceRefusal::ForcedToolWithThinking,
+                reason,
             });
         }
         let choice = match &request.tool_choice {
@@ -1704,7 +1704,14 @@ impl LlmClient for AnthropicClient {
             } else {
                 let headers = response.headers().clone();
                 let text = response.text().await.unwrap_or_default();
-                Err(LlmError::from_http_response(status_code, text, &headers))
+                Err(
+                    crate::request_support::provider_forced_tool_choice_rejection(
+                        request,
+                        status_code,
+                        &text,
+                    )
+                    .unwrap_or_else(|| LlmError::from_http_response(status_code, text, &headers)),
+                )
             };
             let mut stream = stream_result?;
             let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);

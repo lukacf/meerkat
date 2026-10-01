@@ -1075,42 +1075,6 @@ ProviderTag = ProviderTagAnthropic | ProviderTagOpenAi | ProviderTagGemini | Pro
 ReasoningMode = Literal['emit', 'silent', 'off']
 
 
-class ToolChoiceAuto(TypedDict, total=False):
-    """The model decides whether to call a tool.
-    """
-    mode: Required[Literal['auto']]
-
-
-class ToolChoiceRequired(TypedDict, total=False):
-    """The model must call at least one of the offered tools.
-    """
-    mode: Required[Literal['required']]
-
-
-class ToolChoiceNone(TypedDict, total=False):
-    """The model must not call any tool.
-    """
-    mode: Required[Literal['none']]
-
-
-class ToolChoiceTool(TypedDict, total=False):
-    """The model must call the named tool, which must be offered.
-    """
-    mode: Required[Literal['tool']]
-    name: Required[str]
-
-
-# Which tool use the model may or must make on one provider call.
-#
-# `Auto` is today's behaviour and the default: the model decides, and the
-# provider request carries no choice beyond what each adapter always sent.
-# Every other variant is lowered to the provider's native tool-choice field.
-# A provider or model that cannot honour a requested choice refuses the
-# call with a typed unsupported error; a choice is never downgraded to
-# `Auto` silently.
-ToolChoice = ToolChoiceAuto | ToolChoiceRequired | ToolChoiceNone | ToolChoiceTool
-
-
 class ProviderParamsOverride(TypedDict, total=False):
     """Typed per-turn provider parameter overrides.
 
@@ -1125,7 +1089,6 @@ class ProviderParamsOverride(TypedDict, total=False):
     reasoning: NotRequired[Optional[ReasoningMode]]
     temperature: NotRequired[Optional[float]]
     thinking_budget_tokens: NotRequired[Optional[int]]
-    tool_choice: NotRequired[Optional[ToolChoice]]
     top_p: NotRequired[Optional[float]]
 
 

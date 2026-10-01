@@ -294,9 +294,11 @@ pub struct ModelCapabilities {
     pub beta_headers: &'static [BetaHeader],
 
     /// Whether the model accepts a tool choice that forces a call (`any` /
-    /// `required` / a named tool). Claude models whose thinking cannot be
-    /// disabled answer 400 to a forced choice, so the Anthropic lowering
-    /// refuses it locally with a typed error instead.
+    /// `required` / a named tool). `false` only for models proven to reject
+    /// one (Claude Opus 5.5 answers 400 "not supported for this model"); the
+    /// lowering then refuses locally with a typed error. Unproven models are
+    /// `true`: the call is attempted and a provider rejection maps to the
+    /// same typed error.
     pub supports_forced_tool_choice: bool,
 
     // ── Runtime ───────────────────────────────────────────────────────

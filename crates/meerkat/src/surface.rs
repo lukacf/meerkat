@@ -185,6 +185,8 @@ pub enum WorkGraphAttentionTurnOverlayError {
     WorkGraph(#[from] crate::WorkGraphError),
     #[error("conflicting turn tool overlay dispatch context for {key}")]
     ConflictingDispatchContext { key: String },
+    #[error("conflicting turn tool-choice plans")]
+    ConflictingToolChoicePlan,
 }
 
 impl From<meerkat_core::service::TurnToolOverlayComposeError>
@@ -195,6 +197,9 @@ impl From<meerkat_core::service::TurnToolOverlayComposeError>
             meerkat_core::service::TurnToolOverlayComposeError::ConflictingDispatchContext {
                 key,
             } => Self::ConflictingDispatchContext { key },
+            meerkat_core::service::TurnToolOverlayComposeError::ConflictingToolChoicePlan => {
+                Self::ConflictingToolChoicePlan
+            }
         }
     }
 }
@@ -1764,6 +1769,7 @@ mod tests {
     #[test]
     fn attention_overlay_intersects_existing_turn_overlay() {
         let existing = meerkat_core::service::TurnToolOverlay {
+            tool_choice_plan: Vec::new(),
             allowed_tools: Some(vec![
                 meerkat_core::types::ToolName::from("workgraph_get"),
                 meerkat_core::types::ToolName::from("non_workgraph"),
@@ -1772,6 +1778,7 @@ mod tests {
             dispatch_context: BTreeMap::from([("turn".to_string(), serde_json::json!(true))]),
         };
         let attention = meerkat_core::service::TurnToolOverlay {
+            tool_choice_plan: Vec::new(),
             allowed_tools: Some(vec![
                 meerkat_core::types::ToolName::from("workgraph_get"),
                 meerkat_core::types::ToolName::from("workgraph_update"),

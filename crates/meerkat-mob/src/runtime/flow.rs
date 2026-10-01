@@ -2212,6 +2212,7 @@ fn step_tool_overlay(step: &FlowStepSpec) -> Option<TurnToolOverlay> {
         return None;
     }
     Some(TurnToolOverlay {
+        tool_choice_plan: Vec::new(),
         allowed_tools: step.allowed_tools.clone().map(|names| {
             names
                 .into_iter()

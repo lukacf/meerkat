@@ -142,7 +142,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(300),
-        supports_forced_tool_choice: false,
+        supports_forced_tool_choice: true,
     },
     // Claude Fable 5
     //
@@ -222,7 +222,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(300),
-        supports_forced_tool_choice: false,
+        supports_forced_tool_choice: true,
     },
     // Claude Opus 5.5
     //
@@ -283,6 +283,8 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(300),
+        // Live probe 2026-10-01: tool_choice any/tool answers 400 "not
+        // supported for this model" with and without thinking.
         supports_forced_tool_choice: false,
     },
     // Claude Opus 5
@@ -335,7 +337,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(300),
-        supports_forced_tool_choice: false,
+        supports_forced_tool_choice: true,
     },
     // Claude Opus 4.8
     //
@@ -522,7 +524,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(120),
-        supports_forced_tool_choice: false,
+        supports_forced_tool_choice: true,
     },
     // Claude Sonnet 4.6
     //

@@ -23,6 +23,10 @@ pub enum ToolChoiceRefusal {
     /// Forcing a tool call is incompatible with the thinking this request uses.
     #[error("forcing a tool call is incompatible with extended thinking")]
     ForcedToolWithThinking,
+    /// The model rejects a forced tool call outright (catalog fact or the
+    /// provider's own rejection).
+    #[error("the model does not support a forced tool choice")]
+    ModelDoesNotSupportForcedToolChoice,
     /// A forcing choice was requested but the request offers no tools.
     #[error("no tools are offered")]
     NoToolsOffered,

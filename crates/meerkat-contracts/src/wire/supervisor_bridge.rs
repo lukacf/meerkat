@@ -6404,6 +6404,7 @@ mod tests {
                     step_id: "draft".to_string(),
                 },
                 tool_overlay: Some(meerkat_core::service::PublicTurnToolOverlay {
+                    tool_choice_plan: Vec::new(),
                     allowed_tools: None,
                     blocked_tools: None,
                 }),

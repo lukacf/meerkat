@@ -5291,18 +5291,20 @@ where
         ) {
             effective_provider_params.clear_provider_native_tools();
         }
-        // A forcing tool choice binds the run's first provider call only.
-        // Later calls see the forced tool's result and choose freely (`Auto`);
-        // re-forcing them would call the tool again on every result until the
-        // turn cap. `None` (no tool calls) stays in force for the whole run.
-        if ctx.turn_count > 0
-            && effective_provider_params
-                .tool_choice
-                .as_ref()
-                .is_some_and(crate::ToolChoice::forces_a_tool_call)
-        {
-            effective_provider_params.tool_choice = None;
-        }
+        // The request-local tool choice comes only from this turn's plan:
+        // entry `k` for the run's `k`-th provider call, `Auto` once the plan
+        // is exhausted (so a forced step never re-forces itself) and for
+        // tool-free extraction. Any value that arrived with session or turn
+        // params is replaced, so no choice can persist past its request.
+        effective_provider_params.tool_choice = if in_extraction {
+            None
+        } else {
+            usize::try_from(ctx.turn_count)
+                .ok()
+                .and_then(|index| self.turn_tool_choice_plan.get(index))
+                .filter(|choice| !choice.is_auto())
+                .cloned()
+        };
         let typed_provider_params =
             Some(effective_provider_params).filter(|params| !params.is_empty());
         Ok(CallingLlmGate::Continue(CallingLlmPrepared {

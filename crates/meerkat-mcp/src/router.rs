@@ -2529,39 +2529,10 @@ mod tests {
     use meerkat_core::ExternalToolSurfaceFailureCause;
     use meerkat_core::event::ToolConfigChangeOperation;
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     fn async_connect_test_timeout() -> Duration {
         Duration::from_secs((McpConnection::DEFAULT_CONNECT_TIMEOUT_SECS as u64) + 5)
-    }
-
-    fn test_server_path() -> PathBuf {
-        if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
-            return PathBuf::from(target_dir).join("debug/mcp-test-server");
-        }
-
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-        let workspace_root = PathBuf::from(manifest_dir)
-            .parent()
-            .and_then(std::path::Path::parent)
-            .expect("workspace root")
-            .to_path_buf();
-        workspace_root
-            .join("target")
-            .join("debug")
-            .join("mcp-test-server")
-    }
-
-    fn skip_if_no_test_server() -> Option<PathBuf> {
-        let path = test_server_path();
-        if path.exists() {
-            Some(path)
-        } else {
-            eprintln!(
-                "Skipping: mcp-test-server not built. Run `cargo build -p mcp-test-server` first."
-            );
-            None
-        }
     }
 
     fn test_server_config(name: &str, path: &Path) -> McpServerConfig {
@@ -3284,9 +3255,7 @@ mod tests {
     /// fail-closed `CallStarted` rejection path.
     #[tokio::test]
     async fn call_finished_rejection_fails_closed_not_returning_result() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router =
             McpRouter::new_with_surface_handle(Arc::new(RejectCallFinishedSurfaceHandle::new()));
@@ -3904,9 +3873,7 @@ mod tests {
 
     #[tokio::test]
     async fn staged_add_remove_reload_transitions() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_handle_owner_router();
 
@@ -3943,9 +3910,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_is_immediately_hidden_on_boundary_apply() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_handle_owner_router();
         router
@@ -3965,9 +3930,7 @@ mod tests {
 
     #[tokio::test]
     async fn removing_state_rejects_new_calls_and_drains_inflight() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_handle_owner_router_with_timeout(Duration::from_secs(60));
         router
@@ -4009,9 +3972,7 @@ mod tests {
 
     #[tokio::test]
     async fn removal_timeout_forces_close_and_reports_degraded_signal() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_handle_owner_router_with_timeout(Duration::from_millis(10));
         router
@@ -4038,9 +3999,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_staged_add_is_non_blocking() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_handle_owner_router();
         router
@@ -4103,9 +4062,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_remove_add_discards_stale_generation() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_handle_owner_router();
 

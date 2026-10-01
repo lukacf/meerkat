@@ -5,6 +5,18 @@
 # Turbo-S live-smoke cohort is a Bazel sh_test suite, so its serialization and
 # retry policy belongs to scripts/buildbuddy-bazel-poc rather than here.
 
+[profile.default]
+# Archived lanes (ci.yml main-unit, scripts/ci-nextest-archive.sh): the
+# mcp-test-server fixture binary, built by scripts/mcp-test-server-fixture when
+# an archived crate dev-depends on it, rides in the archive next to the test
+# binaries' deps/, where mcp_test_server::fixture_binary() resolves it after
+# extraction. Every profile inherits this. Archives that need no fixture never
+# build it, so its absence is not an archive error; a test that needs it fails
+# on its own.
+archive.include = [
+    { path = "debug/mcp-test-server", relative-to = "target", on-missing = "ignore" },
+]
+
 [profile.ci-unit]
 # CI unit shards normally finish in a few minutes total. Bound any single test
 # that stops making progress so nextest reports its name instead of leaving an

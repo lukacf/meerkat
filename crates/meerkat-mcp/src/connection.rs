@@ -511,7 +511,6 @@ pub mod tests {
     use axum::{Json, Router};
     use rmcp::model::Content;
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::net::TcpListener;
@@ -670,43 +669,10 @@ pub mod tests {
         assert_eq!(reason, "tool returned error with no content");
     }
 
-    /// Get path to the test server binary
-    fn test_server_path() -> PathBuf {
-        if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
-            return PathBuf::from(target_dir).join("debug/mcp-test-server");
-        }
-
-        // Build path relative to workspace root
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-        let workspace_root = PathBuf::from(manifest_dir)
-            .parent()
-            .and_then(Path::parent)
-            .unwrap()
-            .to_path_buf();
-        workspace_root
-            .join("target")
-            .join("debug")
-            .join("mcp-test-server")
-    }
-
-    fn skip_if_no_test_server() -> Option<PathBuf> {
-        let path = test_server_path();
-        if path.exists() {
-            Some(path)
-        } else {
-            eprintln!(
-                "Skipping: mcp-test-server not built. Run `cargo build -p mcp-test-server` first."
-            );
-            None
-        }
-    }
-
     /// RCT: Verify MCP initialize handshake works
     #[tokio::test]
     async fn test_mcp_initialize_handshake() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let config = McpServerConfig::stdio(
             "test-server",
@@ -733,9 +699,7 @@ pub mod tests {
     /// RCT: Verify tools/list schema parsing
     #[tokio::test]
     async fn test_mcp_tools_list_schema_parse() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let config = McpServerConfig::stdio(
             "test-server",
@@ -798,9 +762,7 @@ pub mod tests {
     /// RCT: Verify tools/call round-trip (returns Vec<ContentBlock>)
     #[tokio::test]
     async fn test_mcp_tools_call_round_trip() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let config = McpServerConfig::stdio(
             "test-server",

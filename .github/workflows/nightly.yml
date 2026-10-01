@@ -125,7 +125,11 @@ jobs:
       # meerkat-rpc gates its WebRTC router tests on `live-webrtc`, which no
       # default feature set enables, so `make test-unit` compiles them out.
       - name: meerkat-rpc unit tests (all features)
-        run: ./scripts/repo-cargo nextest run -p meerkat-rpc --all-features --lib --no-fail-fast --show-progress none --status-level none --final-status-level fail
+        run: |
+          # meerkat-rpc's MCP boundary tests spawn this exact fixture and fail without it.
+          MEERKAT_MCP_TEST_SERVER="$(scripts/mcp-test-server-fixture)"
+          export MEERKAT_MCP_TEST_SERVER
+          ./scripts/repo-cargo nextest run -p meerkat-rpc --all-features --lib --no-fail-fast --show-progress none --status-level none --final-status-level fail
 
   workspace-int:
     name: Workspace integration-fast tests

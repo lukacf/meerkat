@@ -18095,34 +18095,15 @@ mod tests {
     }
 
     #[cfg(feature = "mcp")]
-    fn mcp_test_server_path() -> PathBuf {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-        let workspace_root = PathBuf::from(manifest_dir)
-            .parent()
-            .and_then(std::path::Path::parent)
-            .expect("workspace root")
-            .to_path_buf();
-        workspace_root
-            .join("target")
-            .join("debug")
-            .join("mcp-test-server")
-    }
-
-    #[cfg(feature = "mcp")]
-    fn maybe_mcp_server_config(server_name: &str) -> Option<McpServerConfig> {
-        let path = mcp_test_server_path();
-        if !path.exists() {
-            eprintln!(
-                "Skipping MCP runtime boundary test: mcp-test-server not built. Run `cargo build -p mcp-test-server` first."
-            );
-            return None;
-        }
-        Some(McpServerConfig::stdio(
+    fn mcp_server_config(server_name: &str) -> McpServerConfig {
+        McpServerConfig::stdio(
             server_name,
-            path.to_string_lossy().to_string(),
+            mcp_test_server::fixture_binary()
+                .to_string_lossy()
+                .to_string(),
             Vec::new(),
             HashMap::new(),
-        ))
+        )
     }
 
     #[tokio::test]
@@ -25788,10 +25769,9 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[tokio::test]
+    #[ignore = "flaky under load (8/30): Remove event missing at the remove boundary, #1461"]
     async fn start_turn_applies_staged_mcp_remove_and_reload_at_turn_boundary() {
-        let Some(server_config) = maybe_mcp_server_config("test-server") else {
-            return;
-        };
+        let server_config = mcp_server_config("test-server");
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
@@ -25853,9 +25833,7 @@ mod tests {
     #[cfg(feature = "mcp")]
     #[tokio::test]
     async fn async_mcp_removal_timeout_is_emitted_on_next_boundary() {
-        let Some(server_config) = maybe_mcp_server_config("timeout-server") else {
-            return;
-        };
+        let server_config = mcp_server_config("timeout-server");
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
@@ -25980,14 +25958,10 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[tokio::test]
-    #[ignore = "integration-real: requires mcp-test-server binary and real process spawning"]
+    #[ignore = "flaky under load (11/30): depends on the 100 ms MCP drain poll, #1461"]
     async fn staged_ops_remain_boundary_gated_while_background_drain_runs() {
-        let Some(server1_config) = maybe_mcp_server_config("server-draining") else {
-            return;
-        };
-        let Some(server2_config) = maybe_mcp_server_config("server-staged") else {
-            return;
-        };
+        let server1_config = mcp_server_config("server-draining");
+        let server2_config = mcp_server_config("server-staged");
 
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
@@ -26130,11 +26104,9 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[tokio::test]
-    #[ignore = "integration-real: requires mcp-test-server binary and real process spawning"]
+    #[ignore = "fails under load (3/3 on 2 cores): fixed sleep on the 100 ms MCP drain poll, #1461"]
     async fn queued_lifecycle_actions_survive_boundary_apply_failure() {
-        let Some(server_config) = maybe_mcp_server_config("lossless-server") else {
-            return;
-        };
+        let server_config = mcp_server_config("lossless-server");
 
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);

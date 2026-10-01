@@ -5618,19 +5618,19 @@ Next ==
 
 WitnessNext_revision_supersede_route ==
     \/ DeliverQueuedRoute
-    \/ \E arg_trigger_key \in TriggerKeyValues : \E arg_target_binding_key \in TargetBindingIdValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : \E arg_planning_horizon_days \in 0..2 : \E arg_planning_horizon_occurrences \in 0..2 : \E arg_at_utc_ms \in 0..2 : schedule_ReviseActive(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy, arg_planning_horizon_days, arg_planning_horizon_occurrences, arg_at_utc_ms)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "schedule" /\ witness_packet.variant = "Revise" /\ schedule_ReviseActive(witness_packet.payload.trigger_key, witness_packet.payload.target_binding_key, witness_packet.payload.misfire_policy, witness_packet.payload.overlap_policy, witness_packet.payload.missing_target_policy, witness_packet.payload.planning_horizon_days, witness_packet.payload.planning_horizon_occurrences, witness_packet.payload.at_utc_ms)
     \/ WitnessSatisfiedStutter_revision_supersede_route
     \/ WitnessInjectNext_revision_supersede_route
 
 WitnessNext_occurrence_supersede_ack_route ==
     \/ DeliverQueuedRoute
-    \/ \E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "occurrence" /\ witness_packet.variant = "Supersede" /\ occurrence_SupersedePendingOrLive(witness_packet.payload.superseded_by_revision, witness_packet.payload.at_utc_ms)
     \/ WitnessSatisfiedStutter_occurrence_supersede_ack_route
     \/ WitnessInjectNext_occurrence_supersede_ack_route
 
 WitnessNext_pause_resume_without_revision ==
-    \/ \E arg_at_utc_ms \in 0..2 : schedule_PauseActiveOrPaused(arg_at_utc_ms)
-    \/ \E arg_at_utc_ms \in 0..2 : schedule_ResumeActiveOrPaused(arg_at_utc_ms)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "schedule" /\ witness_packet.variant = "Pause" /\ schedule_PauseActiveOrPaused(witness_packet.payload.at_utc_ms)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "schedule" /\ witness_packet.variant = "Resume" /\ schedule_ResumeActiveOrPaused(witness_packet.payload.at_utc_ms)
     \/ WitnessSatisfiedStutter_pause_resume_without_revision
     \/ WitnessInjectNext_pause_resume_without_revision
 

@@ -78588,7 +78588,7 @@ Next ==
 
 WitnessNext_layer_terminal_feedback ==
     \/ DeliverQueuedRoute
-    \/ \E arg_run_id \in RunIdValues : \E arg_status \in FlowRunStatusValues : layer_mob_ClassifyFlowRunPublicResultSuccessRunning(arg_run_id, arg_status)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "layer_mob" /\ witness_packet.variant = "ClassifyFlowRunPublicResult" /\ layer_mob_ClassifyFlowRunPublicResultSuccessRunning(witness_packet.payload.run_id, witness_packet.payload.status)
     \/ WitnessSatisfiedStutter_layer_terminal_feedback
     \/ WitnessInjectNext_layer_terminal_feedback
 

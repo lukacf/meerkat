@@ -2032,7 +2032,7 @@ fn seam_begin_spawn_exec_input() -> CompositionWitnessInput {
             witness_field("agent_identity", Expr::String("agentidentity_1".into())),
             witness_field("agent_runtime_id", Expr::String("agentruntimeid_1".into())),
             witness_field("fence_token", Expr::U64(1)),
-            witness_field("generation", Expr::U64(1)),
+            witness_field("generation", Expr::U64(0)),
             witness_field("profile_material_digest", Expr::String("digest_1".into())),
             witness_field("external_addressable", Expr::Bool(true)),
             witness_field(
@@ -2072,7 +2072,7 @@ fn seam_commit_spawn_membership_input() -> CompositionWitnessInput {
             witness_field("agent_identity", Expr::String("agentidentity_1".into())),
             witness_field("agent_runtime_id", Expr::String("agentruntimeid_1".into())),
             witness_field("fence_token", Expr::U64(1)),
-            witness_field("generation", Expr::U64(1)),
+            witness_field("generation", Expr::U64(0)),
             witness_field("profile_material_digest", Expr::String("digest_1".into())),
             witness_field("external_addressable", Expr::Bool(true)),
             witness_field(
@@ -2116,7 +2116,7 @@ fn seam_retire_input() -> CompositionWitnessInput {
             witness_field("mob_id", Expr::String("mobid_1".into())),
             witness_field("agent_runtime_id", Expr::String("agentruntimeid_1".into())),
             witness_field("agent_identity", Expr::String("agentidentity_1".into())),
-            witness_field("generation", Expr::U64(1)),
+            witness_field("generation", Expr::U64(0)),
             witness_field("releasing", some_string("sessionid_1")),
             witness_field("session_id", some_string("sessionid_1")),
         ],
@@ -2138,6 +2138,7 @@ fn basic_round_trip_witness() -> CompositionWitness {
     CompositionWitness {
         name: witness_id("basic_round_trip"),
         preload_inputs: vec![
+            witness_input("meerkat", "Initialize", vec![]),
             seam_runtime_session_registration_input(),
             seam_authorize_spawn_profile_input(),
             seam_begin_spawn_exec_input(),
@@ -2152,6 +2153,7 @@ fn basic_round_trip_witness() -> CompositionWitness {
         expected_scheduler_rules: vec![],
         expected_states: vec![],
         expected_transitions: vec![
+            witness_transition("meerkat", "Initialize"),
             witness_transition("meerkat", "RegisterSessionIdle"),
             witness_transition("mob", "AuthorizeSpawnProfileRunning"),
             // Machine-driven spawn phase ladder: opener -> commit. The membership
@@ -2171,7 +2173,7 @@ fn basic_round_trip_witness() -> CompositionWitness {
         // gone), and BeginSpawnExecFresh emits nothing. Path effect total = 7
         // (Authorize 1 + Commit 4 + PrepareBindings 1 + SubmitWork 1); steps ~15
         // (4 injects + 8 transitions + 3 route deliveries).
-        state_limits: meerkat_mob_seam_witness_limits(16, 3, 9),
+        state_limits: meerkat_mob_seam_witness_limits(19, 3, 11),
     }
 }
 
@@ -2179,6 +2181,7 @@ fn retire_runtime_path_witness() -> CompositionWitness {
     CompositionWitness {
         name: witness_id("retire_runtime_path"),
         preload_inputs: vec![
+            witness_input("meerkat", "Initialize", vec![]),
             seam_runtime_session_registration_input(),
             seam_authorize_spawn_profile_input(),
             seam_begin_spawn_exec_input(),
@@ -2192,6 +2195,7 @@ fn retire_runtime_path_witness() -> CompositionWitness {
         expected_scheduler_rules: vec![],
         expected_states: vec![],
         expected_transitions: vec![
+            witness_transition("meerkat", "Initialize"),
             witness_transition("meerkat", "RegisterSessionIdle"),
             witness_transition("mob", "AuthorizeSpawnProfileRunning"),
             // Machine-driven spawn phase ladder (see basic_round_trip_witness).
@@ -2208,7 +2212,7 @@ fn retire_runtime_path_witness() -> CompositionWitness {
         // Path effect total = 13 (Authorize 1 + Commit 4 + PrepareBindings 1 +
         // RetireRunningReleasing 5 + RetireRequested 1 + ObserveRetired 1); steps
         // ~17 (4 injects + 9 transitions + 4 route deliveries).
-        state_limits: meerkat_mob_seam_witness_limits(18, 4, 14),
+        state_limits: meerkat_mob_seam_witness_limits(21, 4, 16),
     }
 }
 
@@ -2216,10 +2220,19 @@ fn destroy_runtime_path_witness() -> CompositionWitness {
     CompositionWitness {
         name: witness_id("destroy_runtime_path"),
         preload_inputs: vec![
+            witness_input("meerkat", "Initialize", vec![]),
             seam_runtime_session_registration_input(),
             seam_authorize_spawn_profile_input(),
             seam_begin_spawn_exec_input(),
             seam_commit_spawn_membership_input(),
+            witness_input(
+                "mob",
+                "BeginPlacedCompletionLifecycleQuiesce",
+                vec![witness_field(
+                    "intent",
+                    named_variant("PlacedCompletionLifecycleIntentKind", "Destroy"),
+                )],
+            ),
             seam_destroy_mob_signal(),
         ],
         expected_routes: vec![
@@ -2229,6 +2242,7 @@ fn destroy_runtime_path_witness() -> CompositionWitness {
         expected_scheduler_rules: vec![],
         expected_states: vec![],
         expected_transitions: vec![
+            witness_transition("meerkat", "Initialize"),
             witness_transition("meerkat", "RegisterSessionIdle"),
             witness_transition("mob", "AuthorizeSpawnProfileRunning"),
             // Machine-driven spawn phase ladder (see basic_round_trip_witness).
@@ -2236,6 +2250,7 @@ fn destroy_runtime_path_witness() -> CompositionWitness {
             witness_transition("mob", "CommitSpawnMembershipFresh"),
             witness_transition("meerkat", "PrepareBindingsIdle"),
             witness_transition("mob", "ObserveRuntimeReady"),
+            witness_transition("mob", "BeginPlacedCompletionLifecycleQuiesceFresh"),
             witness_transition("mob", "DestroyMob"),
             witness_transition("meerkat", "Destroy"),
         ],
@@ -2244,7 +2259,7 @@ fn destroy_runtime_path_witness() -> CompositionWitness {
         // Path effect total = 8 (Authorize 1 + Commit 4 + PrepareBindings 1 +
         // DestroyMob 1 + Destroy 1); steps ~16 (4 injects + 8 transitions + 4
         // route deliveries).
-        state_limits: meerkat_mob_seam_witness_limits(17, 4, 9),
+        state_limits: meerkat_mob_seam_witness_limits(22, 4, 13),
     }
 }
 
@@ -2657,7 +2672,7 @@ fn meerkat_mob_seam_witness_limits(
         // ladder adds 1 preload inject (BeginSpawnExec, before CommitSpawnMembership)
         // and 1 transition firing (BeginSpawnExecFresh) over the old single Spawn.
         step_limit,
-        pending_input_limit: 2,
+        pending_input_limit: 5,
         pending_route_limit: 1,
         delivered_route_limit,
         emitted_effect_limit,

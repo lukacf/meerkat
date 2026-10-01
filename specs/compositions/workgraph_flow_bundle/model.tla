@@ -1574,7 +1574,7 @@ Next ==
     \/ InjectNext
 
 WitnessNext_workgraph_flow_success_closure ==
-    \/ \E arg_binding_id \in StringValues : \E arg_run_id \in StringValues : work_execution_BindExecution(arg_binding_id, arg_run_id)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "work_execution" /\ witness_packet.variant = "Bind" /\ work_execution_BindExecution(witness_packet.payload.binding_id, witness_packet.payload.run_id)
     \/ work_execution_ObserveCompletedFlow
     \/ work_execution_CommitEvidenceProjection
     \/ work_execution_CommitWorkClosure
@@ -1588,8 +1588,8 @@ WitnessNext_workgraph_flow_success_closure ==
     \/ WitnessInjectNext_workgraph_flow_success_closure
 
 WitnessNext_workgraph_flow_failure_evidence ==
-    \/ \E arg_binding_id \in StringValues : \E arg_run_id \in StringValues : work_execution_BindExecution(arg_binding_id, arg_run_id)
-    \/ \E arg_detail \in OptionStringValues : work_execution_ObserveFailedFlow(arg_detail)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "work_execution" /\ witness_packet.variant = "Bind" /\ work_execution_BindExecution(witness_packet.payload.binding_id, witness_packet.payload.run_id)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "work_execution" /\ witness_packet.variant = "ObserveFlowFailed" /\ work_execution_ObserveFailedFlow(witness_packet.payload.detail)
     \/ work_execution_CommitFlowFailureEvidenceProjection
     \/ OwnerFeedback_work_execution_work_execution_failure_evidence_projection_ConfirmFlowFailureEvidenceProjected
     \/ OwnerFeedback_work_execution_work_execution_flow_launch_ObserveFlowFailed
@@ -1600,8 +1600,8 @@ WitnessNext_workgraph_flow_failure_evidence ==
     \/ WitnessInjectNext_workgraph_flow_failure_evidence
 
 WitnessNext_workgraph_flow_cancellation_evidence ==
-    \/ \E arg_binding_id \in StringValues : \E arg_run_id \in StringValues : work_execution_BindExecution(arg_binding_id, arg_run_id)
-    \/ \E arg_detail \in OptionStringValues : work_execution_ObserveCanceledFlow(arg_detail)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "work_execution" /\ witness_packet.variant = "Bind" /\ work_execution_BindExecution(witness_packet.payload.binding_id, witness_packet.payload.run_id)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "work_execution" /\ witness_packet.variant = "ObserveFlowCanceled" /\ work_execution_ObserveCanceledFlow(witness_packet.payload.detail)
     \/ work_execution_CommitFlowCancellationEvidenceProjection
     \/ OwnerFeedback_work_execution_work_execution_cancellation_evidence_projection_ConfirmFlowCancellationEvidenceProjected
     \/ OwnerFeedback_work_execution_work_execution_flow_launch_ObserveFlowCanceled
@@ -1612,9 +1612,9 @@ WitnessNext_workgraph_flow_cancellation_evidence ==
     \/ WitnessInjectNext_workgraph_flow_cancellation_evidence
 
 WitnessNext_workgraph_flow_uncertain_abandonment ==
-    \/ \E arg_binding_id \in StringValues : \E arg_run_id \in StringValues : work_execution_BindExecution(arg_binding_id, arg_run_id)
-    \/ \E arg_detail \in StringValues : work_execution_RecordUncertainLaunch(arg_detail)
-    \/ \E arg_detail \in StringValues : work_execution_FailLaunch(arg_detail)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "work_execution" /\ witness_packet.variant = "Bind" /\ work_execution_BindExecution(witness_packet.payload.binding_id, witness_packet.payload.run_id)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "work_execution" /\ witness_packet.variant = "MarkLaunchUncertain" /\ work_execution_RecordUncertainLaunch(witness_packet.payload.detail)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "work_execution" /\ witness_packet.variant = "ResolveLaunchFailed" /\ work_execution_FailLaunch(witness_packet.payload.detail)
     \/ work_execution_CommitLaunchFailureEvidenceProjection
     \/ OwnerFeedback_work_execution_work_execution_flow_launch_MarkLaunchUncertain
     \/ OwnerFeedback_work_execution_work_execution_launch_failure_evidence_projection_ConfirmLaunchFailureEvidenceProjected
@@ -1623,8 +1623,8 @@ WitnessNext_workgraph_flow_uncertain_abandonment ==
     \/ WitnessInjectNext_workgraph_flow_uncertain_abandonment
 
 WitnessNext_workgraph_flow_launch_quarantine ==
-    \/ \E arg_binding_id \in StringValues : \E arg_run_id \in StringValues : work_execution_BindExecution(arg_binding_id, arg_run_id)
-    \/ \E arg_detail \in StringValues : work_execution_QuarantineLaunch(arg_detail)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "work_execution" /\ witness_packet.variant = "Bind" /\ work_execution_BindExecution(witness_packet.payload.binding_id, witness_packet.payload.run_id)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "work_execution" /\ witness_packet.variant = "QuarantineLaunch" /\ work_execution_QuarantineLaunch(witness_packet.payload.detail)
     \/ work_execution_ObserveCompletedFlow
     \/ work_execution_CommitEvidenceProjection
     \/ work_execution_CommitWorkClosure

@@ -154,6 +154,10 @@ TLC_WORKERS="${tlc_workers}" "${live_context_outbox_audit}" "${LIVE_CONTEXT_OUTB
 # model is very large and a full ci.cfg state-space sweep does not yet fit the
 # CI budget. The per-machine specs still model-check, and `machine-check-drift`
 # (below + on the default cargo CI lane) keeps the generated kernels honest.
+# The skip covers only the full ci.cfg sweep: each skipped composition's
+# scripted witnesses still run with the completion proof (the meerkat_mob_seam
+# runtime-binding, retire and destroy round trips, and adaptive's
+# layer_terminal_feedback, which is also proven directly above).
 #
 # `adaptive_mob_bundle` has a canonical route for layer-terminal feedback,
 # generated driver, checked-in witness config, ci.cfg structural invariant, and

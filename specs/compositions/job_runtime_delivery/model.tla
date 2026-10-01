@@ -2048,32 +2048,32 @@ Next ==
 
 WitnessNext_runtime_delivery_first_commit ==
     \/ DeliverQueuedRoute
-    \/ \E arg_job_id \in StringValues : \E arg_restart_class \in DetachedJobRestartClassValues : job_SubmitQueued(arg_job_id, arg_restart_class)
-    \/ \E arg_attempt_id \in StringValues : \E arg_worker_id \in StringValues : \E arg_claimed_at_ms \in 0..2 : \E arg_lease_expires_at_ms \in 0..2 : \E arg_runner_handle \in StringValues : job_ClaimQueued(arg_attempt_id, arg_worker_id, arg_claimed_at_ms, arg_lease_expires_at_ms, arg_runner_handle)
-    \/ \E arg_attempt_id \in StringValues : \E arg_fence \in 0..2 : \E arg_completed_at_ms \in 0..2 : job_CompleteRunningAttempt(arg_attempt_id, arg_fence, arg_completed_at_ms)
-    \/ \E arg_delivery_id \in StringValues : \E arg_source_sequence \in 0..2 : runtime_delivery_CommitNewDelivery(arg_delivery_id, arg_source_sequence)
-    \/ \E arg_delivery_id \in StringValues : \E arg_delivery_sequence \in 0..2 : job_ApplySucceededDelivery(arg_delivery_id, arg_delivery_sequence)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "Submit" /\ job_SubmitQueued(witness_packet.payload.job_id, witness_packet.payload.restart_class)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "ClaimAttempt" /\ job_ClaimQueued(witness_packet.payload.attempt_id, witness_packet.payload.worker_id, witness_packet.payload.claimed_at_ms, witness_packet.payload.lease_expires_at_ms, witness_packet.payload.runner_handle)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "CompleteAttempt" /\ job_CompleteRunningAttempt(witness_packet.payload.attempt_id, witness_packet.payload.fence, witness_packet.payload.completed_at_ms)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "runtime_delivery" /\ witness_packet.variant = "CommitDelivery" /\ runtime_delivery_CommitNewDelivery(witness_packet.payload.delivery_id, witness_packet.payload.source_sequence)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "MarkDeliveryApplied" /\ job_ApplySucceededDelivery(witness_packet.payload.delivery_id, witness_packet.payload.delivery_sequence)
     \/ WitnessSatisfiedStutter_runtime_delivery_first_commit
     \/ WitnessInjectNext_runtime_delivery_first_commit
 
 WitnessNext_runtime_delivery_notification_commit ==
     \/ DeliverQueuedRoute
-    \/ \E arg_job_id \in StringValues : \E arg_restart_class \in DetachedJobRestartClassValues : job_SubmitQueued(arg_job_id, arg_restart_class)
-    \/ \E arg_attempt_id \in StringValues : \E arg_worker_id \in StringValues : \E arg_claimed_at_ms \in 0..2 : \E arg_lease_expires_at_ms \in 0..2 : \E arg_runner_handle \in StringValues : job_ClaimQueued(arg_attempt_id, arg_worker_id, arg_claimed_at_ms, arg_lease_expires_at_ms, arg_runner_handle)
-    \/ \E arg_attempt_id \in StringValues : \E arg_fence \in 0..2 : \E arg_notification_id \in StringValues : \E arg_idempotency_key \in StringValues : \E arg_runtime_delivery_id \in StringValues : \E arg_observed_at_ms \in 0..2 : job_EmitRunningNotification(arg_attempt_id, arg_fence, arg_notification_id, arg_idempotency_key, arg_runtime_delivery_id, arg_observed_at_ms)
-    \/ \E arg_delivery_id \in StringValues : \E arg_source_sequence \in 0..2 : runtime_delivery_CommitNewDelivery(arg_delivery_id, arg_source_sequence)
-    \/ \E arg_delivery_id \in StringValues : \E arg_delivery_sequence \in 0..2 : job_ApplyRunningNotificationDelivery(arg_delivery_id, arg_delivery_sequence)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "Submit" /\ job_SubmitQueued(witness_packet.payload.job_id, witness_packet.payload.restart_class)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "ClaimAttempt" /\ job_ClaimQueued(witness_packet.payload.attempt_id, witness_packet.payload.worker_id, witness_packet.payload.claimed_at_ms, witness_packet.payload.lease_expires_at_ms, witness_packet.payload.runner_handle)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "EmitNotification" /\ job_EmitRunningNotification(witness_packet.payload.attempt_id, witness_packet.payload.fence, witness_packet.payload.notification_id, witness_packet.payload.idempotency_key, witness_packet.payload.runtime_delivery_id, witness_packet.payload.observed_at_ms)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "runtime_delivery" /\ witness_packet.variant = "CommitDelivery" /\ runtime_delivery_CommitNewDelivery(witness_packet.payload.delivery_id, witness_packet.payload.source_sequence)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "MarkDeliveryApplied" /\ job_ApplyRunningNotificationDelivery(witness_packet.payload.delivery_id, witness_packet.payload.delivery_sequence)
     \/ WitnessSatisfiedStutter_runtime_delivery_notification_commit
     \/ WitnessInjectNext_runtime_delivery_notification_commit
 
 WitnessNext_runtime_delivery_crash_retry_reuse ==
     \/ DeliverQueuedRoute
-    \/ \E arg_delivery_id \in StringValues : \E arg_source_sequence \in 0..2 : runtime_delivery_CommitNewDelivery(arg_delivery_id, arg_source_sequence)
-    \/ \E arg_job_id \in StringValues : \E arg_restart_class \in DetachedJobRestartClassValues : job_SubmitQueued(arg_job_id, arg_restart_class)
-    \/ \E arg_attempt_id \in StringValues : \E arg_worker_id \in StringValues : \E arg_claimed_at_ms \in 0..2 : \E arg_lease_expires_at_ms \in 0..2 : \E arg_runner_handle \in StringValues : job_ClaimQueued(arg_attempt_id, arg_worker_id, arg_claimed_at_ms, arg_lease_expires_at_ms, arg_runner_handle)
-    \/ \E arg_attempt_id \in StringValues : \E arg_fence \in 0..2 : \E arg_completed_at_ms \in 0..2 : job_CompleteRunningAttempt(arg_attempt_id, arg_fence, arg_completed_at_ms)
-    \/ \E arg_delivery_id \in StringValues : \E arg_source_sequence \in 0..2 : runtime_delivery_ReuseCommittedDelivery(arg_delivery_id, arg_source_sequence)
-    \/ \E arg_delivery_id \in StringValues : \E arg_delivery_sequence \in 0..2 : job_ApplySucceededDelivery(arg_delivery_id, arg_delivery_sequence)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "runtime_delivery" /\ witness_packet.variant = "CommitDelivery" /\ runtime_delivery_CommitNewDelivery(witness_packet.payload.delivery_id, witness_packet.payload.source_sequence)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "Submit" /\ job_SubmitQueued(witness_packet.payload.job_id, witness_packet.payload.restart_class)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "ClaimAttempt" /\ job_ClaimQueued(witness_packet.payload.attempt_id, witness_packet.payload.worker_id, witness_packet.payload.claimed_at_ms, witness_packet.payload.lease_expires_at_ms, witness_packet.payload.runner_handle)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "CompleteAttempt" /\ job_CompleteRunningAttempt(witness_packet.payload.attempt_id, witness_packet.payload.fence, witness_packet.payload.completed_at_ms)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "runtime_delivery" /\ witness_packet.variant = "CommitDelivery" /\ runtime_delivery_ReuseCommittedDelivery(witness_packet.payload.delivery_id, witness_packet.payload.source_sequence)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "MarkDeliveryApplied" /\ job_ApplySucceededDelivery(witness_packet.payload.delivery_id, witness_packet.payload.delivery_sequence)
     \/ WitnessSatisfiedStutter_runtime_delivery_crash_retry_reuse
     \/ WitnessInjectNext_runtime_delivery_crash_retry_reuse
 

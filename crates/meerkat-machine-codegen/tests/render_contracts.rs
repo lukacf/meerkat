@@ -388,11 +388,16 @@ fn renders_composition_witness_fairness_in_tlc_safe_chunks() {
             && seam_witness_next.contains("WitnessSatisfiedStutter_basic_round_trip"),
         "meerkat_mob_seam witness must be scripted through concrete seam transitions, not CoreNext:\n{seam_witness_next}"
     );
+    // MeerkatMachine starts in Initializing, so the script first delivers the
+    // Initialize signal, then ordinary session registration (never a
+    // phase-shaped recovery input).
     assert!(
         rendered.contains(
-            "WitnessInit_basic_round_trip ==\n    /\\ BaseInit\n    /\\ pending_inputs = <<[machine |-> \"meerkat\", variant |-> \"RegisterSession\""
+            "WitnessInit_basic_round_trip ==\n    /\\ BaseInit\n    /\\ pending_inputs = <<[machine |-> \"meerkat\", variant |-> \"Initialize\""
+        ) && rendered.contains(
+            "/\\ witness_remaining_script_inputs = <<[machine |-> \"meerkat\", variant |-> \"RegisterSession\""
         ),
-        "seam witness must preload ordinary session registration rather than phase-shaped recovery"
+        "seam witness must initialize the meerkat machine, then preload ordinary session registration rather than phase-shaped recovery"
     );
     let seam_destroy_witness_next = rendered
         .split("WitnessNext_destroy_runtime_path ==")

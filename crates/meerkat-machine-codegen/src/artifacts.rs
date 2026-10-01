@@ -7753,7 +7753,27 @@ impl<'a> CompositionTlaCompiler<'a> {
                 machine: expected.machine.to_string(),
                 transition: expected.transition.to_string(),
             })?;
-        Ok(self.machine_transition_call(expected.machine.as_str(), transition))
+        if transition.on.bindings().is_empty() {
+            return Ok(self.machine_transition_name(expected.machine.as_str(), transition));
+        }
+        // A scripted witness supplies exact typed packets. Sampling the ordinary
+        // exploration domains again can make those packets impossible to consume
+        // (for example, revisions 3 and 4 outside the bounded 0..2 sample).
+        // Reuse the same guarded action with the queued payload, without changing
+        // ordinary exploration bounds or bypassing action admission checks.
+        let args = transition
+            .on
+            .bindings()
+            .iter()
+            .map(|binding| format!("witness_packet.payload.{}", tla_ident(binding)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(format!(
+            "\\E witness_packet \\in SeqElements(pending_inputs) : /\\ witness_packet.machine = {} /\\ witness_packet.variant = {} /\\ {}({args})",
+            tla_string(expected.machine.as_str()),
+            tla_string(transition.on.variant_str()),
+            self.machine_transition_name(expected.machine.as_str(), transition),
+        ))
     }
 
     fn witness_fairness_clauses(

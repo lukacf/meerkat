@@ -144,6 +144,11 @@ them.
   gate now writes partial evidence labeled with its skipped set, reused only
   by a push that skips the same hooks. The stamp format moves to v2, so all
   earlier (ambiguous) stamps are ignored.
+- Pull-request CI classifies changed paths against the base-branch parent of
+  the checked-out `refs/pull/N/merge` commit instead of the event payload's
+  base SHA, which is read when the run is queued and goes stale when main
+  advances before checkout (over-testing today, under-testing in the reverse
+  race). A pull-request checkout that is not a two-parent merge fails closed.
 - Mob shutdown no longer fails intermittently with `failed to materialize
   committed HeadCanonical metadata ... metadata read authority is no longer
   current`. The shutdown visibility observation reads session metadata

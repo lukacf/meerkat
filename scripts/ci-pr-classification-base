@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Resolve the base revision the CI changed-path classifier diffs against.
+#
+# Usage: ci-pr-classification-base <event-name> <payload-base-sha>
+#
+# A pull_request run checks out refs/pull/N/merge: a merge commit whose first
+# parent is the base-branch tip GitHub merged the PR into. The event payload's
+# base.sha is read when the run is queued and can be older (or newer) than that
+# tip, so diffing against it classifies main's own intervening changes as the
+# PR's (over-test) or misses changes (under-test). For pull_request, the exact
+# base is HEAD^1 of the checked-out merge commit. A pull_request checkout that
+# is not a two-parent merge fails closed: the caller has no trustworthy base.
+# Other events (push) keep the payload base unchanged.
+set -euo pipefail
+
+if [[ "$#" -ne 2 ]]; then
+  echo "usage: ci-pr-classification-base <event-name> <payload-base-sha>" >&2
+  exit 2
+fi
+event_name="$1"
+payload_base="$2"
+
+if [[ "$event_name" != "pull_request" ]]; then
+  printf '%s\n' "$payload_base"
+  exit 0
+fi
+
+parents="$(git rev-list --parents -n 1 HEAD)"
+read -r -a parent_fields <<<"$parents"
+if [[ "${#parent_fields[@]}" -ne 3 ]]; then
+  echo "pull_request checkout HEAD ($(git rev-parse HEAD)) is not a two-parent merge commit;" >&2
+  echo "refusing to classify against the payload base ${payload_base}." >&2
+  exit 1
+fi
+merge_base="${parent_fields[1]}"
+if [[ -n "$payload_base" && "$payload_base" != "$merge_base" ]]; then
+  echo "note: payload base ${payload_base} differs from the merge commit's base parent ${merge_base}; classifying against ${merge_base}." >&2
+fi
+printf '%s\n' "$merge_base"

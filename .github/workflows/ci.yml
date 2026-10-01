@@ -196,11 +196,17 @@ jobs:
               github.event_name == 'push' && github.event.before ||
               ''
             }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          # A pull_request checkout is refs/pull/N/merge; classify against its
+          # base-branch parent, not the payload base read when the run was
+          # queued (main may have moved in between). Fails closed if the
+          # checkout is not the expected merge commit.
+          classification_base="$(scripts/ci-pr-classification-base "${EVENT_NAME}" "${BASE_SHA}")"
           # The classifier exits non-zero rather than emit an empty plan for a
           # build-relevant change; a failure here fails the CI gate.
-          node scripts/ci-cargo-lanes.mjs --format github --base "${BASE_SHA}" --head HEAD \
+          node scripts/ci-cargo-lanes.mjs --format github --base "${classification_base}" --head HEAD \
             | tee "${RUNNER_TEMP}/ci-cargo-lanes.txt" >> "${GITHUB_OUTPUT}"
           grep -vE '^(closure_flags|shard_matrix|unit_shard_matrix|main_unit_shard_matrix|main_archive_build_matrix|main_archive_run_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
 

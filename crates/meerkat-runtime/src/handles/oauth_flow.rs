@@ -486,11 +486,44 @@ impl RuntimeOAuthFlowHandle {
         )
     }
 
-    fn expire_pruned_flows(&self) {
-        self.expire_collected_flows(OAuthPrunedFlows {
+    fn sync_persisted_payloads(&self, operation: &'static str) -> Result<(), OAuthFlowError> {
+        let expired_durable_payloads = self.sync_registry_payloads(operation)?;
+        let pruned = OAuthPrunedFlows {
             browser: self.registry.prune_expired_browser_flows(),
             device: self.registry.prune_expired_device_flows(),
-        });
+        };
+        let expired_payloads =
+            expired_durable_payloads || !pruned.browser.is_empty() || !pruned.device.is_empty();
+        let removed_browser = pruned
+            .browser
+            .iter()
+            .map(|(state, target)| browser_snapshot_key(target, state))
+            .collect::<Vec<_>>();
+        let removed_device = pruned
+            .device
+            .iter()
+            .map(|(code, target)| device_snapshot_key(target, code))
+            .collect::<Vec<_>>();
+        self.expire_collected_flows(pruned);
+        if expired_payloads {
+            // A refused verify or repeated exact retirement can return before
+            // consume/expire reaches its normal persistence path. Retire the
+            // private payload here too, through the existing atomic merge.
+            // Inspecting durable expiry above also makes a failed write
+            // retryable after the local registry has already been pruned.
+            // An empty local projection leaves every unrelated live payload
+            // and its original deadline unchanged, including concurrent admits.
+            persist_registry_snapshot(
+                &OAuthFlowRegistrySnapshot::default(),
+                &self.store,
+                operation,
+                &removed_browser,
+                &removed_device,
+                current_time_millis(),
+                SnapshotPersistPolicy::merge(),
+            )?;
+        }
+        Ok(())
     }
 
     fn retain_registry_payloads_with_lifecycle(
@@ -702,9 +735,9 @@ impl RuntimeOAuthFlowHandle {
         );
     }
 
-    fn sync_persisted_payloads(&self, operation: &'static str) -> Result<(), OAuthFlowError> {
+    fn sync_registry_payloads(&self, operation: &'static str) -> Result<bool, OAuthFlowError> {
         let Some(store) = self.store() else {
-            return Ok(());
+            return Ok(false);
         };
         let snapshot =
             match store.load_auth_oauth_flow_snapshot().map_err(|err| {
@@ -806,7 +839,14 @@ impl RuntimeOAuthFlowHandle {
         {
             self.restore_device_payload(persisted, now_millis, now_instant);
         }
-        Ok(())
+        Ok(snapshot
+            .browser
+            .iter()
+            .any(|flow| flow.expires_at_millis <= now_millis)
+            || snapshot
+                .device
+                .iter()
+                .any(|flow| flow.expires_at_millis <= now_millis))
     }
 
     fn restore_browser_payload(
@@ -1516,7 +1556,6 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.sync_persisted_payloads("admit_oauth_browser_flow")?;
-        self.expire_pruned_flows();
         let state = OAuthFlowRegistry::new_state()?;
         let expires_at = expires_at_millis(provider.lifetime(self.registry.ttl()))?;
         self.admit_browser(&target, &state, &provider, &redirect_uri, expires_at)?;
@@ -1584,7 +1623,6 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.sync_persisted_payloads("verify_oauth_browser_flow")?;
-        self.expire_pruned_flows();
         self.verify_browser(target, state, &provider, redirect_uri)?;
         match self.registry.verify(state, target, provider, redirect_uri) {
             Ok(record) => Ok(record),
@@ -1609,7 +1647,6 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.sync_persisted_payloads("consume_oauth_browser_flow")?;
-        self.expire_pruned_flows();
         self.verify_browser(target, state, &provider, redirect_uri)?;
         let record = match self
             .registry
@@ -1666,7 +1703,6 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.sync_persisted_payloads("expire_oauth_browser_flow")?;
-        self.expire_pruned_flows();
         // Compare the immutable payload before retiring native authority. An
         // expired or revoked attempt may already have been retired by sync.
         let record = self
@@ -1704,7 +1740,6 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.sync_persisted_payloads("admit_oauth_device_flow")?;
-        self.expire_pruned_flows();
         let machine_expires_at = expires_at_millis(expires_in)?;
         self.admit_device(&target, &device_code, provider, machine_expires_at)?;
         let (lifecycle_pruned, lifecycle_pruned_snapshot) =
@@ -1766,7 +1801,6 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.sync_persisted_payloads("verify_oauth_device_flow")?;
-        self.expire_pruned_flows();
         self.verify_device(target, device_code, provider)?;
         match self
             .registry
@@ -1791,7 +1825,6 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.sync_persisted_payloads("begin_oauth_device_poll")?;
-        self.expire_pruned_flows();
         self.begin_device_poll(target, device_code, provider)?;
         let poll = match self
             .registry
@@ -2338,6 +2371,57 @@ mod tests {
             vec![successful_state.as_str()],
             "a later successful admit must not persist a previously failed unreturned flow"
         );
+    }
+
+    #[test]
+    fn oauth_expiry_durable_write_failure_can_be_retried_after_local_pruning() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let store = Arc::new(FailingOAuthSnapshotStore::default());
+        let store_dyn = store.clone() as Arc<dyn RuntimeStore>;
+        let authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_millis(100),
+            lifecycle.clone(),
+            &store_dyn,
+        );
+        let target = target();
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect = "http://127.0.0.1/callback";
+        let state = authority
+            .start(
+                target.clone(),
+                provider,
+                redirect.into(),
+                "expiry-pkce".into(),
+            )
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        store.fail_oauth_persist();
+        assert!(matches!(
+            authority.verify(&state, &target, provider, redirect),
+            Err(OAuthFlowError::PersistenceFailed {
+                operation: "verify_oauth_browser_flow",
+                ..
+            })
+        ));
+        assert!(!lifecycle.has_oauth_browser_flow_for_test(&target, &state));
+        let retained: OAuthFlowRegistrySnapshot =
+            serde_json::from_slice(&store.load_auth_oauth_flow_snapshot().unwrap().unwrap())
+                .unwrap();
+        assert_eq!(retained.browser.len(), 1);
+
+        store.allow_oauth_persist();
+        assert!(matches!(
+            OAuthFlowAuthority::expire(&authority, &state, &target, provider.into(), redirect),
+            Err(OAuthFlowError::Missing)
+        ));
+        let retired: OAuthFlowRegistrySnapshot =
+            serde_json::from_slice(&store.load_auth_oauth_flow_snapshot().unwrap().unwrap())
+                .unwrap();
+        assert!(
+            retired.browser.is_empty(),
+            "retry must erase the durable expired payload"
+        );
+        assert!(retired.device.is_empty());
     }
 
     #[test]
@@ -4167,6 +4251,185 @@ mod connector_owner_tests {
             )
             .unwrap()
             .into()
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    fn persisted_snapshot(store: &Arc<dyn RuntimeStore>) -> OAuthFlowRegistrySnapshot {
+        serde_json::from_slice(&store.load_auth_oauth_flow_snapshot().unwrap().unwrap()).unwrap()
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[test]
+    fn oauth_expiry_sqlite_verify_retires_private_payload_before_refusal_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime.sqlite");
+        let target = target("account-a");
+        let state = {
+            let store: Arc<dyn RuntimeStore> =
+                Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&path).unwrap());
+            let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+            let owner = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+                Duration::from_millis(500),
+                lifecycle.clone(),
+                &store,
+            );
+            let state = owner
+                .start(
+                    target.clone(),
+                    descriptor("account-a"),
+                    REDIRECT.into(),
+                    "expired-private-pkce".into(),
+                )
+                .unwrap();
+            assert_eq!(persisted_snapshot(&store).browser.len(), 1);
+            std::thread::sleep(Duration::from_millis(550));
+            assert!(matches!(
+                owner.verify(&state, &target, descriptor("account-a"), REDIRECT),
+                Err(OAuthFlowError::LifecycleRejected {
+                    operation: "verify_oauth_browser_flow",
+                    ..
+                })
+            ));
+            assert!(!lifecycle.has_oauth_browser_flow_for_test(&target, &state));
+            let snapshot = persisted_snapshot(&store);
+            assert!(
+                snapshot.browser.is_empty(),
+                "refused expired verification must erase the durable private browser payload"
+            );
+            assert!(snapshot.device.is_empty());
+            for _ in 0..2 {
+                assert!(matches!(
+                    OAuthFlowAuthority::expire(
+                        &owner,
+                        &state,
+                        &target,
+                        descriptor("account-a").into(),
+                        REDIRECT,
+                    ),
+                    Err(OAuthFlowError::Missing)
+                ));
+                assert!(persisted_snapshot(&store).browser.is_empty());
+            }
+            state
+        };
+        // Read the physically reopened store before constructing an owner: its
+        // rehydration must not be what hides an unretired expired payload.
+        let store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&path).unwrap());
+        assert!(persisted_snapshot(&store).browser.is_empty());
+        let owner = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(300),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &store,
+        );
+        assert!(
+            owner
+                .verify(&state, &target, descriptor("account-a"), REDIRECT)
+                .is_err()
+        );
+        assert!(
+            owner
+                .consume(&state, &target, completion("account-a"), REDIRECT)
+                .is_err()
+        );
+        assert!(persisted_snapshot(&store).browser.is_empty());
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[test]
+    fn oauth_expiry_sqlite_retirement_preserves_another_live_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime.sqlite");
+        let store_a: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&path).unwrap());
+        let store_b: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&path).unwrap());
+        let owner_a = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_millis(500),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &store_a,
+        );
+        let owner_b = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &store_b,
+        );
+        let target_a = target("account-a");
+        let target_b = target("account-b");
+        let expired = owner_a
+            .start(
+                target_a.clone(),
+                descriptor("account-a"),
+                REDIRECT.into(),
+                "expired-pkce".into(),
+            )
+            .unwrap();
+        let live = owner_b
+            .start(
+                target_b.clone(),
+                descriptor("account-b"),
+                REDIRECT.into(),
+                "live-pkce".into(),
+            )
+            .unwrap();
+        let original_live = persisted_snapshot(&store_b)
+            .browser
+            .into_iter()
+            .find(|row| row.state == live)
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(550));
+        assert!(
+            owner_a
+                .verify(&expired, &target_a, descriptor("account-a"), REDIRECT)
+                .is_err()
+        );
+        let remaining = persisted_snapshot(&store_a);
+        assert_eq!(
+            remaining.browser,
+            vec![original_live],
+            "expiry must preserve the other owner's exact live payload and deadline"
+        );
+        assert!(remaining.device.is_empty());
+        let before_mismatch = persisted_snapshot(&store_b);
+        assert!(matches!(
+            OAuthFlowAuthority::expire(
+                &owner_b,
+                &live,
+                &target_a,
+                descriptor("account-b").into(),
+                REDIRECT,
+            ),
+            Err(OAuthFlowError::TargetMismatch { .. })
+        ));
+        assert!(matches!(
+            OAuthFlowAuthority::expire(
+                &owner_b,
+                &live,
+                &target_b,
+                descriptor("account-a").into(),
+                REDIRECT,
+            ),
+            Err(OAuthFlowError::BrowserIdentityMismatch)
+        ));
+        assert!(matches!(
+            OAuthFlowAuthority::expire(
+                &owner_b,
+                &live,
+                &target_b,
+                descriptor("account-b").into(),
+                "http://127.0.0.1:12345/other",
+            ),
+            Err(OAuthFlowError::RedirectUriMismatch)
+        ));
+        assert_eq!(persisted_snapshot(&store_b), before_mismatch);
+        assert_eq!(
+            owner_b
+                .consume(&live, &target_b, completion("account-b"), REDIRECT)
+                .unwrap()
+                .pkce_verifier,
+            "live-pkce"
+        );
+        assert!(persisted_snapshot(&store_b).browser.is_empty());
     }
 
     #[test]

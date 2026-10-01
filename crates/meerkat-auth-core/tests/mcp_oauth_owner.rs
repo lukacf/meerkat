@@ -1876,3 +1876,91 @@ async fn actual_mcp_exchange_refuses_crossed_account_and_scope_downgrade_and_ret
         );
     }
 }
+
+#[tokio::test]
+async fn oauth_expiry_cancelling_actual_mcp_login_erases_persisted_attempt_without_tokens() {
+    use meerkat_auth_core::oauth_flow::OAuthFlowRegistrySnapshot;
+    use meerkat_runtime::store::{RuntimeStore, memory::InMemoryRuntimeStore};
+
+    // Exercise the production admitted-attempt Drop path while its callback
+    // wait is still pending. This browser reports the URL only to the driver.
+    struct PendingBrowser(tokio::sync::mpsc::UnboundedSender<String>);
+    #[async_trait]
+    impl BrowserOpener for PendingBrowser {
+        async fn open(&self, url: &str) -> Result<(), McpOAuthError> {
+            self.0.send(url.to_owned()).unwrap();
+            Ok(())
+        }
+    }
+
+    let (base, state) = spawn_oauth_fixture().await;
+    let tokens = Arc::new(EphemeralTokenStore::new());
+    // SQLite erasure/reopen is covered in the runtime owner tests. Here the
+    // injected store makes persisted-row observation independent of the owner.
+    let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+    let auth = test_auth_lease();
+    let flows = Arc::new(
+        RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_millis(500),
+            auth.lifecycle,
+            &runtime_store,
+        ),
+    );
+    let (opened, mut launches) = tokio::sync::mpsc::unbounded_channel();
+    let native = McpOAuthAuthority::with_http(
+        ProviderAuthPersistence::new(tokens.clone(), Arc::new(InMemoryCoordinator::new())),
+        Arc::new(PendingBrowser(opened)),
+        Client::new(),
+        auth.generated,
+    )
+    .with_interactive_strategy(flows, Arc::new(FixtureAccountStrategy))
+    .unwrap();
+    let target = McpServerIdentity::from_server_config("expiry-cancel", format!("{base}/mcp"));
+    let login_target = target.clone();
+    let login = tokio::spawn(async move { native.interactive_login(&login_target, None).await });
+    let _opened = tokio::time::timeout(Duration::from_secs(5), launches.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let pending: OAuthFlowRegistrySnapshot = serde_json::from_slice(
+        &runtime_store
+            .load_auth_oauth_flow_snapshot()
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(pending.browser.len(), 1);
+    assert!(pending.device.is_empty());
+    tokio::time::sleep(Duration::from_millis(550)).await;
+    assert!(
+        !login.is_finished(),
+        "the real callback wait must still be pending"
+    );
+    login.abort();
+    assert!(login.await.unwrap_err().is_cancelled());
+
+    // Read storage directly before any verify/reopen could perform cleanup.
+    let retired: OAuthFlowRegistrySnapshot = serde_json::from_slice(
+        &runtime_store
+            .load_auth_oauth_flow_snapshot()
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        retired.browser.is_empty(),
+        "cancellation after expiry must erase the persisted private attempt"
+    );
+    assert!(retired.device.is_empty());
+    assert!(
+        tokens
+            .load(&target.token_key().unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        state.token_requests.lock().is_empty(),
+        "cancelled login must not reach code exchange"
+    );
+}

@@ -166,6 +166,10 @@ them.
 
 ### Fixed
 
+- Expired OAuth attempts now retire their private persisted payloads when the
+  native owner prunes them, including late callbacks and cancelled MCP login.
+  Cleanup preserves concurrent live attempts and their deadlines; a failed
+  durable write returns `PersistenceFailed` and remains retryable.
 - The Cargo test lanes provide the MCP form-elicitation fixture again. Since
   #1338, `meerkat-mcp`'s `form_elicitation` tests (which require
   `MEERKAT_MCP_TEST_SERVER` to name the exact `mcp-test-server` binary and

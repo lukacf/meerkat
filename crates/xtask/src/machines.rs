@@ -422,117 +422,14 @@ fn machine_verify_at_root(
 ) -> Result<()> {
     ensure_no_drift(root, selection)?;
 
-    for machine in &selection.machines {
-        println!("machine: {}", machine.schema.machine);
-        if run_tlc {
-            let coverage = maybe_run_tlc_in_dir(
-                &machine_dir(root, &machine.slug),
-                &machine.slug,
-                profile,
-                budget,
-            )?;
-            if matches!(profile, VerifyProfile::Deep)
-                && let Some(coverage) = coverage
-            {
-                ensure_machine_transition_coverage(&machine.schema, &coverage)?;
-            }
+    if run_tlc {
+        run_tlc_lane(root, selection, profile, budget, skip_tlc_compositions)?;
+    } else {
+        for machine in &selection.machines {
+            println!("machine: {}", machine.schema.machine);
         }
-    }
-
-    for composition in &selection.compositions {
-        println!("composition: {}", composition.schema.name);
-        if run_tlc {
-            // A skipped broad composition skips only its full ci.cfg/deep.cfg
-            // state-space sweep, which exceeds the budget. Its scripted
-            // witnesses are bounded by construction and still run below with
-            // the completion proof.
-            let skip_full_sweep = skip_tlc_compositions.contains(&composition.slug);
-            let main_coverage = if skip_full_sweep {
-                ensure_composition_ci_structural_invariants(
-                    root,
-                    &composition.slug,
-                    &composition.schema,
-                )?;
-                println!(
-                    "skipping full TLC for broad composition {} after drift and ci.cfg structural-invariant validation; its witnesses still run",
-                    composition.schema.name
-                );
-                None
-            } else {
-                maybe_run_tlc_in_dir(
-                    &composition_dir(root, &composition.slug),
-                    &composition.slug,
-                    profile,
-                    budget,
-                )?
-            };
-            // Structural requirements (expected routes / scheduler rules /
-            // states / transitions) are enforced in EVERY verify profile via the
-            // structural invariants emitted into the composition `ci.cfg`
-            // INVARIANTS block (see render_composition_ci_cfg), which makes the
-            // standard CI gate fail closed on a structurally under-specified
-            // composition.
-            //
-            // Every witness `.cfg` also runs in every profile. Each one is a
-            // self-contained `WitnessSpec_<w>` and must prove its script
-            // completed (see `verify_composition_witness`); exit 0 alone is
-            // not evidence. Only the Deep profile aggregates witness coverage
-            // into the zero-hit route/scheduler audit, because that audit also
-            // needs the Deep main run's `-coverage 1` instrumentation.
-            let mut aggregated_coverage = main_coverage.unwrap_or_default();
-            let mut witness_covered_routes = BTreeSet::new();
-            let mut witness_covered_scheduler_rules = BTreeSet::new();
-            let mut witness_failures = Vec::new();
-            for witness in &composition.schema.witnesses {
-                // A witness credits its declared routes and scheduler rules
-                // only after TLC proves its script completed. An exit-0 run
-                // can still be a truncation by the witness state constraint,
-                // and every generated witness invariant is vacuous until
-                // completion, so exit status alone proves nothing.
-                let witness_coverage =
-                    match verify_composition_witness(root, composition, witness, budget) {
-                        Ok(coverage) => coverage,
-                        Err(err) => {
-                            witness_failures.push(format!("{err:#}"));
-                            continue;
-                        }
-                    };
-                merge_tlc_coverage(&mut aggregated_coverage, Some(&witness_coverage));
-                witness_covered_routes.extend(
-                    witness
-                        .expected_routes
-                        .iter()
-                        .map(|r| r.as_str().to_owned()),
-                );
-                witness_covered_scheduler_rules.extend(
-                    witness
-                        .expected_scheduler_rules
-                        .iter()
-                        .map(composition_scheduler_coverage_operator_name),
-                );
-            }
-            if !witness_failures.is_empty() {
-                bail!(
-                    "{} witness(es) of composition {} did not prove completion:\n{}",
-                    witness_failures.len(),
-                    composition.schema.name,
-                    witness_failures
-                        .iter()
-                        .map(|failure| format!("- {failure}"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                );
-            }
-            // The zero-hit audit needs the main sweep's coverage, which a
-            // skipped composition does not have.
-            if matches!(profile, VerifyProfile::Deep) && !skip_full_sweep {
-                ensure_composition_coverage(
-                    &composition.schema,
-                    &aggregated_coverage,
-                    &witness_covered_routes,
-                    &witness_covered_scheduler_rules,
-                )?;
-            }
+        for composition in &selection.compositions {
+            println!("composition: {}", composition.schema.name);
         }
     }
 
@@ -546,6 +443,302 @@ fn machine_verify_at_root(
     }
 
     Ok(())
+}
+
+/// One independent TLC run of the lane, in fixed lane order: every machine,
+/// then per composition its main sweep (unless skipped) and its witnesses.
+#[derive(Debug, Clone, Copy)]
+enum LaneJob {
+    Machine(usize),
+    CompositionMain(usize),
+    Witness { composition: usize, witness: usize },
+}
+
+/// A finished lane job: its captured TLC output and outcome. Witness jobs
+/// already include the completion proof in their outcome.
+struct LaneJobResult {
+    output: String,
+    coverage: Result<Option<TlcCoverageSummary>>,
+}
+
+/// Run every TLC job of the lane, concurrently within the worker budget, then
+/// report outputs and failures in the fixed lane order. A failing job does not
+/// cancel the others, every job keeps its own fail-closed per-run cap, and the
+/// result fails if any check failed.
+fn run_tlc_lane(
+    root: &Path,
+    selection: &Selection,
+    profile: VerifyProfile,
+    budget: TlcRunBudget,
+    skip_tlc_compositions: &BTreeSet<String>,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    let mut jobs = Vec::new();
+    for index in 0..selection.machines.len() {
+        jobs.push(LaneJob::Machine(index));
+    }
+    for (index, composition) in selection.compositions.iter().enumerate() {
+        if skip_tlc_compositions.contains(&composition.slug) {
+            // A skipped broad composition skips only its full sweep; its
+            // scripted witnesses are bounded and still run.
+            if let Err(err) = ensure_composition_ci_structural_invariants(
+                root,
+                &composition.slug,
+                &composition.schema,
+            ) {
+                failures.push(format!("composition {}: {err:#}", composition.schema.name));
+            }
+        } else {
+            jobs.push(LaneJob::CompositionMain(index));
+        }
+        for witness in 0..composition.schema.witnesses.len() {
+            jobs.push(LaneJob::Witness {
+                composition: index,
+                witness,
+            });
+        }
+    }
+
+    let (concurrency, job_budget) = budget.split_for_jobs(jobs.len());
+    eprintln!(
+        "machine-verify: {} TLC job(s), {concurrency} concurrent x {} worker(s){}{}",
+        jobs.len(),
+        job_budget.workers,
+        job_budget
+            .gc_threads
+            .map(|gc| format!(", {gc} GC thread(s)"))
+            .unwrap_or_default(),
+        job_budget
+            .heap_mb
+            .map(|mb| format!(", -Xmx{mb}m"))
+            .unwrap_or_default(),
+    );
+    let results = run_lane_jobs(&jobs, concurrency, |job| match *job {
+        LaneJob::Machine(index) => {
+            let machine = &selection.machines[index];
+            let capture = run_tlc_capture(
+                &machine_dir(root, &machine.slug),
+                &machine.slug,
+                lane_profile_config(profile),
+                profile,
+                job_budget,
+            );
+            LaneJobResult {
+                output: capture.output,
+                coverage: capture.result,
+            }
+        }
+        LaneJob::CompositionMain(index) => {
+            let composition = &selection.compositions[index];
+            let capture = run_tlc_capture(
+                &composition_dir(root, &composition.slug),
+                &composition.slug,
+                lane_profile_config(profile),
+                profile,
+                job_budget,
+            );
+            LaneJobResult {
+                output: capture.output,
+                coverage: capture.result,
+            }
+        }
+        LaneJob::Witness {
+            composition,
+            witness,
+        } => {
+            let composition = &selection.compositions[composition];
+            let witness = &composition.schema.witnesses[witness];
+            let (output, result) =
+                verify_composition_witness_capture(root, composition, witness, job_budget);
+            LaneJobResult {
+                output,
+                coverage: result.map(Some),
+            }
+        }
+    });
+    let mut results = jobs.iter().zip(results).collect::<Vec<_>>().into_iter();
+
+    for machine in &selection.machines {
+        println!("machine: {}", machine.schema.machine);
+        let Some((_, result)) = results.next() else {
+            bail!("lane result missing for machine {}", machine.schema.machine);
+        };
+        print!("{}", result.output);
+        match result.coverage {
+            Ok(Some(coverage)) if matches!(profile, VerifyProfile::Deep) => {
+                if let Err(err) = ensure_machine_transition_coverage(&machine.schema, &coverage) {
+                    failures.push(format!("machine {}: {err:#}", machine.schema.machine));
+                }
+            }
+            Ok(_) => {}
+            Err(err) => failures.push(format!("machine {}: {err:#}", machine.schema.machine)),
+        }
+    }
+
+    for composition in &selection.compositions {
+        println!("composition: {}", composition.schema.name);
+        let skip_full_sweep = skip_tlc_compositions.contains(&composition.slug);
+        let mut aggregated_coverage = TlcCoverageSummary::default();
+        let mut main_ok = true;
+        if skip_full_sweep {
+            println!(
+                "skipping full TLC for broad composition {} after drift and ci.cfg structural-invariant validation; its witnesses still run",
+                composition.schema.name
+            );
+        } else {
+            let Some((_, result)) = results.next() else {
+                bail!(
+                    "lane result missing for composition {}",
+                    composition.schema.name
+                );
+            };
+            print!("{}", result.output);
+            match result.coverage {
+                Ok(coverage) => aggregated_coverage = coverage.unwrap_or_default(),
+                Err(err) => {
+                    main_ok = false;
+                    failures.push(format!("composition {}: {err:#}", composition.schema.name));
+                }
+            }
+        }
+        // A witness credits its declared routes and scheduler rules only after
+        // TLC proves its script completed (see `verify_composition_witness`).
+        let mut witness_covered_routes = BTreeSet::new();
+        let mut witness_covered_scheduler_rules = BTreeSet::new();
+        let mut witness_failures = Vec::new();
+        for witness in &composition.schema.witnesses {
+            let Some((_, result)) = results.next() else {
+                bail!(
+                    "lane result missing for witness {} of composition {}",
+                    witness.name,
+                    composition.schema.name
+                );
+            };
+            print!("{}", result.output);
+            match result.coverage {
+                Ok(coverage) => {
+                    merge_tlc_coverage(&mut aggregated_coverage, coverage.as_ref());
+                    witness_covered_routes.extend(
+                        witness
+                            .expected_routes
+                            .iter()
+                            .map(|r| r.as_str().to_owned()),
+                    );
+                    witness_covered_scheduler_rules.extend(
+                        witness
+                            .expected_scheduler_rules
+                            .iter()
+                            .map(composition_scheduler_coverage_operator_name),
+                    );
+                }
+                Err(err) => witness_failures.push(format!("{err:#}")),
+            }
+        }
+        if !witness_failures.is_empty() {
+            failures.push(format!(
+                "{} witness(es) of composition {} did not prove completion:\n{}",
+                witness_failures.len(),
+                composition.schema.name,
+                witness_failures
+                    .iter()
+                    .map(|failure| format!("  - {failure}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+        // The zero-hit audit needs the main sweep's coverage and every witness.
+        if matches!(profile, VerifyProfile::Deep)
+            && !skip_full_sweep
+            && main_ok
+            && witness_failures.is_empty()
+            && let Err(err) = ensure_composition_coverage(
+                &composition.schema,
+                &aggregated_coverage,
+                &witness_covered_routes,
+                &witness_covered_scheduler_rules,
+            )
+        {
+            failures.push(format!("composition {}: {err:#}", composition.schema.name));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "{} TLC check(s) failed (lane order):\n{}",
+            failures.len(),
+            failures
+                .iter()
+                .map(|failure| format!("- {failure}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    }
+}
+
+fn lane_profile_config(profile: VerifyProfile) -> &'static str {
+    match profile {
+        VerifyProfile::Ci => "ci.cfg",
+        VerifyProfile::Deep => "deep.cfg",
+    }
+}
+
+/// Run `jobs` on at most `concurrency` threads and return their results in job
+/// order, whatever order they finish in. Progress goes to stderr as jobs end.
+fn run_lane_jobs<F>(jobs: &[LaneJob], concurrency: usize, run: F) -> Vec<LaneJobResult>
+where
+    F: Fn(&LaneJob) -> LaneJobResult + Sync,
+{
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let slots = Mutex::new(
+        (0..jobs.len())
+            .map(|_| None)
+            .collect::<Vec<Option<LaneJobResult>>>(),
+    );
+    std::thread::scope(|scope| {
+        for _ in 0..concurrency.clamp(1, jobs.len().max(1)) {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    let Some(job) = jobs.get(index) else {
+                        break;
+                    };
+                    let started = Instant::now();
+                    let result = run(job);
+                    let finished = done.fetch_add(1, Ordering::SeqCst) + 1;
+                    eprintln!(
+                        "machine-verify: [{finished}/{}] {job:?} {} in {}s",
+                        jobs.len(),
+                        if result.coverage.is_ok() {
+                            "ok"
+                        } else {
+                            "FAILED"
+                        },
+                        started.elapsed().as_secs()
+                    );
+                    if let Ok(mut slots) = slots.lock() {
+                        slots[index] = Some(result);
+                    }
+                }
+            });
+        }
+    });
+    slots
+        .into_inner()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|slot| {
+            slot.unwrap_or_else(|| LaneJobResult {
+                output: String::new(),
+                coverage: Err(anyhow!("lane job produced no result")),
+            })
+        })
+        .collect()
 }
 
 fn ensure_composition_ci_structural_invariants(
@@ -4111,25 +4304,32 @@ pub fn merge_tlc_coverage(target: &mut TlcCoverageSummary, other: Option<&TlcCov
     }
 }
 
-fn maybe_run_tlc_in_dir(
-    dir: &Path,
-    slug: &str,
-    profile: VerifyProfile,
-    budget: TlcRunBudget,
-) -> Result<Option<TlcCoverageSummary>> {
-    let config_name = match profile {
-        VerifyProfile::Ci => "ci.cfg",
-        VerifyProfile::Deep => "deep.cfg",
-    };
-    maybe_run_tlc_in_dir_with_config(dir, slug, config_name, profile, budget)
+/// Output and outcome of one TLC child, captured so concurrent runs can be
+/// reported in a fixed order.
+struct TlcCapture {
+    output: String,
+    result: Result<Option<TlcCoverageSummary>>,
 }
 
-fn maybe_run_tlc_in_dir_with_config(
+fn run_tlc_capture(
     dir: &Path,
     slug: &str,
     config_name: &str,
     profile: VerifyProfile,
     budget: TlcRunBudget,
+) -> TlcCapture {
+    let mut output = String::new();
+    let result = run_tlc_capture_inner(dir, slug, config_name, profile, budget, &mut output);
+    TlcCapture { output, result }
+}
+
+fn run_tlc_capture_inner(
+    dir: &Path,
+    slug: &str,
+    config_name: &str,
+    profile: VerifyProfile,
+    budget: TlcRunBudget,
+    output: &mut String,
 ) -> Result<Option<TlcCoverageSummary>> {
     let model = dir.join("model.tla");
     let config = dir.join(config_name);
@@ -4164,10 +4364,10 @@ fn maybe_run_tlc_in_dir_with_config(
         .arg(&config)
         .arg(&model)
         .current_dir(&root)
-        .env("JAVA_TOOL_OPTIONS", merged_java_tool_options())
+        .env("JAVA_TOOL_OPTIONS", job_java_tool_options(&budget))
         .env(
             "JDK_JAVA_OPTIONS",
-            merged_jdk_java_options(&merged_java_tool_options()),
+            merged_jdk_java_options(&job_java_tool_options(&budget)),
         );
 
     let run =
@@ -4175,16 +4375,16 @@ fn maybe_run_tlc_in_dir_with_config(
 
     let stdout = String::from_utf8_lossy(&run.stdout);
     let stderr = String::from_utf8_lossy(&run.stderr);
-    print!("{stdout}");
-    eprint!("{stderr}");
+    output.push_str(&stdout);
+    output.push_str(&stderr);
 
     let combined = format!("{stdout}\n{stderr}");
 
     if let Err(err) = fs::remove_dir_all(&metadir) {
-        eprintln!(
-            "warning: failed to remove TLC metadir {}: {err:#}",
+        output.push_str(&format!(
+            "warning: failed to remove TLC metadir {}: {err:#}\n",
             metadir.display()
-        );
+        ));
     }
 
     match run.status {
@@ -4232,6 +4432,13 @@ pub const DEFAULT_TLC_RUN_CAP_SECS: u64 = 900;
 pub struct TlcRunBudget {
     pub workers: usize,
     pub cap: Duration,
+    /// `-XX:ParallelGCThreads` for this TLC JVM; set only when several TLC
+    /// JVMs run concurrently, so they cannot oversubscribe the cores.
+    pub gc_threads: Option<usize>,
+    /// `-Xmx` (MiB) for this TLC JVM: the whole heap budget for a lone JVM,
+    /// an equal share for concurrent ones, so N of them cannot oversubscribe
+    /// memory on a small machine.
+    pub heap_mb: Option<u64>,
 }
 
 impl TlcRunBudget {
@@ -4251,8 +4458,94 @@ impl TlcRunBudget {
         Ok(Self {
             workers: resolve_tlc_workers(workers)?,
             cap: Duration::from_secs(cap_secs),
+            gc_threads: None,
+            heap_mb: None,
         })
     }
+
+    /// Split this budget across `jobs` independent TLC runs. The total worker
+    /// count (TLC_WORKERS or the core count) is divided so the sum of
+    /// concurrent workers never exceeds it: each job keeps at least
+    /// `MIN_WORKERS_PER_PARALLEL_JOB` workers, so a small budget degrades to
+    /// fewer concurrent jobs rather than starved ones (a 4-worker budget runs
+    /// sequentially, exactly as before). Concurrent JVMs also get GC threads
+    /// proportional to their workers and an equal share of the heap budget.
+    pub fn split_for_jobs(self, jobs: usize) -> (usize, Self) {
+        self.split_for_jobs_with_heap(jobs, tlc_heap_budget_mb())
+    }
+
+    fn split_for_jobs_with_heap(self, jobs: usize, heap_budget_mb: Option<u64>) -> (usize, Self) {
+        let mut concurrency = (self.workers / MIN_WORKERS_PER_PARALLEL_JOB).clamp(1, jobs.max(1));
+        // Every concurrent JVM must get at least MIN_HEAP_MB_PER_PARALLEL_JOB
+        // (the largest generated models need it), so a small heap budget
+        // runs fewer jobs at once rather than starving them.
+        if let Some(total) = heap_budget_mb {
+            let by_heap =
+                usize::try_from(total / MIN_HEAP_MB_PER_PARALLEL_JOB).unwrap_or(usize::MAX);
+            concurrency = concurrency.min(by_heap.max(1));
+        }
+        if concurrency == 1 {
+            // A lone JVM keeps the default GC threads but still gets the whole
+            // heap budget: the JVM default (a quarter of RAM) is too small for
+            // the largest generated models on a 32 GB machine.
+            return (
+                1,
+                Self {
+                    heap_mb: heap_budget_mb,
+                    ..self
+                },
+            );
+        }
+        let workers = (self.workers / concurrency).max(1);
+        let heap_mb = heap_budget_mb.map(|total| total / concurrency as u64);
+        (
+            concurrency,
+            Self {
+                workers,
+                cap: self.cap,
+                gc_threads: Some(workers),
+                heap_mb,
+            },
+        )
+    }
+}
+
+/// Smallest worker share a concurrently scheduled TLC job receives.
+pub const MIN_WORKERS_PER_PARALLEL_JOB: usize = 4;
+
+/// Smallest heap (MiB) a concurrently scheduled TLC JVM receives.
+pub const MIN_HEAP_MB_PER_PARALLEL_JOB: u64 = 16 * 1024;
+
+/// Total heap (MiB) shared by concurrently running TLC JVMs: TLC_HEAP_BUDGET_MB,
+/// or half of physical memory. `None` when neither is known, in which case
+/// each JVM keeps its default heap.
+fn tlc_heap_budget_mb() -> Option<u64> {
+    if let Ok(raw) = env::var("TLC_HEAP_BUDGET_MB")
+        && let Ok(mb) = raw.trim().parse::<u64>()
+    {
+        return Some(mb.max(256));
+    }
+    physical_memory_mb().map(|mb| mb / 2)
+}
+
+fn physical_memory_mb() -> Option<u64> {
+    if let Ok(meminfo) = fs::read_to_string("/proc/meminfo") {
+        return meminfo
+            .lines()
+            .find_map(|line| line.strip_prefix("MemTotal:"))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|kib| kib.parse::<u64>().ok())
+            .map(|kib| kib / 1024);
+    }
+    let output = Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|bytes| bytes / (1024 * 1024))
 }
 
 /// Typed outcome of a TLC run that did not pass.
@@ -4364,29 +4657,50 @@ fn verify_composition_witness(
     witness: &CompositionWitness,
     budget: TlcRunBudget,
 ) -> Result<TlcCoverageSummary> {
+    let (output, result) = verify_composition_witness_capture(root, composition, witness, budget);
+    print!("{output}");
+    result
+}
+
+fn verify_composition_witness_capture(
+    root: &Path,
+    composition: &CompositionEntry,
+    witness: &CompositionWitness,
+    budget: TlcRunBudget,
+) -> (String, Result<TlcCoverageSummary>) {
     let config_name = composition_witness_cfg_name(&witness.name);
     // Witness runs always use the coverage-instrumented (Deep) invocation:
     // completion is proven from the coverage of the satisfied-stutter action.
-    let coverage = maybe_run_tlc_in_dir_with_config(
+    let capture = run_tlc_capture(
         &composition_dir(root, &composition.slug),
         &composition.slug,
         &config_name,
         VerifyProfile::Deep,
         budget,
-    )
-    .with_context(|| {
-        format!(
-            "witness {} of composition {}",
-            witness.name, composition.schema.name
-        )
-    })?
-    .ok_or_else(|| {
-        anyhow!(
-            "witness {} of composition {} produced no TLC coverage",
-            witness.name,
-            composition.schema.name
-        )
-    })?;
+    );
+    let result = witness_completion_result(composition, witness, capture.result);
+    (capture.output, result)
+}
+
+fn witness_completion_result(
+    composition: &CompositionEntry,
+    witness: &CompositionWitness,
+    run: Result<Option<TlcCoverageSummary>>,
+) -> Result<TlcCoverageSummary> {
+    let coverage = run
+        .with_context(|| {
+            format!(
+                "witness {} of composition {}",
+                witness.name, composition.schema.name
+            )
+        })?
+        .ok_or_else(|| {
+            anyhow!(
+                "witness {} of composition {} produced no TLC coverage",
+                witness.name,
+                composition.schema.name
+            )
+        })?;
     ensure_witness_completed(composition.schema.name.as_str(), witness, &coverage)?;
     Ok(coverage)
 }
@@ -4814,12 +5128,17 @@ fn repo_cargo_command(root: &Path) -> Command {
 }
 
 fn verification_metadir(slug: &str, profile: VerifyProfile) -> Result<PathBuf> {
+    // Concurrent lane jobs of one composition can start in the same
+    // millisecond of the same process, so a per-process sequence number keeps
+    // each TLC run's metadir private (a shared one would be deleted under it).
+    static NEXT_METADIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT_METADIR.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let epoch_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
     let metadir = env::temp_dir().join("meerkat-machine-verify").join(format!(
-        "{slug}-{}-{}-{epoch_ms}",
+        "{slug}-{}-{}-{epoch_ms}-{sequence}",
         verify_profile_name(profile),
         std::process::id()
     ));
@@ -4888,6 +5207,35 @@ fn merge_jdk_java_options(existing: &str, java_tool_options: &str) -> String {
             .find(|flag| flag.starts_with("-Xss"))
             .unwrap_or("-Xss256m");
         flags.insert(0, stack_size.into());
+    }
+    flags.join(" ")
+}
+
+/// JVM options for one TLC child: the shared policy plus, for a concurrently
+/// scheduled job, GC threads proportional to its workers and its heap share.
+/// Explicit caller flags win.
+fn job_java_tool_options(budget: &TlcRunBudget) -> String {
+    let mut flags = merged_java_tool_options()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if let Some(gc_threads) = budget.gc_threads
+        && !flags
+            .iter()
+            .any(|flag| flag.starts_with("-XX:ParallelGCThreads="))
+    {
+        flags.push(format!("-XX:ParallelGCThreads={gc_threads}"));
+        if !flags
+            .iter()
+            .any(|flag| flag.starts_with("-XX:ConcGCThreads="))
+        {
+            flags.push(format!("-XX:ConcGCThreads={}", gc_threads.div_ceil(4)));
+        }
+    }
+    if let Some(heap_mb) = budget.heap_mb
+        && !flags.iter().any(|flag| flag.starts_with("-Xmx"))
+    {
+        flags.push(format!("-Xmx{heap_mb}m"));
     }
     flags.join(" ")
 }

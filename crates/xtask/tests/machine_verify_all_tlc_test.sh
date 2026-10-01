@@ -122,8 +122,6 @@ if [[ ! -x "${durable_steer_audit}" ]]; then
   echo "error: durable in-turn steer audit runner is missing from workspace runfiles: ${durable_steer_audit}" >&2
   exit 1
 fi
-echo "running bounded durable in-turn steer TLC audit"
-TLC_WORKERS="${tlc_workers}" "${durable_steer_audit}" "${DURABLE_STEER_AUDIT_MAX_STEPS:-16}"
 
 # The live-context outbox invariants (no closed channel leaves a queued row;
 # no queued row is one a channel's provider session already carries) are
@@ -140,8 +138,6 @@ if [[ ! -x "${live_context_outbox_audit}" ]]; then
   echo "error: live-context outbox audit runner is missing from workspace runfiles: ${live_context_outbox_audit}" >&2
   exit 1
 fi
-echo "running bounded live-context outbox TLC audit"
-TLC_WORKERS="${tlc_workers}" "${live_context_outbox_audit}" "${LIVE_CONTEXT_OUTBOX_AUDIT_MAX_STEPS:-20}"
 
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
 # codegen defects. `machine-verify` still validates drift and the generated
@@ -163,6 +159,93 @@ TLC_WORKERS="${tlc_workers}" "${live_context_outbox_audit}" "${LIVE_CONTEXT_OUTB
 # generated driver, checked-in witness config, ci.cfg structural invariant, and
 # the bounded witness TLC proof above. It still composes two full MobMachine
 # instances, so the full composition TLC sweep exceeds the required CI budget.
-exec "${xtask_bin}" machine-verify --all --skip-cargo-tests \
-  --skip-tlc-composition meerkat_mob_seam \
-  --skip-tlc-composition adaptive_mob_bundle
+#
+# Scheduling: the two audits and `machine-verify` are independent TLC work.
+# With a total budget of at least three 4-worker shares (TLC_WORKERS, or the
+# core count), the audits run concurrently with `machine-verify`, which itself
+# runs its TLC jobs concurrently within the remaining workers. Each concurrent
+# audit JVM gets 4 workers, GC threads capped to match, and a heap share
+# proportional to its workers; `machine-verify` gets the rest of both budgets,
+# so the totals are never exceeded. Outputs are captured and printed in the
+# fixed lane order below, and the lane fails if any part fails. A smaller
+# budget runs everything sequentially, exactly as before.
+audit_workers=4
+run_machine_verify() {
+  "${xtask_bin}" machine-verify --all --skip-cargo-tests \
+    --skip-tlc-composition meerkat_mob_seam \
+    --skip-tlc-composition adaptive_mob_bundle
+}
+
+total_heap_mb="${TLC_HEAP_BUDGET_MB:-}"
+if [[ -z "${total_heap_mb}" ]]; then
+  if [[ -r /proc/meminfo ]]; then
+    total_heap_mb="$(awk '/^MemTotal:/ {print int($2 / 1024 / 2)}' /proc/meminfo)"
+  else
+    total_heap_mb="$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 / 1024 / 2 ))"
+  fi
+fi
+# Each concurrent TLC JVM needs a heap floor (the largest generated models do);
+# without three floors of heap budget, run sequentially.
+min_heap_mb_per_job=16384
+if (( tlc_workers < 3 * audit_workers )) \
+  || (( total_heap_mb > 0 && total_heap_mb < 3 * min_heap_mb_per_job )); then
+  echo "running bounded durable in-turn steer TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${durable_steer_audit}" "${DURABLE_STEER_AUDIT_MAX_STEPS:-16}"
+  echo "running bounded live-context outbox TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${live_context_outbox_audit}" "${LIVE_CONTEXT_OUTBOX_AUDIT_MAX_STEPS:-20}"
+  TLC_WORKERS="${tlc_workers}" run_machine_verify
+  exit $?
+fi
+
+audit_java_tool_options="${JAVA_TOOL_OPTIONS}"
+machine_verify_heap_mb=""
+if [[ " ${audit_java_tool_options} " != *" -XX:ParallelGCThreads="* ]]; then
+  audit_java_tool_options+=" -XX:ParallelGCThreads=${audit_workers} -XX:ConcGCThreads=1"
+fi
+if (( total_heap_mb > 0 )); then
+  audit_heap_mb=$(( total_heap_mb * audit_workers / tlc_workers ))
+  (( audit_heap_mb < min_heap_mb_per_job )) && audit_heap_mb=${min_heap_mb_per_job}
+  if [[ " ${audit_java_tool_options} " != *" -Xmx"* ]]; then
+    audit_java_tool_options+=" -Xmx${audit_heap_mb}m"
+  fi
+  machine_verify_heap_mb="$(( total_heap_mb - 2 * audit_heap_mb ))"
+fi
+
+lane_logs="$(mktemp -d "${TMPDIR:-/tmp}/machine-verify-lane.XXXXXX")"
+trap 'rm -rf "${lane_logs}"' EXIT
+echo "machine-verify lane: audits run concurrently (${audit_workers} workers each), machine-verify gets $(( tlc_workers - 2 * audit_workers )) workers"
+TLC_WORKERS="${audit_workers}" JAVA_TOOL_OPTIONS="${audit_java_tool_options}" \
+  "${durable_steer_audit}" "${DURABLE_STEER_AUDIT_MAX_STEPS:-16}" >"${lane_logs}/steer.log" 2>&1 &
+steer_pid=$!
+TLC_WORKERS="${audit_workers}" JAVA_TOOL_OPTIONS="${audit_java_tool_options}" \
+  "${live_context_outbox_audit}" "${LIVE_CONTEXT_OUTBOX_AUDIT_MAX_STEPS:-20}" >"${lane_logs}/live.log" 2>&1 &
+live_pid=$!
+machine_verify_status=0
+(
+  export TLC_WORKERS="$(( tlc_workers - 2 * audit_workers ))"
+  if [[ -n "${machine_verify_heap_mb}" ]]; then
+    export TLC_HEAP_BUDGET_MB="${machine_verify_heap_mb}"
+  fi
+  run_machine_verify
+) >"${lane_logs}/machine-verify.log" || machine_verify_status=$?
+steer_status=0
+wait "${steer_pid}" || steer_status=$?
+live_status=0
+wait "${live_pid}" || live_status=$?
+
+echo "running bounded durable in-turn steer TLC audit"
+cat "${lane_logs}/steer.log"
+echo "running bounded live-context outbox TLC audit"
+cat "${lane_logs}/live.log"
+cat "${lane_logs}/machine-verify.log"
+
+lane_status=0
+for part in "durable in-turn steer audit:${steer_status}" \
+  "live-context outbox audit:${live_status}" \
+  "machine-verify:${machine_verify_status}"; do
+  if [[ "${part##*:}" != "0" ]]; then
+    echo "error: ${part%:*} failed (exit ${part##*:})" >&2
+    lane_status=1
+  fi
+done
+exit "${lane_status}"

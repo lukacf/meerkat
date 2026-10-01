@@ -404,6 +404,96 @@ fn deep_coverage_credits_transitions_tlc_reports_as_next_disjuncts() {
     );
 }
 
+#[cfg(feature = "machine-authority")]
+#[test]
+fn tlc_lane_budget_split_never_exceeds_the_total_worker_budget() {
+    let budget = |workers: usize| TlcRunBudget {
+        workers,
+        cap: std::time::Duration::from_secs(900),
+        gc_threads: None,
+        heap_mb: None,
+    };
+    // A 4-worker budget (or less) runs sequentially with the JVM defaults,
+    // exactly as before.
+    for workers in [1, 2, 4, 7] {
+        let (concurrency, job) = budget(workers).split_for_jobs_with_heap(30, None);
+        assert_eq!(concurrency, 1, "workers={workers}");
+        assert_eq!(job.workers, workers);
+        assert!(job.gc_threads.is_none() && job.heap_mb.is_none());
+    }
+    for (workers, jobs) in [(8, 30), (10, 30), (16, 30), (192, 35), (192, 3)] {
+        let (concurrency, job) = budget(workers).split_for_jobs_with_heap(jobs, None);
+        assert!(concurrency >= 1 && concurrency <= jobs, "workers={workers}");
+        assert!(
+            concurrency * job.workers <= workers,
+            "workers={workers}: {concurrency} x {} exceeds the budget",
+            job.workers
+        );
+        assert!(job.workers >= MIN_WORKERS_PER_PARALLEL_JOB.min(workers));
+        if concurrency > 1 {
+            assert_eq!(
+                job.gc_threads,
+                Some(job.workers),
+                "GC threads follow workers"
+            );
+        }
+    }
+    assert_eq!(budget(8).split_for_jobs_with_heap(30, None).0, 2);
+    assert_eq!(budget(192).split_for_jobs_with_heap(3, None).0, 3);
+
+    // The heap budget also bounds concurrency: every concurrent JVM gets at
+    // least MIN_HEAP_MB_PER_PARALLEL_JOB, so a small machine runs fewer jobs.
+    let floor = MIN_HEAP_MB_PER_PARALLEL_JOB;
+    let (concurrency, job) = budget(16).split_for_jobs_with_heap(30, Some(2 * floor));
+    assert_eq!(concurrency, 2);
+    assert_eq!(job.heap_mb, Some(floor));
+    let (concurrency, job) = budget(16).split_for_jobs_with_heap(30, Some(floor / 2));
+    assert_eq!(
+        concurrency, 1,
+        "below one floor share the lane runs sequentially"
+    );
+    assert_eq!(
+        job.heap_mb,
+        Some(floor / 2),
+        "a lone JVM gets the whole budget"
+    );
+    assert!(
+        job.gc_threads.is_none(),
+        "a lone JVM keeps the default GC threads"
+    );
+    let (concurrency, job) = budget(192).split_for_jobs_with_heap(35, Some(100 * floor));
+    assert_eq!(concurrency, 35);
+    assert!(job.heap_mb.is_some_and(|mb| mb >= floor));
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn tlc_lane_jobs_report_in_lane_order_and_failures_do_not_cancel_others() {
+    let jobs = (0..6).map(LaneJob::Machine).collect::<Vec<_>>();
+    let results = run_lane_jobs(&jobs, 3, |job| {
+        let LaneJob::Machine(index) = *job else {
+            unreachable!("machine jobs only")
+        };
+        // Earlier jobs finish later, so completion order is reversed.
+        std::thread::sleep(std::time::Duration::from_millis(30 * (6 - index as u64)));
+        LaneJobResult {
+            output: format!("job {index}\n"),
+            coverage: if index == 1 {
+                Err(anyhow::anyhow!("job 1 failed"))
+            } else {
+                Ok(None)
+            },
+        }
+    });
+    let outputs = results
+        .iter()
+        .map(|r| r.output.as_str())
+        .collect::<String>();
+    assert_eq!(outputs, "job 0\njob 1\njob 2\njob 3\njob 4\njob 5\n");
+    assert!(results[1].coverage.is_err());
+    assert_eq!(results.iter().filter(|r| r.coverage.is_ok()).count(), 5);
+}
+
 fn materialize_missing_coverage_anchors(mismatches: &[String]) -> anyhow::Result<()> {
     for mismatch in mismatches {
         let Some((_, rest)) = mismatch.split_once("coverage anchor ") else {

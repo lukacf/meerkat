@@ -34,6 +34,25 @@ name: Nightly
 #                       fails when more than one release was published after
 #                       the mirrored one (publication has stalled silently)
 
+# Hosted-runner slots. The account runs at most 40 hosted jobs at once,
+# shared with every pull request and main push, and nightly once held 22 of
+# them for most of 02:17-04:40 UTC (run 36807541395) while a merge burst
+# queued pull-request jobs for up to 11 minutes. Nightly now holds about ten:
+#   1. gcp-buildbuddy runs alone first (its own jobs peak at 9-10 hosted
+#      submitters for about 35 minutes, and its 3000 s deadline needs them
+#      in parallel);
+#   2. then five sequential chains: each job `needs` the previous one and
+#      runs under !cancelled(), so a red job never skips the rest:
+#        release-packaging (140 min) > mobkit-docs-lag
+#        e2e-system (100) > sdk-web (24) > audit
+#        feature-matrix (89) > workspace-int (46)
+#        release-stack-budget (55) > minimal-and-modularity (42) > e2e-fast
+#          (18) > sdk-host (14)
+#        machine-verify (38) > workspace-unit (24) > clippy-full (24) >
+#          dense-topology (24) > wasm-contract (16)
+# Minutes are from the 2026-10-01 run. Each chain is at most about 145
+# minutes, so nightly takes about three hours instead of about two and a
+# half. A new job joins the shortest chain; a new chain is a new slot.
 on:
   schedule:
     - cron: "17 2 * * *"
@@ -62,6 +81,8 @@ env:
 jobs:
   workspace-unit:
     name: Workspace unit tests
+    needs: machine-verify
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -104,6 +125,8 @@ jobs:
 
   workspace-int:
     name: Workspace integration-fast tests
+    needs: feature-matrix
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -141,6 +164,8 @@ jobs:
 
   e2e-fast:
     name: Deterministic e2e lane
+    needs: minimal-and-modularity
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -178,10 +203,14 @@ jobs:
 
   dense-topology:
     name: GitHub-hosted dense Mob topology
+    needs: clippy-full
+    if: ${{ !cancelled() }}
     uses: ./.github/workflows/mob-dense-topology.yml
 
   machine-verify:
     name: Bounded TLC machine verification
+    needs: gcp-buildbuddy
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -239,6 +268,8 @@ jobs:
 
   sdk-host:
     name: Python + TypeScript SDK suites
+    needs: e2e-fast
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -291,6 +322,8 @@ jobs:
 
   clippy-full:
     name: Clippy (all targets, all features)
+    needs: workspace-unit
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -321,6 +354,8 @@ jobs:
 
   feature-matrix:
     name: Feature matrix (lint + test)
+    needs: gcp-buildbuddy
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -359,6 +394,8 @@ jobs:
 
   minimal-and-modularity:
     name: Minimal features + surface modularity
+    needs: release-stack-budget
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -397,6 +434,8 @@ jobs:
 
   release-stack-budget:
     name: Release worker-stack budget (rkat-rpc dispatch path)
+    needs: gcp-buildbuddy
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -436,6 +475,8 @@ jobs:
 
   e2e-system:
     name: System e2e lane
+    needs: gcp-buildbuddy
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -471,6 +512,8 @@ jobs:
 
   sdk-web:
     name: Web SDK build + tests
+    needs: e2e-system
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -519,6 +562,8 @@ jobs:
 
   wasm-contract:
     name: WASM browser contract
+    needs: dense-topology
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -573,6 +618,8 @@ jobs:
 
   release-packaging:
     name: Release packaging dry-run
+    needs: gcp-buildbuddy
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -603,6 +650,8 @@ jobs:
 
   audit:
     name: Security audit
+    needs: sdk-web
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -621,6 +670,8 @@ jobs:
 
   mobkit-docs-lag:
     name: MobKit docs mirror lag
+    needs: release-packaging
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

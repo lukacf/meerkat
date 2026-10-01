@@ -2821,6 +2821,54 @@ impl EphemeralRuntimeDriver {
             conversation_digest: None,
             message_count: 0,
             sequence: boundary_sequence,
+            owner_contributions: Vec::new(),
+        })
+    }
+
+    /// Stamp one owner request-only contribution (not a runtime input) onto
+    /// the run's next checkpoint receipt (`ResolveLiveBoundaryOwnerContextReceipt`),
+    /// in the same dense per-run sequence as input-owned receipts.
+    pub(crate) fn machine_resolve_live_boundary_owner_context_receipt(
+        &mut self,
+        run_id: &RunId,
+        contribution_id: &str,
+    ) -> Result<RunBoundaryReceipt, RuntimeDriverError> {
+        let expected_run_id = mm_dsl::RunId::from_domain(run_id);
+        let effects = self.dsl_apply_effects(
+            mm_dsl::MeerkatMachineInput::ResolveLiveBoundaryOwnerContextReceipt {
+                run_id: expected_run_id.clone(),
+                contribution_id: contribution_id.to_owned(),
+            },
+            "ResolveLiveBoundaryOwnerContextReceipt",
+        )?;
+        let Some((effect_run_id, effect_contribution, boundary, boundary_sequence)) =
+            effects.into_iter().find_map(|effect| match effect {
+                mm_dsl::MeerkatMachineEffect::LiveBoundaryOwnerContextReceiptResolved {
+                    run_id,
+                    contribution_id,
+                    boundary,
+                    boundary_sequence,
+                } => Some((run_id, contribution_id, boundary, boundary_sequence)),
+                _ => None,
+            })
+        else {
+            return Err(RuntimeDriverError::Internal(format!(
+                "generated machine emitted no owner boundary receipt for {contribution_id}"
+            )));
+        };
+        if effect_run_id != expected_run_id || effect_contribution != contribution_id {
+            return Err(RuntimeDriverError::Internal(format!(
+                "generated machine emitted a mismatched owner boundary receipt for {contribution_id}"
+            )));
+        }
+        Ok(RunBoundaryReceipt {
+            run_id: run_id.clone(),
+            boundary: boundary.into(),
+            contributing_input_ids: Vec::new(),
+            conversation_digest: None,
+            message_count: 0,
+            sequence: boundary_sequence,
+            owner_contributions: vec![contribution_id.to_owned()],
         })
     }
 

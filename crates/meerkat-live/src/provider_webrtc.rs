@@ -1132,6 +1132,19 @@ pub enum LiveSidebandObservationKind {
         role: LiveSidebandTurnRole,
         transcript: String,
     },
+    /// The user turn about to finish continues the utterance of
+    /// `delegation`, which the provider created while this user's turn was
+    /// open (a pause mid-sentence); it is the next user turn to finish before
+    /// any other client delegation. Provider evidence only: steering it into
+    /// the delegation's worker requires generated steer authority. Emitted
+    /// immediately before the turn's `TurnFinished`.
+    UserTurnContinuesDelegation {
+        turn: LiveSidebandTurnRef,
+        delegation: LiveSidebandDelegationRef,
+        /// The continuing turn's transcript, exactly as its `TurnFinished`
+        /// reports it.
+        transcript: String,
+    },
     /// Provider output-transcript transport detail. Canonical assistant text
     /// is emitted only from an exact assistant turn lifecycle, so fragments
     /// cannot become duplicate parent messages.
@@ -1195,6 +1208,7 @@ impl fmt::Debug for LiveSidebandObservationKind {
             Self::TurnStarted { .. } => "turn_started",
             Self::TurnSnapshotDelta { .. } => "turn_snapshot_delta",
             Self::TurnFinished { .. } => "turn_finished",
+            Self::UserTurnContinuesDelegation { .. } => "user_turn_continues_delegation",
             Self::AssistantTranscriptFragment { .. } => "assistant_transcript_fragment",
             Self::DelegationRequested { .. } => "delegation_requested",
             Self::DelegationActionableInputUnsupported { .. } => {

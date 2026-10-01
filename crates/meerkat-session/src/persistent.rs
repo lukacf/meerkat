@@ -21950,6 +21950,7 @@ mod tests {
             message_count: usize::try_from(checkpoint.message_count())
                 .expect("checkpoint count fits usize"),
             sequence: 1,
+            owner_contributions: Vec::new(),
         };
         let promotion = meerkat_runtime::store::PreparedWholeBlobProvisionalPromotion::prepare(
             checkpoint,

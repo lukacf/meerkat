@@ -146,6 +146,7 @@ mod tests {
             conversation_digest: Some("digest".into()),
             message_count: 3,
             sequence: 0,
+            owner_contributions: Vec::new(),
         };
         let event = RunEvent::BoundaryApplied {
             run_id: receipt.run_id.clone(),

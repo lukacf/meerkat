@@ -932,6 +932,7 @@ async fn recover_consumes_committed_applied_pending_inputs() {
                 conversation_digest: None,
                 message_count: 1,
                 sequence: 0,
+                owner_contributions: Vec::new(),
             },
             vec![persistable(stored.clone())],
             None,

@@ -459,6 +459,106 @@ impl MeerkatMachine {
         })?
     }
 
+    /// Deliver owner request-only context (not a runtime input: no ledger
+    /// row, no queue, no follow-up turn) into the session's running turn at
+    /// its next exact model boundary, waiting across a closed window.
+    ///
+    /// Linearization mirrors the input path: prepare parks the runner without
+    /// the mutation gate; the attachment and run are revalidated under it; the
+    /// runtime stamps `ResolveLiveBoundaryOwnerContextReceipt` into the run's
+    /// dense boundary sequence and (persistent drivers) commits that receipt
+    /// durably; only then is the context published to the runner. No active
+    /// run, a run that ends first, or a replaced attachment is `NotDelivered`
+    /// with nothing recorded.
+    pub async fn deliver_live_owner_request_context(
+        &self,
+        session_id: &SessionId,
+        contribution_id: &str,
+        contexts: Vec<meerkat_core::lifecycle::TurnRequestContext>,
+    ) -> Result<crate::live_execution::LiveOwnerContextDelivery, RuntimeDriverError> {
+        use crate::live_execution::LiveOwnerContextDelivery;
+        let (gate, driver, boundary_handle, attachment_id) = {
+            let sessions = self.sessions.read().await;
+            let Some(entry) = sessions.get(session_id) else {
+                return Ok(LiveOwnerContextDelivery::NotDelivered);
+            };
+            let (Some(handle), Some(attachment)) =
+                (entry.boundary_handle(), entry.live_attachment_id())
+            else {
+                return Ok(LiveOwnerContextDelivery::NotDelivered);
+            };
+            (
+                Arc::clone(&entry.mutation_gate),
+                Arc::clone(&entry.driver),
+                handle,
+                attachment,
+            )
+        };
+        let Some(run_id) = driver.lock().await.current_run_id() else {
+            return Ok(LiveOwnerContextDelivery::NotDelivered);
+        };
+        // The boundary callback may re-enter MeerkatMachine: prepare without M.
+        let prepared = boundary_handle
+            .prepare_turn_boundary_delivery(
+                &run_id,
+                meerkat_core::TurnBoundaryDelivery::RequestOnlyAtNextBoundary(contexts),
+            )
+            .await;
+        let _held_mutation_gate = Arc::clone(&gate).lock_owned().await;
+        let still_exact = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).is_some_and(|entry| {
+                Arc::ptr_eq(&entry.mutation_gate, &gate)
+                    && Arc::ptr_eq(&entry.driver, &driver)
+                    && entry.live_attachment_id() == Some(attachment_id)
+                    && entry
+                        .boundary_handle()
+                        .is_some_and(|handle| Arc::ptr_eq(&handle, &boundary_handle))
+            })
+        } && driver.lock().await.current_run_id().as_ref() == Some(&run_id);
+        let prepared = match prepared {
+            Ok(prepared) if still_exact => prepared,
+            Ok(prepared) => {
+                drop(prepared);
+                return Ok(LiveOwnerContextDelivery::NotDelivered);
+            }
+            Err(
+                meerkat_core::lifecycle::CoreBoundaryStageError::Unavailable { .. }
+                | meerkat_core::lifecycle::CoreBoundaryStageError::Stale { .. },
+            ) => {
+                return Ok(LiveOwnerContextDelivery::NotDelivered);
+            }
+            Err(meerkat_core::lifecycle::CoreBoundaryStageError::Fault { reason }) => {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "owner boundary context preparation failed for {contribution_id}: {reason}"
+                )));
+            }
+        };
+        let receipt = driver
+            .lock()
+            .await
+            .machine_realize_live_boundary_owner_context(&run_id, contribution_id, session_id)
+            .await;
+        let receipt = match receipt {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                drop(prepared);
+                return Err(error);
+            }
+        };
+        // The session-side publication linearization point, after the
+        // durable receipt. Under the exact parked witness it is infallible.
+        prepared.commit().map_err(|error| {
+            RuntimeDriverError::Internal(format!(
+                "owner boundary context {contribution_id} lost its exact session publication authority after its receipt: {error}"
+            ))
+        })?;
+        Ok(LiveOwnerContextDelivery::Delivered {
+            run_id,
+            boundary_sequence: receipt.sequence,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn commit_live_boundary_input_if_available(
         &self,

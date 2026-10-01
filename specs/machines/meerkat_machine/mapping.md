@@ -3305,6 +3305,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveLiveBoundaryContextReceiptRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveLiveBoundaryOwnerContextReceiptRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitTerminalBoundarySequenceRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4482,6 +4485,51 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeLiveDelegationNarrationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationSteerIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationSteerAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationSteerRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationSteerDeliveryIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationSteerDeliveryAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationSteerDeliveryRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerConfirmedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerConfirmedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerConfirmedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerMaterialConflictIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerMaterialConflictAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerMaterialConflictRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerMissingIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerMissingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationSteerMissingRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeLiveConsequentialEffectIdle`
@@ -7507,6 +7555,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveBoundaryContextReceiptResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveBoundaryOwnerContextReceiptResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TerminalBoundarySequenceCommitted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7960,6 +8011,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveDelegationNarrationAuthorized`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveDelegationSteerAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationSteerDeliveryResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationSteerReconciled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveDelegationResultReleaseAuthorized`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8214,6 +8274,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 
 ### Invariants
+- `live_delegation_steer_records_are_authorized_and_single`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `fence_requires_bound_runtime`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

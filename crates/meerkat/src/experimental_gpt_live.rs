@@ -1655,6 +1655,19 @@ pub trait ExperimentalGptLiveControlPlane: Send + Sync {
         delegation: LiveSidebandDelegationRef,
         text: String,
     ) -> Result<ExperimentalGptLiveNarrationDispatch, ExperimentalGptLiveBridgeError>;
+
+    /// The canonical commit of one continuation the provider marked on this
+    /// binding's channel (`continuation_id` is the item id its user row
+    /// commits under), resolved when the row commits or the channel's
+    /// projection ends. Compositions without a projection report nothing
+    /// committed.
+    async fn continuation_commit(
+        &self,
+        _binding: &ProviderWebrtcBinding,
+        _continuation_id: &str,
+    ) -> ExperimentalGptLiveContinuationCommit {
+        ExperimentalGptLiveContinuationCommit::NotCommitted
+    }
 }
 
 /// Why one provider lifecycle fact was not applied.
@@ -3703,6 +3716,22 @@ fn experimental_gpt_live_realtime_capabilities() -> RealtimeCapabilities {
     }
 }
 
+/// Canonical commit of one steered continuation's user row, as the
+/// projection pump applied it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExperimentalGptLiveContinuationCommit {
+    /// The row committed with this text.
+    Committed { text: String },
+    /// The row never committed: the channel's projection ended first, or the
+    /// continuation was never observed on this channel.
+    NotCommitted,
+}
+
+enum ContinuationCommitSlot {
+    Waiting(Vec<oneshot::Sender<ExperimentalGptLiveContinuationCommit>>),
+    Settled(ExperimentalGptLiveContinuationCommit),
+}
+
 struct ExperimentalGptLiveDeferredAdapter {
     context_observation_recorder: std::sync::OnceLock<
         Arc<crate::session_runtime::live_summary::LiveContextObservationRecorder>,
@@ -3739,6 +3768,11 @@ struct ExperimentalGptLiveDeferredAdapter {
     caption_sink: Option<Arc<dyn PublicGptLiveProvisionalCaptionSink>>,
     /// Session and channel of the binding currently feeding this adapter.
     caption_scope: std::sync::Mutex<Option<(meerkat_core::SessionId, meerkat_live::LiveChannelId)>>,
+    /// Continuations a delegation may be steered with, keyed by the item id
+    /// their canonical user row commits under: registered by the reader when
+    /// the provider marks the turn, settled by the projection pump when the
+    /// row commits (or when the pump ends without committing it).
+    continuation_commits: std::sync::Mutex<HashMap<String, ContinuationCommitSlot>>,
 }
 
 enum ExperimentalGptLiveAdapterIngress {
@@ -3883,7 +3917,87 @@ impl ExperimentalGptLiveDeferredAdapter {
             unmeasured_seal_requested: Notify::new(),
             caption_sink: None,
             caption_scope: std::sync::Mutex::new(None),
+            continuation_commits: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The reader saw the provider mark this turn as continuing a
+    /// delegation; its commit is awaited from now on.
+    fn expect_continuation_commit(&self, item_id: String) {
+        if let Ok(mut slots) = self.continuation_commits.lock() {
+            slots
+                .entry(item_id)
+                .or_insert_with(|| ContinuationCommitSlot::Waiting(Vec::new()));
+        }
+    }
+
+    /// The projection pump applied an expected continuation's user row.
+    fn settle_continuation_commit(
+        &self,
+        item_id: &str,
+        outcome: ExperimentalGptLiveContinuationCommit,
+    ) {
+        let Ok(mut slots) = self.continuation_commits.lock() else {
+            return;
+        };
+        let Some(slot) = slots.get_mut(item_id) else {
+            return;
+        };
+        if let ContinuationCommitSlot::Waiting(waiters) = slot {
+            for waiter in waiters.drain(..) {
+                let _ = waiter.send(outcome.clone());
+            }
+            *slot = ContinuationCommitSlot::Settled(outcome);
+        }
+    }
+
+    /// The projection pump ended: every continuation still awaiting its
+    /// commit never committed.
+    fn settle_unresolved_continuation_commits(&self) {
+        let Ok(mut slots) = self.continuation_commits.lock() else {
+            return;
+        };
+        for slot in slots.values_mut() {
+            if let ContinuationCommitSlot::Waiting(waiters) = slot {
+                for waiter in waiters.drain(..) {
+                    let _ = waiter.send(ExperimentalGptLiveContinuationCommit::NotCommitted);
+                }
+                *slot = ContinuationCommitSlot::Settled(
+                    ExperimentalGptLiveContinuationCommit::NotCommitted,
+                );
+            }
+        }
+    }
+
+    /// The commit outcome of one expected continuation, consumed once.
+    async fn continuation_commit(&self, item_id: &str) -> ExperimentalGptLiveContinuationCommit {
+        let receiver = {
+            let Ok(mut slots) = self.continuation_commits.lock() else {
+                return ExperimentalGptLiveContinuationCommit::NotCommitted;
+            };
+            match slots.get_mut(item_id) {
+                None => return ExperimentalGptLiveContinuationCommit::NotCommitted,
+                Some(ContinuationCommitSlot::Settled(_)) => {
+                    let Some(ContinuationCommitSlot::Settled(outcome)) = slots.remove(item_id)
+                    else {
+                        return ExperimentalGptLiveContinuationCommit::NotCommitted;
+                    };
+                    return outcome;
+                }
+                Some(ContinuationCommitSlot::Waiting(waiters)) => {
+                    let (sender, receiver) = oneshot::channel();
+                    waiters.push(sender);
+                    receiver
+                }
+            }
+        };
+        let outcome = receiver
+            .await
+            .unwrap_or(ExperimentalGptLiveContinuationCommit::NotCommitted);
+        if let Ok(mut slots) = self.continuation_commits.lock() {
+            slots.remove(item_id);
+        }
+        outcome
     }
 
     #[cfg(any(test, feature = "experimental-gpt-live-gate0-harness"))]
@@ -4752,6 +4866,7 @@ impl ExperimentalGptLiveDeferredAdapter {
             | LiveSidebandObservationKind::TurnStarted { .. }
             | LiveSidebandObservationKind::TurnSnapshotDelta { .. }
             | LiveSidebandObservationKind::DelegationRequested { .. }
+            | LiveSidebandObservationKind::UserTurnContinuesDelegation { .. }
             | LiveSidebandObservationKind::AppendAcknowledged { .. }
             | LiveSidebandObservationKind::AppendRejected { .. }
             | LiveSidebandObservationKind::AppendDeliveryAmbiguousTerminal { .. } => None,
@@ -6653,6 +6768,23 @@ impl ExperimentalGptLiveControlPlane for ExperimentalGptLiveWebrtcTransport {
         ExperimentalGptLiveWebrtcTransport::narrate_delegation(self, authority, delegation, text)
             .await
     }
+
+    async fn continuation_commit(
+        &self,
+        binding: &ProviderWebrtcBinding,
+        continuation_id: &str,
+    ) -> ExperimentalGptLiveContinuationCommit {
+        let adapter = self
+            .registered_by_channel
+            .lock()
+            .await
+            .get(binding.channel_id())
+            .map(|registration| Arc::clone(&registration.adapter));
+        match adapter {
+            Some(adapter) => adapter.continuation_commit(continuation_id).await,
+            None => ExperimentalGptLiveContinuationCommit::NotCommitted,
+        }
+    }
 }
 
 /// Release every sealed provider-managed unmeasured segment, oldest first:
@@ -6930,6 +7062,7 @@ fn spawn_sideband_actors(
                     let control_observation = matches!(
                         observation.kind(),
                         LiveSidebandObservationKind::DelegationRequested { .. }
+                            | LiveSidebandObservationKind::UserTurnContinuesDelegation { .. }
                             | LiveSidebandObservationKind::DelegationActionableInputUnsupported { .. }
                             | LiveSidebandObservationKind::AppendAcknowledged { .. }
                             | LiveSidebandObservationKind::AppendRejected { .. }
@@ -7052,6 +7185,15 @@ fn spawn_sideband_actors(
                     if speech_boundary && observation_adapter.push_speech_boundary().is_ok() {
                         speech_boundary_pending = true;
                     }
+                    if let LiveSidebandObservationKind::UserTurnContinuesDelegation {
+                        turn, ..
+                    } = observation.kind()
+                    {
+                        // Registered before the turn's TurnFinished reaches the
+                        // projection, so its commit is never missed.
+                        observation_adapter
+                            .expect_continuation_commit(live_user_transcript_item_id(turn));
+                    }
                     if control_observation {
                         // Delivery receipts must reach their owned waiter even
                         // while the control consumer commits a transcript.
@@ -7135,6 +7277,15 @@ fn spawn_sideband_actors(
     let pump_drain = Arc::clone(&drain);
     let pump_adapter = Arc::clone(&adapter);
     let adapter_pump = tokio::spawn(async move {
+        // However the projection ends, a continuation it never committed
+        // resolves as not committed.
+        struct SettleContinuationsOnExit(Arc<ExperimentalGptLiveDeferredAdapter>);
+        impl Drop for SettleContinuationsOnExit {
+            fn drop(&mut self) {
+                self.0.settle_unresolved_continuation_commits();
+            }
+        }
+        let _settle_continuations = SettleContinuationsOnExit(Arc::clone(&pump_adapter));
         let Some(activation) = pump_gate.wait_for_commit().await else {
             return;
         };
@@ -7291,6 +7442,20 @@ fn spawn_sideband_actors(
                     outcome = ?outcome,
                     "live adapter observation applied"
                 );
+                if let (
+                    LiveAdapterObservation::UserTranscriptFinal {
+                        provider_item_id: Some(item_id),
+                        text,
+                        ..
+                    },
+                    meerkat_live::ObservationOutcome::TranscriptAppended,
+                ) = (&*observation, &outcome)
+                {
+                    pump_adapter.settle_continuation_commit(
+                        item_id,
+                        ExperimentalGptLiveContinuationCommit::Committed { text: text.clone() },
+                    );
+                }
                 if let meerkat_live::ObservationOutcome::PlaybackTerminalSettled {
                     ref item_id, ..
                 } = outcome
@@ -8413,6 +8578,31 @@ impl ExperimentalGptLiveSideband {
                     transcript,
                 }
             }
+            GptLiveBrokerObservation::UserTurnContinuesDelegation {
+                turn,
+                delegation,
+                transcript,
+            } => {
+                let turn = self.existing_turn_ref(turn).await?;
+                let correlations = self.correlations.lock().await;
+                let provider_id = delegation.__opaque_provider_id();
+                let local = correlations
+                    .delegations
+                    .iter()
+                    .find(|(_, known)| known.__opaque_provider_id() == provider_id)
+                    .map(|(local, _)| local.clone())
+                    .ok_or(ProviderWebrtcBrokerError::ProtocolDrift)?;
+                let delegation = LiveSidebandDelegationRef::__from_provider_observation(
+                    local,
+                    provider_id.to_string(),
+                )
+                .ok_or(ProviderWebrtcBrokerError::ProtocolDrift)?;
+                LiveSidebandObservationKind::UserTurnContinuesDelegation {
+                    turn,
+                    delegation,
+                    transcript,
+                }
+            }
             GptLiveBrokerObservation::ClientDelegationFinal {
                 delegation,
                 target: meerkat_openai::gpt_live_broker::GptLiveDelegationTarget::Client,
@@ -8540,7 +8730,9 @@ impl ExperimentalGptLiveSideband {
 
 /// The item id the live transcript commits a finished user turn's canonical
 /// row under.
-fn live_user_transcript_item_id(turn: &LiveSidebandTurnRef) -> String {
+/// The item id a provider user turn's canonical row commits under; a
+/// continuation is identified by it.
+pub fn live_user_transcript_item_id(turn: &LiveSidebandTurnRef) -> String {
     format!("experimental-gpt-live-user-item:{}", turn.adapter_key())
 }
 
@@ -12311,6 +12503,13 @@ mod tests {
         sideband.close().await.expect("close requested");
         if late_tail {
             // Stream end flushes the open tail turn as a committed user row.
+            // The tail continues the utterance the delegation was created
+            // in, so it is first marked as continuing that delegation.
+            assert!(matches!(
+                next().await.kind(),
+                LiveSidebandObservationKind::UserTurnContinuesDelegation { transcript, .. }
+                    if transcript == public_wire::USER_TRANSCRIPT_TAIL
+            ));
             assert!(matches!(
                 next().await.kind(),
                 LiveSidebandObservationKind::TurnFinished {
@@ -13881,6 +14080,75 @@ mod tests {
                 .expect("recorded retractions")
                 .push(retraction);
         }
+    }
+
+    /// A steered continuation's canonical commit reaches its waiter whether
+    /// the commit lands before or after the wait begins, exactly once; an
+    /// unexpected id, or a projection that ends first, reports not committed.
+    #[tokio::test]
+    async fn continuation_commits_resolve_once_whenever_the_row_commits() {
+        let adapter = Arc::new(ExperimentalGptLiveDeferredAdapter::new(
+            test_deferred_adapter().identity.clone(),
+        ));
+        // Commit before the wait.
+        adapter.expect_continuation_commit("item-early".into());
+        adapter.settle_continuation_commit(
+            "item-early",
+            ExperimentalGptLiveContinuationCommit::Committed {
+                text: " into notes".into(),
+            },
+        );
+        assert_eq!(
+            adapter.continuation_commit("item-early").await,
+            ExperimentalGptLiveContinuationCommit::Committed {
+                text: " into notes".into()
+            }
+        );
+        assert_eq!(
+            adapter.continuation_commit("item-early").await,
+            ExperimentalGptLiveContinuationCommit::NotCommitted,
+            "consumed once"
+        );
+        // Wait before the commit.
+        adapter.expect_continuation_commit("item-late".into());
+        let waiter = {
+            let adapter = Arc::clone(&adapter);
+            tokio::spawn(async move { adapter.continuation_commit("item-late").await })
+        };
+        tokio::task::yield_now().await;
+        adapter.settle_continuation_commit(
+            "item-late",
+            ExperimentalGptLiveContinuationCommit::Committed {
+                text: " dot md".into(),
+            },
+        );
+        assert_eq!(
+            waiter.await.unwrap(),
+            ExperimentalGptLiveContinuationCommit::Committed {
+                text: " dot md".into()
+            }
+        );
+        // A user row that was never marked as a continuation is not tracked.
+        adapter.settle_continuation_commit(
+            "item-ordinary",
+            ExperimentalGptLiveContinuationCommit::Committed { text: "hi".into() },
+        );
+        assert_eq!(
+            adapter.continuation_commit("item-ordinary").await,
+            ExperimentalGptLiveContinuationCommit::NotCommitted
+        );
+        // The projection ends before the row committed.
+        adapter.expect_continuation_commit("item-lost".into());
+        let waiter = {
+            let adapter = Arc::clone(&adapter);
+            tokio::spawn(async move { adapter.continuation_commit("item-lost").await })
+        };
+        tokio::task::yield_now().await;
+        adapter.settle_unresolved_continuation_commits();
+        assert_eq!(
+            waiter.await.unwrap(),
+            ExperimentalGptLiveContinuationCommit::NotCommitted
+        );
     }
 
     fn unmeasured_test_adapter(

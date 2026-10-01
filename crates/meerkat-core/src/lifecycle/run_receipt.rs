@@ -49,6 +49,7 @@ impl RunBoundaryReceiptDraft {
             conversation_digest: self.conversation_digest,
             message_count: self.message_count,
             sequence,
+            owner_contributions: Vec::new(),
         }
     }
 }
@@ -69,6 +70,13 @@ pub struct RunBoundaryReceipt {
     pub message_count: usize,
     /// Monotonic sequence number for ordering receipts within a run.
     pub sequence: u64,
+    /// Owner-supplied request-only contributions to this boundary that are
+    /// not runtime inputs (a live delegation steer delivered straight to the
+    /// running turn), by their owner contribution id. Empty for input-owned
+    /// receipts. Every context contribution to a model attempt is recorded
+    /// on a runtime boundary receipt, whichever path supplied it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_contributions: Vec<String>,
 }
 
 #[cfg(test)]
@@ -85,10 +93,70 @@ mod tests {
             conversation_digest: Some("abc123".into()),
             message_count: 5,
             sequence: 1,
+            owner_contributions: Vec::new(),
         };
         let json = serde_json::to_value(&receipt).unwrap();
         let parsed: RunBoundaryReceipt = serde_json::from_value(json).unwrap();
         assert_eq!(receipt, parsed);
+    }
+
+    /// A receipt written before `owner_contributions` existed decodes with an
+    /// empty list.
+    #[test]
+    fn old_format_receipt_decodes_with_no_owner_contributions() {
+        let run_id = RunId::new();
+        let old = serde_json::json!({
+            "run_id": run_id,
+            "boundary": "run_checkpoint",
+            "contributing_input_ids": [],
+            "message_count": 0,
+            "sequence": 3
+        });
+        let parsed: RunBoundaryReceipt = serde_json::from_value(old).unwrap();
+        assert!(parsed.owner_contributions.is_empty());
+        assert_eq!(parsed.sequence, 3);
+    }
+
+    /// An input-owned receipt (no owner contributions) serializes exactly as
+    /// before the field existed, so older readers and byte digests see the
+    /// same record.
+    #[test]
+    fn empty_owner_contributions_serialize_byte_identically_to_the_old_format() {
+        let receipt = RunBoundaryReceipt {
+            run_id: RunId::new(),
+            boundary: RunApplyBoundary::RunCheckpoint,
+            contributing_input_ids: vec![InputId::new()],
+            conversation_digest: None,
+            message_count: 2,
+            sequence: 1,
+            owner_contributions: Vec::new(),
+        };
+        let json = serde_json::to_string(&receipt).unwrap();
+        assert!(!json.contains("owner_contributions"));
+        let old_shape = serde_json::json!({
+            "run_id": receipt.run_id,
+            "boundary": receipt.boundary,
+            "contributing_input_ids": receipt.contributing_input_ids,
+            "message_count": 2,
+            "sequence": 1
+        });
+        assert_eq!(serde_json::to_value(&receipt).unwrap(), old_shape);
+    }
+
+    #[test]
+    fn owner_contributions_round_trip() {
+        let receipt = RunBoundaryReceipt {
+            run_id: RunId::new(),
+            boundary: RunApplyBoundary::RunCheckpoint,
+            contributing_input_ids: Vec::new(),
+            conversation_digest: None,
+            message_count: 0,
+            sequence: 2,
+            owner_contributions: vec!["live-steer:continuation-1".to_string()],
+        };
+        let json = serde_json::to_string(&receipt).unwrap();
+        let parsed: RunBoundaryReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, receipt);
     }
 
     #[test]
@@ -100,6 +168,7 @@ mod tests {
             conversation_digest: None,
             message_count: 0,
             sequence: 0,
+            owner_contributions: Vec::new(),
         };
         let json = serde_json::to_string(&receipt).unwrap();
         assert!(!json.contains("conversation_digest"));
@@ -117,6 +186,7 @@ mod tests {
             conversation_digest: None,
             message_count: 3,
             sequence: 2,
+            owner_contributions: Vec::new(),
         };
         assert_eq!(receipt.contributing_input_ids, ids);
     }

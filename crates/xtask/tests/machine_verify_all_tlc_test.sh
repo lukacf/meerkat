@@ -139,6 +139,22 @@ if [[ ! -x "${live_context_outbox_audit}" ]]; then
   exit 1
 fi
 
+# The live delegation steer edges (authorize, delivery outcome, reconcile at
+# commit) sit behind a long live-channel setup the ci sweep cannot reach, so a
+# second hand-written audit over the same generated model drives a bound
+# channel to a started delegation worker and explores every steer outcome
+# under every generated invariant (including
+# live_delegation_steer_records_are_authorized_and_single). It also proves
+# each outcome reachable by requiring a counterexample to its negation. 16
+# steps reach every outcome on two continuations; deeper bounds run by hand.
+live_steer_audit="${workspace_root}/specs/machines/meerkat_machine/live_delegation_steer_audit.sh"
+if [[ ! -x "${live_steer_audit}" ]]; then
+  echo "error: live delegation steer audit runner is missing from workspace runfiles: ${live_steer_audit}" >&2
+  exit 1
+fi
+echo "running bounded live delegation steer TLC audit"
+TLC_WORKERS="${tlc_workers}" "${live_steer_audit}" "${LIVE_STEER_AUDIT_MAX_STEPS:-16}"
+
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
 # codegen defects. `machine-verify` still validates drift and the generated
 # ci.cfg structural-invariant contract before honoring these skips. The earlier
@@ -159,6 +175,9 @@ fi
 # generated driver, checked-in witness config, ci.cfg structural invariant, and
 # the bounded witness TLC proof above. It still composes two full MobMachine
 # instances, so the full composition TLC sweep exceeds the required CI budget.
+#
+# The live delegation steer audit above runs on its own first (it is small:
+# well under a minute at its default bound).
 #
 # Scheduling: the two audits and `machine-verify` are independent TLC work.
 # With a total budget of at least three 4-worker shares (TLC_WORKERS, or the

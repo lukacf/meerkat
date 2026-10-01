@@ -597,6 +597,7 @@ fn make_receipt(
         conversation_digest: None,
         message_count: 0,
         sequence,
+        owner_contributions: Vec::new(),
     }
 }
 
@@ -687,6 +688,7 @@ async fn recovery_store_contract_applies_machine_owned_receipts_across_supported
             conversation_digest: Some(format!("{}-machine-digest", harness.name)),
             message_count: 2,
             sequence: 0,
+            owner_contributions: Vec::new(),
         };
 
         harness
@@ -791,6 +793,7 @@ async fn recovery_store_contract_applies_machine_owned_receipts_across_supported
                     conversation_digest: Some(format!("{}-second-digest", harness.name)),
                     message_count: 1,
                     sequence: 1,
+                    owner_contributions: Vec::new(),
                 },
                 vec![persistable(applied_pending_state(&second, &run_id, 1))],
                 None,
@@ -1264,6 +1267,7 @@ async fn atomic_apply_recovery_boundary_commits_visible_effects_together() {
             conversation_digest: Some(format!("{name}-recovered-boundary-digest")),
             message_count: recovered.messages().len(),
             sequence: 1,
+            owner_contributions: Vec::new(),
         };
         // Input-state terminalization: the recovered run's input closes
         // Consumed. Recovery TERMINALIZES the original input; it never
@@ -1689,6 +1693,7 @@ async fn head_canonical_recovery_uses_only_store_owned_source_and_migrates_floor
         conversation_digest: None,
         message_count: committed.messages().len(),
         sequence: 1,
+        owner_contributions: Vec::new(),
     };
     store
         .commit_prepared_session_boundary(

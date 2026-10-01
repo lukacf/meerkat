@@ -6700,6 +6700,28 @@ fn narrate(
     )
 }
 
+fn steer(
+    authority: &mut mm::MeerkatMachineAuthority,
+    index: usize,
+    continuation_id: &str,
+    continuation_digest: &str,
+) -> Result<mm::MeerkatMachineTransition, mm::MeerkatMachineTransitionError> {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationSteer {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(index),
+            operation_id: channel_operation(index),
+            provider_turn_correlation: channel_provider_turn(index),
+            continuation_id: continuation_id.to_string(),
+            continuation_digest: continuation_digest.to_string(),
+        },
+    )
+}
+
 fn schedule_state(
     authority: &mm::MeerkatMachineAuthority,
     index: usize,
@@ -7086,6 +7108,171 @@ fn failed_narration_is_released_once_for_failed_or_cancelled_items_only() {
     narrate(&mut authority, 2, mm::LiveDelegationNarrationKind::Failed)
         .expect("failed worker narrates as failed");
     assert_eq!(active_worker_count(&authority), 0);
+}
+
+fn reconcile_steer(
+    authority: &mut mm::MeerkatMachineAuthority,
+    index: usize,
+    continuation_id: &str,
+    committed: bool,
+    digest_matches: bool,
+) -> Result<mm::MeerkatMachineTransition, mm::MeerkatMachineTransitionError> {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ReconcileLiveDelegationSteer {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            operation_id: channel_operation(index),
+            continuation_id: continuation_id.to_string(),
+            continuation_committed: committed,
+            committed_digest_matches: digest_matches,
+        },
+    )
+}
+
+fn steer_reconciliation(
+    authority: &mm::MeerkatMachineAuthority,
+    continuation_id: &str,
+) -> Option<mm::LiveDelegationReconciliation> {
+    authority
+        .state()
+        .live_delegation_steer_reconciliation_by_continuation
+        .get(continuation_id)
+        .copied()
+}
+
+/// A continuation of the user's utterance reaches the delegation's worker
+/// only while the worker accepts input, each continuation at most once, and
+/// provisionally: its canonical row commits later (after an existing member's
+/// turn ends) and is reconciled then.
+#[test]
+fn a_continuation_steers_a_worker_that_accepts_input_once() {
+    let mut authority = opened_authority();
+    bind_only(&mut authority);
+    admit_parallel_delegation(&mut authority, 1);
+    assert!(
+        steer(&mut authority, 1, "continuation-a", "digest-a").is_err(),
+        "a queued delegation has no worker to steer"
+    );
+    authorize_parallel_worker(&mut authority, 1, &channel_worker(1)).expect("worker start");
+    assert!(
+        steer(&mut authority, 1, "", "digest-a").is_err(),
+        "a continuation needs an identity"
+    );
+    assert!(
+        steer(&mut authority, 1, "continuation-a", "").is_err(),
+        "a continuation needs its transcript digest"
+    );
+    let authorized = steer(&mut authority, 1, "continuation-a", "digest-a")
+        .expect("a start-authorized worker accepts the continuation");
+    assert!(authorized.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationSteerAuthorized {
+            operation_id,
+            continuation_id,
+            ..
+        } if operation_id == &channel_operation(1) && continuation_id == "continuation-a"
+    )));
+    assert_eq!(
+        steer_reconciliation(&authority, "continuation-a"),
+        Some(mm::LiveDelegationReconciliation::Provisional)
+    );
+    assert!(
+        steer(&mut authority, 1, "continuation-a", "digest-a").is_err(),
+        "each continuation steers once"
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationWorkerStart {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(1),
+            operation_id: channel_operation(1),
+            worker_identity: channel_worker(1),
+            started: true,
+        },
+    )
+    .expect("worker start resolves");
+    steer(&mut authority, 1, "continuation-b", "digest-b").expect("a running worker accepts input");
+    steer(&mut authority, 1, "continuation-c", "digest-c").expect("a running worker accepts input");
+    record_parallel_terminal(
+        &mut authority,
+        1,
+        &channel_worker(1),
+        mm::LiveDelegationWorkerTerminalKind::Completed,
+    );
+    assert!(
+        steer(&mut authority, 1, "continuation-d", "digest-d").is_err(),
+        "a terminal worker takes no more input"
+    );
+
+    // The runtime's boundary delivery resolves exactly once per steer.
+    let delivery = |authority: &mut mm::MeerkatMachineAuthority, id: &str, delivered: bool| {
+        apply(
+            authority,
+            mm::MeerkatMachineInput::ResolveLiveDelegationSteerDelivery {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                operation_id: channel_operation(1),
+                continuation_id: id.to_string(),
+                delivered,
+            },
+        )
+    };
+    let resolved = delivery(&mut authority, "continuation-a", true).expect("delivered");
+    assert!(resolved.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationSteerDeliveryResolved {
+            delivered: true,
+            ..
+        }
+    )));
+    assert!(
+        delivery(&mut authority, "continuation-a", false).is_err(),
+        "one delivery outcome per steer"
+    );
+    delivery(&mut authority, "continuation-b", false).expect("not delivered");
+    assert!(
+        delivery(&mut authority, "continuation-unknown", true).is_err(),
+        "only an authorized steer has a delivery"
+    );
+
+    // Each provisional steer is reconciled exactly once, after the worker's
+    // turn ended and its canonical row committed (or did not).
+    let confirmed = reconcile_steer(&mut authority, 1, "continuation-a", true, true)
+        .expect("committed with the steered text");
+    assert!(confirmed.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationSteerReconciled {
+            reconciliation: mm::LiveDelegationReconciliation::Confirmed,
+            ..
+        }
+    )));
+    assert!(
+        reconcile_steer(&mut authority, 1, "continuation-a", true, true).is_err(),
+        "reconciled once"
+    );
+    reconcile_steer(&mut authority, 1, "continuation-b", true, false)
+        .expect("committed with different text");
+    reconcile_steer(&mut authority, 1, "continuation-c", false, false).expect("never committed");
+    assert_eq!(
+        steer_reconciliation(&authority, "continuation-b"),
+        Some(mm::LiveDelegationReconciliation::MaterialConflict)
+    );
+    assert_eq!(
+        steer_reconciliation(&authority, "continuation-c"),
+        Some(mm::LiveDelegationReconciliation::Missing)
+    );
+    assert!(
+        reconcile_steer(&mut authority, 2, "continuation-unknown", true, true).is_err(),
+        "only a recorded steer reconciles"
+    );
 }
 
 #[test]

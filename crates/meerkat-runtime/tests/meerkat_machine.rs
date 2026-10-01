@@ -1693,6 +1693,7 @@ async fn control_plane_receipt_lookup_ignores_legacy_storage_alias() {
         conversation_digest: None,
         message_count: 0,
         sequence: 0,
+        owner_contributions: Vec::new(),
     };
     store
         .atomic_apply(

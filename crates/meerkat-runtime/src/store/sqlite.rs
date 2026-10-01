@@ -16588,6 +16588,7 @@ ORDER BY runtime_id";
                 conversation_digest: None,
                 message_count: expected_session.messages().len(),
                 sequence: 7,
+                owner_contributions: Vec::new(),
             };
             let released_receipt_json = serde_json::to_vec(&released_receipt).unwrap();
             tx.execute(
@@ -18344,6 +18345,7 @@ ORDER BY runtime_id";
                 conversation_digest: Some(resumed.transcript_content_digest().unwrap()),
                 message_count: resumed.messages().len(),
                 sequence: 1,
+                owner_contributions: Vec::new(),
             };
             let mut mismatched_receipt = receipt.clone();
             mismatched_receipt.conversation_digest = Some("sha256:wrong-target".to_string());
@@ -18631,6 +18633,7 @@ ORDER BY runtime_id";
                 conversation_digest: Some(resumed.transcript_content_digest().unwrap()),
                 message_count: resumed.messages().len(),
                 sequence: 1,
+                owner_contributions: Vec::new(),
             };
             let lifecycle = lifecycle_commit(&runtime_id, RuntimeState::Idle, 71, 11);
             let committed = store
@@ -18844,6 +18847,7 @@ ORDER BY runtime_id";
                 conversation_digest: Some(second_candidate.transcript_content_digest().unwrap()),
                 message_count: second_candidate.messages().len(),
                 sequence: 1,
+                owner_contributions: Vec::new(),
             };
             let checkpoint = meerkat_core::RunCheckpointReceipt::issued(
                 meerkat_core::RunCheckpointAuthority::HeadCanonical(second_provisional.clone()),
@@ -19064,6 +19068,7 @@ ORDER BY runtime_id";
                 conversation_digest: Some(session.transcript_content_digest().unwrap()),
                 message_count: session.messages().len(),
                 sequence: 1,
+                owner_contributions: Vec::new(),
             };
 
             let first = store
@@ -19387,6 +19392,7 @@ ORDER BY runtime_id";
                             conversation_digest: None,
                             message_count: 1,
                             sequence: 41,
+                            owner_contributions: Vec::new(),
                         },
                         vec![],
                         Some(session.id().clone()),
@@ -19461,6 +19467,7 @@ ORDER BY runtime_id";
                 conversation_digest: None,
                 message_count: 1,
                 sequence,
+                owner_contributions: Vec::new(),
             };
             store
                 .atomic_apply(
@@ -19567,6 +19574,7 @@ ORDER BY runtime_id";
                         conversation_digest: None,
                         message_count: 1,
                         sequence: 42,
+                        owner_contributions: Vec::new(),
                     },
                     vec![],
                     Some(session.id().clone()),
@@ -19605,6 +19613,7 @@ ORDER BY runtime_id";
                             conversation_digest: None,
                             message_count: 1,
                             sequence: 50 + sequence as u64,
+                            owner_contributions: Vec::new(),
                         },
                         vec![],
                         Some(session.id().clone()),
@@ -19660,6 +19669,7 @@ ORDER BY runtime_id";
                         conversation_digest: None,
                         message_count: 1,
                         sequence: 43,
+                        owner_contributions: Vec::new(),
                     },
                     vec![],
                     Some(incoming.id().clone()),
@@ -19692,6 +19702,7 @@ ORDER BY runtime_id";
                 conversation_digest: None,
                 message_count: 1,
                 sequence,
+                owner_contributions: Vec::new(),
             };
             store
                 .atomic_apply(
@@ -19809,6 +19820,7 @@ ORDER BY runtime_id";
                 conversation_digest: Some("machine-owned-digest".to_string()),
                 message_count: 42,
                 sequence: 5,
+                owner_contributions: Vec::new(),
             };
             store
                 .atomic_apply(
@@ -20689,6 +20701,7 @@ ORDER BY runtime_id";
                 conversation_digest: Some("machine-owned-digest".to_string()),
                 message_count: 2,
                 sequence: 11,
+                owner_contributions: Vec::new(),
             };
 
             store
@@ -20767,6 +20780,7 @@ ORDER BY runtime_id";
                 conversation_digest: Some("machine-owned-digest".to_string()),
                 message_count: incoming.messages().len(),
                 sequence: 12,
+                owner_contributions: Vec::new(),
             };
 
             store
@@ -20863,6 +20877,7 @@ ORDER BY runtime_id";
                 conversation_digest: Some("machine-owned-digest".to_string()),
                 message_count: incoming.messages().len(),
                 sequence: 13,
+                owner_contributions: Vec::new(),
             };
 
             store
@@ -21028,6 +21043,7 @@ ORDER BY runtime_id";
                 conversation_digest: None,
                 message_count: 0,
                 sequence: 0,
+                owner_contributions: Vec::new(),
             };
 
             store
@@ -21079,6 +21095,7 @@ ORDER BY runtime_id";
                 conversation_digest: None,
                 message_count: 0,
                 sequence: 0,
+                owner_contributions: Vec::new(),
             };
             store
                 .atomic_apply(
@@ -21148,6 +21165,7 @@ ORDER BY runtime_id";
                 conversation_digest: None,
                 message_count: 0,
                 sequence,
+                owner_contributions: Vec::new(),
             };
 
             store
@@ -21230,6 +21248,7 @@ ORDER BY runtime_id";
                 conversation_digest: None,
                 message_count: 0,
                 sequence: 0,
+                owner_contributions: Vec::new(),
             };
             let incoming_snapshot = serde_json::to_vec(&incoming).unwrap();
             store
@@ -21297,6 +21316,7 @@ ORDER BY runtime_id";
                         conversation_digest: None,
                         message_count: 0,
                         sequence: 0,
+                        owner_contributions: Vec::new(),
                     },
                     vec![input_state()],
                     Some(wrong_session_id),
@@ -22162,6 +22182,7 @@ ORDER BY runtime_id";
                 conversation_digest: Some("machine-owned-digest".to_string()),
                 message_count: 1,
                 sequence,
+                owner_contributions: Vec::new(),
             }
         }
 

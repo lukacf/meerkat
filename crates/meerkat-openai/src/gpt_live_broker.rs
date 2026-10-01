@@ -223,6 +223,19 @@ pub enum GptLiveBrokerObservation {
         role: GptLiveTurnRole,
         transcript: String,
     },
+    /// The user turn about to finish continues the utterance of
+    /// `delegation`: that delegation was created while this user's turn was
+    /// open (a pause mid-sentence), and this is the next user turn to finish
+    /// before any other client delegation. The protocol has no utterance
+    /// identity, so this is the closest typed stand-in for "the rest of the
+    /// same sentence". Emitted immediately before the turn's `TurnFinished`.
+    UserTurnContinuesDelegation {
+        turn: GptLiveTurnRef,
+        delegation: GptLiveDelegationRef,
+        /// The continuing turn's transcript, exactly as its `TurnFinished`
+        /// reports it.
+        transcript: String,
+    },
     /// Exact client-targeted delegation joined to its final user turn.
     ///
     /// This is provider evidence only. It does not itself authorize executor
@@ -296,6 +309,7 @@ impl std::fmt::Debug for GptLiveBrokerObservation {
             Self::TurnStarted { .. } => "turn_started",
             Self::TurnSnapshotDelta { .. } => "turn_snapshot_delta",
             Self::TurnFinished { .. } => "turn_finished",
+            Self::UserTurnContinuesDelegation { .. } => "user_turn_continues_delegation",
             Self::ClientDelegationFinal { .. } => "client_delegation_final",
             Self::DelegationActionableInputUnsupported { .. } => {
                 "delegation_actionable_input_unsupported"

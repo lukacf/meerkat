@@ -318,6 +318,10 @@ printf '%s\n' \
   'echo "Error: Action property AuditNeverRecoveryEndsCarriedRows is violated."' \
   'echo "Error: Invariant AuditReplacementNeverReceivesALaterRow is violated."' \
   'echo "Error: Invariant AuditNeverReopensAfterFailedRealization is violated."' \
+  'echo "Error: Invariant NotGoalDeliveredConfirmed is violated."' \
+  'echo "Error: Invariant NotGoalNotDelivered is violated."' \
+  'echo "Error: Invariant NotGoalMaterialConflict is violated."' \
+  'echo "Error: Invariant NotGoalMissing is violated."' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
 

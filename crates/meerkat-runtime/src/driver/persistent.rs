@@ -2577,6 +2577,59 @@ impl PersistentRuntimeDriver {
         Ok(result)
     }
 
+    /// Stamp one owner request-only contribution onto the run's next
+    /// checkpoint receipt and make that receipt durable, before the caller
+    /// publishes the parked context to the runner.
+    pub(crate) async fn machine_realize_live_boundary_owner_context(
+        &mut self,
+        run_id: &RunId,
+        contribution_id: &str,
+        owner_session_id: &meerkat_core::types::SessionId,
+    ) -> Result<RunBoundaryReceipt, RuntimeDriverError> {
+        self.require_durability_ready()?;
+        let checkpoint = self.persistence_rollback_checkpoint();
+        let receipt = match self
+            .inner
+            .machine_resolve_live_boundary_owner_context_receipt(run_id, contribution_id)
+        {
+            Ok(receipt) => receipt,
+            Err(err) => {
+                return Err(self.post_transition_failure(
+                    checkpoint,
+                    "live_boundary_owner_receipt",
+                    err.to_string(),
+                ));
+            }
+        };
+        let request = match self.prepare_success_boundary(
+            None,
+            receipt.clone(),
+            Vec::new(),
+            owner_session_id.clone(),
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                return Err(self.post_transition_failure(
+                    checkpoint,
+                    "live_boundary_owner_receipt_validation",
+                    format!("owner boundary receipt is invalid: {error}"),
+                ));
+            }
+        };
+        if let Err(err) = self
+            .store
+            .commit_prepared_session_boundary(&self.runtime_id, request)
+            .await
+        {
+            return Err(self.post_transition_failure(
+                checkpoint,
+                "live_boundary_owner_receipt_commit",
+                format!("owner boundary receipt commit failed: {err}"),
+            ));
+        }
+        Ok(receipt)
+    }
+
     /// Join one durable-class Steer input to the current run and make its
     /// Staged binding (`last_run_id`) durable BEFORE the caller publishes the
     /// payload to the parked runner. A generated guard refusal changes
@@ -3391,6 +3444,7 @@ mod tests {
             conversation_digest: Some("checkpoint-digest".to_string()),
             message_count: 1,
             sequence: 1,
+            owner_contributions: Vec::new(),
         };
         let whole_blob = meerkat_core::RunCheckpointReceipt::issued(
             meerkat_core::RunCheckpointAuthority::WholeBlob(

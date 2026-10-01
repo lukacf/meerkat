@@ -5,6 +5,8 @@
 //! collection and `"<redacted>"` otherwise, so the value never reaches a
 //! formatter. Structs without redacted fields keep the derived `Debug`.
 
+#![allow(clippy::expect_used, clippy::panic)]
+
 use meerkat_machine_codegen::render_machine_kernel_module;
 use meerkat_machine_schema::identity::{EnumVariantId, FieldId, MachineId, PhaseId};
 use meerkat_machine_schema::{

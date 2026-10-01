@@ -79,3 +79,7 @@ artifacts/deprecated_backend_scan.txt
 artifacts/m0_legacy_surface_inventory.txt
 artifacts/session_control_public_name_scan.txt
 states/
+
+# host_human_input test fixtures create their storage roots inside the
+# crate (tempdir_in(".")); a run killed before the TempDir drops leaves them.
+crates/meerkat-mob/.host-human-input-*/

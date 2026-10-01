@@ -233,6 +233,7 @@ struct FailNextSaveStore {
     fail_next_save: AtomicBool,
 }
 
+#[cfg(feature = "file-lock")]
 struct FailNextSaveDynStore {
     inner: Arc<dyn TokenStore>,
     fail_next_save: AtomicBool,
@@ -277,6 +278,7 @@ impl TokenStore for FailClearStore {
     }
 }
 
+#[cfg(feature = "file-lock")]
 #[async_trait]
 impl TokenStore for FailNextSaveDynStore {
     async fn load(
@@ -1086,6 +1088,7 @@ fn recording_browser(state: Arc<TestState>) -> Arc<dyn BrowserOpener> {
     })
 }
 
+#[cfg(feature = "file-lock")]
 async fn wait_for_token_grant_count(state: &TestState, grant_type: &str, expected: usize) {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {

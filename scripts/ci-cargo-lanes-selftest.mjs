@@ -132,11 +132,13 @@ function assertArchivedLanes(plan, label) {
   assert.deepEqual(plan.unit_deferred, ["meerkat-mob"]);
   assert.ok(plan.package_model["meerkat-mob"].estimated_minutes > plan.pr_unit_budget_minutes, "mob's own lane models over budget");
   assertLanes(plan, "mob touch");
-  for (const name of ["meerkat-mob", "meerkat-rpc", "meerkat-rest", "rkat", "meerkat-mob-mcp", "xtask", "meerkat-integration-tests", "meerkat-web-runtime"]) {
-    assert.ok(plan.unit_deferred_chain.includes(name), `${name} depends on meerkat-mob and is in the deferred chain`);
+  for (const name of ["meerkat-mob", "meerkat-rpc", "meerkat-rest", "rkat", "meerkat-mob-mcp", "meerkat-integration-tests", "meerkat-web-runtime", "meerkat-machine-codegen"]) {
+    assert.ok(plan.unit_deferred_chain.includes(name), `${name} compiles meerkat-mob in its unit lane and is in the deferred chain`);
   }
-  for (const name of ["meerkat-core", "meerkat-runtime", "meerkat-session", "meerkat"]) {
-    assert.ok(!plan.unit_deferred_chain.includes(name), `${name} does not depend on meerkat-mob`);
+  // xtask reaches meerkat-mob only through meerkat-machine-codegen's
+  // dev-dependency, which Cargo never builds for xtask: not in the chain.
+  for (const name of ["meerkat-core", "meerkat-runtime", "meerkat-session", "meerkat", "xtask", "machine-dsl-tests"]) {
+    assert.ok(!plan.unit_deferred_chain.includes(name), `${name} does not compile meerkat-mob in its unit lane`);
   }
 }
 {
@@ -283,6 +285,22 @@ for (const path of [
   assert.equal(plan.packages.length, 9);
   assert.equal(plan.shards.length, 4);
   assertLanes(plan, "nine packages in four shards");
+}
+
+// A pull request that changes crates/xtask runs xtask's unit lane and its
+// machine-authority feature suite (main went red through #1362 because both
+// were deferred).
+{
+  const plan = planFor(["crates/xtask/src/machines.rs"]);
+  assert.deepEqual(plan.unit_deferred, [], "xtask is not deferred to main");
+  assert.deepEqual(plan.unit_shards.map((shard) => shard.packages), [["xtask"]]);
+  assert.ok(
+    plan.unit_feature_shards.some((suite) => suite.packages[0] === "xtask" && suite.features.includes("machine-authority")),
+    "the xtask machine-authority suite runs in the pull request",
+  );
+  for (const shard of [...plan.unit_shards, ...plan.unit_feature_shards]) {
+    assert.ok(shard.estimated_minutes <= plan.pr_unit_budget_minutes, `${shard.name} fits the pull-request budget`);
+  }
 }
 
 // Embedded inputs the facade compiles in through include macros select the

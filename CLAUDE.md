@@ -362,10 +362,12 @@ GitHub-hosted runners and sized to a 25-minute lane execution budget:
   (`clippy --no-deps --all-targets --all-features -D warnings`).
 - `unit`: `nextest --lib --bins --profile ci-pr` (`fast` plus a 4-minute hung-test kill) for
   the changed packages outside the meerkat-mob compile chain; crates that
-  compile `meerkat-mob` (mob, mob-mcp, mob-pack, rpc, rest, mcp-server,
-  rkat, web-runtime, integration-tests, machine-codegen, machine-dsl-tests,
-  xtask; computed from metadata) defer their unit tests to `push: main`
-  because their lanes need 17-22 min on 4 vCPU.
+  compile `meerkat-mob` (mob, mob-adaptive, mob-mcp, mob-pack, rpc, rest,
+  mcp-server, rkat, web-runtime, integration-tests, machine-codegen;
+  computed from each unit lane's real build graph: the package's own deps
+  of every kind, then normal and build deps only) defer their unit tests to
+  `push: main` because their lanes need 17-22 min on 4 vCPU. xtask and
+  machine-dsl-tests do not build mob and run in the pull request.
 - Feature-gated unit suites (`FEATURE_UNIT_SUITES` in
   `scripts/ci-cargo-lanes.mjs`): the unit lanes build default features only,
   so each suite adds a `nextest -p <package> --features <list>` row to

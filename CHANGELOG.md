@@ -390,6 +390,7 @@ them.
 
 ### Fixed
 
+- The release workflow's BuildBuddy unit and integration-fast cargo-equivalent lanes now build the mcp-test-server fixture and export `MEERKAT_MCP_TEST_SERVER`, so meerkat-mcp's form-elicitation tests run instead of panicking on the missing variable.
 - `make semver-breaks` no longer fails its own self-test when the release adds
   a publishable crate. The self-test compared a recorded 0.8.23 workspace
   report with the live checkable-crate set, so any new crate failed it before

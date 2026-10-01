@@ -37,6 +37,12 @@ them.
 
 ### Breaking
 
+- `meerkat_mcp::McpError` gains `ToolDiscoveryCursorRepeated { server, cursor }`
+  and `ToolDiscoveryLimitExceeded { server, limit }`, with the new
+  `meerkat_mcp::ToolDiscoveryLimit` (`Pages { max }` / `Tools { max }`).
+  Exhaustive matches must handle them. A repeated `tools/list` cursor was a
+  `ProtocolError` whose message carried the reason; it is now the typed
+  variant.
 - `meerkat_workgraph::WorkGraphError`,
   `meerkat_machine_schema::catalog::dsl::workgraph_lifecycle::WorkGraphErrorKind`,
   and `meerkat_machine_kernels::generated::work_graph_lifecycle::WorkGraphErrorKind`
@@ -71,6 +77,13 @@ them.
   the model saw only listed session, identity and mob targets, so it was
   undiscoverable. The target invokes an already registered host runnable;
   it does not register one or grant permission.
+- MCP tool discovery is bounded (follow-up to #1334): it follows at most
+  `McpConnection::MAX_TOOL_DISCOVERY_PAGES` (100) `tools/list` pages and
+  accepts at most `McpConnection::MAX_DISCOVERED_TOOLS` (10,000) tools, in both
+  `McpConnection::list_tools` and `McpProtocol::list_tools`. A server that keeps
+  minting new cursors or lists more tools is refused whole with
+  `McpError::ToolDiscoveryLimitExceeded` instead of being followed until the
+  connect timeout (or forever, on `McpProtocol`).
 - WorkGraph observations, including execution recovery, distinguish an
   unavailable backing store from an absent record and preserve one read-only
   snapshot across schema validation and data queries. Ordinary writes also

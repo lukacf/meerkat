@@ -19,6 +19,9 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
 
+const MAX_PAGES: usize = McpConnection::MAX_TOOL_DISCOVERY_PAGES;
+const MAX_TOOLS: usize = McpConnection::MAX_DISCOVERED_TOOLS;
+
 #[derive(Clone, Copy)]
 enum Case {
     TwoPages,
@@ -28,6 +31,16 @@ enum Case {
     EmptyCursor,
     Duplicate,
     LaterIoFailure,
+    /// Every page mints a fresh cursor; `last_page` ends the listing there,
+    /// `None` never ends it.
+    MintCursors {
+        last_page: Option<usize>,
+    },
+    /// Two pages carrying `first` and `second` tools.
+    ManyTools {
+        first: usize,
+        second: usize,
+    },
 }
 struct Server {
     case: Case,
@@ -45,6 +58,11 @@ fn tool(name: &str, description: &str) -> Tool {
         .unwrap()
         .clone(),
     )
+}
+fn tools(prefix: &str, count: usize) -> Vec<Tool> {
+    (0..count)
+        .map(|index| tool(&format!("{prefix}-{index}"), prefix))
+        .collect()
 }
 fn page(tools: Vec<Tool>, next_cursor: Option<&str>) -> ListToolsResult {
     ListToolsResult {
@@ -68,10 +86,24 @@ impl ServerHandler for Server {
             requests.push(cursor.clone());
             requests.len()
         };
-        // A broken cycle implementation fails a protocol assertion, not an
-        // unbounded test. This guard is fixture behavior, never client policy.
-        if count > 8 {
+        // A broken bound fails a protocol assertion, not an unbounded test.
+        // This guard is fixture behavior, never client policy; it sits above
+        // the client's page bound so the bound is what stops enumeration.
+        if count > MAX_PAGES + 8 {
             return Err(ErrorData::invalid_params("fixture request guard", None));
+        }
+        if let Case::MintCursors { last_page } = self.case {
+            let next = (last_page != Some(count)).then(|| format!("minted-{count}"));
+            return Ok(page(
+                vec![tool(&format!("tool-{count}"), "minted")],
+                next.as_deref(),
+            ));
+        }
+        if let Case::ManyTools { first, second } = self.case {
+            return Ok(match cursor.as_deref() {
+                None => page(tools("first", first), Some("page-two")),
+                _ => page(tools("second", second), None),
+            });
         }
         match (self.case, cursor.as_deref()) {
             (Case::EmptyCursor, None) => Ok(page(vec![], Some(""))),
@@ -192,7 +224,7 @@ async fn enumerate(
                 service: service.into(),
             };
             let result = tokio::time::timeout(
-                Duration::from_secs(3),
+                Duration::from_secs(30),
                 connection.list_tools("source-account"),
             )
             .await;
@@ -201,7 +233,7 @@ async fn enumerate(
         Surface::Protocol => {
             let protocol = McpProtocol::new(service);
             let result = tokio::time::timeout(
-                Duration::from_secs(3),
+                Duration::from_secs(30),
                 protocol.list_tools("source-account"),
             )
             .await;
@@ -255,7 +287,11 @@ async fn pagination_repeated_cursor_is_a_protocol_error() {
         let (result, trace) = enumerate(Case::Repeat, surface).await;
         assert_eq!(trace, [None, Some("page-two".into())]);
         assert!(
-            matches!(result, Err(McpError::ProtocolError { message }) if message.contains("repeated pagination cursor")),
+            matches!(
+                &result,
+                Err(McpError::ToolDiscoveryCursorRepeated { server, cursor })
+                    if server == "source-account" && cursor == "page-two"
+            ),
             "{surface:?}"
         );
     }
@@ -269,7 +305,11 @@ async fn pagination_longer_cursor_cycle_stops_before_re_request() {
             [None, Some("page-two".into()), Some("page-three".into())]
         );
         assert!(
-            matches!(result, Err(McpError::ProtocolError { message }) if message.contains("repeated pagination cursor")),
+            matches!(
+                &result,
+                Err(McpError::ToolDiscoveryCursorRepeated { server, cursor })
+                    if server == "source-account" && cursor == "page-two"
+            ),
             "{surface:?}"
         );
     }
@@ -307,5 +347,84 @@ async fn pagination_later_transport_failure_is_not_partial_success() {
             matches!(result, Err(McpError::ProtocolError { message }) if message.contains("Failed to list tools")),
             "{surface:?}"
         );
+    }
+}
+#[tokio::test]
+async fn pagination_cursor_minting_server_is_refused_at_the_page_bound() {
+    for surface in SURFACES {
+        let (result, trace) = enumerate(Case::MintCursors { last_page: None }, surface).await;
+        assert_eq!(
+            trace.len(),
+            MAX_PAGES,
+            "{surface:?}: the page after the bound is never requested"
+        );
+        assert!(
+            matches!(
+                &result,
+                Err(McpError::ToolDiscoveryLimitExceeded {
+                    server,
+                    limit: crate::ToolDiscoveryLimit::Pages { max: MAX_PAGES },
+                }) if server == "source-account"
+            ),
+            "{surface:?}"
+        );
+    }
+}
+#[tokio::test]
+async fn pagination_exactly_the_page_bound_completes() {
+    for surface in SURFACES {
+        let (result, trace) = enumerate(
+            Case::MintCursors {
+                last_page: Some(MAX_PAGES),
+            },
+            surface,
+        )
+        .await;
+        assert_eq!(trace.len(), MAX_PAGES, "{surface:?}");
+        let tools = result.expect("a listing that ends on the last allowed page");
+        assert_eq!(tools.len(), MAX_PAGES, "{surface:?}");
+        assert_eq!(
+            tools[MAX_PAGES - 1].name.to_string(),
+            format!("tool-{MAX_PAGES}")
+        );
+    }
+}
+#[tokio::test]
+async fn pagination_tool_count_over_the_bound_is_refused_whole() {
+    for surface in SURFACES {
+        let (result, trace) = enumerate(
+            Case::ManyTools {
+                first: MAX_TOOLS / 2 + 1,
+                second: MAX_TOOLS / 2,
+            },
+            surface,
+        )
+        .await;
+        assert_eq!(trace, [None, Some("page-two".into())], "{surface:?}");
+        assert!(
+            matches!(
+                &result,
+                Err(McpError::ToolDiscoveryLimitExceeded {
+                    server,
+                    limit: crate::ToolDiscoveryLimit::Tools { max: MAX_TOOLS },
+                }) if server == "source-account"
+            ),
+            "{surface:?}"
+        );
+    }
+}
+#[tokio::test]
+async fn pagination_exactly_the_tool_bound_completes() {
+    for surface in SURFACES {
+        let (result, _trace) = enumerate(
+            Case::ManyTools {
+                first: MAX_TOOLS / 2,
+                second: MAX_TOOLS / 2,
+            },
+            surface,
+        )
+        .await;
+        let tools = result.expect("a listing of exactly the tool bound");
+        assert_eq!(tools.len(), MAX_TOOLS, "{surface:?}");
     }
 }

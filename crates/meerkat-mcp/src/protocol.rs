@@ -12,7 +12,7 @@ use rmcp::{
 };
 use serde_json::Value;
 
-use crate::McpError;
+use crate::{McpError, ToolDiscoveryLimit};
 
 pub struct McpProtocol {
     service: crate::client_service::ConnectedClient,
@@ -86,14 +86,23 @@ impl McpProtocol {
 
 /// Enumerate every page through the same live service. Later-page failures
 /// refuse the whole observation rather than publishing a partial tool list.
-/// Cursors are opaque; repeated cursors are a protocol error, not completion.
+/// Cursors are opaque; a repeated cursor is a typed protocol error, not
+/// completion. Enumeration is bounded by
+/// [`McpConnection::MAX_TOOL_DISCOVERY_PAGES`] and
+/// [`McpConnection::MAX_DISCOVERED_TOOLS`]; exceeding either refuses the list.
+///
+/// [`McpConnection::MAX_TOOL_DISCOVERY_PAGES`]: crate::McpConnection::MAX_TOOL_DISCOVERY_PAGES
+/// [`McpConnection::MAX_DISCOVERED_TOOLS`]: crate::McpConnection::MAX_DISCOVERED_TOOLS
 pub(crate) async fn list_all_tools(
     service: &Peer<RoleClient>,
     server_name: &str,
 ) -> Result<Vec<ToolDef>, McpError> {
+    const MAX_PAGES: usize = crate::McpConnection::MAX_TOOL_DISCOVERY_PAGES;
+    const MAX_TOOLS: usize = crate::McpConnection::MAX_DISCOVERED_TOOLS;
     let mut request = None;
     let mut seen_cursors = std::collections::HashSet::new();
     let mut tools = Vec::new();
+    let mut pages = 0usize;
     loop {
         let response =
             service
@@ -102,6 +111,13 @@ pub(crate) async fn list_all_tools(
                 .map_err(|error| McpError::ProtocolError {
                     message: format!("Failed to list tools: {error}"),
                 })?;
+        pages += 1;
+        if tools.len().saturating_add(response.tools.len()) > MAX_TOOLS {
+            return Err(McpError::ToolDiscoveryLimitExceeded {
+                server: server_name.to_string(),
+                limit: ToolDiscoveryLimit::Tools { max: MAX_TOOLS },
+            });
+        }
         tools.extend(response.tools.into_iter().map(|tool| {
             let schema = Value::Object(Arc::unwrap_or_clone(tool.input_schema));
             ToolDef {
@@ -118,8 +134,15 @@ pub(crate) async fn list_all_tools(
             return Ok(tools);
         };
         if !seen_cursors.insert(cursor.clone()) {
-            return Err(McpError::ProtocolError {
-                message: "Failed to list tools: repeated pagination cursor".to_string(),
+            return Err(McpError::ToolDiscoveryCursorRepeated {
+                server: server_name.to_string(),
+                cursor,
+            });
+        }
+        if pages >= MAX_PAGES {
+            return Err(McpError::ToolDiscoveryLimitExceeded {
+                server: server_name.to_string(),
+                limit: ToolDiscoveryLimit::Pages { max: MAX_PAGES },
             });
         }
         request = Some(rmcp::model::PaginatedRequestParams::default().with_cursor(Some(cursor)));

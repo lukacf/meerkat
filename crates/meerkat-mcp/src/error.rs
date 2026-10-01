@@ -47,4 +47,42 @@ pub enum McpError {
     /// The MCP router has been shut down.
     #[error("MCP router has been shut down")]
     RouterShutDown,
+
+    /// A `tools/list` pagination cursor the server had already returned came
+    /// back again, so following it would never reach the last page. The
+    /// partial tool list is refused.
+    #[error("Server '{server}' repeated tool discovery pagination cursor '{cursor}'")]
+    ToolDiscoveryCursorRepeated { server: String, cursor: String },
+
+    /// Tool discovery reached a declared enumeration bound before the server
+    /// reported its last page. The partial tool list is refused.
+    #[error("Server '{server}' exceeded the tool discovery bound: {limit}")]
+    ToolDiscoveryLimitExceeded {
+        server: String,
+        limit: ToolDiscoveryLimit,
+    },
+}
+
+/// The declared tool discovery bound a server exceeded.
+///
+/// The bounds are [`McpConnection::MAX_TOOL_DISCOVERY_PAGES`] and
+/// [`McpConnection::MAX_DISCOVERED_TOOLS`].
+///
+/// [`McpConnection::MAX_TOOL_DISCOVERY_PAGES`]: crate::McpConnection::MAX_TOOL_DISCOVERY_PAGES
+/// [`McpConnection::MAX_DISCOVERED_TOOLS`]: crate::McpConnection::MAX_DISCOVERED_TOOLS
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolDiscoveryLimit {
+    /// The server still had a next page after `max` pages.
+    Pages { max: usize },
+    /// The server listed more than `max` tools across its pages.
+    Tools { max: usize },
+}
+
+impl std::fmt::Display for ToolDiscoveryLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pages { max } => write!(f, "more than {max} tools/list pages"),
+            Self::Tools { max } => write!(f, "more than {max} tools"),
+        }
+    }
 }

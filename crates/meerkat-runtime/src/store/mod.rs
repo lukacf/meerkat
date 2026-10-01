@@ -8074,6 +8074,34 @@ pub trait RuntimeSessionAuthorityOps: Send + Sync {
             })
     }
 
+    /// Read the metadata of whichever HeadCanonical boundary is current, with
+    /// the authority and its metadata observed under one snapshot. A boundary
+    /// commit racing this read yields the metadata before or after it, never
+    /// an authority conflict. `None` when no HeadCanonical authority is
+    /// current. The default observes one authority row and materializes from
+    /// that same carrier; compact backends read both in one transaction.
+    async fn load_current_head_canonical_metadata(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, RuntimeStoreError> {
+        let Some(authority) = self
+            .load_session_boundary_authority(runtime_id)
+            .await?
+            .and_then(|current| current.head_canonical().cloned())
+        else {
+            return Ok(None);
+        };
+        authority
+            .boundary_head()
+            .materialized_metadata()
+            .map(Some)
+            .map_err(|error| {
+                RuntimeStoreError::ReadFailed(format!(
+                    "current HeadCanonical metadata unavailable: {error}"
+                ))
+            })
+    }
+
     async fn load_session_resume_observation(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -8315,6 +8343,17 @@ pub trait RuntimeStore: Send + Sync {
     ) -> Result<serde_json::Map<String, serde_json::Value>, RuntimeStoreError> {
         self.session_authority_ops()
             .load_head_canonical_metadata(authority)
+            .await
+    }
+
+    /// Materialize the metadata of the current HeadCanonical boundary under
+    /// one snapshot with its authority.
+    async fn load_current_head_canonical_metadata(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, RuntimeStoreError> {
+        self.session_authority_ops()
+            .load_current_head_canonical_metadata(runtime_id)
             .await
     }
 

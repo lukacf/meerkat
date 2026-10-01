@@ -78,6 +78,16 @@ them.
 
 ### Fixed
 
+- Mob shutdown no longer fails intermittently with `failed to materialize
+  committed HeadCanonical metadata ... metadata read authority is no longer
+  current`. The shutdown visibility observation reads session metadata
+  concurrently with the member's turn, and the authoritative metadata read
+  observed the boundary authority and then re-validated it in a second store
+  read, so a boundary commit landing in between was refused. The read now
+  uses the new `RuntimeStore::load_current_head_canonical_metadata`, which
+  observes the current HeadCanonical authority and its metadata under one
+  snapshot (one SQLite read transaction).
+
 - Retiring a mob member no longer waits on its turn-finalization boundary
   until the retire deadline when an input was admitted but not yet opened as a
   run. Retire's pre-boundary step read "no bound run" as nothing to cancel, so

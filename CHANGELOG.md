@@ -35,6 +35,21 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Behaviour-only (not measured by the gate): rkat-rpc callback routing is
+  owned per connection (#1451). Over TCP, a session's callback tools route
+  only to the connection that created it, and `tools/register` changes only
+  that connection's registry.
+  - When that connection is gone, its sessions' callbacks fail with
+    `tool_unavailable` (`NotCurrentlyCallable`), not `execution_failed`.
+  - Sessions with no owning connection (for example mob member sessions over
+    TCP, where no process-default channel is initialized) get no callback
+    tools. They previously used the most recently connected client's tools.
+    Binding mob callback tools to the creating connection is tracked in #1459.
+  - Stdio and embedded servers that pre-create the channel with
+    `SessionRuntime::init_callback_channel` are unchanged.
+
 ### Added
 
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
@@ -42,6 +57,23 @@ them.
   `RetainedUnattached { registration }`). The call waits only while a
   session's actor-materialization claim is in flight, and reports an actor
   retained without an executor attachment instead of waiting on it.
+- `meerkat_rpc::callback_dispatcher::CallbackRoute` (one connection's
+  callback channel, id space and tool registry), with
+  `CallbackToolDispatcher::from_route` and `from_route_with_job_runtime`.
+- `SessionRuntime::{default_callback_route, callback_tool_dispatcher_for_route,
+  bind_session_callback_route, session_callback_route}` and
+  `MethodRouter::{with_callback_route, callback_route}`.
+- Route-aware handlers: `handlers::session::{handle_create_on_route,
+  create_session_with_params_on_route}` and
+  `handlers::jobs::{handle_cancel_on_route, handle_retry_on_route}`. The
+  existing handlers keep their signatures and use the process-default route.
+
+### Deprecated
+
+- `SessionRuntime::set_callback_channel`. It replaced the route shared by
+  every connection on the runtime. Connection-owned servers keep their route
+  on their own router; use `init_callback_channel` for the single-client
+  default route.
 
 ### Fixed
 
@@ -85,6 +117,13 @@ them.
   - the registration chain went from 1,490,216 B to 697,224 B.
 
   The canary now also passes at 1536 KiB and 1280 KiB. No behaviour change.
+- rkat-rpc over TCP: a new connection no longer overwrites the shared
+  runtime's callback channel, id counter and tool registry (#1451). Before,
+  callbacks for an older connection's new sessions went to the newest
+  connection, its registered tools were cleared, and callback ids restarted
+  in another connection's id space. On connection close the server now fails
+  pending callbacks before its graceful request shutdown, so a session waiting
+  on a gone client gets the typed failure immediately.
 
 ## [0.8.50] - 2026-10-01
 

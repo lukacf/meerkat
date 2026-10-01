@@ -1261,6 +1261,9 @@ impl RoutedRpcResponse {
 #[derive(Clone)]
 pub struct MethodRouter {
     runtime: Arc<SessionRuntime>,
+    /// The callback route owned by this router's connection. `None` falls
+    /// back to the runtime's process-default route.
+    callback_route: Option<crate::callback_dispatcher::CallbackRoute>,
     config_store: Arc<dyn ConfigStore>,
     notification_sink: NotificationSink,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
@@ -1354,6 +1357,7 @@ impl MethodRouter {
             config_store,
             notification_sink,
             skill_runtime: None,
+            callback_route: None,
             active_session_streams: Arc::new(Mutex::new(HashMap::new())),
             stream_authority: Arc::new(Mutex::new(new_rpc_stream_authority())),
             #[cfg(feature = "mob")]
@@ -1868,6 +1872,7 @@ impl MethodRouter {
             config_store,
             notification_sink,
             skill_runtime: None,
+            callback_route: None,
             active_session_streams: Arc::new(Mutex::new(HashMap::new())),
             stream_authority: Arc::new(Mutex::new(new_rpc_stream_authority())),
             mob_state,
@@ -1934,6 +1939,21 @@ impl MethodRouter {
     ) -> Self {
         self.skill_runtime = runtime;
         self
+    }
+
+    /// Bind this router to its connection's callback route: callback tools
+    /// registered and sessions created through it route to that connection.
+    pub fn with_callback_route(mut self, route: crate::callback_dispatcher::CallbackRoute) -> Self {
+        self.callback_route = Some(route);
+        self
+    }
+
+    /// This connection's callback route, or the runtime's process-default
+    /// route when the router owns none.
+    pub fn callback_route(&self) -> Option<crate::callback_dispatcher::CallbackRoute> {
+        self.callback_route
+            .clone()
+            .or_else(|| self.runtime.default_callback_route())
     }
 
     // This intentionally does only the minimum owner probe. Handlers perform
@@ -2119,13 +2139,14 @@ impl MethodRouter {
             }
             "session/create" => {
                 routed_arm(|| {
-                    handlers::session::handle_create(
+                    handlers::session::handle_create_on_route(
                         id,
                         params,
                         self.runtime.clone(),
                         &self.notification_sink,
                         &self.runtime_adapter,
                         request_context.clone(),
+                        self.callback_route(),
                     )
                 })
                 .await
@@ -2218,7 +2239,16 @@ impl MethodRouter {
                 routed_arm(|| handlers::jobs::handle_list(id, params, &self.runtime)).await
             }
             "jobs/cancel" => {
-                routed_arm(|| handlers::jobs::handle_cancel(id, params, &self.runtime)).await
+                let callback_route = self.callback_route();
+                routed_arm(|| {
+                    handlers::jobs::handle_cancel_on_route(
+                        id,
+                        params,
+                        &self.runtime,
+                        callback_route.as_ref(),
+                    )
+                })
+                .await
             }
             "jobs/progress" => {
                 routed_arm(|| handlers::jobs::handle_get_progress(id, params, &self.runtime)).await
@@ -2230,7 +2260,16 @@ impl MethodRouter {
                 routed_arm(|| handlers::jobs::handle_artifacts(id, params, &self.runtime)).await
             }
             "jobs/retry" => {
-                routed_arm(|| handlers::jobs::handle_retry(id, params, &self.runtime)).await
+                let callback_route = self.callback_route();
+                routed_arm(|| {
+                    handlers::jobs::handle_retry_on_route(
+                        id,
+                        params,
+                        &self.runtime,
+                        callback_route.as_ref(),
+                    )
+                })
+                .await
             }
             "jobs/health" => routed_arm(|| handlers::jobs::handle_health(id, &self.runtime)).await,
             "monitors/start" => {
@@ -3123,13 +3162,18 @@ impl MethodRouter {
                 );
             }
         };
-        match self
-            .runtime
-            .callback_tool_registry()
-            .replace_or_add_with_contracts(replacements)
-        {
+        // Registration mutates this connection's own registry only.
+        let callback_route = self.callback_route();
+        let registry = callback_route
+            .as_ref()
+            .map(crate::callback_dispatcher::CallbackRoute::registry)
+            .unwrap_or_else(|| self.runtime.callback_tool_registry());
+        match registry.replace_or_add_with_contracts(replacements) {
             Ok(count) => {
-                if let Some(dispatcher) = self.runtime.callback_tool_dispatcher(vec![]) {
+                if let Some(dispatcher) = callback_route.as_ref().map(|route| {
+                    self.runtime
+                        .callback_tool_dispatcher_for_route(route, vec![])
+                }) {
                     tokio::spawn(async move {
                         if let Err(error) = dispatcher.reconcile_detached_jobs().await {
                             tracing::warn!(

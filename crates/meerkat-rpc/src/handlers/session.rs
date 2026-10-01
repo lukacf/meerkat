@@ -472,13 +472,42 @@ pub async fn handle_create(
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
-    create_session_with_params(
+    let callback_route = runtime.default_callback_route();
+    create_session_with_params_on_route(
         id,
         params,
         runtime,
         notification_sink,
         runtime_adapter,
         request_context,
+        callback_route,
+    )
+    .await
+}
+
+/// Handle `session/create` for a connection that owns `callback_route`: the
+/// session's callback tools route to that connection only.
+pub async fn handle_create_on_route(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+    notification_sink: &NotificationSink,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    request_context: Option<RequestContext>,
+    callback_route: Option<crate::callback_dispatcher::CallbackRoute>,
+) -> RpcResponse {
+    let params: CreateSessionParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    create_session_with_params_on_route(
+        id,
+        params,
+        runtime,
+        notification_sink,
+        runtime_adapter,
+        request_context,
+        callback_route,
     )
     .await
 }
@@ -487,13 +516,39 @@ pub async fn handle_create(
 /// (`help/ask`). Takes a fully-formed [`CreateSessionParams`] so callers
 /// route typed params without re-serializing through a hand-shaped JSON
 /// payload (K17: handlers speak typed params/results only).
+/// Create a session on the process-default callback route.
 pub async fn create_session_with_params(
+    id: Option<RpcId>,
+    params: CreateSessionParams,
+    runtime: Arc<SessionRuntime>,
+    notification_sink: &NotificationSink,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    request_context: Option<RequestContext>,
+) -> RpcResponse {
+    let callback_route = runtime.default_callback_route();
+    create_session_with_params_on_route(
+        id,
+        params,
+        runtime,
+        notification_sink,
+        runtime_adapter,
+        request_context,
+        callback_route,
+    )
+    .await
+}
+
+/// Create a session whose callback tools are bound to `callback_route` (the
+/// requesting connection's route). With no route the session has no
+/// callback tools; it never borrows another connection's route.
+pub async fn create_session_with_params_on_route(
     id: Option<RpcId>,
     params: CreateSessionParams,
     runtime: Arc<SessionRuntime>,
     notification_sink: &NotificationSink,
     _runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
     request_context: Option<RequestContext>,
+    callback_route: Option<crate::callback_dispatcher::CallbackRoute>,
 ) -> RpcResponse {
     if let Err(err) = meerkat::surface::validate_public_peer_meta(params.peer_meta.as_ref()) {
         return RpcResponse::error(id, error::INVALID_PARAMS, err);
@@ -622,8 +677,9 @@ pub async fn create_session_with_params(
                 ..t
             })
             .collect();
-        if let Some(dispatcher) = runtime.callback_tool_dispatcher(inline_tools) {
-            let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> = Arc::new(dispatcher);
+        if let Some(route) = callback_route.as_ref() {
+            let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
+                Arc::new(runtime.callback_tool_dispatcher_for_route(route, inline_tools));
             build_config.external_tools = Some(dispatcher);
         }
     }
@@ -682,6 +738,11 @@ pub async fn create_session_with_params(
             return RpcResponse::error(id, rpc_err.code, rpc_err.message);
         }
     };
+    // Later recovery or live orchestration of this session rebuilds its
+    // callback tools from this exact route.
+    if let Some(route) = callback_route {
+        runtime.bind_session_callback_route(session_id.clone(), route);
+    }
 
     // Immediate creates need a live runtime loop before the first turn starts.
     // Deferred creates register on-demand through the session/* router entry

@@ -649,11 +649,13 @@ pub struct LiveAssistantOutputAvailableParams {
 }
 
 /// Runtime request notification `live/media_health_requested`: at the typed
-/// end of a channel's first assistant output, the runtime asks the client for
-/// its raw decoded-audio counters for exactly that output (from its
-/// `live/assistant_output_available` notification to now). The client answers
-/// with `live/media_health`. A client that never answers leaves the output
-/// unjudged.
+/// end of a channel's first assistant output (its first segment settled with
+/// a non-empty transcript), the runtime asks the client for its raw
+/// decoded-audio counters from the channel's media start to now (nothing was
+/// audible before the first output). The `output_id` is only the report key;
+/// that output is already settled and is not a playback handle. The client
+/// answers with `live/media_health`. A client that never answers leaves the
+/// output unjudged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveMediaHealthRequestedParams {
@@ -661,15 +663,16 @@ pub struct LiveMediaHealthRequestedParams {
     pub output_id: String,
 }
 
-/// `live/media_health` request: the client's raw decoded-audio counters for
-/// the requested output. The runtime judges them; the client never sends a
-/// verdict.
+/// `live/media_health` request: the client's raw decoded-audio counters from
+/// the channel's media start to now, for the output a
+/// `live/media_health_requested` notification named. The runtime judges them;
+/// the client never sends a verdict.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveMediaHealthParams {
     pub channel_id: String,
     pub output_id: String,
-    /// Audio frames the client decoded for the output.
+    /// Audio frames the client decoded since the channel's media start.
     pub decoded_frames: u64,
     /// Decoded frames whose RMS reached the client's non-silent floor.
     pub audible_frames: u64,

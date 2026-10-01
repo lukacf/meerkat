@@ -638,6 +638,7 @@ test_suite(
         "//crates/meerkat-live:meerkat_live_unit_test",
         "//crates/meerkat-llm-core:meerkat_llm_core_unit_test",
         "//crates/meerkat-machine-codegen:artifacts_semantic_model_test",
+        "//crates/meerkat-machine-codegen:len_lowering_test",
         "//crates/meerkat-machine-codegen:meerkat_machine_codegen_unit_test",
         "//crates/meerkat-machine-codegen:named_type_binding_respected_test",
         "//crates/meerkat-machine-codegen:redacted_field_debug_test",

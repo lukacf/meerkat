@@ -11336,11 +11336,15 @@ impl<'a> MachineTlaCompiler<'a> {
                 self.render_expr_with_types(inner, env, binding_env, binding_types)
             ),
             Expr::Len(inner) => {
+                // The kernel counts the entries of a sequence, set or map
+                // alike; TLA+ `Len` is defined only on sequences.
                 let rendered = self.render_expr_with_types(inner, env, binding_env, binding_types);
-                if self.expr_renders_as_set(inner, binding_types) {
-                    format!("Cardinality({rendered})")
-                } else {
-                    format!("Len({rendered})")
+                match self.infer_expr_type_for_render(inner, binding_types) {
+                    Some(TypeRef::Map(_, _)) => format!("Cardinality(DOMAIN {rendered})"),
+                    Some(ty) if self.type_renders_as_set(&ty) => {
+                        format!("Cardinality({rendered})")
+                    }
+                    _ => format!("Len({rendered})"),
                 }
             }
             Expr::Count { collection, value } => format!(
@@ -11422,16 +11426,38 @@ impl<'a> MachineTlaCompiler<'a> {
         }
     }
 
-    fn expr_renders_as_set(&self, expr: &Expr, binding_types: &BTreeMap<String, TypeRef>) -> bool {
-        self.infer_expr_type_for_render(expr, binding_types)
-            .is_some_and(|ty| self.type_renders_as_set(&ty))
-    }
-
     fn infer_expr_type_for_render(
         &self,
         expr: &Expr,
         binding_types: &BTreeMap<String, TypeRef>,
     ) -> Option<TypeRef> {
+        // A projection into a structural record (`restrictions.lifetime.unresolved`)
+        // takes the declared type of the record field, so `.len()` on a
+        // field-presence set reached through one renders as `Cardinality`.
+        if let Expr::FieldAccess { base, field } = expr {
+            let TypeRef::Named(record) = self.infer_expr_type_for_render(base, binding_types)?
+            else {
+                return None;
+            };
+            let meerkat_machine_schema::RustTypeAtom::TypePathStruct { fields, .. } =
+                self.named_bindings.get(record.as_str())?
+            else {
+                return None;
+            };
+            return match &fields
+                .iter()
+                .find(|candidate| candidate.name == *field)?
+                .atom
+            {
+                meerkat_machine_schema::TypePathStructFieldAtom::String => Some(TypeRef::String),
+                meerkat_machine_schema::TypePathStructFieldAtom::Named(name) => {
+                    Some(TypeRef::Named(name.clone()))
+                }
+                meerkat_machine_schema::TypePathStructFieldAtom::OptionalNamed(name) => {
+                    Some(TypeRef::Option(Box::new(TypeRef::Named(name.clone()))))
+                }
+            };
+        }
         let field_types = self
             .schema
             .state

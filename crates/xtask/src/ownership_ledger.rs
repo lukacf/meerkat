@@ -2565,7 +2565,7 @@ fn state_cells() -> Vec<StateCellEntry> {
         ),
         state_entry!(
             "crates/meerkat-mcp/src/router.rs",
-            "RouterProjectionSnapshot.tool_to_server",
+            "RouterProjectionSnapshot.tool_routes",
             Subsystem::Mcp,
             StateClass::DerivedProjection,
             "RouterProjectionSnapshot",

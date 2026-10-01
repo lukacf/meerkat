@@ -1119,6 +1119,13 @@ fn gen_helper(helper: &HelperDef) -> TokenStream {
         .iter()
         .map(|p| {
             let pname = &p.name;
+            // A sequence parameter borrows as a slice (`&[T]`, not `&Vec<T>`):
+            // callers pass `&vec`, which coerces, and clippy's `ptr_arg`
+            // rejects `&Vec<T>` parameters.
+            if let crate::ast::TypeDef::Seq(inner) = &p.ty {
+                let inner_ty = crate::gen_state::gen_type(inner);
+                return quote! { #pname: &[#inner_ty] };
+            }
             let pty = crate::gen_state::gen_type(&p.ty);
             quote! { #pname: &#pty }
         })
@@ -1127,6 +1134,20 @@ fn gen_helper(helper: &HelperDef) -> TokenStream {
     if helper.params.is_empty() {
         quote! {
             fn #name(&self) -> #return_ty {
+                #body
+            }
+        }
+    } else if helper
+        .params
+        .iter()
+        .any(|p| matches!(p.ty, crate::ast::TypeDef::String))
+    {
+        // A `String` parameter stays `&String`: helper bodies compare it with
+        // owned strings (`chain.contains(entry)` needs `&String`), so it
+        // cannot become `&str`. Allowed as on the generated input methods.
+        quote! {
+            #[allow(clippy::ptr_arg)]
+            fn #name(#(#params),*) -> #return_ty {
                 #body
             }
         }

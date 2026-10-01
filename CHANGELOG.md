@@ -460,6 +460,18 @@ them.
   sweeps more workers (192 cores: 213-246 s, from 267 s), and the lane script
   runs the audits beside `machine-verify` only from 16 workers up (a
   12-worker, 32 GiB machine: 525 s instead of 688 s).
+- Machine `.len()` lowers to the TLA+ operator that matches the collection:
+  `Cardinality` for a set, including a field-presence set reached through a
+  structural record field (`restrictions.lifetime.unresolved`, which rendered
+  as `Len` and failed TLC evaluation), `Cardinality(DOMAIN ..)` for a map, and
+  `Len` for a sequence, matching the kernel, which counts entries of all
+  three. Two map lengths in MeerkatMachine
+  (`live_context_queued_append_by_cursor`, `live_bridge_channel_by_operation`)
+  rendered as `Len`, which TLC rejects on any non-empty map not keyed
+  `1..n`; their lane states are unchanged. A `machine!` helper's `Seq<T>`
+  parameter is `&[T]` instead of `&Vec<T>` (clippy `ptr_arg`); a `String`
+  parameter stays `&String` with the lint allowed, as on the generated input
+  methods.
 - Live structural mob event subscriptions no longer fall back to reading the
   event store when appends race. `InMemoryMobEventStore` released its write
   lock before broadcasting an append, so a preempted append was overtaken by

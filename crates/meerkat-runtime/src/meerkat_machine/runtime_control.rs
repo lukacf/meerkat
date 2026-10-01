@@ -14619,6 +14619,23 @@ impl MeerkatMachine {
         }
     }
 
+    /// The output the runtime requested media health for on a channel (its
+    /// first assistant output), when the request was made.
+    pub async fn live_media_health_requested_output(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> Result<Option<String>, RuntimeDriverError> {
+        let state = self
+            .session_dsl_state(session_id)
+            .await
+            .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
+        Ok(state
+            .live_media_health_requested_output_by_channel
+            .get(channel_id.as_str())
+            .cloned())
+    }
+
     /// Judge the client's raw decoded-audio counters for the requested output
     /// (`ObserveLiveChannelMediaHealth`). Refused unless the report names the
     /// exact output the runtime requested on the session's active channel and

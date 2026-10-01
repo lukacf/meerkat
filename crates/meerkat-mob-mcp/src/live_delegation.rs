@@ -66,20 +66,30 @@ pub(crate) const LIVE_DELEGATION_ASSISTANT_CONTEXT_HEADING: &str = "Assistant al
      the user may not have heard all of it; do not repeat it, and treat anything it already \
      answered as answered):";
 
+/// Preface of every voice request in the executor task text. The request is
+/// a speech transcript, and transcription spells punctuation out, so a file
+/// the user called "notes dot md" reached the worker as those words and was
+/// written as `notes-dot-md` (S106).
+pub(crate) const LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE: &str = "The request below is a speech transcript of the user's voice: spoken punctuation in names \
+     means the character (\"dot\" is \".\", \"slash\" is \"/\", \"underscore\" is \"_\"), so \
+     \"notes dot md\" names the file notes.md.";
+
 /// The one seam that turns a delegation's provider window into the worker's
 /// task text. The request is the user transcript of the whole window; the
 /// assistant's native output in that window is appended as a separately
 /// labelled section so the worker can see what was already answered, and is
 /// never merged into the request itself. The label says "generated", not
 /// "said": after a barge-in the transcript can describe audio the user never
-/// heard.
+/// heard. The request is prefaced by [`LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE`].
 pub(crate) fn delegation_request_text(input: &LiveDelegationExecutorInput) -> String {
     let request = input.request_transcript.trim();
     let context = input.assistant_context.trim();
     if context.is_empty() {
-        return request.to_string();
+        return format!("{LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE}\n\n{request}");
     }
-    format!("{request}\n\n{LIVE_DELEGATION_ASSISTANT_CONTEXT_HEADING}\n{context}")
+    format!(
+        "{LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE}\n\n{request}\n\n{LIVE_DELEGATION_ASSISTANT_CONTEXT_HEADING}\n{context}"
+    )
 }
 mod schedule;
 
@@ -5704,6 +5714,9 @@ mod tests {
             assistant_context: "mm-hm".into(),
         };
         let text = delegation_request_text(&split);
+        let text = text
+            .strip_prefix(&format!("{LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE}\n\n"))
+            .expect("speech transcript preface");
         let (request, context) = text
             .split_once(&format!(
                 "\n\n{LIVE_DELEGATION_ASSISTANT_CONTEXT_HEADING}\n"
@@ -5716,7 +5729,10 @@ mod tests {
             request_transcript: " second task ".into(),
             assistant_context: String::new(),
         };
-        assert_eq!(delegation_request_text(&quiet), "second task");
+        assert_eq!(
+            delegation_request_text(&quiet),
+            format!("{LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE}\n\nsecond task")
+        );
         // A native answer between two requests (S103) lands in the context
         // section; the request text carries only user transcript.
         let answered = LiveDelegationExecutorInput {
@@ -5724,9 +5740,35 @@ mod tests {
             assistant_context: "on it it is Tuesday".into(),
         };
         let text = delegation_request_text(&answered);
-        assert!(text.starts_with("what day is it also add a summary\n\n"));
+        assert!(text.starts_with(&format!(
+            "{LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE}\n\nwhat day is it also add a summary\n\n"
+        )));
         assert!(text.ends_with("\non it it is Tuesday"));
         assert_eq!(text.matches("Tuesday").count(), 1);
+    }
+
+    #[test]
+    fn the_task_tells_the_worker_its_request_is_a_speech_transcript() {
+        // S106: "notes dot md" was written as `notes-dot-md`.
+        let text = delegation_request_text(&LiveDelegationExecutorInput {
+            request_transcript: "write a note into a file called notes dot md".into(),
+            assistant_context: String::new(),
+        });
+        let (preface, request) = text.split_once("\n\n").expect("preface, then request");
+        assert_eq!(preface, LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE);
+        assert_eq!(request, "write a note into a file called notes dot md");
+        for spoken in [
+            "speech transcript",
+            "\"dot\" is \".\"",
+            "\"slash\" is \"/\"",
+            "\"underscore\" is \"_\"",
+            "notes.md",
+        ] {
+            assert!(
+                preface.contains(spoken),
+                "{spoken:?} missing from {preface:?}"
+            );
+        }
     }
 
     #[test]

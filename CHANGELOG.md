@@ -140,6 +140,10 @@ them.
   refusal was retained as a failed stop-cleanup result, and the next binding
   preparation for that session failed with `guard rejected transition from
   Stopped`.
+- A voice delegation's executor task now says the request is a speech
+  transcript whose spoken punctuation in names means the character ("dot",
+  "slash", "underscore"). A file the user called "notes dot md" was written as
+  `notes-dot-md`.
 - The `meerkat_schedule_create` and `meerkat_schedule_update` tool schemas
   advertise the existing `host_runnable` target (`target_kind`
   `"host_runnable"`, a required non-empty `runnable` name and optional opaque

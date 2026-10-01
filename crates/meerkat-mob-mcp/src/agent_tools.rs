@@ -4379,16 +4379,12 @@ mod tests {
 
     impl TestCommsRuntime {
         async fn new(name: &str, registry: Arc<TestCommsRegistry>) -> Arc<Self> {
-            let mut public_key_bytes = [0u8; 32];
-            for (index, byte) in name.bytes().enumerate() {
-                let slot = index % public_key_bytes.len();
-                public_key_bytes[slot] = public_key_bytes[slot]
-                    .wrapping_add(byte)
-                    .wrapping_add(index as u8);
-            }
-            if public_key_bytes == [0u8; 32] {
-                public_key_bytes[0] = 1;
-            }
+            // SHA-256 of the name: deterministic and collision-resistant (a
+            // byte fold collided for sibling names).
+            let public_key_bytes: [u8; 32] = {
+                use sha2::Digest as _;
+                sha2::Sha256::digest(name.as_bytes()).into()
+            };
             let peer_id = PeerId::from_ed25519_pubkey(&public_key_bytes);
             let runtime = Arc::new(Self {
                 name: name.into(),

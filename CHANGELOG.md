@@ -397,6 +397,19 @@ them.
   as "new crate, no baseline in vX (first publication, not measured, not a
   failure)" on every run; an undeclared one still fails closed.
 
+- `reconstructed_stopped_resume_preparation_keeps_query_phase_responsive`
+  (issue #1409) no longer fails while spawning its 17 members with
+  "guard rejected transition from phase Running for
+  input::RegisterMemberPeer". The test's mock comms runtime derived each
+  member's signing key from its name with a weak byte fold, which collided
+  for sibling names such as `<mob>/worker/cold-1` and `<mob>/worker/cold-12`
+  under about 19% of random mob ids. MobMachine then correctly refused the
+  second member's peer registration for reusing the first one's peer id. The
+  mock (and five other test comms fixtures) now derive the key as SHA-256 of
+  the name, still deterministic per name. That includes `meerkat-mob-mcp`'s
+  in-memory dev/test `LocalSessionService`, whose members could hit the same
+  refusal.
+
 - Shutting down an MCP router no longer leaves a still-connecting stdio
   server process behind. `McpRouter::shutdown` now aborts and joins the
   connect-and-enumerate tasks it spawned instead of letting them run until the

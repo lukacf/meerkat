@@ -30681,6 +30681,71 @@ async fn test_resume_repoints_snapshotless_member_head_to_latest_persisted_sessi
     );
 }
 
+/// The member runtime already reached its terminal Stopped (stopped to
+/// terminal through the runtime adapter) before `MobHandle::stop`: the mob
+/// stop observes that terminal and completes instead of waiting on it. An
+/// AutonomousHost member always has its host-loop run in flight, and a
+/// generated runtime stop on Running defers to that run's boundary
+/// (`runtime_stop_deferred`), so the fixture interrupts the run first; without
+/// that, the until-terminal stop itself waits for a boundary that never comes.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mob_stop_completes_when_member_runtime_already_terminal() {
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let identity = AgentIdentity::from("mk--rt_creview_csingleton_c0");
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    // Hold the host-loop turn at its entry so the interrupt below targets a
+    // run that is provably current, never one still being staged.
+    service.hold_start_turns();
+    let mut held = service.held_start_turn_entries();
+    handle
+        .spawn(ProfileName::from("worker"), identity.clone(), None)
+        .await
+        .expect("spawn member");
+    held.wait_for(|entries| *entries > 0)
+        .await
+        .expect("the member host-loop turn enters the hold");
+    let sid = handle
+        .get_member(&identity)
+        .await
+        .expect("roster query")
+        .expect("spawned member")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    let registration = adapter
+        .current_session_registration_witness(&sid)
+        .await
+        .expect("member registration");
+    // An AutonomousHost member always has its host-loop run in flight; a
+    // runtime stop defers to that run's boundary, so interrupt it first.
+    // The held turn observes the interrupt and returns Cancelled.
+    adapter
+        .hard_cancel_current_run(&sid, "interrupt the host loop before the stop")
+        .await
+        .expect("interrupt the member host loop");
+    assert!(
+        adapter
+            .stop_runtime_executor_until_terminal_if_current(
+                &registration,
+                "stop the member runtime before the mob stop",
+            )
+            .await
+            .expect("stop the member runtime to terminal"),
+        "the member registration must still be current"
+    );
+    service.release_held_start_turns();
+    tokio::time::timeout(std::time::Duration::from_secs(20), handle.stop())
+        .await
+        .expect("the mob stop returns although the member runtime is already terminal")
+        .expect("the mob stop succeeds");
+}
+
 #[tokio::test]
 async fn test_snapshotless_recovery_never_publishes_foreign_attachment_endpoint() {
     let service = Arc::new(MockSessionService::new());

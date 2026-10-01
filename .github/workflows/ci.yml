@@ -76,13 +76,42 @@ on:
       - ready_for_review
   workflow_dispatch: {}
 
-# Pull requests: one group per PR, a newer push cancels the older run. Pushes
-# to main: one group per commit and no cancellation, so every main commit
-# completes its run and gets attested even when merges land back to back (a
-# per-ref group cancelled 35918370610 and 35920687943 before their gates).
+# Pull requests: one group per PR, a newer push cancels the older run.
+#
+# Pushes to main: a newer main commit supersedes the still-running run of an
+# older one (group main-<ref>-superseded, cancelled). The account runs at most
+# 40 hosted jobs at once, a main run starts 35-50 of them, and merges arrive
+# about every 13-32 minutes against a 20-34 minute main run, so completing
+# every main run starved pull-request CI of runners: in the 02:27-03:50 UTC
+# merge burst of 2026-10-01, 806 of the 1760 main-run job-minutes (46%) ran
+# after a newer main commit had already been pushed. The newest main commit
+# is still fully tested, and its run covers every superseded commit's change.
+#
+# Never superseded, one group per commit (main-<ref>-<sha>):
+#   - a release commit ("chore: release v..." in the head commit message),
+#     because the release workflow's require_ci_green needs a successful
+#     exact-main run on exactly that commit;
+#   - every re-run attempt (run_attempt > 1). A superseded commit that turns
+#     out to be needed (a tag on it, or bisecting a red main) gets its
+#     attestation with `gh run rerun <id>`, and that attempt runs to the end;
+#   - workflow_dispatch runs.
+# A cancelled run never reaches the CI gate (it runs under !cancelled()), so
+# it leaves no exact-tree attestation; require_ci_green only accepts a run
+# that completed with success. A per-ref group with cancellation for every
+# main push once cancelled 35918370610 and 35920687943 before their gates;
+# the exemptions above are what makes cancellation safe for releases.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('main-{0}-{1}', github.ref_name, github.sha) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: >-
+    ${{
+      github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) ||
+      (github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v')) && format('main-{0}-superseded', github.ref_name) ||
+      format('main-{0}-{1}', github.ref_name, github.sha)
+    }}
+  cancel-in-progress: >-
+    ${{
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v'))
+    }}
 
 permissions:
   actions: read

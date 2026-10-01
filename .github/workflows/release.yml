@@ -179,6 +179,7 @@ jobs:
             const timeoutMs = 120 * 60 * 1000;
             const pollMs = 30 * 1000;
             const started = Date.now();
+            let supersededReported = false;
 
             async function listExactMainRuns() {
               const { data } = await github.rest.actions.listWorkflowRuns({
@@ -218,6 +219,21 @@ jobs:
                 core.setOutput("run_id", String(success.id));
                 core.setOutput("run_attempt", String(success.run_attempt));
                 return;
+              }
+
+              // ci.yml lets a newer main commit supersede (cancel) an older
+              // commit's first attempt unless the commit message names a
+              // release ("chore: release v..."). A re-run attempt is never
+              // superseded, so re-running the cancelled run recovers.
+              const superseded = runs.find(
+                (run) => run.status === "completed" && run.conclusion === "cancelled"
+              );
+              if (superseded && !supersededReported) {
+                supersededReported = true;
+                core.warning(
+                  `Exact-main CI on ${ref} was cancelled (superseded by a newer main commit): ${superseded.html_url}. ` +
+                    `Re-run it with: gh run rerun ${superseded.id} --repo ${owner}/${repo}`
+                );
               }
 
               if (Date.now() - started >= timeoutMs) {

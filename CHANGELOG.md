@@ -333,6 +333,18 @@ them.
 
 ### Changed
 
+- CI on `main`: a newer main commit now supersedes (cancels) the
+  still-running first attempt of an older one, so a merge burst no longer
+  fills the account's 40 concurrent hosted jobs with main runs (35-50 jobs
+  each) while pull-request CI waits for runners. In the 2026-10-01 02:27-03:50
+  UTC burst this would have freed 806 of 1760 main-run job-minutes (46%).
+  Release commits (`chore: release v...` in the head commit message), every
+  re-run attempt and dispatches keep one concurrency group per commit and are
+  never cancelled, so the release workflow's exact-main CI requirement still
+  holds; when it finds the release commit's run cancelled it prints the
+  `gh run rerun` command that recovers it. A cancelled run never builds an
+  exact-tree attestation.
+
 - Main CI builds meerkat-mob's unit tests once and runs them in parallel
   partitions. Its default and `openai-live` lanes took 12.5-20 min on the
   hosted 4-vCPU runners, two thirds of it compiling the crate's own

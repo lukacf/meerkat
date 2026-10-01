@@ -294,11 +294,32 @@ graph.
 Pull request CI uses one concurrency group per PR (`pr-<number>`) with
 `cancel-in-progress: true`. Starting another PR-associated attempt in that
 group automatically cancels the older in-progress attempt, even when nobody
-issues an explicit cancel command. Pushes to `main` use one group per commit
-(`main-main-<sha>`) with no cancellation, so back-to-back merges each
-complete their run and emit their attestation. The
-`CI gate` job runs under `!cancelled()`, so a superseded run surfaces as
-cancelled rather than leaving a failed `CI gate` context on the head. The
+issues an explicit cancel command.
+
+Pushes to `main` share one group (`main-main-superseded`) with
+`cancel-in-progress: true`: a newer main commit supersedes the still-running
+first attempt of an older one, so only the newest main commit is fully tested
+while merges stream in, and its run covers every superseded change. The
+account runs at most 40 hosted jobs at once and a main run starts 35-50 of
+them; in the 2026-10-01 02:27-03:50 UTC merge burst, 46% of the main-run
+job-minutes (806 of 1760) ran after a newer main commit had been pushed, while
+pull-request jobs waited up to 11 minutes for a runner. Three kinds of run keep
+one group per commit (`main-main-<sha>`) and are never superseded:
+
+- a release commit, whose head commit message contains `chore: release v`,
+  because `require_ci_green` in the release workflow needs a successful
+  exact-main run on exactly the release commit;
+- every re-run attempt (`run_attempt` above 1): when a superseded commit is
+  needed after all (a tag on it, or bisecting a red main), `gh run rerun <id>`
+  gives it an attempt that runs to the end and emits its attestation.
+  `require_ci_green` prints that command when it finds the release commit's
+  run cancelled;
+- `workflow_dispatch` runs.
+
+The `CI gate` job runs under `!cancelled()`, so a superseded run surfaces as
+cancelled rather than leaving a failed `CI gate` context on the head, and it
+never builds an exact-tree attestation; `require_ci_green` accepts only a run
+that completed with success. The
 reusable BuildBuddy workflow (nightly and release) serializes its shared
 executor lifecycle with its own concurrency group; that group's
 `cancel-in-progress` is `false`.

@@ -140,13 +140,23 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         ci.contains("format('pr-{0}', github.event.pull_request.number)"),
         "one concurrency group per pull request"
     );
+    // A newer main commit supersedes an older commit's first attempt, but a
+    // release commit, every re-run attempt and a dispatch keep one group per
+    // commit and are never cancelled: the release workflow needs a
+    // successful exact-main run on the release commit.
     assert!(
-        ci.contains("format('main-{0}-{1}', github.ref_name, github.sha)"),
-        "one concurrency group per pushed commit, so main runs never cancel each other"
+        ci.contains("format('main-{0}-superseded', github.ref_name)"),
+        "first attempts of main pushes share a superseding group"
     );
     assert!(
-        ci.contains("cancel-in-progress: ${{ github.event_name == 'pull_request' }}"),
-        "only pull-request runs are cancelled by a newer push"
+        ci.contains("format('main-{0}-{1}', github.ref_name, github.sha)"),
+        "release commits, re-runs and dispatches keep one group per commit"
+    );
+    let supersedable = "github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v')";
+    assert_eq!(
+        ci.matches(supersedable).count(),
+        2,
+        "the superseding group and its cancel-in-progress use the same condition"
     );
 
     let jobs = doc

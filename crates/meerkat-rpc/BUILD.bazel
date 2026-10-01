@@ -189,15 +189,15 @@ rust_test(
     size = "large",
     exec_properties = {"test.network": "external"},
     data = [
-        "//:workspace_cargo_manifests",
-        "//:workspace_metadata",
         "//crates/meerkat-core:package_runfiles",
         "//crates/meerkat-rest:package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat-rpc",
@@ -223,6 +223,7 @@ rust_test(
         "//crates/meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",
         normal = True,
@@ -281,6 +282,7 @@ rust_binary(
         "//crates/meerkat:meerkat_session_agent_factory_build",
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",
         normal = True,
@@ -330,11 +332,13 @@ rust_test(
     ],
     size = "medium",
     data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         "//crates/meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -362,6 +366,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",
         normal = True,
@@ -412,11 +417,13 @@ rust_test(
     ],
     size = "medium",
     data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         "//crates/meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -444,6 +451,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",
         normal = True,
@@ -493,11 +501,13 @@ rust_test(
         "integration",
     ],
     data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         "//crates/meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -525,6 +535,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",
         normal = True,
@@ -576,11 +587,13 @@ rust_test(
     size = "medium",
     data = [
         ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         "//crates/meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -608,6 +621,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",
         normal = True,
@@ -659,11 +673,13 @@ rust_test(
     size = "medium",
     data = [
         ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         "//crates/meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -691,6 +707,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",
         normal = True,
@@ -745,11 +762,13 @@ rust_test(
         "//tests/fixtures/machine-dsl-tests:package_runfiles",
         "//tests/fixtures/mcp-test-server:package_runfiles",
         "//tests/fixtures/surface-build-fixtures:package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         "//crates/meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -777,6 +796,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",
         normal = True,
@@ -831,11 +851,13 @@ rust_test(
         "//tests/fixtures/machine-dsl-tests:package_runfiles",
         "//tests/fixtures/mcp-test-server:package_runfiles",
         "//tests/fixtures/surface-build-fixtures:package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         "//crates/meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -863,6 +885,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",
         normal = True,
@@ -914,11 +937,13 @@ rust_test(
     size = "medium",
     data = [
         ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         "//crates/meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -946,6 +971,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",
         normal = True,
@@ -996,11 +1022,13 @@ rust_test(
     ],
     size = "medium",
     data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         "//crates/meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -1028,6 +1056,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",
         normal = True,
@@ -1078,11 +1107,13 @@ rust_test(
     ],
     size = "medium",
     data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         "//crates/meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -1110,6 +1141,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",
         normal = True,
@@ -1161,11 +1193,13 @@ rust_test(
     size = "medium",
     data = [
         ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         "//crates/meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -1193,6 +1227,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",
         normal = True,
@@ -1244,11 +1279,13 @@ rust_test(
     size = "medium",
     data = [
         ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         "//crates/meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -1276,6 +1313,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",
         normal = True,
@@ -1373,6 +1411,7 @@ rust_binary(
         "//crates/meerkat:meerkat_session_agent_factory_build",
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
         ":meerkat_rpc_surface_min",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",
@@ -1478,6 +1517,7 @@ rust_binary(
         "//crates/meerkat:meerkat_session_agent_factory_build",
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
         ":meerkat_rpc_surface_comms_mcp",
     ] + all_crate_deps(
         package_name = "crates/meerkat-rpc",

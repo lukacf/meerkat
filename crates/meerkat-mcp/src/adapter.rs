@@ -1170,44 +1170,11 @@ mod tests {
     use meerkat_core::ExternalToolSurfacePendingOp;
     use meerkat_runtime::RuntimeExternalToolSurfaceHandle;
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::time::Duration;
 
     fn async_connect_test_timeout() -> Duration {
         Duration::from_secs((McpConnection::DEFAULT_CONNECT_TIMEOUT_SECS as u64) + 5)
-    }
-
-    fn test_server_path() -> PathBuf {
-        if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
-            let target_dir = PathBuf::from(target_dir);
-            for profile in ["debug", "release"] {
-                let candidate = target_dir.join(profile).join("mcp-test-server");
-                if candidate.exists() {
-                    return candidate;
-                }
-            }
-            return target_dir.join("debug/mcp-test-server");
-        }
-
-        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let workspace_root = manifest_dir
-            .parent()
-            .and_then(Path::parent)
-            .expect("workspace root");
-        workspace_root.join("target/debug/mcp-test-server")
-    }
-
-    fn skip_if_no_test_server() -> Option<PathBuf> {
-        let path = test_server_path();
-        if path.exists() {
-            Some(path)
-        } else {
-            eprintln!(
-                "Skipping: mcp-test-server not built. \
-                 Run `cargo build -p mcp-test-server` first."
-            );
-            None
-        }
     }
 
     fn test_server_config(name: &str, path: &Path) -> meerkat_core::McpServerConfig {
@@ -1526,9 +1493,7 @@ mod tests {
     /// authority and calls must keep working after the bind.
     #[tokio::test]
     async fn adapter_late_bind_rederives_pre_bind_facts_instead_of_poisoning() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
         // Embedder flow: ephemeral construction-time authority, servers
         // staged + applied + connected BEFORE the session bind exists.
         let mut router = generated_surface_router();
@@ -1629,9 +1594,7 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_bind_external_surface_handle_allows_post_bind_pending_state() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
         let router = McpRouter::new();
         let adapter = McpRouterAdapter::new(router);
         let handle = generated_surface_handle();
@@ -1762,9 +1725,7 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_bind_seeds_pre_bind_pending_servers_into_dsl() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
         let mut router = generated_surface_router();
         router
             .stage_add(test_server_config("srv-beta", &server_path))
@@ -1885,9 +1846,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_until_ready_returns_notices_when_server_connects() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_surface_router();
         router
@@ -2030,9 +1989,7 @@ mod tests {
 
     #[tokio::test]
     async fn stage_reload_all_returns_typed_report_and_fails_closed_on_shutdown() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
         let mut router = generated_surface_router();
         router
             .stage_add(test_server_config("reload-srv", &server_path))
@@ -2216,9 +2173,7 @@ mod tests {
 
     #[tokio::test]
     async fn connected_adapter_reports_exact_catalog_support_with_deferred_entries() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_surface_router();
         router
@@ -2262,9 +2217,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_reload_rebuild_requires_fresh_live_resolution() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_surface_router();
         router
@@ -2360,9 +2313,7 @@ mod tests {
 
     #[tokio::test]
     async fn lifecycle_action_reload_invalidates_plan_resolved_while_connection_was_pending() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_surface_router();
         router

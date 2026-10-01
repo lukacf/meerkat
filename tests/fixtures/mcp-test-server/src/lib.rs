@@ -1,5 +1,8 @@
 //! Shared real-rmcp server for connection-local form-elicitation tests.
 
+mod fixture;
+pub use fixture::{FIXTURE_ENV, FixtureError, fixture_binary, resolve_fixture_binary};
+
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientInfo, Content, CreateElicitationRequest,
     CreateElicitationRequestParams, CreateMessageRequest, CreateMessageRequestParams,

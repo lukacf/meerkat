@@ -228,13 +228,13 @@ rust_test(
     ],
     size = "medium",
     data = [
-        "//:workspace_cargo_manifests",
-        "//:workspace_metadata",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat-mcp",
@@ -289,10 +289,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat-mcp",
@@ -347,10 +350,13 @@ rust_test(
     tags = [
         "integration",
     ],
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat-mcp",
@@ -408,8 +414,6 @@ rust_test(
         "required-feature",
     ],
     data = [
-        ":package_runfiles",
-        "//:repo_governance_files",
         "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
@@ -471,11 +475,12 @@ rust_test(
         "required-feature",
     ],
     data = [
-        ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat-mcp",
@@ -534,10 +539,12 @@ rust_test(
     size = "medium",
     data = [
         ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat-mcp",
@@ -593,10 +600,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat-mcp",

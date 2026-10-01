@@ -45,6 +45,23 @@ them.
 
 ### Fixed
 
+- Tests that need the `mcp-test-server` fixture binary no longer pass
+  without running when it is missing. Each test hand-rolled a
+  `target/debug/mcp-test-server` lookup and returned early when nothing was
+  there. That path does not exist under the repo-cargo target layout, and PR
+  CI never set `MEERKAT_MCP_TEST_SERVER`, so the meerkat-mcp stdio tests and
+  the meerkat-rpc MCP boundary tests passed in CI without running.
+  - They now share `mcp_test_server::fixture_binary()`: `MEERKAT_MCP_TEST_SERVER`,
+    else the path `scripts/mcp-test-server-fixture` builds it to. When neither
+    resolves, the test fails with a message naming that script.
+  - The fixture-only `integration-real` tests are no longer ignored.
+  - `ci.yml`, the nightly meerkat-rpc lane and `make test-unit` export the
+    variable whenever a tested crate dev-depends on the fixture. Archived lanes
+    ship the binary (`archive.include`).
+  - Bazel gives every test target of such a crate the fixture, keyed on the
+    dev-dependency. Generation fails if one lacks it.
+  - Three meerkat-rpc MCP lifecycle tests this exposed as failing under load
+    are ignored with that reason pending #1461.
 - Explicit mob resume no longer waits forever on a member whose session
   claim settled as an actor without an executor. If another in-process owner
   materializes that actor after the resume's preparation step and never

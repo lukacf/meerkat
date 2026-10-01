@@ -2374,6 +2374,14 @@ struct PendingDirectMemberBindAdmission {
 
 /// Process-lifetime cleanup dispatcher for surface transactions that must
 /// outlive the ambient Tokio runtime which opened them.
+///
+/// Tasks spawned here must not block a thread. The dispatcher is one small
+/// fixed pool (two workers on native targets) shared by every session's
+/// cleanup and user-interrupt callbacks: run synchronous work through
+/// `spawn_blocking` or a dedicated thread and await it. Two tasks that block
+/// their workers stall every session's cleanup, and each interrupt caller
+/// then reports `InterruptDispatchOutcomeUnknown` when its acknowledgement
+/// bound (5 s) elapses.
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct RuntimeCleanupTaskSpawner {

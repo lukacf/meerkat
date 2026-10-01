@@ -1591,6 +1591,18 @@ pub trait CoreExecutorBoundaryHandle: Send + Sync {
 }
 
 /// Cloneable live endpoint for hard-cancelling the active run immediately.
+///
+/// # Must not block a thread
+///
+/// The runtime runs this callback on its process-wide cleanup dispatcher, a
+/// small fixed pool (two workers on native targets) shared by every session's
+/// cleanup and interrupt work. An implementation must stay asynchronous: hand
+/// the cancel to the session's own task and await it, but never block the
+/// thread (no synchronous I/O, `std::sync` waits, `thread::sleep` or
+/// `block_on`). Two callbacks that block their workers stall the whole pool,
+/// and then every interrupt caller in the process gets
+/// `InterruptDispatchOutcomeUnknown` once its acknowledgement bound (5 s)
+/// elapses, even though the work would otherwise finish in milliseconds.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait CoreExecutorInterruptHandle: Send + Sync {

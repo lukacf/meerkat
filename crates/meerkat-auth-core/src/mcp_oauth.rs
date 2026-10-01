@@ -59,10 +59,11 @@ pub enum McpAuthMode {
 /// to [`binding_slug`](Self::binding_slug) so the token realm key and the
 /// `AuthMachine` lease key are guaranteed structurally identical for the same
 /// server.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct McpServerIdentity {
     server_name: String,
     server_url: String,
+    expected_account: Option<String>,
 }
 
 impl McpServerIdentity {
@@ -74,7 +75,52 @@ impl McpServerIdentity {
         Self {
             server_name: server_name.into(),
             server_url: server_url.into(),
+            expected_account: None,
         }
+    }
+
+    /// Select the provider's stable subject/account ID, never a display name.
+    /// Selected identities use a distinct vault and lifecycle key and never
+    /// fall back to credentials stored under the legacy unselected identity.
+    pub fn with_expected_account(
+        mut self,
+        expected_account: impl Into<String>,
+    ) -> Result<Self, McpOAuthError> {
+        let account = expected_account.into();
+        if account.trim().is_empty()
+            || account.len() > 4096
+            || account.chars().any(char::is_control)
+        {
+            return Err(McpOAuthError::InvalidAccountSelection);
+        }
+        self.expected_account = Some(account);
+        Ok(self)
+    }
+
+    pub fn expected_account(&self) -> Option<&str> {
+        self.expected_account.as_deref()
+    }
+
+    /// Use the same persisted selection for native connections and login.
+    pub fn from_config(config: &meerkat_core::McpServerConfig) -> Result<Self, McpOAuthError> {
+        use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
+        let McpTransportConfig::Http(http) = &config.transport else {
+            return Err(McpOAuthError::UnsupportedAccountSelection);
+        };
+        let target = Self::from_server_config(config.name.clone(), http.url.clone());
+        let Some(account) = &http.oauth_account else {
+            return Ok(target);
+        };
+        let target = target.with_expected_account(account.clone())?;
+        if http.transport.unwrap_or_default() != McpHttpTransport::StreamableHttp
+            || http
+                .headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("authorization"))
+        {
+            return Err(McpOAuthError::UnsupportedAccountSelection);
+        }
+        Ok(target)
     }
 
     pub fn server_name(&self) -> &str {
@@ -93,6 +139,10 @@ impl McpServerIdentity {
         hasher.update(self.server_name.as_bytes());
         hasher.update(b"\0");
         hasher.update(self.server_url.as_bytes());
+        if let Some(account) = self.expected_account() {
+            hasher.update(b"\0mcp-account-v1\0");
+            hasher.update(account.as_bytes());
+        }
         let digest = URL_SAFE_NO_PAD.encode(hasher.finalize());
         let name_slug = slug_component(&self.server_name);
         format!("{name_slug}-{}", &digest[..16])
@@ -131,6 +181,16 @@ impl McpServerIdentity {
     /// on this lease — the authority never re-derives expiry policy.
     pub fn lease_key(&self) -> Result<LeaseKey, McpOAuthError> {
         Ok(LeaseKey::from_auth_binding(&self.auth_binding_ref()?))
+    }
+}
+
+impl std::fmt::Debug for McpServerIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerIdentity")
+            .field("server_name", &self.server_name)
+            .field("server_url", &self.server_url)
+            .field("account_selected", &self.expected_account.is_some())
+            .finish()
     }
 }
 
@@ -224,6 +284,14 @@ impl Drop for AdmittedBrowserAttempt {
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpOAuthError {
+    #[error("MCP OAuth expected account selection is invalid")]
+    InvalidAccountSelection,
+    #[error("MCP OAuth interactive login requires an explicit expected account")]
+    AccountSelectionRequired,
+    #[error(
+        "MCP OAuth account selection requires its OAuth resolver and streamable HTTP without static Authorization"
+    )]
+    UnsupportedAccountSelection,
     #[error(transparent)]
     Verification(#[from] ConnectorOAuthRefusal),
     #[error("MCP OAuth flow owner refused the ceremony")]
@@ -320,6 +388,21 @@ impl McpOAuthAuthority {
         Ok(self)
     }
 
+    /// Check local prerequisites before a surface performs discovery preflight.
+    /// This does not authorize network effects or verify provider account data.
+    pub fn validate_interactive_selection(
+        &self,
+        target: &McpServerIdentity,
+    ) -> Result<(), McpOAuthError> {
+        if target.expected_account().is_none() {
+            return Err(McpOAuthError::AccountSelectionRequired);
+        }
+        if self.interactive.is_none() {
+            return Err(ConnectorOAuthRefusal::VerificationUnavailable.into());
+        }
+        Ok(())
+    }
+
     fn token_store(&self) -> Arc<dyn TokenStore> {
         self.provider_auth_persistence.token_store()
     }
@@ -332,6 +415,9 @@ impl McpOAuthAuthority {
         &self,
         target: &McpServerIdentity,
     ) -> Result<Option<String>, McpOAuthError> {
+        if self.interactive.is_some() && target.expected_account().is_none() {
+            return Err(McpOAuthError::AccountSelectionRequired);
+        }
         let key = target.token_key()?;
         let lease_key = target.lease_key()?;
         let admitted = {
@@ -366,6 +452,9 @@ impl McpOAuthAuthority {
                     )
                     .await
                     .map_err(|error| map_coordinated_refresh_error(&error_target, error))?;
+                // A coordinator may return another waiter's result. Recheck
+                // the selected subject on that exact result before use.
+                verify_stored_account(target, &refreshed)?;
                 Ok(refreshed.primary_secret)
             }
             CredentialUseDisposition::ReauthRequired
@@ -392,6 +481,10 @@ impl McpOAuthAuthority {
         target: &McpServerIdentity,
         www_authenticate: Option<&str>,
     ) -> Result<String, McpOAuthError> {
+        self.validate_interactive_selection(target)?;
+        let expected_account = target
+            .expected_account()
+            .ok_or(McpOAuthError::AccountSelectionRequired)?;
         let (authority, strategy) = self
             .interactive
             .as_ref()
@@ -419,6 +512,9 @@ impl McpOAuthAuthority {
                 },
             )?;
             let facts = descriptor.parameters();
+            if facts.expected_account != expected_account {
+                return Err(ConnectorOAuthRefusal::AccountMismatch.into());
+            }
             if facts.issuer != discovery.authorization_server
                 || facts.client != client.client_id
                 || facts.resource != discovery.resource
@@ -595,6 +691,7 @@ impl McpOAuthAuthority {
         if tokens.auth_mode != PersistedAuthMode::McpOauth {
             return Ok(None);
         }
+        verify_stored_account(target, &tokens)?;
         if tokens.primary_secret.is_none()
             || !durable_marker::marker_payload_valid_for_tokens(&tokens, key)
         {
@@ -633,6 +730,7 @@ impl McpOAuthAuthority {
             .ok_or_else(|| McpOAuthError::ReauthRequired {
                 server_name: target.server_name().to_string(),
             })?;
+            verify_stored_account(target, &tokens)?;
             if tokens.primary_secret.is_none()
                 || !durable_marker::marker_payload_valid_for_tokens(&tokens, key)
             {
@@ -1223,6 +1321,18 @@ fn stored_metadata_for_target(
     Ok(metadata)
 }
 
+fn verify_stored_account(
+    target: &McpServerIdentity,
+    tokens: &PersistedTokens,
+) -> Result<(), McpOAuthError> {
+    if let Some(expected) = target.expected_account()
+        && tokens.account_id.as_deref() != Some(expected)
+    {
+        return Err(ConnectorOAuthRefusal::AccountMismatch.into());
+    }
+    Ok(())
+}
+
 fn persisted_tokens_from_result(
     result: &OAuthTokenResult,
     discovery: &StoredMcpOAuthDiscovery,
@@ -1301,6 +1411,9 @@ fn lifecycle_snapshot_is_absent(snapshot: &AuthLeaseSnapshot) -> bool {
 
 fn refresh_error_from_mcp(error: McpOAuthError) -> RefreshError {
     match error {
+        McpOAuthError::Verification(ConnectorOAuthRefusal::AccountMismatch) => {
+            RefreshError::CredentialIdentityMismatch
+        }
         McpOAuthError::ReauthRequired { .. }
         | McpOAuthError::MissingStoredToken { .. }
         | McpOAuthError::MissingStoredMetadata { .. } => {
@@ -1311,6 +1424,9 @@ fn refresh_error_from_mcp(error: McpOAuthError) -> RefreshError {
 }
 
 fn map_coordinated_refresh_error(target: &McpServerIdentity, error: RefreshError) -> McpOAuthError {
+    if matches!(error, RefreshError::CredentialIdentityMismatch) {
+        return ConnectorOAuthRefusal::AccountMismatch.into();
+    }
     if let RefreshError::DurableTerminalCommit { message, .. } = &error {
         return McpOAuthError::TokenStore(message.clone());
     }

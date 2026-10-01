@@ -2979,6 +2979,10 @@ enum McpCommands {
         #[arg(long = "header", short = 'H', value_name = "KEY:VALUE")]
         headers: Vec<String>,
 
+        /// Expected OAuth provider subject/account ID (streamable HTTP only)
+        #[arg(long, value_name = "ACCOUNT_ID")]
+        oauth_account: Option<String>,
+
         /// Environment variable (KEY=VALUE). Can be repeated. (for stdio transport)
         #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
         env: Vec<String>,
@@ -15894,6 +15898,7 @@ async fn handle_mcp_command(command: McpCommands, cli_scope: &RuntimeScope) -> a
             scope,
             url,
             headers,
+            oauth_account,
             env,
             command,
         } => {
@@ -15909,6 +15914,7 @@ async fn handle_mcp_command(command: McpCommands, cli_scope: &RuntimeScope) -> a
                     url,
                     positional_url,
                     headers,
+                    oauth_account,
                     command,
                     env,
                     project_scope: matches!(scope, CliMcpScope::Project | CliMcpScope::Local),
@@ -16039,10 +16045,8 @@ async fn login_mcp_server(
     }
 
     let authority = open_mcp_oauth_authority(CliMcpAuthMode::Interactive)?;
-    let target = meerkat_auth_core::McpServerIdentity::from_server_config(
-        server.name.clone(),
-        http.url.clone(),
-    );
+    let target = meerkat_auth_core::McpServerIdentity::from_config(&server)?;
+    authority.validate_interactive_selection(&target)?;
     let www_authenticate = preflight_mcp_auth_challenge(&http.url).await;
     authority
         .interactive_login(&target, www_authenticate.as_deref())

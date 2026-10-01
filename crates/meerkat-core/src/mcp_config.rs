@@ -69,6 +69,10 @@ pub struct McpHttpConfig {
     /// HTTP transport selection (default: streamable-http)
     #[serde(default)]
     pub transport: Option<McpHttpTransport>,
+    /// Selected OAuth provider subject or account ID, never a display name.
+    /// A selection is an expectation; native OAuth verifies the credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_account: Option<String>,
 }
 
 /// Keeps the command and env names but redacts argument and env values,
@@ -95,6 +99,10 @@ impl std::fmt::Debug for McpHttpConfig {
                 &crate::redact::RedactedValues::of(self.headers.keys()),
             )
             .field("transport", &self.transport)
+            .field(
+                "oauth_account",
+                &self.oauth_account.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -160,6 +168,7 @@ impl McpServerConfig {
                 url: url.into(),
                 headers,
                 transport: None,
+                oauth_account: None,
             }),
             connect_timeout_secs: None,
         }
@@ -176,6 +185,7 @@ impl McpServerConfig {
                 url: url.into(),
                 headers,
                 transport: Some(McpHttpTransport::Sse),
+                oauth_account: None,
             }),
             connect_timeout_secs: None,
         }
@@ -883,6 +893,9 @@ fn server_table(server: &McpServerConfig) -> Table {
                     McpHttpTransport::Sse => "sse",
                 });
             }
+            if let Some(account) = &http.oauth_account {
+                table["oauth_account"] = toml_edit::value(account);
+            }
         }
     }
     if let Some(timeout) = server.connect_timeout_secs {
@@ -1019,6 +1032,7 @@ where
                 url,
                 headers,
                 transport: http.transport,
+                oauth_account: http.oauth_account,
             })
         }
     };
@@ -1148,17 +1162,21 @@ mod tests {
     #[test]
     fn mcp_server_config_debug_redacts_credentials() {
         const SECRET: &str = "sk-live-secret-value";
+        const ACCOUNT: &str = "provider-subject-private-42";
         let stdio = McpServerConfig::stdio(
             "local",
             "npx",
             vec!["--api-key".into(), SECRET.into()],
             HashMap::from([("API_TOKEN".to_string(), SECRET.to_string())]),
         );
-        let http = McpServerConfig::streamable_http(
+        let mut http = McpServerConfig::streamable_http(
             "remote",
             format!("https://user:{SECRET}@mcp.example.com/v1/mcp?token={SECRET}#{SECRET}"),
             HashMap::from([("Authorization".to_string(), format!("Bearer {SECRET}"))]),
         );
+        if let McpTransportConfig::Http(http) = &mut http.transport {
+            http.oauth_account = Some(ACCOUNT.into());
+        }
         let sse = McpServerConfig::sse(
             "legacy",
             "https://sse.example.com/sse",
@@ -1175,6 +1193,7 @@ mod tests {
             format!("{transports:?}"),
         ] {
             assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+            assert!(!rendered.contains(ACCOUNT), "account leaked: {rendered}");
             for kept in [
                 "local",
                 "npx",
@@ -1188,6 +1207,47 @@ mod tests {
                 assert!(rendered.contains(kept), "missing {kept}: {rendered}");
             }
         }
+    }
+
+    #[test]
+    fn http_oauth_account_survives_env_reconstruction_without_inference() {
+        let account = "provider|CaseSensitive/007";
+        let server: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "name": "display-name",
+            "url": "https://${MCP_HOST}/mcp",
+            "oauth_account": account,
+        }))
+        .unwrap();
+        let expanded = expand_env_in_server_with(server, &|name| {
+            (name == "MCP_HOST").then(|| "mcp.example".to_string())
+        })
+        .unwrap();
+        assert!(matches!(
+            &expanded.transport,
+            McpTransportConfig::Http(http)
+                if http.url == "https://mcp.example/mcp"
+                    && http.oauth_account.as_deref() == Some(account)
+        ));
+        assert_eq!(
+            serde_json::to_value(&expanded).unwrap()["oauth_account"],
+            account
+        );
+
+        let legacy: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "name": "display-name",
+            "url": "https://mcp.example/mcp",
+        }))
+        .unwrap();
+        assert!(matches!(
+            &legacy.transport,
+            McpTransportConfig::Http(http) if http.oauth_account.is_none()
+        ));
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("oauth_account")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1675,6 +1735,33 @@ future_server_key = "leave-this-too"
         let persisted = tokio::fs::read_to_string(path).await.unwrap();
         assert!(persisted.contains("transport = \"sse\""));
         assert!(persisted.contains("connect_timeout_secs = 42"));
+    }
+
+    #[tokio::test]
+    async fn http_oauth_account_survives_persisted_config_reload() {
+        let temp = TempDir::new().unwrap();
+        let authority = McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
+        let mut selected = McpServerConfig::streamable_http(
+            "display-name",
+            "https://mcp.example/mcp",
+            HashMap::new(),
+        );
+        if let McpTransportConfig::Http(http) = &mut selected.transport {
+            http.oauth_account = Some("provider-subject-42".into());
+        }
+        McpConfig::persist_add_with_rollback(&authority, selected.clone())
+            .await
+            .unwrap();
+
+        let path = authority.resolved_path().unwrap();
+        let reloaded = McpConfig::load_from_paths(None, Some(&path)).await.unwrap();
+        assert_eq!(reloaded.servers, vec![selected]);
+        assert!(
+            tokio::fs::read_to_string(path)
+                .await
+                .unwrap()
+                .contains("oauth_account = \"provider-subject-42\"")
+        );
     }
 
     #[tokio::test]

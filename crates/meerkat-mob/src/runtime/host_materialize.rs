@@ -517,6 +517,7 @@ fn decompile_mcp_servers(
             PortableMcpDecl::Http {
                 url,
                 http_transport,
+                oauth_account,
                 required_header_names,
                 connect_timeout_secs,
             } => {
@@ -535,6 +536,7 @@ fn decompile_mcp_servers(
                             url: url.clone(),
                             headers: HashMap::new(),
                             transport: *http_transport,
+                            oauth_account: oauth_account.clone(),
                         },
                     ),
                     connect_timeout_secs: connect_timeout_secs
@@ -3372,6 +3374,7 @@ mod tests {
             PortableMcpDecl::Http {
                 url: "https://mcp.example".to_string(),
                 http_transport: None,
+                oauth_account: None,
                 required_header_names: vec!["authorization".to_string()],
                 connect_timeout_secs: None,
             },
@@ -3390,6 +3393,7 @@ mod tests {
             PortableMcpDecl::Http {
                 url: "https://mcp.example/events".to_string(),
                 http_transport: Some(meerkat_core::mcp_config::McpHttpTransport::Sse),
+                oauth_account: None,
                 required_header_names: Vec::new(),
                 connect_timeout_secs: Some(23),
             },
@@ -3408,6 +3412,35 @@ mod tests {
             meerkat_core::mcp_config::McpTransportKind::Sse
         );
         assert_eq!(server.connect_timeout_secs, Some(23));
+    }
+
+    #[test]
+    fn decompile_preserves_selected_oauth_account() {
+        let mut spec = sample_spec();
+        spec.profile.tools.mcp_servers.insert(
+            "remote".to_string(),
+            PortableMcpDecl::Http {
+                url: "https://mcp.example/mcp".to_string(),
+                http_transport: None,
+                oauth_account: Some("provider-subject-42".to_string()),
+                required_header_names: Vec::new(),
+                connect_timeout_secs: None,
+            },
+        );
+
+        let decompiled = decompile_portable_spec(&spec).expect("selected account decompiles");
+        let server = decompiled
+            .profile
+            .tools
+            .mcp_servers
+            .iter()
+            .find(|server| server.name == "remote")
+            .expect("decompiled remote MCP server");
+        assert!(matches!(
+            &server.transport,
+            meerkat_core::mcp_config::McpTransportConfig::Http(http)
+                if http.oauth_account.as_deref() == Some("provider-subject-42")
+        ));
     }
 
     #[test]

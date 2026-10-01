@@ -79,6 +79,32 @@ them.
   `meerkat_live::LiveSidebandObservationKind` gains `ProviderInputLatency`
   and `meerkat_openai::GptLiveBrokerObservation` gains
   `ProviderInputLatency`; exhaustive matches must handle them.
+- `meerkat_core::mcp_config::McpHttpConfig` and the HTTP variant of
+  `meerkat_contracts::wire::PortableMcpDecl` gain `oauth_account: Option<String>`.
+- `meerkat_core::mcp_config::McpHttpConfig` and
+  `meerkat_contracts::wire::PortableMcpDecl::Http` gain `oauth_account: Option<String>`.
+  Rust struct/variant literals must supply the field; serialized configurations
+  may omit it. Existing constructors select `None`.
+- `meerkat_core::auth::RefreshError` gains `CredentialIdentityMismatch`;
+  `meerkat_auth_core::McpOAuthError` gains `InvalidAccountSelection`,
+  `AccountSelectionRequired` and `UnsupportedAccountSelection`;
+  `meerkat_mcp::McpError` gains `OAuthAccountRejected`. Exhaustive matches must
+  handle these selected-credential refusals. They do not authorize reauthentication.
+- Behaviour-only (not measured by the gate): `McpOAuthAuthority::interactive_login`
+  requires an explicit expected provider account in `McpServerIdentity`, and
+  rejects a strategy selecting another account. An authority configured with
+  an interactive account strategy also refuses unselected stored-token use.
+  Select `oauth_account` in HTTP configuration or construct the typed identity
+  with `with_expected_account`. Account-selected credentials use distinct native
+  vault and lifecycle keys and never fall back to legacy name-and-URL rows;
+  existing unselected credentials require a fresh verified login for selected use.
+  `McpConnection` rejects an explicit selection with static Authorization, legacy
+  SSE or no resolver before transport effects. A missing selected credential
+  refuses in stored mode or invokes the interactive strategy before the first
+  MCP request in interactive mode.
+  CLI `mcp add --oauth-account` persists the selection; the default CLI authority
+  still has no provider account strategy, so this change does not make CLI
+  `mcp login` interactive verification available.
 - `meerkat_mcp::McpError` gains `ToolDiscoveryCursorRepeated { server, cursor }`
   and `ToolDiscoveryLimitExceeded { server, limit }`, with the new
   `meerkat_mcp::ToolDiscoveryLimit` (`Pages { max }` / `Tools { max }`).

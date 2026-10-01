@@ -5,6 +5,10 @@ use meerkat_core::handles::DslTransitionError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
+    /// Preserve selected-account refusal without turning it into an
+    /// interactive retry or losing its typed cause in a connection string.
+    #[error(transparent)]
+    OAuthAccountRejected(meerkat_auth_core::McpOAuthError),
     #[error("Connection failed: {reason}")]
     ConnectionFailed { reason: String },
 

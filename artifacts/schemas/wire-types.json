@@ -12609,6 +12609,13 @@
                 ],
                 "description": "URL transport subtype. An absent value preserves the historical\ndefault of streamable HTTP; explicit SSE must survive placement."
               },
+              "oauth_account": {
+                "description": "Selected OAuth provider subject or account ID, never a display name.\nCarries the expectation without carrying a credential.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "required_header_names": {
                 "items": {
                   "type": "string"
@@ -20657,6 +20664,13 @@
                   }
                 ],
                 "description": "URL transport subtype. An absent value preserves the historical\ndefault of streamable HTTP; explicit SSE must survive placement."
+              },
+              "oauth_account": {
+                "description": "Selected OAuth provider subject or account ID, never a display name.\nCarries the expectation without carrying a credential.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "required_header_names": {
                 "items": {
@@ -58478,6 +58492,13 @@
                 ],
                 "description": "URL transport subtype. An absent value preserves the historical\ndefault of streamable HTTP; explicit SSE must survive placement."
               },
+              "oauth_account": {
+                "description": "Selected OAuth provider subject or account ID, never a display name.\nCarries the expectation without carrying a credential.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "required_header_names": {
                 "items": {
                   "type": "string"
@@ -68422,6 +68443,13 @@
                   }
                 ],
                 "description": "URL transport subtype. An absent value preserves the historical\ndefault of streamable HTTP; explicit SSE must survive placement."
+              },
+              "oauth_account": {
+                "description": "Selected OAuth provider subject or account ID, never a display name.\nCarries the expectation without carrying a credential.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "required_header_names": {
                 "items": {
@@ -102666,6 +102694,13 @@
                 ],
                 "description": "URL transport subtype. An absent value preserves the historical\ndefault of streamable HTTP; explicit SSE must survive placement."
               },
+              "oauth_account": {
+                "description": "Selected OAuth provider subject or account ID, never a display name.\nCarries the expectation without carrying a credential.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "required_header_names": {
                 "items": {
                   "type": "string"
@@ -119712,6 +119747,13 @@
             ],
             "description": "URL transport subtype. An absent value preserves the historical\ndefault of streamable HTTP; explicit SSE must survive placement."
           },
+          "oauth_account": {
+            "description": "Selected OAuth provider subject or account ID, never a display name.\nCarries the expectation without carrying a credential.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "required_header_names": {
             "items": {
               "type": "string"
@@ -120232,6 +120274,13 @@
                   }
                 ],
                 "description": "URL transport subtype. An absent value preserves the historical\ndefault of streamable HTTP; explicit SSE must survive placement."
+              },
+              "oauth_account": {
+                "description": "Selected OAuth provider subject or account ID, never a display name.\nCarries the expectation without carrying a credential.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "required_header_names": {
                 "items": {
@@ -122035,6 +122084,13 @@
                 ],
                 "description": "URL transport subtype. An absent value preserves the historical\ndefault of streamable HTTP; explicit SSE must survive placement."
               },
+              "oauth_account": {
+                "description": "Selected OAuth provider subject or account ID, never a display name.\nCarries the expectation without carrying a credential.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "required_header_names": {
                 "items": {
                   "type": "string"
@@ -123776,6 +123832,13 @@
                   }
                 ],
                 "description": "URL transport subtype. An absent value preserves the historical\ndefault of streamable HTTP; explicit SSE must survive placement."
+              },
+              "oauth_account": {
+                "description": "Selected OAuth provider subject or account ID, never a display name.\nCarries the expectation without carrying a credential.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "required_header_names": {
                 "items": {

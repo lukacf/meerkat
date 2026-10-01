@@ -3597,6 +3597,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    url: Required[str]\n"
     types_content += "    headers: NotRequired[dict[str, str]]\n"
     types_content += "    transport: NotRequired[McpHttpTransport]\n"
+    types_content += "    oauth_account: NotRequired[Optional[str]]\n"
     types_content += "    connect_timeout_secs: NotRequired[int]\n\n"
     types_content += "\nMcpServerConfig = McpStdioServerConfig | McpHttpServerConfig\n"
     for name in MCP_LIVE_CONTRACT_TYPES:

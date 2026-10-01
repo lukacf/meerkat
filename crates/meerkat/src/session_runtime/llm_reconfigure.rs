@@ -47,6 +47,25 @@ pub fn session_error_to_runtime_driver(err: SessionError) -> RuntimeDriverError 
     }
 }
 
+/// Convert an error from READING a session's live state for reconfiguration.
+///
+/// The read runs after the live session was synchronized from durable
+/// authority, on a session whose runtime is registered, so `NotFound` here
+/// means the session has no live actor to reconfigure (for example a stale
+/// actor that could not be synchronized was discarded). It is not a destroyed
+/// runtime, which the generic mapping would report.
+fn live_session_read_error_to_runtime_driver(
+    session_id: &SessionId,
+    err: SessionError,
+) -> RuntimeDriverError {
+    match err {
+        SessionError::NotFound { .. } => RuntimeDriverError::Internal(format!(
+            "session {session_id} has no live session actor to reconfigure"
+        )),
+        other => session_error_to_runtime_driver(other),
+    }
+}
+
 /// Convert a runtime-driver error back into a session-service error.
 pub fn runtime_driver_error_to_session_error(err: RuntimeDriverError) -> SessionError {
     SessionError::Agent(AgentError::InternalError(err.to_string()))
@@ -206,6 +225,18 @@ pub trait SessionRuntimeLlmReconfigureService: Send + Sync {
         session_id: &SessionId,
     ) -> Result<Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>, SessionError>;
 
+    /// Bring the live session to durable authority before its live state is
+    /// read for a reconfiguration, exactly as a runtime turn does on entry.
+    /// After a stopped or errored turn the live actor trails durable authority
+    /// (no boundary was committed) until resynced; reading it first would see
+    /// no authoritative live session. Required: a forwarding service that
+    /// skipped it would fail every identity change that follows such a turn.
+    /// Services with no durable authority implement it as a no-op.
+    async fn synchronize_live_session_from_durable_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError>;
+
     async fn live_llm_identity(
         &self,
         session_id: &SessionId,
@@ -309,6 +340,17 @@ async fn preferred_hot_swap_realm(
 
 #[async_trait::async_trait]
 impl SessionRuntimeLlmReconfigureService for PersistentSessionService<FactoryAgentBuilder> {
+    async fn synchronize_live_session_from_durable_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        PersistentSessionService::<FactoryAgentBuilder>::synchronize_live_session_for_runtime_turn(
+            self, session_id,
+        )
+        .await
+        .map(|_discarded| ())
+    }
+
     async fn acquire_runtime_turn_finalization_guard(
         &self,
         session_id: &SessionId,
@@ -507,6 +549,15 @@ impl SessionRuntimeLlmReconfigureService for PersistentSessionService<FactoryAge
 
 #[async_trait::async_trait]
 impl SessionRuntimeLlmReconfigureService for EphemeralSessionService<FactoryAgentBuilder> {
+    async fn synchronize_live_session_from_durable_authority(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        // An ephemeral session has no durable authority for its live actor to
+        // trail.
+        Ok(())
+    }
+
     async fn acquire_runtime_turn_finalization_guard(
         &self,
         session_id: &SessionId,
@@ -1006,13 +1057,20 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         &self,
         session_id: &SessionId,
     ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
+        // A stopped or errored turn leaves the live actor trailing durable
+        // authority until the next turn resyncs it. This reconfiguration runs
+        // before that turn, so it performs the turn-entry resync itself.
+        self.service
+            .synchronize_live_session_from_durable_authority(session_id)
+            .await
+            .map_err(session_error_to_runtime_driver)?;
         let current_identity = match self.service.live_llm_identity(session_id).await {
             Ok(identity) => identity,
             Err(err) => {
                 if let Some(hydrated) = self.hydrate_staged_session_llm_state(session_id).await? {
                     return Ok(hydrated);
                 }
-                return Err(session_error_to_runtime_driver(err));
+                return Err(live_session_read_error_to_runtime_driver(session_id, err));
             }
         };
         let current_visibility_state =
@@ -1024,14 +1082,14 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
                     {
                         return Ok(hydrated);
                     }
-                    return Err(session_error_to_runtime_driver(err));
+                    return Err(live_session_read_error_to_runtime_driver(session_id, err));
                 }
             };
         let base_tool_names = self
             .service
             .live_tool_scope_snapshot(session_id)
             .await
-            .map_err(session_error_to_runtime_driver)?
+            .map_err(|err| live_session_read_error_to_runtime_driver(session_id, err))?
             .ok_or_else(|| {
                 RuntimeDriverError::Internal(format!(
                     "session {session_id} missing live tool scope snapshot during llm reconfiguration"
@@ -1099,7 +1157,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
             .service
             .live_session_has_instruction_activations(session_id)
             .await
-            .map_err(session_error_to_runtime_driver)?
+            .map_err(|err| live_session_read_error_to_runtime_driver(session_id, err))?
         {
             let supports_mid_conversation_system_messages = capability_surface
                 .is_some_and(|surface| surface.supports_mid_conversation_system_messages);
@@ -1195,6 +1253,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SessionRuntimeLlmReconfigureService for RealmOnlyService {
+        async fn synchronize_live_session_from_durable_authority(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            unreachable!("realm selection does not reconfigure a live session")
+        }
+
         async fn acquire_runtime_turn_finalization_guard(
             &self,
             _session_id: &SessionId,

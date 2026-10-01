@@ -37,6 +37,19 @@ them.
 
 ### Breaking
 
+- `meerkat::session_runtime::llm_reconfigure::SessionRuntimeLlmReconfigureService`
+  gains the required method
+  `synchronize_live_session_from_durable_authority(&self, &SessionId) -> Result<(), SessionError>`.
+  The reconfigure host now calls it before hydrating a session's LLM state,
+  so a forwarding implementation must forward it; services with no durable
+  authority implement it as a no-op. `meerkat_session::PersistentSessionService`
+  adds `synchronize_live_session_for_runtime_turn` for it. Behaviour: after a
+  run stopped by `MeerkatMachine::stop_run` (or otherwise ended without a
+  committed boundary), the next turn that changes the LLM identity
+  (`MemberTurnOptions` model or provider) no longer fails with "Runtime not
+  ready: destroyed"; the live session is resynchronized from durable
+  authority first and the turn runs in the same session. A live-state read
+  that finds no live actor now reports that, not a destroyed runtime.
 - `meerkat_rest::ApiError` gains `SessionBusyWithData { message, details }`
   (HTTP 409, code `SESSION_BUSY`, typed `details`). Exhaustive matches must
   handle it.

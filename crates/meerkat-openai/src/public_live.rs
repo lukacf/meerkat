@@ -501,7 +501,9 @@ fn bounded_late_recent_items(recent: &[Message]) -> Vec<InitialItem> {
 
 /// Compose the startup input from a leading item that is always kept and a
 /// tail of recent items, dropping the oldest tail items until both limits
-/// hold. The truncation is typed and reported by the caller.
+/// hold, then any replies left at the front of the tail so the verbatim part
+/// starts at a user row (no answer seeded without its question, as on the
+/// Late path). The truncation is typed and reported by the caller.
 fn budget_startup_input(
     keep: InitialItem,
     recent: &[InitialItem],
@@ -529,8 +531,21 @@ fn budget_startup_input(
                 .sum::<usize>();
         }
     }
+    kept_recent.reverse();
+    let first_user = kept_recent
+        .iter()
+        .position(|item| item.role == InitialRole::User)
+        .unwrap_or(kept_recent.len());
+    for item in kept_recent.drain(..first_user) {
+        truncation.dropped_items += 1;
+        truncation.dropped_bytes += item
+            .content
+            .iter()
+            .map(|part| part.text.len())
+            .sum::<usize>();
+    }
     items.push(keep);
-    items.extend(kept_recent.into_iter().rev());
+    items.extend(kept_recent);
     (items, truncation)
 }
 
@@ -3070,6 +3085,59 @@ mod tests {
             fresh.context_seed.initial_input().unwrap().len()
                 <= 1 + LIVE_STARTUP_VERBATIM_ITEMS_MAX
         );
+    }
+
+    /// A fresh-summary open trims its verbatim tail the way the Late path
+    /// does: the newest bounded items, starting at a user row. The fresh
+    /// summary covers the whole history, so dropped replies are counted as
+    /// truncation, never lost.
+    #[test]
+    fn fresh_summary_seed_keeps_the_newest_bounded_items_from_a_user_row() {
+        use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, StopReason, UserMessage};
+        let assistant = |text: &str| {
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: text.to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ))
+        };
+        let user = |text: &str| Message::User(UserMessage::text(text));
+        // u0 a0 u1 a1 ... u6 a6: the newest four are u5 a5 u6 a6.
+        let rows: Vec<Message> = (0..7)
+            .flat_map(|i| [user(&format!("u{i}")), assistant(&format!("a{i}"))])
+            .collect();
+        let seed_texts = |rows: &[Message]| {
+            let config = PublicLiveOpenConfig::new("v=0", "marin")
+                .unwrap()
+                .with_history(rows)
+                .with_context_summary("summary");
+            let items = config.context_seed.initial_input().unwrap();
+            assert_eq!(items[0].role, InitialRole::Developer);
+            let texts: Vec<String> = items[1..]
+                .iter()
+                .map(|item| item.content[0].text.clone())
+                .collect();
+            (texts, config.startup_input_truncation())
+        };
+        let (texts, truncation) = seed_texts(&rows);
+        assert_eq!(texts, ["u5", "a5", "u6", "a6"]);
+        assert_eq!(truncation.dropped_items, rows.len() - 4);
+        // A cut that lands on a reply drops it: rows ending at u6 have
+        // a4 u5 a5 u6 as the newest four, and a4 goes with the rest.
+        let (texts, truncation) = seed_texts(&rows[..13]);
+        assert_eq!(texts, ["u5", "a5", "u6"]);
+        assert_eq!(truncation.dropped_items, 13 - 3);
+        assert_eq!(
+            truncation.dropped_bytes,
+            "u0a0u1a1u2a2u3a3u4a4".len(),
+            "every dropped row is reported"
+        );
+        // A tail with no user row at all seeds the summary alone.
+        let (texts, truncation) = seed_texts(&[assistant("only a reply")]);
+        assert!(texts.is_empty(), "{texts:?}");
+        assert_eq!(truncation.dropped_items, 1);
     }
 
     /// A Late open seeds at most the verbatim bound of the newest items,

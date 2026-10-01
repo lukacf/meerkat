@@ -4199,7 +4199,9 @@ fn maybe_run_tlc_in_dir_with_config(
     }
 
     let coverage = if matches!(profile, VerifyProfile::Deep) {
-        Some(parse_tlc_coverage(&combined))
+        let model_text = fs::read_to_string(&model)
+            .with_context(|| format!("read TLC model {}", model.display()))?;
+        Some(parse_tlc_coverage_with_model(&combined, &model_text))
     } else {
         None
     };
@@ -4607,6 +4609,76 @@ pub fn parse_tlc_coverage(output: &str) -> TlcCoverageSummary {
     }
 
     summary
+}
+
+/// Parse TLC coverage and also credit the actions TLC could not name.
+///
+/// TLC names a Next disjunct after its operator only when it can split the
+/// disjunct at startup. A disjunct quantified over a state-dependent set, such
+/// as `\E expected_revision \in {revision} : PauseActive(..)`, is reported as
+/// `<Next line .. (L C L C)>: distinct:generated` instead. Those counts are
+/// credited to every operator called on model line `L`, so a transition that
+/// fires is not reported as zero-hit merely because of how TLC labeled it.
+pub fn parse_tlc_coverage_with_model(output: &str, model: &str) -> TlcCoverageSummary {
+    let mut summary = parse_tlc_coverage(output);
+    let model_lines = model.lines().collect::<Vec<_>>();
+    for line in output.lines() {
+        let Some((disjunct_line, counts)) = parse_tlc_disjunct_coverage_line(line) else {
+            continue;
+        };
+        let Some(source) = disjunct_line
+            .checked_sub(1)
+            .and_then(|index| model_lines.get(index))
+        else {
+            continue;
+        };
+        for operator in called_operator_names(source) {
+            summary
+                .counts_by_operator
+                .entry(operator)
+                .and_modify(|existing| {
+                    existing.truth_hits = existing.truth_hits.max(counts.truth_hits);
+                    existing.evaluations = existing.evaluations.max(counts.evaluations);
+                })
+                .or_insert(counts);
+        }
+    }
+    summary
+}
+
+/// `<Next line 202, col 1 to line 202, col 4 of module model (203 8 203 127)>: 4:148`
+/// yields `(203, counts)`: the model line of the disjunct and its counts.
+pub fn parse_tlc_disjunct_coverage_line(line: &str) -> Option<(usize, TlcCoverageCounts)> {
+    let line = line.trim();
+    if !line.starts_with('<') {
+        return None;
+    }
+    let location = line.split(" of module ").nth(1)?;
+    let span = location.split('(').nth(1)?.split(')').next()?;
+    let disjunct_line = span.split_whitespace().next()?.parse::<usize>().ok()?;
+    let (_, counts) = parse_tlc_coverage_line(line)?;
+    Some((disjunct_line, counts))
+}
+
+/// Identifiers immediately followed by `(` on one model line, in order.
+fn called_operator_names(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut names = Vec::new();
+    let mut start = None;
+    for (index, &byte) in bytes.iter().enumerate() {
+        let ident = byte.is_ascii_alphanumeric() || byte == b'_';
+        match (ident, start) {
+            (true, None) => start = Some(index),
+            (false, Some(begin)) => {
+                if byte == b'(' && !bytes[begin].is_ascii_digit() {
+                    names.push(source[begin..index].to_owned());
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 pub fn parse_tlc_coverage_line(line: &str) -> Option<(String, TlcCoverageCounts)> {

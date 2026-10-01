@@ -613,6 +613,10 @@ pub fn detached_job_schema_metadata() -> MachineSchemaMetadata {
         ],
         vec![],
     )
+    // Deep samples the guard literal "terminal" (the terminal outbox key) on
+    // top of the generic string pool. Reaching the delivery-apply branch it
+    // unlocks multiplies the state space, so keep one generic sample.
+    .with_deep_domain_override("StringValues", 1)
 }
 
 pub fn approval_lifecycle_schema_metadata() -> MachineSchemaMetadata {

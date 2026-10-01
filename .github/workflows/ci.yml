@@ -730,6 +730,33 @@ jobs:
           ./scripts/repo-cargo nextest archive ${PACKAGES} --lib --bins \
             --archive-file "${RUNNER_TEMP}/nextest-${ARCHIVE}.tar.zst"
 
+      - name: Verify the partitions cover every test exactly once
+        shell: bash
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          PARTITIONS: ${{ matrix.partitions }}
+        run: |
+          set -euo pipefail
+          [[ "${PARTITIONS}" =~ ^[0-9]+$ ]] && (( PARTITIONS >= 2 )) || { echo "::error::archived lane without a partition count"; exit 1; }
+          archive="${RUNNER_TEMP}/nextest-${ARCHIVE}.tar.zst"
+          list() {
+            cargo nextest list --archive-file "${archive}" --workspace-remap "${GITHUB_WORKSPACE}" \
+              --profile ci-pr --message-format oneline "$@" | LC_ALL=C sort
+          }
+          list > "${RUNNER_TEMP}/all.txt"
+          : > "${RUNNER_TEMP}/union.txt"
+          for (( index = 1; index <= PARTITIONS; index++ )); do
+            list --partition "hash:${index}/${PARTITIONS}" >> "${RUNNER_TEMP}/union.txt"
+          done
+          LC_ALL=C sort "${RUNNER_TEMP}/union.txt" -o "${RUNNER_TEMP}/union.txt"
+          duplicates="$(uniq -d "${RUNNER_TEMP}/union.txt" | wc -l)"
+          if [[ "${duplicates}" != "0" ]] || ! cmp -s "${RUNNER_TEMP}/all.txt" "${RUNNER_TEMP}/union.txt"; then
+            echo "::error::the ${PARTITIONS} partitions of ${ARCHIVE} do not cover its $(wc -l < "${RUNNER_TEMP}/all.txt") tests exactly once (duplicates: ${duplicates})"
+            diff "${RUNNER_TEMP}/all.txt" "${RUNNER_TEMP}/union.txt" | head -20 || true
+            exit 1
+          fi
+          echo "${ARCHIVE}: ${PARTITIONS} partitions cover all $(wc -l < "${RUNNER_TEMP}/all.txt") tests exactly once"
+
       - name: Upload nextest archive
         uses: actions/upload-artifact@v7
         with:

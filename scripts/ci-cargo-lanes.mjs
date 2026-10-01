@@ -770,6 +770,7 @@ function archiveMatrixOf(rows) {
       name: row.name,
       archive: row.archive,
       ...(row.package_flags ? { packages: row.package_flags } : {}),
+      ...(row.partitions ? { partitions: String(row.partitions) } : {}),
       ...(row.partition ? { partition: row.partition } : {}),
       ...(row.rust_min_stack ? { rust_min_stack: String(row.rust_min_stack) } : {}),
     })),

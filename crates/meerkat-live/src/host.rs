@@ -4056,6 +4056,7 @@ fn tool_result_from_dispatch(call_id: ToolCallId, result: ToolResult) -> LiveToo
         call_id,
         content: result.content,
         is_error: result.is_error,
+        settlement_failures: result.settlement_failures,
     }
 }
 

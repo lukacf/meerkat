@@ -6240,7 +6240,7 @@ async fn execute_openai_live_command_with_budget(
                 tool_use_id: result.call_id.0,
                 content: result.content,
                 is_error: result.is_error,
-                settlement_failures: Vec::new(),
+                settlement_failures: result.settlement_failures,
             };
             session.submit_tool_result(tool_result).await?;
             Ok(())
@@ -14877,6 +14877,76 @@ mod tests {
             } else {
                 assert_eq!(output, "next completed");
             }
+            assert!(!output.contains("settlement_failures"));
+            assert!(!output.contains("operation_observation_unavailable"));
+            assert_response_create_requests_audio(&seen[index + 1]);
+        }
+    }
+
+    #[tokio::test]
+    async fn live_command_successful_settlement_companions_keep_semantic_output() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        let companion = serde_json::json!({
+            "admission_source": "authorization_audit",
+            "effect_kind": "external_io",
+            "physical_outcome": "committed",
+            "failure_kind": "operation_observation_unavailable"
+        });
+        let semantic = serde_json::json!({"status": "completed", "value": 1}).to_string();
+        for (call_id, output, companions) in [
+            (
+                "completed-effect",
+                semantic.as_str(),
+                serde_json::json!([companion.clone(), companion]),
+            ),
+            (
+                "healthy-next-effect",
+                "next completed",
+                serde_json::json!([]),
+            ),
+        ] {
+            let command: LiveAdapterCommand = serde_json::from_value(serde_json::json!({
+                "command": "submit_tool_result",
+                "result": {
+                    "call_id": call_id,
+                    "content": [{"type": "text", "text": output}],
+                    "is_error": false,
+                    "settlement_failures": companions
+                }
+            }))
+            .expect("valid seam command");
+            execute_openai_live_command(&mut session, command)
+                .await
+                .expect("completed result must be submitted successfully");
+            assert_eq!(
+                session.response_state,
+                RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 }
+            );
+        }
+        let seen = seen.lock().await;
+        assert_eq!(seen.len(), 4, "one output and one continuation per result");
+        for (index, call, expected) in [
+            (0, "completed-effect", semantic.as_str()),
+            (2, "healthy-next-effect", "next completed"),
+        ] {
+            let ClientEvent::ConversationItemCreate { item, .. } = &seen[index] else {
+                panic!("expected semantic function output, got {:?}", seen[index]);
+            };
+            let Item::FunctionCallOutput {
+                call_id, output, ..
+            } = item.as_ref()
+            else {
+                panic!("expected function call output item, got {item:?}");
+            };
+            assert_eq!(call_id, call);
+            assert_eq!(output, expected);
             assert!(!output.contains("settlement_failures"));
             assert!(!output.contains("operation_observation_unavailable"));
             assert_response_create_requests_audio(&seen[index + 1]);

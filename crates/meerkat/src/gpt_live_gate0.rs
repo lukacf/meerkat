@@ -200,7 +200,10 @@ impl LiveWebrtcBoundReadyCustody for Gate0CandidateBoundReadyCustody {
         let deactivation = self.activator.deactivate_bound_channel(&binding).await;
         let observation = self
             .live_adapter_host
-            .reserve_channel_close_observation(binding.channel_id())
+            .reserve_channel_close_observation(
+                binding.channel_id(),
+                meerkat_core::LiveChannelCloseReason::OpenAbandoned,
+            )
             .await
             .map_err(|error| format!("host close observation failed: {error}"))?;
         self.live_adapter_host

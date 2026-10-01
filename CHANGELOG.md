@@ -1302,6 +1302,9 @@ them.
   with `LifecycleOperationPending` when a turn took longer than 1 s to wind
   down (#1390); a turn that never ends reports a typed
   `LifecycleOperationProgressStalled` naming the member.
+- `meerkat_live::LiveAdapterHost::reserve_channel_close_observation` takes the
+  close's `meerkat_core::LiveChannelCloseReason`: the path that reserves a close
+  names why it closes, and the committed close publishes that reason.
 - `meerkat_contracts::WireLiveAdapterStatus::Closed` is now a struct variant,
   `Closed { reason: Option<WireLiveCloseReason>, reopen_recommended: bool }`:
   patterns must become `Closed { .. }` (or use `is_closed()`), and
@@ -1585,11 +1588,19 @@ them.
   `observe_live_media_health`, `live_media_health_requested_output` with
   `LiveMediaHealthJudgement`.
 - `meerkat_core::AgentEvent::LiveChannelClosed { session_id, channel_id,
-  reason, reopen_recommended }` (with `LiveChannelCloseReason`), published on
-  the session event stream after the runtime closes a live channel for a
-  typed cause, so observers learn it without polling. Typed in the Python
-  (`LiveChannelClosed`) and TypeScript (`LiveChannelClosedEvent`) SDKs.
-  `AgentEvent` is `#[non_exhaustive]`.
+  reason, reopen_recommended }`, published on the owning session's event stream
+  after every committed live channel close, so observers learn every close and
+  its cause without polling `live/status`. `meerkat_core::LiveChannelCloseReason`
+  is `client_requested`, `client_disconnected`, `provider_closed`, `error`,
+  `media_fault`, `replaced` or `open_abandoned`. Typed in the
+  Python (`LiveChannelClosed`) and TypeScript (`LiveChannelClosedEvent`,
+  `LiveChannelCloseReason`) SDKs; event-inventory parity covers it.
+  `AgentEvent` is `#[non_exhaustive]`. Runtime:
+  `meerkat_runtime::live_execution::LiveChannelCloseEventPublisher` and
+  `MeerkatMachine::set_live_channel_close_publisher` (installed by
+  `ServiceMemberLiveHost::new`). Facade: `close_live_channel_for` and
+  `close_experimental_live_channel_for` name a close's reason;
+  `meerkat_live::LiveChannelCloseObservation::reason()`.
 - `meerkat_mob::store::MobRunStore` gains
   `flow_authority_validation_boundary`, a `#[doc(hidden)]` method with a
   default body. Not a break: existing implementations compile unchanged. Its

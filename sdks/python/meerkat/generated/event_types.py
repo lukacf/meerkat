@@ -707,8 +707,8 @@ InteractionFailureReason = InteractionFailureReasonCancelled | InteractionFailur
 InteractionId = str
 
 
-# Typed cause of a runtime-initiated live channel close.
-LiveChannelCloseReason = Literal['media_fault']
+# Typed cause of a committed live channel close.
+LiveChannelCloseReason = Literal['client_requested', 'client_disconnected', 'provider_closed', 'error', 'media_fault', 'replaced', 'open_abandoned']
 
 
 # Closed classifier for recoverable LLM failures.

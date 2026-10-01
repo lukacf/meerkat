@@ -169,6 +169,22 @@ impl LiveDelegationRuntimeBinding {
     }
 }
 
+/// Session event publication for committed live channel closes. The runtime
+/// calls it once per committed close, after `RecordLiveCloseClosed`, with the
+/// typed reason the closing path named (a media fault recorded by the
+/// generated media-health edge takes precedence) and, for a media fault,
+/// whether the session's one reopen is still available.
+#[async_trait::async_trait]
+pub trait LiveChannelCloseEventPublisher: Send + Sync {
+    async fn publish_live_channel_closed(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
+        reopen_recommended: bool,
+    );
+}
+
 /// The generated verdict on one channel's first assistant output
 /// (`LiveChannelMediaHealthJudged`): a media fault when the output's
 /// transcript was non-empty but the client decoded no audible audio for it.

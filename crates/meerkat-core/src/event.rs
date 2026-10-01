@@ -136,15 +136,30 @@ pub enum AgentErrorClass {
     NoPendingBoundary,
 }
 
-/// Typed cause of a runtime-initiated live channel close.
+/// Typed cause of a committed live channel close.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LiveChannelCloseReason {
+    /// A caller asked to close the channel (`live/close`, a member host
+    /// close, or the client's own close request on the channel transport).
+    ClientRequested,
+    /// The client's transport went away (socket or peer connection lost).
+    ClientDisconnected,
+    /// The provider ended the session.
+    ProviderClosed,
+    /// A terminal adapter, provider or transport protocol error (including a
+    /// configuration the provider rejected).
+    Error,
     /// The channel's first assistant output had a non-empty transcript but
     /// the client decoded no audible audio for it.
     MediaFault,
+    /// The runtime retired the channel for a replacement (context or result
+    /// recovery reopens the session on a fresh channel).
+    Replaced,
+    /// The channel's open was abandoned before it activated.
+    OpenAbandoned,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

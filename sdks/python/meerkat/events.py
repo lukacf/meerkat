@@ -696,11 +696,14 @@ class BackgroundJobCompleted(Event):
 
 @dataclass(frozen=True, slots=True)
 class LiveChannelClosed(Event):
-    """The runtime closed one of the session's live channels for a typed cause.
+    """One of the session's live channels closed (every committed close).
 
-    `reason` is `"media_fault"` when the channel's first assistant output had a
-    transcript but no audible audio. `reopen_recommended` says whether the
-    session may reopen the channel with its retained context.
+    `reason` names why: `client_requested`, `client_disconnected`,
+    `provider_closed`, `error`, `media_fault` (the first assistant output had a
+    transcript but no audible audio), `replaced` (a recovery reopened the
+    session on a fresh channel) or `open_abandoned`.
+    `reopen_recommended` is true only for a media fault whose session may
+    still reopen with its retained context.
     """
 
     session_id: str
@@ -762,7 +765,15 @@ _STOP_REASONS = frozenset({
 })
 
 _TOOL_CONFIG_OPERATIONS = frozenset({"add", "remove", "reload"})
-_LIVE_CHANNEL_CLOSE_REASONS = frozenset({"media_fault"})
+_LIVE_CHANNEL_CLOSE_REASONS = frozenset({
+    "client_requested",
+    "client_disconnected",
+    "provider_closed",
+    "error",
+    "media_fault",
+    "replaced",
+    "open_abandoned",
+})
 
 _BACKGROUND_JOB_TERMINAL_STATUSES = frozenset({
     "completed",

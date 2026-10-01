@@ -2028,6 +2028,13 @@ for (const pkg of localPackages.values()) {
         data.unshift(":package_runfiles");
       }
       const env = [`        "RUST_MIN_STACK": "8388608",`, ...SINGLE_THREADED_TEST_ENV];
+      if (key === "meerkat-mcp" && target.name === "form_elicitation") {
+        // Mandatory real transport fixture, kept out of the pure unit target.
+        const server = "//tests/fixtures/mcp-test-server:mcp_test_server_bin";
+        data.push(server);
+        env.push(`        "MEERKAT_MCP_TEST_SERVER": "$(rootpath ${server})",`);
+        attrs.splice(attrs.length - 1, 0, `    exec_properties = {"test.network": "external"},`);
+      }
       attrs.splice(attrs.length - 1, 0, `    tags = ${listExpr([...new Set(tags)].sort())},`);
       if (key === "meerkat" && target.name === "agent_builder_policy_canary") {
         attrs.splice(attrs.length - 1, 0, `    size = "large",`);

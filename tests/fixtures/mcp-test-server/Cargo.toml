@@ -20,6 +20,7 @@ name = "mcp-test-server"
 path = "src/main.rs"
 
 [dependencies]
+rmcp = { workspace = true, features = ["server", "transport-io"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

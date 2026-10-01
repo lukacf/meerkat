@@ -248,6 +248,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
         "//crates/meerkat-skills:meerkat_skills",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-mcp",
         normal = True,
@@ -305,6 +306,72 @@ rust_test(
         "//crates/meerkat-mcp:meerkat_mcp_test_support",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
         "//crates/meerkat-skills:meerkat_skills",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-mcp",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "form_elicitation_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-mcp",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "form_elicitation",
+    crate_root = "tests/form_elicitation.rs",
+    crate_features = [
+        "test-support",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "skills/mcp-server-setup/SKILL.md",
+    ],
+    srcs = [
+        "tests/form_elicitation.rs",
+        "tests/form_elicitation/http.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_BIN_NAME": "form_elicitation",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-mcp",
+    },
+    exec_properties = {"test.network": "external"},
+    tags = [
+        "required-feature",
+    ],
+    data = [
+        ":package_runfiles",
+        "//:repo_governance_files",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-mcp",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-contracts:meerkat_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-mcp:meerkat_mcp_test_support",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+        "//crates/meerkat-skills:meerkat_skills",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-mcp",
         normal = True,
@@ -364,6 +431,7 @@ rust_test(
         "//crates/meerkat-mcp:meerkat_mcp_test_support",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
         "//crates/meerkat-skills:meerkat_skills",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat-mcp",
         normal = True,

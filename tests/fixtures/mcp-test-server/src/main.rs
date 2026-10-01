@@ -60,6 +60,15 @@ struct FailArgs {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(1).as_deref() == Some("--form-elicitation") {
+        if let Some(path) = std::env::args().nth(2) {
+            std::fs::write(path, b"started")?;
+        }
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(mcp_test_server::serve_forms_stdio());
+    }
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let reader = BufReader::new(stdin.lock());

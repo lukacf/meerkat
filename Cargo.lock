@@ -2810,6 +2810,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 name = "mcp-test-server"
 version = "0.8.49"
 dependencies = [
+ "rmcp",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -3345,6 +3346,7 @@ dependencies = [
  "futures",
  "http 1.4.2",
  "inventory",
+ "mcp-test-server",
  "meerkat-auth-core",
  "meerkat-capabilities",
  "meerkat-contracts",

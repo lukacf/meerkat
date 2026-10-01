@@ -189,7 +189,7 @@ async fn enumerate(
                     vec![],
                     Default::default(),
                 ),
-                service,
+                service: service.into(),
             };
             let result = tokio::time::timeout(
                 Duration::from_secs(3),

@@ -850,6 +850,7 @@ test_suite(
         "//crates/xtask:seam_inventory_strict_test",
         "//crates/xtask:xtask_unit_test",
         "//tests/fixtures/machine-dsl-tests:machine_dsl_tests_unit_test",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_unit_test",
         "//tests/integration:meerkat_integration_tests_unit_test",
     ],
 )

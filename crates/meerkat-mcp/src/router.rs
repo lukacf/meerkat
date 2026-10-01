@@ -1002,6 +1002,7 @@ pub struct McpRouter {
     mcp_lifecycle_handle: Arc<StdRwLock<Option<Arc<dyn McpServerLifecycleHandle>>>>,
     mcp_auth_mode: McpAuthMode,
     mcp_auth_resolver: Option<Arc<dyn McpAuthResolver>>,
+    client_service_factory: Option<Arc<dyn crate::McpClientServiceFactory>>,
 }
 
 impl McpRouter {
@@ -1020,6 +1021,7 @@ impl McpRouter {
             mcp_lifecycle_handle: Arc::new(StdRwLock::new(None)),
             mcp_auth_mode: McpAuthMode::Stored,
             mcp_auth_resolver: None,
+            client_service_factory: None,
         }
     }
 
@@ -1120,6 +1122,16 @@ impl McpRouter {
     ) -> Self {
         self.mcp_auth_mode = mode;
         self.mcp_auth_resolver = resolver;
+        self
+    }
+
+    /// Select an optional host form-elicitation service for each exact native
+    /// connection attempt. This does not configure AgentFactory or SDK surfaces.
+    pub fn with_client_service_factory(
+        mut self,
+        factory: Arc<dyn crate::McpClientServiceFactory>,
+    ) -> Self {
+        self.client_service_factory = Some(factory);
         self
     }
 
@@ -1493,11 +1505,13 @@ impl McpRouter {
         let tx = self.pending_tx.clone();
         let auth_mode = self.mcp_auth_mode;
         let auth_resolver = self.mcp_auth_resolver.clone();
+        let client_factory = self.client_service_factory.clone();
         tokio::spawn(async move {
-            let result = McpConnection::connect_and_enumerate_with_mcp_auth(
+            let result = McpConnection::connect_and_enumerate_with_services(
                 &config,
                 auth_mode,
                 auth_resolver,
+                client_factory,
             )
             .await;
             if let Err(error) = tx.send(PendingResult { obligation, result }).await {
@@ -1847,10 +1861,11 @@ impl McpRouter {
             }
         };
 
-        let result = McpConnection::connect_and_enumerate_with_mcp_auth(
+        let result = McpConnection::connect_and_enumerate_with_services(
             &config,
             self.mcp_auth_mode,
             self.mcp_auth_resolver.clone(),
+            self.client_service_factory.clone(),
         )
         .await;
         let connect_error = result.as_ref().err().map(ToString::to_string);

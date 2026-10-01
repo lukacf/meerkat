@@ -149,6 +149,12 @@ them.
   on a seeded reopen). The canonical projection stays unseeded and the late
   summary still covers those rows, so no row enters the live outbox twice. The open
   reads only a bounded committed tail, never the transcript body.
+- A REST turn whose runtime teardown outlasts the plain unregister's 2 s
+  caller grace now delivers its outcome instead of failing with
+  `AuthorityUnavailable` ("REST runtime completion cleanup failed ...
+  UnregisterInProgress"). Completion cleanup joins the exact registration's
+  teardown until terminal, so the outcome arrives once the runtime is gone and
+  a client reusing the session cannot race a half-torn-down registration.
 - The Cargo test lanes provide the MCP form-elicitation fixture again. Since
   #1338, `meerkat-mcp`'s `form_elicitation` tests (which require
   `MEERKAT_MCP_TEST_SERVER` to name the exact `mcp-test-server` binary and

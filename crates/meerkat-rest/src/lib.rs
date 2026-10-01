@@ -1386,7 +1386,7 @@ async fn cleanup_rest_runtime_after_completion_outcome(
             )
             .await?;
         } else {
-            cleanup_archived_session_runtime(state, session_id).await?;
+            cleanup_archived_session_runtime_until_terminal(state, session_id).await?;
         }
     }
     Ok(cleanup_authority.releases_pre_admission())
@@ -8011,6 +8011,39 @@ async fn cleanup_archived_session_runtime(
             | meerkat_runtime::RuntimeDriverError::NotReady { .. },
         ) => {}
         Err(error) => return Err(runtime_driver_error_to_session_error(error)),
+    }
+    cleanup_rest_runtime_after_unregistered(state, session_id).await
+}
+
+/// [`cleanup_archived_session_runtime`] for a completed turn's cleanup: join
+/// the exact registration's teardown until terminal instead of the plain
+/// unregister's bounded caller wait. The turn really completed, so a saga that
+/// outlasts that grace must not surface as a failed cleanup (and withhold the
+/// outcome); and once the outcome is delivered the runtime is gone, so a
+/// client reusing the session cannot race a half-torn-down registration. The
+/// wait ends on the saga's typed terminal result.
+async fn cleanup_archived_session_runtime_until_terminal(
+    state: &AppState,
+    session_id: &SessionId,
+) -> Result<(), SessionError> {
+    if let Some(registration) = state
+        .runtime_adapter
+        .current_session_registration_witness(session_id)
+        .await
+    {
+        match state
+            .runtime_adapter
+            .unregister_session_registration_until_terminal_if_current(&registration)
+            .await
+        {
+            Ok(_)
+            | Err(
+                meerkat_runtime::RuntimeDriverError::NotFound { .. }
+                | meerkat_runtime::RuntimeDriverError::Destroyed
+                | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+            ) => {}
+            Err(error) => return Err(runtime_driver_error_to_session_error(error)),
+        }
     }
     cleanup_rest_runtime_after_unregistered(state, session_id).await
 }
@@ -14938,6 +14971,62 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 meerkat_runtime::CompletionOutcome::RuntimeTerminated { .. }
             ),
             "cleanup failure must not synthesize a runtime terminal outcome: {outcome:?}"
+        );
+    }
+
+    /// A completed turn's cleanup joins the runtime's teardown until terminal:
+    /// an unregister saga that outlasts the plain unregister's caller grace
+    /// must not fail the cleanup and withhold the outcome. The grace is set to
+    /// zero on this machine and the saga is held, so the plain unregister
+    /// would report `UnregisterInProgress` at once; the outcome is delivered
+    /// only after the released saga reaches terminal, with the runtime gone.
+    #[tokio::test]
+    async fn rest_completion_cleanup_joins_runtime_teardown_past_the_caller_grace() {
+        let temp = TempDir::new().unwrap();
+        let state = load_rest_state_with_capacity(&temp, 1).await;
+        let session_id = SessionId::new();
+        let handle = runtime_terminated_completion_handle(
+            &state.runtime_adapter,
+            &session_id,
+            "cleanup joins the held teardown",
+        )
+        .await;
+        state
+            .runtime_adapter
+            .test_set_unregister_caller_wait_grace(std::time::Duration::ZERO);
+        let (saga_entered, release_saga) = state.runtime_adapter.test_hold_next_unregister_saga();
+        let adapter = Arc::clone(&state.runtime_adapter);
+        let outcome_session_id = session_id.clone();
+        let waiting = tokio::spawn(async move {
+            let outcome =
+                wrap_rest_runtime_completion_cleanup(state, outcome_session_id.clone(), handle)
+                    .wait()
+                    .await;
+            let runtime_gone = !adapter.contains_session(&outcome_session_id).await;
+            (outcome, runtime_gone)
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(30), saga_entered)
+            .await
+            .expect("the completion cleanup starts the unregister saga")
+            .expect("the saga hold stays armed");
+        release_saga.send(()).expect("the saga waits on its hold");
+
+        let (outcome, runtime_gone) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), waiting)
+                .await
+                .expect("the completion resolves once the teardown reached terminal")
+                .expect("the completion waiter joins");
+        let outcome = outcome.expect("the completed turn's outcome is delivered, not withheld");
+        assert!(
+            matches!(
+                outcome,
+                meerkat_runtime::CompletionOutcome::RuntimeTerminated { .. }
+            ),
+            "the completion keeps its outcome: {outcome:?}"
+        );
+        assert!(
+            runtime_gone,
+            "the outcome is delivered after the runtime is gone"
         );
     }
 

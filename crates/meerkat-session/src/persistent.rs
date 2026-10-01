@@ -15081,15 +15081,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .map(Some)
                     .map_err(corrupt_metadata_error)
             }
-            RuntimeSessionAuthority::HeadCanonical(authority) => {
-                let metadata = self.runtime_store
-                    .load_head_canonical_metadata(&authority)
+            RuntimeSessionAuthority::HeadCanonical(_) => {
+                // This read is an observation of the current metadata, and
+                // it runs concurrently with boundary commits (the mob
+                // shutdown visibility input deliberately does not queue
+                // behind the turn Stop cancels). Read the current boundary's
+                // metadata under one store snapshot instead of re-validating
+                // the authority observed above, which a commit landing in
+                // between would refuse.
+                let Some(metadata) = self
+                    .runtime_store
+                    .load_current_head_canonical_metadata(&runtime_id)
                     .await
                     .map_err(|error| {
                         SessionError::Agent(AgentError::InternalError(format!(
                             "failed to materialize committed HeadCanonical metadata for session {id}: {error}"
                         )))
-                    })?;
+                    })?
+                else {
+                    return Ok(None);
+                };
                 meerkat_core::PersistedSessionMetadataView::try_from_metadata_map(
                     id.clone(),
                     &metadata,

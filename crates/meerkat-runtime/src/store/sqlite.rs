@@ -12274,6 +12274,35 @@ ORDER BY runtime_id";
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
         }
 
+        async fn load_current_head_canonical_metadata(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                // One read transaction: the current authority row and the
+                // metadata of the boundary it names are the same snapshot.
+                let tx = conn
+                    .transaction()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let Some(authority) = load_head_canonical_authority(&tx, &runtime_id)?
+                    .and_then(|current| current.head_canonical().cloned())
+                else {
+                    return Ok(None);
+                };
+                meerkat_store::sqlite_store::materialize_runtime_boundary_metadata_in_txn(
+                    &tx,
+                    authority.boundary_head(),
+                )
+                .map(Some)
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
         async fn load_session_resume_observation(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -17135,6 +17164,91 @@ ORDER BY runtime_id";
                     Err(RuntimeStoreError::ReadFailed(_)),
                 ),
                 "missing exact metadata owner must not fall back to the latest physical head"
+            );
+        }
+
+        /// A metadata observer that read the authority before a successor
+        /// boundary committed must not turn that commit into an authority
+        /// conflict: the exact-authority read refuses the stale identity (its
+        /// contract), while the current read observes authority and metadata
+        /// in one snapshot and returns the successor's metadata.
+        #[tokio::test]
+        async fn current_head_canonical_metadata_read_spans_a_successor_commit() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("current-metadata.sqlite3");
+            let store = SqliteRuntimeStore::new_head_canonical(&path).unwrap();
+            let physical_store = SqliteSessionStore::open(path.clone()).unwrap();
+            let mut session = session_with_user("first intent");
+            session.set_metadata("host_metadata", serde_json::json!("first"));
+            let session_id = session.id().clone();
+            let runtime_id = LogicalRuntimeId::for_session(&session_id);
+            let mutation = PreparedHeadCanonicalMutation::prepare(&session, None).unwrap();
+            RuntimeStore::commit_prepared_session_boundary(
+                &store,
+                &runtime_id,
+                PreparedRuntimeSessionCommit::snapshot_only(
+                    BoundSessionCommit::head_canonical_from_session(&session, mutation).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+            let observed = RuntimeStore::load_session_boundary_authority(&store, &runtime_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .head_canonical()
+                .expect("first HeadCanonical authority")
+                .clone();
+
+            let observed_head = physical_store
+                .load_head(&session_id)
+                .await
+                .unwrap()
+                .expect("committed physical head");
+            let mut successor = physical_store
+                .load(&session_id)
+                .await
+                .unwrap()
+                .expect("committed physical session");
+            successor.push(Message::User(UserMessage::text(
+                "second intent".to_string(),
+            )));
+            successor.set_metadata("host_metadata", serde_json::json!("second"));
+            let successor_mutation =
+                PreparedHeadCanonicalMutation::prepare(&successor, Some(observed_head)).unwrap();
+            RuntimeStore::commit_prepared_session_boundary(
+                &store,
+                &runtime_id,
+                PreparedRuntimeSessionCommit::snapshot_only(
+                    BoundSessionCommit::head_canonical_from_session(&successor, successor_mutation)
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+
+            assert!(
+                matches!(
+                    RuntimeStore::load_head_canonical_metadata(&store, &observed).await,
+                    Err(RuntimeStoreError::SessionPersistenceAuthorityConflict { .. }),
+                ),
+                "the exact read still refuses the superseded authority"
+            );
+            let current = RuntimeStore::load_current_head_canonical_metadata(&store, &runtime_id)
+                .await
+                .unwrap()
+                .expect("a HeadCanonical authority is current");
+            assert_eq!(
+                current.get("host_metadata"),
+                Some(&serde_json::json!("second")),
+                "the current read returns the successor boundary's metadata"
+            );
+            let absent = LogicalRuntimeId::for_session(&meerkat_core::types::SessionId::new());
+            assert!(
+                RuntimeStore::load_current_head_canonical_metadata(&store, &absent)
+                    .await
+                    .unwrap()
+                    .is_none()
             );
         }
 

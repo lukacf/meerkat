@@ -98016,7 +98016,7 @@
   },
   "LiveMediaHealthParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "`live/media_health` request: the client's raw decoded-audio counters for\nthe requested output. The runtime judges them; the client never sends a\nverdict.",
+    "description": "`live/media_health` request: the client's raw decoded-audio counters from\nthe channel's media start to now, for the output a\n`live/media_health_requested` notification named. The runtime judges them;\nthe client never sends a verdict.",
     "properties": {
       "audible_frames": {
         "description": "Decoded frames whose RMS reached the client's non-silent floor.",
@@ -98028,7 +98028,7 @@
         "type": "string"
       },
       "decoded_frames": {
-        "description": "Audio frames the client decoded for the output.",
+        "description": "Audio frames the client decoded since the channel's media start.",
         "format": "uint64",
         "minimum": 0,
         "type": "integer"
@@ -98054,7 +98054,7 @@
   },
   "LiveMediaHealthRequestedParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Runtime request notification `live/media_health_requested`: at the typed\nend of a channel's first assistant output, the runtime asks the client for\nits raw decoded-audio counters for exactly that output (from its\n`live/assistant_output_available` notification to now). The client answers\nwith `live/media_health`. A client that never answers leaves the output\nunjudged.",
+    "description": "Runtime request notification `live/media_health_requested`: at the typed\nend of a channel's first assistant output (its first segment settled with\na non-empty transcript), the runtime asks the client for its raw\ndecoded-audio counters from the channel's media start to now (nothing was\naudible before the first output). The `output_id` is only the report key;\nthat output is already settled and is not a playback handle. The client\nanswers with `live/media_health`. A client that never answers leaves the\noutput unjudged.",
     "properties": {
       "channel_id": {
         "type": "string"

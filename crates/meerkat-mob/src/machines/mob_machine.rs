@@ -1031,6 +1031,9 @@ pub enum SubmitWorkRejectReasonKind {
     MemberNotFound,
     StaleFenceToken,
     NotExternallyAddressable,
+    /// A scope-bound submit named a member session that is no longer the
+    /// member's current session binding.
+    StaleSessionBinding,
 }
 
 /// Typed public rejection class for [`MobMachineInput::CancelAllWork`].
@@ -4828,6 +4831,7 @@ mod tests {
                 work_id: WorkId::from("before-retire"),
                 origin: WorkOrigin::External,
                 content_attribution: WorkContentAttribution::Conversational,
+                expected_session_id: None,
             },
         )
         .expect("live externally addressable member should accept work");
@@ -4850,6 +4854,7 @@ mod tests {
                 work_id: WorkId::from("during-retire"),
                 origin: WorkOrigin::External,
                 content_attribution: WorkContentAttribution::Conversational,
+                expected_session_id: None,
             },
         );
         assert!(
@@ -4864,6 +4869,7 @@ mod tests {
                 agent_runtime_id: runtime_id,
                 fence_token: FenceToken(7),
                 origin: WorkOrigin::External,
+                expected_session_id: None,
             },
         )
         .expect("retiring SubmitWork rejection should have typed machine feedback");
@@ -5128,6 +5134,7 @@ mod tests {
                 work_id: WorkId::from("stale"),
                 origin: WorkOrigin::Internal,
                 content_attribution: WorkContentAttribution::Conversational,
+                expected_session_id: None,
             },
         );
         assert!(
@@ -5142,6 +5149,7 @@ mod tests {
                 agent_runtime_id: runtime_id,
                 fence_token: FenceToken(99),
                 origin: WorkOrigin::Internal,
+                expected_session_id: None,
             },
         )
         .expect("stale SubmitWork rejection should have typed machine feedback");
@@ -5156,6 +5164,77 @@ mod tests {
                 }
             )),
             "stale SubmitWork public class and fence payload must be generated feedback"
+        );
+    }
+
+    #[test]
+    fn scope_bound_submit_work_refuses_a_moved_session_binding_with_typed_feedback() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("worker");
+        let runtime_id = AgentRuntimeId::from("worker:1");
+        let current_session = seed_live_member(&mut authority, &identity, &runtime_id);
+        let captured_session = SessionId::from("captured-before-the-move");
+        assert_ne!(captured_session, current_session);
+
+        let rejected = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SubmitWork {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: FenceToken(7),
+                expected_session_id: Some(captured_session.clone()),
+                work_id: WorkId::from("scoped-stale"),
+                origin: WorkOrigin::Internal,
+                content_attribution: WorkContentAttribution::Conversational,
+            },
+        );
+        assert!(
+            rejected.is_err(),
+            "a current runtime id and fence must not admit work scoped to another session"
+        );
+
+        let rejection = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ResolveSubmitWorkRejection {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: FenceToken(7),
+                expected_session_id: Some(captured_session),
+                origin: WorkOrigin::Internal,
+            },
+        )
+        .expect("a moved session binding must resolve to typed machine feedback");
+        assert!(
+            rejection.effects.iter().any(|effect| matches!(
+                effect,
+                MobMachineEffect::SubmitWorkRejected {
+                    reason: SubmitWorkRejectReasonKind::StaleSessionBinding,
+                    ..
+                }
+            )),
+            "the stale-session public class must be generated feedback"
+        );
+
+        let admitted = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SubmitWork {
+                agent_identity: identity,
+                agent_runtime_id: runtime_id,
+                fence_token: FenceToken(7),
+                expected_session_id: Some(current_session.clone()),
+                work_id: WorkId::from("scoped-current"),
+                origin: WorkOrigin::Internal,
+                content_attribution: WorkContentAttribution::Conversational,
+            },
+        )
+        .expect("work scoped to the current session binding must be admitted");
+        assert!(
+            admitted.effects.iter().any(|effect| matches!(
+                effect,
+                MobMachineEffect::RequestRuntimeIngress { session_id, .. }
+                    if *session_id == current_session
+            )),
+            "admitted scope-bound work must target exactly the expected session"
         );
     }
 

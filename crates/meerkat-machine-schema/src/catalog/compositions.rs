@@ -2113,6 +2113,7 @@ fn seam_submit_work_input() -> CompositionWitnessInput {
             witness_field("agent_identity", Expr::String("agentidentity_1".into())),
             witness_field("agent_runtime_id", Expr::String("agentruntimeid_1".into())),
             witness_field("fence_token", Expr::U64(1)),
+            witness_field("expected_session_id", Expr::None),
             witness_field("work_id", Expr::String("workid_1".into())),
             witness_field("origin", named_variant("WorkOrigin", "External")),
             witness_field(

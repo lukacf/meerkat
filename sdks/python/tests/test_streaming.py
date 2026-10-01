@@ -10,6 +10,7 @@ from meerkat.errors import (
     MeerkatError,
     ScopeDeniedError,
     StaleCursorError,
+    StaleDeliveryScopeError,
     StaleFenceError,
     meerkat_error_from_jsonrpc_code,
     meerkat_error_from_semantic_code,
@@ -112,6 +113,13 @@ MULTI_HOST_ERROR_CASES = [
         StaleFenceError,
         {"runtime_id": "runtime-1", "expected": 9, "actual": 8},
         {"runtime_id": 7},
+    ),
+    (
+        -32030,
+        "STALE_DELIVERY_SCOPE",
+        StaleDeliveryScopeError,
+        {"agent_identity": "worker", "expected_session_id": "s-a", "actual_session_id": "s-b"},
+        {"agent_identity": "worker"},
     ),
 ]
 

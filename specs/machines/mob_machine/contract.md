@@ -303,7 +303,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `UnwireMembers`(edge: WiringEdge)
 - `WireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
 - `UnwireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
-- `SubmitWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin, content_attribution: WorkContentAttribution)
+- `SubmitWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, expected_session_id: Option<SessionId>, work_id: WorkId, origin: WorkOrigin, content_attribution: WorkContentAttribution)
 - `CancelWork`(work_id: WorkId)
 - `CancelAllWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `Stop`
@@ -441,7 +441,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyFlowStepDispatch`(run_id: RunId, step_id: StepId, target: AgentIdentity, overlay_present: Bool)
 - `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `SessionIngressDetachFailedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String)
-- `ResolveSubmitWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, origin: WorkOrigin)
+- `ResolveSubmitWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, expected_session_id: Option<SessionId>, origin: WorkOrigin)
 - `ResolveRuntimeBindingRefusal`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId, refusal_code: String, reason: String)
 - `ResolveRuntimeIngressRefusal`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId, work_id: WorkId, origin: WorkOrigin, refusal_code: String, reason: String)
 - `ResolveRuntimeRetireRefusal`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId, refusal_code: String, reason: String)
@@ -6653,7 +6653,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SubmitWorkRunningExternal`
 - From: `Running`
-- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin, content_attribution)
+- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, expected_session_id, work_id, origin, content_attribution)
 - Guards:
   - `placed_completion_origin_open`
   - `active_members_present`
@@ -6662,6 +6662,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_token_matches`
   - `generation_binding_present`
   - `session_binding_present`
+  - `expected_session_matches`
   - `placed_carrier_binding_active_or_local`
   - `member_not_retiring`
   - `external_origin`
@@ -6671,7 +6672,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SubmitWorkRunningExternalPeerOnly`
 - From: `Running`
-- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin, content_attribution)
+- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, expected_session_id, work_id, origin, content_attribution)
 - Guards:
   - `placed_completion_origin_open`
   - `active_members_present`
@@ -6680,6 +6681,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_token_matches`
   - `generation_binding_present`
   - `session_binding_absent`
+  - `no_expected_session`
   - `member_not_retiring`
   - `external_origin`
   - `runtime_externally_addressable`
@@ -6689,7 +6691,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SubmitWorkRunningInternal`
 - From: `Running`
-- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin, content_attribution)
+- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, expected_session_id, work_id, origin, content_attribution)
 - Guards:
   - `placed_completion_origin_open`
   - `active_members_present`
@@ -6698,6 +6700,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_token_matches`
   - `generation_binding_present`
   - `session_binding_present`
+  - `expected_session_matches`
   - `placed_carrier_binding_active_or_local`
   - `member_not_retiring`
   - `internal_origin`
@@ -6706,7 +6709,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SubmitWorkRunningInternalPeerOnly`
 - From: `Running`
-- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin, content_attribution)
+- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, expected_session_id, work_id, origin, content_attribution)
 - Guards:
   - `placed_completion_origin_open`
   - `active_members_present`
@@ -6715,6 +6718,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_token_matches`
   - `generation_binding_present`
   - `session_binding_absent`
+  - `no_expected_session`
   - `member_not_retiring`
   - `internal_origin`
   - `member_peer_registered`
@@ -6723,25 +6727,25 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSubmitWorkRejectionStopped`
 - From: `Stopped`
-- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
 - Emits: `SubmitWorkRejected`
 - To: `Stopped`
 
 ### `ResolveSubmitWorkRejectionCompleted`
 - From: `Completed`
-- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
 - Emits: `SubmitWorkRejected`
 - To: `Completed`
 
 ### `ResolveSubmitWorkRejectionDestroyed`
 - From: `Destroyed`
-- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
 - Emits: `SubmitWorkRejected`
 - To: `Destroyed`
 
 ### `ResolveSubmitWorkRejectionMemberNotFound`
 - From: `Running`
-- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
 - Guards:
   - `identity_absent`
 - Emits: `SubmitWorkRejected`
@@ -6749,7 +6753,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSubmitWorkRejectionCurrentRuntimeNotLive`
 - From: `Running`
-- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
 - Guards:
   - `identity_present`
   - `current_runtime_not_live`
@@ -6758,7 +6762,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSubmitWorkRejectionStaleFenceToken`
 - From: `Running`
-- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
 - Guards:
   - `identity_present`
   - `current_runtime_live`
@@ -6768,7 +6772,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSubmitWorkRejectionRetiringAsMemberNotFound`
 - From: `Running`
-- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
 - Guards:
   - `identity_binding_matches`
   - `runtime_live`
@@ -6779,7 +6783,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSubmitWorkRejectionNotExternallyAddressable`
 - From: `Running`
-- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
 - Guards:
   - `identity_binding_matches`
   - `runtime_live`
@@ -6792,7 +6796,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable`
 - From: `Running`
-- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
 - Guards:
   - `identity_binding_matches`
   - `runtime_live`
@@ -6801,6 +6805,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `internal_origin`
   - `session_binding_absent`
   - `member_peer_absent`
+- Emits: `SubmitWorkRejected`
+- To: `Running`
+
+### `ResolveSubmitWorkRejectionStaleSessionBinding`
+- From: `Running`
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
+- Guards:
+  - `identity_binding_matches`
+  - `runtime_live`
+  - `fence_token_matches`
+  - `expected_session_named`
+  - `session_binding_differs`
 - Emits: `SubmitWorkRejected`
 - To: `Running`
 

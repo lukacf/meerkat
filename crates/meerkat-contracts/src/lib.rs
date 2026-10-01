@@ -565,6 +565,7 @@ pub use wire::{
     WireSessionTranscriptRevisionEntry,
     WireSessionTranscriptRevisionList,
     WireStaleCursorDetail,
+    WireStaleDeliveryScopeDetail,
     WireStaleFenceDetail,
     WireStopReason,
     WireSwitchTurnControlResult,

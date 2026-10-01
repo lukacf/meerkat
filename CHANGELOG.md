@@ -49,6 +49,29 @@ them.
     Binding mob callback tools to the creating connection is tracked in #1459.
   - Stdio and embedded servers that pre-create the channel with
     `SessionRuntime::init_callback_channel` are unchanged.
+- `meerkat_mob::MobHandle::submit_work_with_mode_and_delivery_identity_bounded`
+  takes `scope: &MemberDeliveryScope` in place of its `runtime_id` and
+  `fence_token` arguments. The scope carries both plus the member session the
+  delivery is bound to; obtain it from `capture_member_delivery_scope`.
+- `meerkat_mob::MobError` gains `StaleDeliveryScope { agent_identity,
+  expected_session, actual_session }` and `DeliveryScopeUnavailable {
+  agent_identity, reason }`. `MobError` is not `#[non_exhaustive]`, so
+  exhaustive matches must handle both. On the wire `StaleDeliveryScope`
+  projects to the new `STALE_DELIVERY_SCOPE` code (see Added) and
+  `DeliveryScopeUnavailable` to `CAPABILITY_UNAVAILABLE`.
+- `meerkat_contracts::ErrorCode` gains `StaleDeliveryScope` and
+  `meerkat_contracts::wire::WireMobErrorDetail` gains
+  `StaleDeliveryScope(WireStaleDeliveryScopeDetail)`. Neither enum is
+  `#[non_exhaustive]`, so exhaustive Rust matches must handle the new
+  variant; the wire change itself is additive (see Added).
+- `meerkat_machine_schema::catalog::dsl::mob_machine::SubmitWorkRejectReasonKind`
+  and `meerkat_mob::SubmitWorkRejectReasonKind` gain `StaleSessionBinding`,
+  and the generated `MobMachineInput::SubmitWork` and
+  `ResolveSubmitWorkRejection` inputs gain `expected_session_id:
+  Option<SessionId>`. The generated kernel `TransitionId` gains
+  `ResolveSubmitWorkRejectionStaleSessionBinding` (`TransitionId::*`
+  discriminants move). Exhaustive matches and input literals must handle
+  them.
 
 ### Added
 
@@ -67,6 +90,39 @@ them.
   create_session_with_params_on_route}` and
   `handlers::jobs::{handle_cancel_on_route, handle_retry_on_route}`. The
   existing handlers keep their signatures and use the process-default route.
+- Delivery scope correctness for host-persisted mob deliveries. A host can
+  capture a member's exact delivery scope (runtime incarnation, fence and
+  session) with `MobHandle::capture_member_delivery_scope`, persist it before
+  an effect-bearing submit, submit against it, and recover a lost reply from
+  it:
+  - `MemberDeliveryScope` serializes with an explicit `version` field
+    (`MEMBER_DELIVERY_SCOPE_VERSION`); an unknown version or malformed body
+    is a typed `DeliveryScopeDecodeError`.
+  - The bounded delivery-identity submit is validated by generated SubmitWork
+    authority inside the actor admission: a moved session binding is refused
+    as `StaleDeliveryScope` (`StaleSessionBinding` in the machine) with zero
+    effects, and the delivery is never repaired, retargeted or resubmitted.
+  - `WorkDeliveryReceipt` gains `stage: WorkAdmissionStage` (the honest
+    acknowledgement stage; no stage claims durable runtime-input acceptance)
+    and `session_id` (the admitted session for a scope-bound submit).
+  - `MobHandle::recover_bounded_work_at_scope` reads only the scope's session
+    store index, so it works after a rotation or after the original runtime
+    is unregistered. It returns `ScopedWorkState`: `Absent` (an authoritative
+    miss, never retry permission), `InFlight { durable_witness, .. }`,
+    `Terminal`, `TerminalWithoutRun`, `Broken`, or `Unresolved` with a typed
+    `ScopedRecoveryUnresolved` cause for an unknown or unavailable original
+    owner or a timed-out evidence read.
+  - Additive wire code `STALE_DELIVERY_SCOPE` (JSON-RPC `-32030`, HTTP 409,
+    CLI exit 50, category `session`) with the typed detail
+    `WireStaleDeliveryScopeDetail { agent_identity, expected_session_id,
+    actual_session_id? }` (`deny_unknown_fields`), emitted in
+    `errors.json` `JsonRpcErrorCodes` and `wire-types.json`. It is distinct
+    from `STALE_FENCE`: the member's session rotated under a still-current
+    runtime incarnation and fence, so a client re-captures the delivery
+    scope instead of re-resolving the member. The generated SDK errors gain
+    `StaleDeliveryScopeError` (Python and TypeScript) and
+    `WireStaleDeliveryScopeDetail`. A member that cannot be scope-bound (no
+    native session binding) is `CAPABILITY_UNAVAILABLE`.
 
 ### Deprecated
 

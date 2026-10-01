@@ -61,6 +61,7 @@ async fn submit(
         llm_identity_applied_tx: None,
         ack_mode: crate::mob_machine::SubmitWorkAckMode::TurnCompleted,
         content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+        expected_session_id: None,
     });
     handle
         .command_tx

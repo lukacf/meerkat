@@ -1992,6 +1992,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveSubmitWorkRejectionStaleSessionBinding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireMember`
   - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-recover-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`

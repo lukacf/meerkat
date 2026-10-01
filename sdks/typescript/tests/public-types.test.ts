@@ -141,6 +141,7 @@ import type {
   WireSessionMessage,
   WireStaleCursorDetail,
   WireStaleFenceDetail,
+  WireStaleDeliveryScopeDetail,
   WireTrustedPeerIdentity,
   WireTrustedPeerIdentityEd25519PublicKey,
   WireLiveConfigRejectionReasonImageInputInvalidBase64,
@@ -549,6 +550,10 @@ const staleFenceDetail: WireStaleFenceDetail = {
   expected: 9,
   actual: 8,
 };
+const staleDeliveryScopeDetail: WireStaleDeliveryScopeDetail = {
+  agent_identity: "worker",
+  expected_session_id: "s-a",
+};
 const multiHostErrorCode: MultiHostErrorCode = "SCOPE_DENIED";
 // @ts-expect-error multi-host error codes are a generated closed vocabulary.
 const invalidMultiHostErrorCode: MultiHostErrorCode = "REMOTE_FAILURE";
@@ -556,6 +561,7 @@ void scopeDeniedDetail;
 void hostUnavailableDetail;
 void staleCursorDetail;
 void staleFenceDetail;
+void staleDeliveryScopeDetail;
 void multiHostErrorCode;
 void invalidMultiHostErrorCode;
 

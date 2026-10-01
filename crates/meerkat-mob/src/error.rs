@@ -9,7 +9,7 @@ use crate::{MobId, RunId, StepId};
 use meerkat_contracts::wire::supervisor_bridge::{BridgeRejectionCause, BridgeRejectionReply};
 use meerkat_contracts::wire::{
     WireHostUnavailableDetail, WireMobErrorDetail, WireScopeDeniedDetail, WireStaleCursorDetail,
-    WireStaleFenceDetail,
+    WireStaleDeliveryScopeDetail, WireStaleFenceDetail,
 };
 use std::sync::Arc;
 
@@ -1028,6 +1028,28 @@ pub enum MobError {
         actual: FenceToken,
     },
 
+    /// A scope-bound submit named a member session that is no longer the
+    /// member's current session binding. Generated SubmitWork authority
+    /// refused it before any admission effect; nothing was delivered, and
+    /// the submit was never retargeted to the current session.
+    #[error(
+        "stale delivery scope for {agent_identity}: expected session {expected_session}, current {}",
+        actual_session.as_ref().map_or_else(|| "none".to_string(), ToString::to_string)
+    )]
+    StaleDeliveryScope {
+        agent_identity: AgentIdentity,
+        expected_session: meerkat_core::types::SessionId,
+        actual_session: Option<meerkat_core::types::SessionId>,
+    },
+
+    /// A delivery scope cannot be captured for this member (for example a
+    /// peer-only member with no session binding to scope a delivery to).
+    #[error("delivery scope unavailable for {agent_identity}: {reason}")]
+    DeliveryScopeUnavailable {
+        agent_identity: AgentIdentity,
+        reason: String,
+    },
+
     /// A durable remote member-operator request reached actor execution after
     /// its exact placed residency was superseded.
     #[error("stale member-operator execution authority for {member_id}: {reason}")]
@@ -1603,6 +1625,11 @@ impl MobError {
                 Self::SessionError(meerkat_core::SessionError::CapabilityUnavailable(_)) => {
                     Some(meerkat_contracts::ErrorCode::CapabilityUnavailable)
                 }
+                // A member that cannot be scope-bound (no native session
+                // binding) does not support scope-bound delivery at all.
+                Self::DeliveryScopeUnavailable { .. } => {
+                    Some(meerkat_contracts::ErrorCode::CapabilityUnavailable)
+                }
                 Self::RetirementInProgress { .. }
                 | Self::MemberRetirementInProgress { .. }
                 | Self::MemberRetirementAdmissionPending { .. }
@@ -1810,6 +1837,20 @@ impl MobError {
                 expected: Some(expected.get()),
                 actual: Some(actual.get()),
             })),
+            // The member's runtime id and fence are current; only its session
+            // binding moved. Its own code, never StaleFence: the caller
+            // re-captures the scope instead of re-resolving the member.
+            Self::StaleDeliveryScope {
+                agent_identity,
+                expected_session,
+                actual_session,
+            } => Some(WireMobErrorDetail::StaleDeliveryScope(
+                WireStaleDeliveryScopeDetail {
+                    agent_identity: agent_identity.to_string(),
+                    expected_session_id: expected_session.to_string(),
+                    actual_session_id: actual_session.as_ref().map(ToString::to_string),
+                },
+            )),
             Self::StaleMemberOperatorAuthority { .. } => {
                 Some(WireMobErrorDetail::StaleFence(WireStaleFenceDetail {
                     runtime_id: None,
@@ -2397,6 +2438,38 @@ mod tests {
     /// console codes — every `Some` arm with its detail field values
     /// (including all four `BridgeCommandRejected` causes) — and the pinned
     /// non-mappings return `None`.
+    #[test]
+    fn a_moved_session_scope_is_not_a_stale_fence_and_an_unscopable_member_is_unsupported() {
+        let expected = meerkat_core::types::SessionId::new();
+        let actual = meerkat_core::types::SessionId::new();
+        let moved = MobError::StaleDeliveryScope {
+            agent_identity: crate::ids::AgentIdentity::from("worker"),
+            expected_session: expected.clone(),
+            actual_session: Some(actual.clone()),
+        };
+        match moved.wire_detail() {
+            Some(WireMobErrorDetail::StaleDeliveryScope(detail)) => {
+                assert_eq!(detail.agent_identity, "worker");
+                assert_eq!(detail.expected_session_id, expected.to_string());
+                assert_eq!(detail.actual_session_id, Some(actual.to_string()));
+            }
+            other => panic!("StaleDeliveryScope must project its own detail, got {other:?}"),
+        }
+        assert_eq!(
+            moved.wire_error_code(),
+            Some(meerkat_contracts::ErrorCode::StaleDeliveryScope)
+        );
+        let unscopable = MobError::DeliveryScopeUnavailable {
+            agent_identity: crate::ids::AgentIdentity::from("peer"),
+            reason: "no native session binding".to_string(),
+        };
+        assert!(unscopable.wire_detail().is_none());
+        assert_eq!(
+            unscopable.wire_error_code(),
+            Some(meerkat_contracts::ErrorCode::CapabilityUnavailable)
+        );
+    }
+
     #[test]
     fn wire_detail_maps_exactly_the_four_codes() {
         use meerkat_contracts::wire::WireControlScope;

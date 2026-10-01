@@ -262,7 +262,8 @@ impl MobCommand {
             Self::KickoffOutcomeResolved { .. } => None,
 
             #[cfg(any(test, feature = "test-support"))]
-            Self::CrashStopPreservingDurableWorkForTest { .. } => None,
+            Self::CrashStopPreservingDurableWorkForTest { .. }
+            | Self::RebindMemberSessionForTest { .. } => None,
 
             #[cfg(test)]
             Self::AuthorizeMemberTrustCleanupForTest { .. }
@@ -558,7 +559,8 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             #[cfg(any(test, feature = "test-support"))]
-            Self::CrashStopPreservingDurableWorkForTest { reply_tx } => {
+            Self::CrashStopPreservingDurableWorkForTest { reply_tx }
+            | Self::RebindMemberSessionForTest { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             // Internal-class / non-Result-channel arms have no typed error

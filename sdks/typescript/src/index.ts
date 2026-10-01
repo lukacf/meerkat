@@ -294,6 +294,7 @@ export {
   HostUnavailableError,
   StaleCursorError,
   StaleFenceError,
+  StaleDeliveryScopeError,
   MULTI_HOST_JSON_RPC_ERROR_CODES,
   meerkatErrorFromJsonRpcCode,
   meerkatErrorFromSemanticCode,
@@ -304,6 +305,7 @@ export type {
   WireScopeDeniedDetail,
   WireStaleCursorDetail,
   WireStaleFenceDetail,
+  WireStaleDeliveryScopeDetail,
 } from "./generated/errors.js";
 
 export type {

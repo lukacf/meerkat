@@ -4244,6 +4244,7 @@ mod tests {
                                 variant: enum_variant_id("Conversational"),
                             },
                         ),
+                        (field_id("expected_session_id"), KernelValue::None),
                     ]),
                 },
             )

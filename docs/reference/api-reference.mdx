@@ -18,7 +18,7 @@ committed with the repository:
 | `artifacts/schemas/wire-types.json` | `meerkat-contracts` schemas | Wire request/result/event types shared by protocol and SDK layers |
 | `artifacts/schemas/params.json` | `meerkat-contracts` schemas | Wire request/result parameter types shared by protocol and SDK layers |
 | `artifacts/schemas/events.json` | `meerkat-contracts` schemas | Wire event types shared by protocol and SDK layers |
-| `artifacts/schemas/errors.json` | `meerkat-contracts` error catalog | Error vocabulary/envelope schemas plus the four-entry `JsonRpcErrorCodes` subset (`SCOPE_DENIED`, `HOST_UNAVAILABLE`, `STALE_CURSOR`, `STALE_FENCE`) |
+| `artifacts/schemas/errors.json` | `meerkat-contracts` error catalog | Error vocabulary/envelope schemas plus the five-entry `JsonRpcErrorCodes` subset (`SCOPE_DENIED`, `HOST_UNAVAILABLE`, `STALE_CURSOR`, `STALE_FENCE`, `STALE_DELIVERY_SCOPE`) |
 | `artifacts/schemas/capabilities.json` | `meerkat-contracts` capability catalog | Capability IDs and status shapes |
 | `artifacts/schemas/models.json` | Model catalog emission | Models catalog wire shapes |
 | `artifacts/schemas/runtime-host.json` | Runtime host schema emission | Runtime host info, capability, and health projections |
@@ -429,6 +429,7 @@ Every `ErrorCode` maps to a stable string, JSON-RPC code, HTTP status, and CLI e
 | Mob event cursor stale | `STALE_CURSOR` | -32027 | 410 | 47 |
 | Mob fence stale | `STALE_FENCE` | -32028 | 409 | 48 |
 | Mob member reload required | `MEMBER_RELOAD_REQUIRED` | -32029 | 409 | 49 |
+| Mob delivery scope stale (session moved under a current fence; re-capture the scope) | `STALE_DELIVERY_SCOPE` | -32030 | 409 | 50 |
 | Invalid params | `INVALID_PARAMS` | -32602 | 400 | 2 |
 | Internal error | `INTERNAL_ERROR` | -32603 | 500 | 1 |
 

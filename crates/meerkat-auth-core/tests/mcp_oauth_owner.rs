@@ -562,7 +562,9 @@ async fn interactive_login_token_write_is_lease_published() {
     let auth_lease = test_auth_lease();
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), auth_lease.clone());
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     authority
         .interactive_login(&target, None)
@@ -593,7 +595,9 @@ async fn refreshed_token_write_is_lease_published() {
     let browser = recording_browser(Arc::clone(&state));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     authority
         .interactive_login(&target, None)
@@ -640,7 +644,9 @@ async fn unmarked_non_expiring_stored_token_is_dead_data() {
         Client::new(),
         auth_lease.clone(),
     );
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     authority.interactive_login(&target, None).await.unwrap();
     let key = target.token_key().unwrap();
@@ -685,7 +691,9 @@ async fn marked_non_expiring_stored_token_restores_and_is_admitted() {
         Client::new(),
         auth_lease.clone(),
     );
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     authority.interactive_login(&target, None).await.unwrap();
     republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
@@ -735,7 +743,9 @@ async fn concurrent_expired_reads_share_one_refresh_transaction() {
         Client::new(),
         test_auth_lease(),
     );
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
     authority.interactive_login(&target, None).await.unwrap();
     republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
         tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
@@ -776,7 +786,9 @@ async fn interactive_login_commit_waits_for_cross_process_refresh_transaction() 
     let temp = tempfile::tempdir().unwrap();
     let lock_dir = temp.path().join("locks");
     let store: Arc<dyn TokenStore> = Arc::new(FileTokenStore::new(temp.path().join("credentials")));
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
     let seed = FixtureAuthority::with_fixture_http(
         ProviderAuthPersistence::new(
             Arc::clone(&store),
@@ -859,7 +871,9 @@ async fn failed_login_after_paused_refresh_restores_refresh_winner() {
     let lock_dir = temp.path().join("locks");
     let durable_store: Arc<dyn TokenStore> =
         Arc::new(FileTokenStore::new(temp.path().join("credentials")));
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
     let seed = FixtureAuthority::with_fixture_http(
         ProviderAuthPersistence::new(
             Arc::clone(&durable_store),
@@ -963,7 +977,9 @@ async fn refresh_save_failure_restores_previous_token_and_machine_snapshot() {
         Client::new(),
         auth_lease.clone(),
     );
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
     authority.interactive_login(&target, None).await.unwrap();
     let previous = republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
         tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
@@ -1007,7 +1023,9 @@ async fn interactive_relogin_save_failure_restores_previous_token_and_machine_sn
         Client::new(),
         test_auth_lease(),
     );
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
     seed_authority
         .interactive_login(&target, None)
         .await
@@ -1157,7 +1175,9 @@ async fn interactive_login_discovers_registers_exchanges_and_stores_token() {
     let browser = recording_browser(Arc::clone(&state));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
     let token = authority
         .interactive_login(
             &target,
@@ -1226,7 +1246,9 @@ async fn interactive_login_uses_well_known_fallback_without_challenge_header() {
     let browser = recording_browser(Arc::clone(&state));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     let token = authority
         .interactive_login(&target, None)
@@ -1253,7 +1275,9 @@ async fn stored_token_refresh_uses_resource_and_invalid_grant_requires_reauth() 
     let auth_lease = test_auth_lease();
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), auth_lease.clone());
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     authority
         .interactive_login(&target, None)
@@ -1331,7 +1355,9 @@ async fn permanent_refresh_clear_failure_is_typed_and_closes_machine() {
         Client::new(),
         auth_lease.clone(),
     );
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
     authority.interactive_login(&target, None).await.unwrap();
     republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
         tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
@@ -1370,7 +1396,9 @@ async fn durable_clear_crash_point_reconciles_stranded_refreshing_lifecycle() {
         Client::new(),
         auth_lease.clone(),
     );
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
     authority.interactive_login(&target, None).await.unwrap();
     republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
         tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
@@ -1418,7 +1446,9 @@ async fn transient_refresh_failure_closes_machine_back_to_expiring() {
         Client::new(),
         auth_lease.clone(),
     );
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
     authority.interactive_login(&target, None).await.unwrap();
     republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
         tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
@@ -1445,8 +1475,12 @@ async fn stored_token_metadata_must_match_requested_target() {
     let browser = recording_browser(Arc::clone(&state));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
-    let original = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
-    let other = McpServerIdentity::from_server_config("glean", format!("{base}/other-mcp"));
+    let original = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
+    let other = McpServerIdentity::from_server_config("glean", format!("{base}/other-mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     authority
         .interactive_login(&original, None)
@@ -1478,7 +1512,9 @@ async fn interactive_login_missing_dcr_fails_closed() {
     let browser = recording_browser(Arc::clone(&state));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     let result = authority.interactive_login(&target, None).await;
 
@@ -1504,7 +1540,9 @@ async fn interactive_login_missing_dcr_auth_method_fails_closed() {
     let browser = recording_browser(Arc::clone(&state));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     let result = authority.interactive_login(&target, None).await;
 
@@ -1530,7 +1568,9 @@ async fn interactive_login_rejects_mismatched_protected_resource_metadata() {
     let browser = recording_browser(Arc::clone(&state));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     let result = authority.interactive_login(&target, None).await;
 
@@ -1556,7 +1596,9 @@ async fn interactive_login_rejects_relative_protected_resource_metadata() {
     let browser = recording_browser(Arc::clone(&state));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     let result = authority.interactive_login(&target, None).await;
 
@@ -1577,7 +1619,9 @@ async fn interactive_login_rejects_remote_http_protected_resource() {
     let browser = recording_browser(Arc::clone(&state));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
-    let target = McpServerIdentity::from_server_config("glean", "http://mcp.example.test/mcp");
+    let target = McpServerIdentity::from_server_config("glean", "http://mcp.example.test/mcp")
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     let result = authority.interactive_login(&target, None).await;
 
@@ -1603,7 +1647,9 @@ async fn interactive_login_rejects_mismatched_authorization_server_issuer() {
     let browser = recording_browser(Arc::clone(&state));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     let result = authority.interactive_login(&target, None).await;
 
@@ -1629,7 +1675,9 @@ async fn interactive_login_rejects_issuer_without_exact_codepoint_match() {
     let browser = recording_browser(Arc::clone(&state));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     let result = authority.interactive_login(&target, None).await;
 
@@ -1651,7 +1699,9 @@ async fn interactive_login_token_exchange_failure_fails_closed() {
     let browser = recording_browser(Arc::clone(&state));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     let result = authority.interactive_login(&target, None).await;
 
@@ -1705,7 +1755,9 @@ async fn interactive_login_state_mismatch_fails_closed() {
     let browser = recording_browser(Arc::clone(&state));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     let result = authority.interactive_login(&target, None).await;
 
@@ -1720,7 +1772,9 @@ async fn interactive_login_denied_auth_fails_closed() {
     let browser = recording_browser(Arc::clone(&state));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     let result = authority.interactive_login(&target, None).await;
 
@@ -1738,7 +1792,9 @@ async fn interactive_login_timeout_fails_closed() {
     assert_eq!(MCP_INTERACTIVE_LOGIN_TIMEOUT, Duration::from_secs(300));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
-    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
 
     let result = authority.interactive_login(&target, None).await;
     tokio::time::resume();
@@ -1766,7 +1822,9 @@ async fn absent_account_strategy_refuses_before_discovery_or_browser() {
         Arc::new(NeverOpenBrowser),
         owner.generated,
     );
-    let target = McpServerIdentity::from_server_config("untrusted-label", "not-even-a-url");
+    let target = McpServerIdentity::from_server_config("untrusted-label", "not-even-a-url")
+        .with_expected_account("fixture-account-42")
+        .unwrap();
     assert!(matches!(
         authority.interactive_login(&target, None).await,
         Err(McpOAuthError::Verification(
@@ -1825,7 +1883,9 @@ async fn actual_mcp_exchange_refuses_crossed_account_and_scope_downgrade_and_ret
             )
             .unwrap();
         let target =
-            McpServerIdentity::from_server_config("label-is-not-an-account", format!("{base}/mcp"));
+            McpServerIdentity::from_server_config("label-is-not-an-account", format!("{base}/mcp"))
+                .with_expected_account("fixture-account-42")
+                .unwrap();
         let expected = if missing_scopes {
             ConnectorOAuthRefusal::MissingScopes
         } else {
@@ -1918,7 +1978,9 @@ async fn oauth_expiry_cancelling_actual_mcp_login_erases_persisted_attempt_witho
     )
     .with_interactive_strategy(flows, Arc::new(FixtureAccountStrategy))
     .unwrap();
-    let target = McpServerIdentity::from_server_config("expiry-cancel", format!("{base}/mcp"));
+    let target = McpServerIdentity::from_server_config("expiry-cancel", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
     let login_target = target.clone();
     let login = tokio::spawn(async move { native.interactive_login(&login_target, None).await });
     let _opened = tokio::time::timeout(Duration::from_secs(5), launches.recv())
@@ -1965,5 +2027,426 @@ async fn oauth_expiry_cancelling_actual_mcp_login_erases_persisted_attempt_witho
     assert!(
         state.token_requests.lock().is_empty(),
         "cancelled login must not reach code exchange"
+    );
+}
+
+#[test]
+fn selected_account_partitions_token_and_lifecycle_identity_without_debug_disclosure() {
+    let legacy = McpServerIdentity::from_server_config("same-server", "https://example.test/mcp");
+    let a = legacy
+        .clone()
+        .with_expected_account("subject-a-private")
+        .unwrap();
+    let a_again = legacy
+        .clone()
+        .with_expected_account("subject-a-private")
+        .unwrap();
+    let b = legacy
+        .clone()
+        .with_expected_account("subject-b-private")
+        .unwrap();
+    assert_eq!(a, a_again);
+    assert_eq!(a.token_key().unwrap(), a_again.token_key().unwrap());
+    assert_eq!(a.lease_key().unwrap(), a_again.lease_key().unwrap());
+    assert_ne!(a.token_key().unwrap(), b.token_key().unwrap());
+    assert_ne!(a.lease_key().unwrap(), b.lease_key().unwrap());
+    assert_ne!(a.auth_binding_ref().unwrap(), b.auth_binding_ref().unwrap());
+    assert_ne!(a.token_key().unwrap(), legacy.token_key().unwrap());
+    assert_ne!(a.lease_key().unwrap(), legacy.lease_key().unwrap());
+    assert_eq!(legacy.expected_account(), None);
+    assert_eq!(a.expected_account(), Some("subject-a-private"));
+    let diagnostic = format!("{a:?} {a:#?} {:?}", a.token_key().unwrap());
+    assert!(!diagnostic.contains("subject-a-private"));
+    assert!(!diagnostic.contains("subject-b-private"));
+    assert!(diagnostic.contains("account_selected"));
+}
+
+#[test]
+fn selected_account_validation_rejects_empty_and_control_values_without_normalizing_subject() {
+    for account in ["", "  ", "subject\nother", "subject\0other"] {
+        let result = McpServerIdentity::from_server_config("server", "https://example.test/mcp")
+            .with_expected_account(account);
+        assert!(matches!(
+            result,
+            Err(McpOAuthError::InvalidAccountSelection)
+        ));
+    }
+    assert!(matches!(
+        McpServerIdentity::from_server_config("server", "https://example.test/mcp")
+            .with_expected_account("x".repeat(4097)),
+        Err(McpOAuthError::InvalidAccountSelection)
+    ));
+    let padded = McpServerIdentity::from_server_config("server", "https://example.test/mcp")
+        .with_expected_account(" subject ")
+        .unwrap();
+    let plain = McpServerIdentity::from_server_config("server", "https://example.test/mcp")
+        .with_expected_account("subject")
+        .unwrap();
+    assert_eq!(padded.expected_account(), Some(" subject "));
+    assert_ne!(padded.token_key().unwrap(), plain.token_key().unwrap());
+}
+
+#[tokio::test]
+async fn missing_explicit_account_refuses_before_discovery_browser_or_stored_use() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = FixtureAuthority::with_test_http(
+        store.clone(),
+        Arc::new(NeverOpenBrowser),
+        Client::new(),
+        test_auth_lease(),
+    );
+    // Deliberately unselected. The unusable URL discriminates local selection
+    // refusal from reaching discovery; the browser panics if it is entered.
+    let target = McpServerIdentity::from_server_config("fixture-account-42", "not-even-a-url");
+    assert!(matches!(
+        authority.interactive_login(&target, None).await,
+        Err(McpOAuthError::AccountSelectionRequired)
+    ));
+    assert!(matches!(
+        authority.stored_bearer_token(&target).await,
+        Err(McpOAuthError::AccountSelectionRequired)
+    ));
+    assert!(store.list().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn descriptor_account_must_match_explicit_target_before_browser_or_exchange() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = FixtureAuthority::with_test_http(
+        store.clone(),
+        Arc::new(NeverOpenBrowser),
+        Client::new(),
+        test_auth_lease(),
+    );
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("different-selected-account")
+        .unwrap();
+    assert!(matches!(
+        authority.interactive_login(&target, None).await,
+        Err(McpOAuthError::Verification(
+            ConnectorOAuthRefusal::AccountMismatch
+        ))
+    ));
+    assert_eq!(
+        state.registration_requests.lock().len(),
+        1,
+        "the provider-derived descriptor must actually have been reached"
+    );
+    assert!(state.token_requests.lock().is_empty());
+    assert!(state.opened_url.lock().is_none());
+    assert!(store.list().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn selected_account_never_falls_back_to_admissible_legacy_credentials() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = FixtureAuthority::with_test_http(
+        store.clone(),
+        recording_browser(state.clone()),
+        Client::new(),
+        test_auth_lease(),
+    );
+    let selected = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
+    authority.interactive_login(&selected, None).await.unwrap();
+    let selected_key = selected.token_key().unwrap();
+    let tokens = store.load(&selected_key).await.unwrap().unwrap();
+    // Preserve an intentionally unselected old identity, with a valid native
+    // lifecycle marker for its own key. This is a positive legacy-use control.
+    let legacy = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    let legacy_key = legacy.token_key().unwrap();
+    let legacy_tokens = authority
+        .publish_login_tokens_via_lease(&legacy, &legacy_key, &tokens)
+        .unwrap();
+    store.save(&legacy_key, &legacy_tokens).await.unwrap();
+    store.clear(&selected_key).await.unwrap();
+    let legacy_only = McpOAuthAuthority::new(
+        ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
+        Arc::new(NeverOpenBrowser),
+        authority.auth_lease.clone(),
+    );
+    assert_eq!(
+        legacy_only
+            .stored_bearer_token(&legacy)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("access-token")
+    );
+    assert_eq!(
+        authority.stored_bearer_token(&selected).await.unwrap(),
+        None
+    );
+    assert!(matches!(
+        authority.stored_bearer_token(&legacy).await,
+        Err(McpOAuthError::AccountSelectionRequired)
+    ));
+    assert_eq!(store.load(&legacy_key).await.unwrap(), Some(legacy_tokens));
+    assert_eq!(
+        state.token_requests.lock().len(),
+        1,
+        "missing selected credentials must not refresh or reopen the browser"
+    );
+}
+
+#[tokio::test]
+async fn selected_account_refuses_wrong_or_missing_persisted_subject_without_mutation() {
+    for account in [None, Some("different-account")] {
+        for expired in [false, true] {
+            let (base, state) = spawn_oauth_fixture().await;
+            let store = Arc::new(EphemeralTokenStore::new());
+            let owner = test_auth_lease();
+            let authority = FixtureAuthority::with_test_http(
+                store.clone(),
+                recording_browser(state.clone()),
+                Client::new(),
+                owner.clone(),
+            );
+            let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+                .with_expected_account("fixture-account-42")
+                .unwrap();
+            authority.interactive_login(&target, None).await.unwrap();
+            let rejected = republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+                tokens.account_id = account.map(str::to_owned);
+                if expired {
+                    tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+                }
+            })
+            .await;
+            let key = target.token_key().unwrap();
+            assert!(
+                durable_marker::marker_payload_valid_for_tokens(&rejected, &key),
+                "the negative must reach subject admission, not invalid-marker refusal"
+            );
+            let phase = owner.snapshot(&target.lease_key().unwrap()).phase;
+            assert!(matches!(
+                authority.stored_bearer_token(&target).await,
+                Err(McpOAuthError::Verification(
+                    ConnectorOAuthRefusal::AccountMismatch
+                ))
+            ));
+            assert_eq!(owner.snapshot(&target.lease_key().unwrap()).phase, phase);
+            assert_eq!(store.load(&key).await.unwrap(), Some(rejected));
+            assert_eq!(
+                state.token_requests.lock().len(),
+                1,
+                "subject mismatch must not refresh or revoke another account"
+            );
+        }
+    }
+}
+
+// An adversarial durable-store change precisely at the second native load.
+// The same fixture covers rehydration and reload under the real coordinator.
+struct ReplaceOnSecondLoadStore {
+    inner: Arc<EphemeralTokenStore>,
+    loads: std::sync::atomic::AtomicUsize,
+    replacement: Mutex<Option<(TokenKey, PersistedTokens)>>,
+}
+#[async_trait]
+impl TokenStore for ReplaceOnSecondLoadStore {
+    async fn load(
+        &self,
+        key: &TokenKey,
+    ) -> Result<Option<PersistedTokens>, meerkat_auth_core::auth_store::TokenStoreError> {
+        let replacement = if self.loads.fetch_add(1, Ordering::SeqCst) == 1 {
+            self.replacement.lock().take()
+        } else {
+            None
+        };
+        if let Some((expected, tokens)) = replacement {
+            assert_eq!(
+                key, &expected,
+                "replacement must meet the exact selected key"
+            );
+            self.inner.save(key, &tokens).await?;
+        }
+        self.inner.load(key).await
+    }
+    async fn save(
+        &self,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
+        self.inner.save(key, tokens).await
+    }
+    async fn clear(
+        &self,
+        key: &TokenKey,
+    ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
+        self.inner.clear(key).await
+    }
+    async fn list(&self) -> Result<Vec<TokenKey>, meerkat_auth_core::auth_store::TokenStoreError> {
+        self.inner.list().await
+    }
+    fn backend_name(&self) -> &'static str {
+        "replace-on-second-load"
+    }
+}
+
+#[tokio::test]
+async fn selected_subject_is_rechecked_after_rehydrate_and_inside_refresh_coordinator() {
+    for reopened in [false, true] {
+        let (base, state) = spawn_oauth_fixture().await;
+        let store = Arc::new(ReplaceOnSecondLoadStore {
+            inner: Arc::new(EphemeralTokenStore::new()),
+            loads: std::sync::atomic::AtomicUsize::new(0),
+            replacement: Mutex::new(None),
+        });
+        let authority = FixtureAuthority::with_fixture_http(
+            ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
+            recording_browser(state.clone()),
+            Client::new(),
+            test_auth_lease(),
+        );
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+            .with_expected_account("fixture-account-42")
+            .unwrap();
+        authority.interactive_login(&target, None).await.unwrap();
+        let mut replacement =
+            republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+                if !reopened {
+                    tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+                }
+            })
+            .await;
+        replacement.account_id = Some("other-account-at-reload".into());
+        let key = target.token_key().unwrap();
+        assert!(durable_marker::marker_payload_valid_for_tokens(
+            &replacement,
+            &key
+        ));
+        let reader = if reopened {
+            FixtureAuthority::with_fixture_http(
+                ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
+                Arc::new(NeverOpenBrowser),
+                Client::new(),
+                test_auth_lease(),
+            )
+        } else {
+            authority
+        };
+        *store.replacement.lock() = Some((key.clone(), replacement.clone()));
+        store.loads.store(0, Ordering::SeqCst);
+        let result = reader.stored_bearer_token(&target).await;
+        assert!(
+            matches!(
+                result,
+                Err(McpOAuthError::Verification(
+                    ConnectorOAuthRefusal::AccountMismatch
+                ))
+            ),
+            "both native reload boundaries must retain typed account refusal"
+        );
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            2,
+            "the test must reach exactly the intended native reload"
+        );
+        assert!(store.replacement.lock().is_none());
+        assert_eq!(store.inner.load(&key).await.unwrap(), Some(replacement));
+        assert_eq!(
+            state.token_requests.lock().len(),
+            1,
+            "reload mismatch must refuse before refresh HTTP effects"
+        );
+    }
+}
+
+struct SubstituteRefreshResultCoordinator {
+    inner: InMemoryCoordinator,
+    substitute: AtomicBool,
+}
+#[async_trait]
+impl meerkat_auth_core::auth_store::RefreshCoordinator for SubstituteRefreshResultCoordinator {
+    async fn with_exclusive_mutation(
+        &self,
+        key: TokenKey,
+        mutation_fn: meerkat_auth_core::auth_store::CredentialMutationFn,
+    ) -> Result<
+        meerkat_auth_core::auth_store::CredentialMutationOutcome,
+        meerkat_auth_core::auth_store::CredentialMutationError,
+    > {
+        self.inner.with_exclusive_mutation(key, mutation_fn).await
+    }
+    async fn with_refresh(
+        &self,
+        key: TokenKey,
+        refresh_fn: meerkat_auth_core::auth_store::RefreshFn,
+    ) -> Result<PersistedTokens, meerkat_auth_core::auth_store::RefreshError> {
+        let mut returned = self.inner.with_refresh(key, refresh_fn).await?;
+        if self.substitute.swap(false, Ordering::SeqCst) {
+            // Simulate an incorrectly coalesced return value after the real
+            // native refresh committed. The durable correct row is untouched.
+            returned.account_id = Some("other-coordinator-waiter".into());
+        }
+        Ok(returned)
+    }
+}
+
+#[tokio::test]
+async fn selected_subject_is_checked_on_exact_coordinator_return_without_revoking_committed_row() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let coordinator = Arc::new(SubstituteRefreshResultCoordinator {
+        inner: InMemoryCoordinator::new(),
+        substitute: AtomicBool::new(false),
+    });
+    let owner = test_auth_lease();
+    let authority = FixtureAuthority::with_fixture_http(
+        ProviderAuthPersistence::new(store.clone(), coordinator.clone()),
+        recording_browser(state.clone()),
+        Client::new(),
+        owner.clone(),
+    );
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
+    authority.interactive_login(&target, None).await.unwrap();
+    republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+        tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+    })
+    .await;
+    coordinator.substitute.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        authority.stored_bearer_token(&target).await,
+        Err(McpOAuthError::Verification(
+            ConnectorOAuthRefusal::AccountMismatch
+        ))
+    ));
+    assert!(
+        !coordinator.substitute.load(Ordering::SeqCst),
+        "the substituted coordinator result must actually have been returned"
+    );
+    assert_eq!(
+        state.token_requests.lock().len(),
+        2,
+        "login and the real successful refresh must both occur"
+    );
+    let committed = store
+        .load(&target.token_key().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(committed.account_id.as_deref(), Some("fixture-account-42"));
+    assert_eq!(
+        owner.snapshot(&target.lease_key().unwrap()).phase,
+        Some(meerkat_core::handles::AuthLeasePhase::Valid)
+    );
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("access-token")
+    );
+    assert_eq!(
+        state.token_requests.lock().len(),
+        2,
+        "refusing one wrong return value must not revoke or refresh the correct row"
     );
 }

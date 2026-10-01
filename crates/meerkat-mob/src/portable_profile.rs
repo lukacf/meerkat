@@ -64,6 +64,7 @@ pub(crate) fn project_portable_profile(
                 PortableMcpDecl::Http {
                     url: http.url.clone(),
                     http_transport: http.transport,
+                    oauth_account: http.oauth_account.clone(),
                     required_header_names: Vec::new(),
                     connect_timeout_secs: server.connect_timeout_secs.map(u64::from),
                 }
@@ -156,6 +157,7 @@ pub(crate) fn rehydrate_portable_profile(portable: &PortableProfile) -> Result<P
             PortableMcpDecl::Http {
                 url,
                 http_transport,
+                oauth_account,
                 required_header_names,
                 connect_timeout_secs,
             } => {
@@ -171,6 +173,7 @@ pub(crate) fn rehydrate_portable_profile(portable: &PortableProfile) -> Result<P
                             url: url.clone(),
                             headers: HashMap::new(),
                             transport: *http_transport,
+                            oauth_account: oauth_account.clone(),
                         },
                     ),
                     connect_timeout_secs: connect_timeout_secs
@@ -287,6 +290,14 @@ mod tests {
             HashMap::new(),
         );
         sse.connect_timeout_secs = Some(23);
+        let mut selected = meerkat_core::mcp_config::McpServerConfig::streamable_http(
+            "account-tools",
+            "https://mcp.example.invalid/mcp",
+            HashMap::new(),
+        );
+        if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut selected.transport {
+            http.oauth_account = Some("provider-subject-42".into());
+        }
         let profile = Profile {
             model_fallback: Some(meerkat_core::config::ModelFallbackConfig {
                 enabled: Some(false),
@@ -313,7 +324,7 @@ mod tests {
                 image_generation: true,
                 read_only: false,
                 mcp: Vec::new(),
-                mcp_servers: vec![stdio, sse],
+                mcp_servers: vec![stdio, sse, selected.clone()],
                 rust_bundles: Vec::new(),
             },
             peer_description: "review worker".to_string(),
@@ -345,6 +356,7 @@ mod tests {
             Some(&PortableMcpDecl::Http {
                 url: "https://mcp.example.invalid/events".to_string(),
                 http_transport: Some(meerkat_core::mcp_config::McpHttpTransport::Sse),
+                oauth_account: None,
                 required_header_names: Vec::new(),
                 connect_timeout_secs: Some(23),
             })
@@ -365,6 +377,24 @@ mod tests {
             meerkat_core::mcp_config::McpTransportKind::Sse
         );
         assert_eq!(rehydrated_sse.connect_timeout_secs, Some(23));
+        assert_eq!(
+            portable.tools.mcp_servers.get("account-tools"),
+            Some(&PortableMcpDecl::Http {
+                url: "https://mcp.example.invalid/mcp".into(),
+                http_transport: None,
+                oauth_account: Some("provider-subject-42".into()),
+                required_header_names: Vec::new(),
+                connect_timeout_secs: None,
+            })
+        );
+        assert_eq!(
+            rehydrated
+                .tools
+                .mcp_servers
+                .iter()
+                .find(|server| server.name == "account-tools"),
+            Some(&selected)
+        );
         let round_tripped = project_portable_profile(
             &rehydrated,
             rehydrated.runtime_mode,
@@ -410,6 +440,7 @@ mod tests {
             PortableMcpDecl::Http {
                 url: "https://example.invalid/mcp".to_string(),
                 http_transport: None,
+                oauth_account: None,
                 required_header_names: vec!["authorization".to_string()],
                 connect_timeout_secs: None,
             },

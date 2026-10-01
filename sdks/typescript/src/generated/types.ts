@@ -172,6 +172,7 @@ export interface McpStdioConfig {
 
 export interface McpHttpConfig {
   headers?: Record<string, string>;
+  oauth_account?: string | null;
   transport?: McpHttpTransport | null;
   url: string;
 }
@@ -3736,6 +3737,7 @@ export interface PortableMcpDeclStdio {
 export interface PortableMcpDeclHttp {
   connect_timeout_secs?: number | null;
   http_transport?: McpHttpTransport | null;
+  oauth_account?: string | null;
   required_header_names?: string[];
   transport: "http";
   url: string;

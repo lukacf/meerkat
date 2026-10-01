@@ -334,6 +334,10 @@ pub trait TokenStore: Send + Sync {
 /// Errors raised by the refresh coordinator.
 #[derive(Clone, Debug, Error)]
 pub enum RefreshError {
+    /// The credential loaded under the coordinator differs from the caller's
+    /// selected identity. This is a use refusal, not a freshness classification.
+    #[error("stored credential does not match the selected identity")]
+    CredentialIdentityMismatch,
     #[error("refresh function failed: {0}")]
     Refresh(String),
     #[error("refresh function failed: {message}")]
@@ -429,9 +433,10 @@ impl RefreshError {
             | Self::Classified { observation, .. }
             | Self::DurableTerminalCommit { observation, .. } => observation.clone(),
             Self::ReauthRequired(_) => RefreshFailureObservation::local_credential_unusable(),
-            Self::Refresh(_) | Self::Cancelled | Self::LockFailed(_) => {
-                RefreshFailureObservation::transient()
-            }
+            Self::Refresh(_)
+            | Self::CredentialIdentityMismatch
+            | Self::Cancelled
+            | Self::LockFailed(_) => RefreshFailureObservation::transient(),
         }
     }
 
@@ -443,6 +448,7 @@ impl RefreshError {
             Self::Classified { disposition, .. }
             | Self::DurableTerminalCommit { disposition, .. } => Some(*disposition),
             Self::Refresh(_)
+            | Self::CredentialIdentityMismatch
             | Self::Observed { .. }
             | Self::ReauthRequired(_)
             | Self::Cancelled

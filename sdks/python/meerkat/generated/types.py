@@ -186,6 +186,7 @@ class McpHttpConfig:
     """HTTP transport configuration (streamable HTTP or legacy SSE)"""
     url: str
     headers: Optional[dict[str, str]] = None
+    oauth_account: Optional[str] = None
     transport: Optional[McpHttpTransport] = None
 
 
@@ -204,6 +205,7 @@ class McpHttpServerConfig(TypedDict, total=False):
     url: Required[str]
     headers: NotRequired[dict[str, str]]
     transport: NotRequired[McpHttpTransport]
+    oauth_account: NotRequired[Optional[str]]
     connect_timeout_secs: NotRequired[int]
 
 
@@ -6534,6 +6536,7 @@ class PortableMcpDeclStdio(TypedDict, total=False):
 class PortableMcpDeclHttp(TypedDict, total=False):
     connect_timeout_secs: NotRequired[Optional[int]]
     http_transport: NotRequired[Optional[McpHttpTransport]]
+    oauth_account: NotRequired[Optional[str]]
     required_header_names: NotRequired[list[str]]
     transport: Required[Literal['http']]
     url: Required[str]

@@ -158,7 +158,7 @@ pub struct PortableToolConfig {
 /// value maps: stdio `env` and HTTP `headers` are structurally absent; only
 /// the required key/header NAMES travel, satisfied member-host-side.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "transport", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PortableMcpDecl {
     Stdio {
@@ -176,11 +176,51 @@ pub enum PortableMcpDecl {
         /// default of streamable HTTP; explicit SSE must survive placement.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         http_transport: Option<meerkat_core::mcp_config::McpHttpTransport>,
+        /// Selected OAuth provider subject or account ID, never a display name.
+        /// Carries the expectation without carrying a credential.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        oauth_account: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         required_header_names: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         connect_timeout_secs: Option<u64>,
     },
+}
+
+impl std::fmt::Debug for PortableMcpDecl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stdio {
+                command,
+                args,
+                required_env_keys,
+                connect_timeout_secs,
+            } => f
+                .debug_struct("Stdio")
+                .field("command", command)
+                .field("args", args)
+                .field("required_env_keys", required_env_keys)
+                .field("connect_timeout_secs", connect_timeout_secs)
+                .finish(),
+            Self::Http {
+                url,
+                http_transport,
+                oauth_account,
+                required_header_names,
+                connect_timeout_secs,
+            } => f
+                .debug_struct("Http")
+                .field("url", url)
+                .field("http_transport", http_transport)
+                .field(
+                    "oauth_account",
+                    &oauth_account.as_ref().map(|_| "<redacted>"),
+                )
+                .field("required_header_names", required_header_names)
+                .field("connect_timeout_secs", connect_timeout_secs)
+                .finish(),
+        }
+    }
 }
 
 /// Definition-level facts the member build needs beyond the profile.
@@ -601,6 +641,7 @@ mod tests {
             PortableMcpDecl::Http {
                 url: "https://mcp.example".to_string(),
                 http_transport: Some(meerkat_core::mcp_config::McpHttpTransport::Sse),
+                oauth_account: None,
                 required_header_names: vec!["authorization".to_string()],
                 connect_timeout_secs: Some(23),
             }
@@ -616,10 +657,29 @@ mod tests {
             PortableMcpDecl::Http {
                 url: "https://mcp.example".to_string(),
                 http_transport: None,
+                oauth_account: None,
                 required_header_names: Vec::new(),
                 connect_timeout_secs: None,
             }
         );
+    }
+
+    #[test]
+    fn portable_http_oauth_account_round_trips_and_redacts_debug() {
+        let wire = json!({
+            "transport": "http",
+            "url": "https://mcp.example",
+            "oauth_account": "provider-subject-private-42"
+        });
+        let decl: PortableMcpDecl = serde_json::from_value(wire.clone()).expect("selected account");
+        assert_eq!(serde_json::to_value(&decl).expect("serialize"), wire);
+        assert!(!format!("{decl:?}").contains("provider-subject-private-42"));
+        assert!(!format!("{decl:#?}").contains("provider-subject-private-42"));
+
+        let legacy = json!({"transport": "http", "url": "https://mcp.example"});
+        let unselected: PortableMcpDecl =
+            serde_json::from_value(legacy.clone()).expect("unselected server");
+        assert_eq!(serde_json::to_value(unselected).expect("serialize"), legacy);
     }
 
     #[test]

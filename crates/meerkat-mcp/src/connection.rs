@@ -81,6 +81,15 @@ impl McpConnection {
         auth_resolver: Option<Arc<dyn McpAuthResolver>>,
         client_factory: Option<Arc<dyn McpClientServiceFactory>>,
     ) -> Result<Self, McpError> {
+        if matches!(config.transport, McpTransportConfig::Http(_)) {
+            let target = McpServerIdentity::from_config(config)
+                .map_err(mcp_auth_error_to_connection_failed)?;
+            if target.expected_account().is_some() && auth_resolver.is_none() {
+                return Err(McpError::OAuthAccountRejected(
+                    McpOAuthError::UnsupportedAccountSelection,
+                ));
+            }
+        }
         // Refusal precedes process spawn, SSE startup and HTTP transport effects.
         let client = ClientServiceSelection::select(config, client_factory.as_deref())?;
         let service = match &config.transport {
@@ -166,11 +175,23 @@ impl McpConnection {
                 .await
                 .map_err(StreamableConnectError::into_mcp_error);
         }
-        let target = McpServerIdentity::from_server_config(config.name.clone(), url.to_string());
+        let target =
+            McpServerIdentity::from_config(config).map_err(mcp_auth_error_to_connection_failed)?;
         let mut stored_token = None;
         let mut force_interactive_reauth = false;
         if let Some(resolver) = auth_resolver.as_deref() {
             match resolver.stored_bearer_token(&target).await {
+                Ok(None) if target.expected_account().is_some() => {
+                    if matches!(auth_mode, McpAuthMode::Interactive) {
+                        force_interactive_reauth = true;
+                    } else {
+                        return Err(McpError::OAuthAccountRejected(
+                            McpOAuthError::MissingStoredToken {
+                                server_name: config.name.clone(),
+                            },
+                        ));
+                    }
+                }
                 Ok(token) => stored_token = token,
                 Err(McpOAuthError::ReauthRequired { .. })
                     if matches!(auth_mode, McpAuthMode::Interactive) =>
@@ -459,8 +480,16 @@ fn auth_failure_suggests_oauth(error: &StreamableConnectError) -> bool {
 }
 
 fn mcp_auth_error_to_connection_failed(error: McpOAuthError) -> McpError {
-    McpError::ConnectionFailed {
-        reason: error.to_string(),
+    match error {
+        McpOAuthError::InvalidAccountSelection
+        | McpOAuthError::AccountSelectionRequired
+        | McpOAuthError::UnsupportedAccountSelection
+        | McpOAuthError::Verification(
+            meerkat_auth_core::connector_oauth::ConnectorOAuthRefusal::AccountMismatch,
+        ) => McpError::OAuthAccountRejected(error),
+        other => McpError::ConnectionFailed {
+            reason: other.to_string(),
+        },
     }
 }
 

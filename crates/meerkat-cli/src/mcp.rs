@@ -133,6 +133,7 @@ pub struct AddServerRequest {
     pub url: Option<String>,
     pub positional_url: Option<String>,
     pub headers: Vec<String>,
+    pub oauth_account: Option<String>,
     pub command: Vec<String>,
     pub env: Vec<String>,
     pub project_scope: bool,
@@ -158,7 +159,7 @@ pub async fn add_server(
         );
     }
 
-    let server = build_server_config(
+    let mut server = build_server_config(
         request.name.clone(),
         request.transport,
         request.url,
@@ -167,6 +168,13 @@ pub async fn add_server(
         request.command,
         request.env,
     )?;
+    if let Some(account) = request.oauth_account {
+        let McpTransportConfig::Http(http) = &mut server.transport else {
+            return Err(meerkat_auth_core::McpOAuthError::UnsupportedAccountSelection.into());
+        };
+        http.oauth_account = Some(account);
+        meerkat_auth_core::McpServerIdentity::from_config(&server)?;
+    }
 
     let authority = McpConfigMutationAuthority::for_scope(
         scope,
@@ -308,6 +316,7 @@ pub async fn list_servers(
                     },
                     "url": http.url,
                     "headers": http.headers,
+                    "oauth_account": http.oauth_account,
                     "scope": s.scope.to_string(),
                 }),
             })
@@ -391,6 +400,7 @@ pub async fn get_server(
                 },
                 "url": http.url,
                 "headers": http.headers,
+                    "oauth_account": http.oauth_account,
                 "scope": server.scope.to_string(),
             }),
         };
@@ -428,6 +438,9 @@ pub async fn get_server(
                 };
                 println!("Transport: {transport}");
                 println!("URL:       {}", http.url);
+                if let Some(account) = &http.oauth_account {
+                    println!("Account:   {account}");
+                }
                 if !http.headers.is_empty() {
                     println!("Headers:");
                     for (k, v) in &http.headers {
@@ -457,6 +470,63 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
+    async fn selected_oauth_account_is_persisted_and_conflicts_do_not_write() {
+        let temp = TempDir::new().unwrap();
+        for (name, transport, headers, account, accepted) in [
+            (
+                "selected",
+                McpTransportKind::StreamableHttp,
+                vec![],
+                "provider-subject-a",
+                true,
+            ),
+            (
+                "static",
+                McpTransportKind::StreamableHttp,
+                vec!["Authorization: Bearer fixture".into()],
+                "provider-subject-a",
+                false,
+            ),
+            (
+                "sse",
+                McpTransportKind::Sse,
+                vec![],
+                "provider-subject-a",
+                false,
+            ),
+            ("empty", McpTransportKind::StreamableHttp, vec![], "", false),
+        ] {
+            let result = add_server(
+                AddServerRequest {
+                    name: name.into(),
+                    transport: Some(transport),
+                    url: Some("https://fixture.example/mcp".into()),
+                    positional_url: None,
+                    headers,
+                    oauth_account: Some(account.into()),
+                    command: Vec::new(),
+                    env: Vec::new(),
+                    project_scope: false,
+                },
+                None,
+                Some(temp.path()),
+            )
+            .await;
+            assert_eq!(
+                result.is_ok(),
+                accepted,
+                "unexpected config admission for {name}"
+            );
+        }
+        let stored = McpConfig::load_scope_from_roots(McpScope::User, None, Some(temp.path()))
+            .await
+            .unwrap();
+        assert_eq!(stored.servers.len(), 1);
+        let target = meerkat_auth_core::McpServerIdentity::from_config(&stored.servers[0]).unwrap();
+        assert_eq!(target.expected_account(), Some("provider-subject-a"));
+    }
+
+    #[tokio::test]
     async fn test_offline_mutations_use_explicit_convention_roots() {
         let temp = TempDir::new().unwrap();
         let context_root = temp.path().join("context");
@@ -469,6 +539,7 @@ mod tests {
                 url: None,
                 positional_url: None,
                 headers: Vec::new(),
+                oauth_account: None,
                 command: vec!["echo".to_string(), "hello".to_string()],
                 env: Vec::new(),
                 project_scope: false,
@@ -529,6 +600,7 @@ future_server_key = "preserve-too"
                 url: None,
                 positional_url: None,
                 headers: Vec::new(),
+                oauth_account: None,
                 command: vec!["echo".to_string()],
                 env: Vec::new(),
                 project_scope: false,

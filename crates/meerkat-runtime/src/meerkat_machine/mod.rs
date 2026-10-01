@@ -8750,6 +8750,18 @@ pub struct MeerkatMachineShared {
     test_executor_after_ensure_pause_reached: crate::tokio::sync::Notify,
     #[cfg(feature = "test-support")]
     test_executor_after_ensure_pause_release: crate::tokio::sync::Notify,
+    /// One-shot hold armed by a test: the next unregister teardown saga this
+    /// machine starts waits here (entered, release) before it tears down.
+    /// Per-machine unregister caller grace override set by a test.
+    #[cfg(feature = "test-support")]
+    test_unregister_caller_wait_grace: StdMutex<Option<std::time::Duration>>,
+    #[cfg(feature = "test-support")]
+    test_unregister_saga_hold: StdMutex<
+        Option<(
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     /// This machine's user-interrupt acknowledgement bound. Tests scope it
     /// per machine: a short bound would make every success-path interrupt
     /// race the process-global cleanup dispatcher that all in-process tests
@@ -10248,6 +10260,10 @@ impl MeerkatMachine {
                 test_executor_after_ensure_pause_reached: crate::tokio::sync::Notify::new(),
                 #[cfg(feature = "test-support")]
                 test_executor_after_ensure_pause_release: crate::tokio::sync::Notify::new(),
+                #[cfg(feature = "test-support")]
+                test_unregister_saga_hold: StdMutex::new(None),
+                #[cfg(feature = "test-support")]
+                test_unregister_caller_wait_grace: StdMutex::new(None),
                 #[cfg(test)]
                 test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
                 #[cfg(test)]
@@ -10340,6 +10356,10 @@ impl MeerkatMachine {
                 test_executor_after_ensure_pause_reached: crate::tokio::sync::Notify::new(),
                 #[cfg(feature = "test-support")]
                 test_executor_after_ensure_pause_release: crate::tokio::sync::Notify::new(),
+                #[cfg(feature = "test-support")]
+                test_unregister_saga_hold: StdMutex::new(None),
+                #[cfg(feature = "test-support")]
+                test_unregister_caller_wait_grace: StdMutex::new(None),
                 #[cfg(test)]
                 test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
                 #[cfg(test)]
@@ -10432,6 +10452,10 @@ impl MeerkatMachine {
                 test_executor_after_ensure_pause_reached: crate::tokio::sync::Notify::new(),
                 #[cfg(feature = "test-support")]
                 test_executor_after_ensure_pause_release: crate::tokio::sync::Notify::new(),
+                #[cfg(feature = "test-support")]
+                test_unregister_saga_hold: StdMutex::new(None),
+                #[cfg(feature = "test-support")]
+                test_unregister_caller_wait_grace: StdMutex::new(None),
                 #[cfg(test)]
                 test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
                 #[cfg(test)]

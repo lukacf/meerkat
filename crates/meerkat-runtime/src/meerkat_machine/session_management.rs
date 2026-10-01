@@ -5993,7 +5993,7 @@ impl MeerkatMachine {
             UnregisterTeardownCaller::Explicit,
             UnregisterTeardownAdmission::ExactTerminalUnattachedRegistration,
             Some(witness),
-            UnregisterTeardownWait::CallerGrace(unregister_caller_wait_deadline()),
+            UnregisterTeardownWait::CallerGrace(self.unregister_caller_wait_deadline()),
         )
         .await?
         .require_completed()
@@ -6622,7 +6622,7 @@ impl MeerkatMachine {
             UnregisterTeardownCaller::Explicit,
             UnregisterTeardownAdmission::AnyCurrentRegistration,
             Some(registration),
-            UnregisterTeardownWait::CallerGrace(unregister_caller_wait_deadline()),
+            UnregisterTeardownWait::CallerGrace(self.unregister_caller_wait_deadline()),
         )
         .await?
         .require_completed()
@@ -7575,7 +7575,7 @@ impl MeerkatMachine {
             caller,
             UnregisterTeardownAdmission::AnyCurrentRegistration,
             None,
-            UnregisterTeardownWait::CallerGrace(unregister_caller_wait_deadline()),
+            UnregisterTeardownWait::CallerGrace(self.unregister_caller_wait_deadline()),
         )
         .await
         .and_then(UnregisterTeardownWaitOutcome::require_completed)
@@ -7906,6 +7906,8 @@ impl MeerkatMachine {
                 let worker = crate::tokio::spawn(unregister_coordinator_poll_scope(
                     coordinator_id,
                     async move {
+                        #[cfg(feature = "test-support")]
+                        saga_machine.run_unregister_saga_test_hold().await;
                         saga_machine
                             .run_owned_unregister_teardown(
                                 &saga_session_id,
@@ -10389,6 +10391,68 @@ impl MeerkatMachine {
         self.test_executor_after_ensure_pause_reached
             .notified()
             .await;
+    }
+
+    /// Hold the next unregister teardown saga this machine starts before it
+    /// tears anything down. The first receiver resolves when the saga reaches
+    /// the hold; sending on (or dropping) the returned sender lets it go on.
+    /// Callers that wait on the plain unregister then see its caller grace
+    /// elapse while the saga is still running.
+    #[cfg(feature = "test-support")]
+    pub fn test_hold_next_unregister_saga(
+        &self,
+    ) -> (
+        crate::tokio::sync::oneshot::Receiver<()>,
+        crate::tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = crate::tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
+        let replaced = self
+            .test_unregister_saga_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace((entered_tx, release_rx));
+        assert!(
+            replaced.is_none(),
+            "unregister saga test hold already armed"
+        );
+        (entered_rx, release_tx)
+    }
+
+    /// Shorten this machine's unregister caller grace (the plain unregister's
+    /// bounded wait before it reports `UnregisterInProgress`) for a test.
+    #[cfg(feature = "test-support")]
+    pub fn test_set_unregister_caller_wait_grace(&self, grace: std::time::Duration) {
+        *self
+            .test_unregister_caller_wait_grace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(grace);
+    }
+
+    /// The deadline for a plain unregister caller's bounded wait.
+    fn unregister_caller_wait_deadline(&self) -> meerkat_core::time_compat::Instant {
+        #[cfg(feature = "test-support")]
+        if let Some(grace) = *self
+            .test_unregister_caller_wait_grace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            return meerkat_core::time_compat::Instant::now() + grace;
+        }
+        unregister_caller_wait_deadline()
+    }
+
+    #[cfg(feature = "test-support")]
+    async fn run_unregister_saga_test_hold(&self) {
+        let hold = self
+            .test_unregister_saga_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some((entered_tx, release_rx)) = hold {
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+        }
     }
 
     #[cfg(feature = "test-support")]

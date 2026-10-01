@@ -3050,6 +3050,7 @@ runtime_internal_inputs!(
         UpdateDeferredSessionLlmIdentity,
         BindLiveExecutionChannel,
         StageExperimentalLiveExecution,
+        AdvanceLiveExperimentalStagedSeed,
         ResolveLiveExecutionModeAdmission,
         RegisterLivePlaybackOwner,
         AuthorizeLiveActiveChannelControl,

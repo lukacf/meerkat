@@ -494,7 +494,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
 - `AcceptWithoutWake`(input_id: InputId)
 - `Recycle`
-- `AdvanceLiveExperimentalStagedSeed`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, previous_seed_cursor: u64, next_seed_cursor: u64)
 - `RequestDeferredTools`(authorities: Map<ToolName, ToolVisibilityWitness>)
 
 ## Surface-only Inputs
@@ -687,6 +686,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveLiveOpenAdmission`(session_id: String, channel_id: String, llm_identity: SessionLlmIdentity)
 - `BindLiveExecutionChannel`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64)
 - `StageExperimentalLiveExecution`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64, pending_receipt: String)
+- `AdvanceLiveExperimentalStagedSeed`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, previous_seed_cursor: u64, next_seed_cursor: u64)
 - `ResolveLiveExecutionModeAdmission`(session_id: String, channel_id: String, profile_id: String, requested_mode: LiveExecutionMode, function_bridge_available: Bool, client_context_available: Bool)
 - `RegisterLivePlaybackOwner`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, owner_id: String, readiness_id: String, pending_receipt: String)
 - `AuthorizeLiveActiveChannelControl`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, activation_receipt: String, control_authority_id: String, operation: String)

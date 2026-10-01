@@ -2598,6 +2598,7 @@ mod tests {
                 meerkat_runtime::meerkat_machine::dsl::LiveChannelDegradationReason::Other,
             ),
             degradation_detail: Some("provider reported degraded mode".to_string()),
+            media_fault_reopen_recommended: None,
             channel_status_commit_authority: None,
         };
 

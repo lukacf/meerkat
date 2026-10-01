@@ -13897,6 +13897,10 @@ pub struct State {
     pub live_channel_status_observation_sequence_by_channel:
         std::collections::BTreeMap<String, u64>,
     pub live_channel_status_by_channel: std::collections::BTreeMap<String, LiveChannelPublicStatus>,
+    pub live_media_health_requested_output_by_channel: std::collections::BTreeMap<String, String>,
+    pub live_media_health_judged_channels: std::collections::BTreeSet<String>,
+    pub live_media_fault_reopen_recommended_by_channel: std::collections::BTreeMap<String, bool>,
+    pub live_media_fault_reopens_by_session: std::collections::BTreeMap<String, u64>,
     pub session_event_stream_open_result_sequence: u64,
     pub session_event_stream_close_result_sequence: u64,
     pub session_event_stream_terminal_sequence: u64,
@@ -15200,6 +15204,22 @@ impl std::fmt::Debug for State {
             .field(
                 "live_channel_status_by_channel",
                 &self.live_channel_status_by_channel,
+            )
+            .field(
+                "live_media_health_requested_output_by_channel",
+                &self.live_media_health_requested_output_by_channel,
+            )
+            .field(
+                "live_media_health_judged_channels",
+                &self.live_media_health_judged_channels,
+            )
+            .field(
+                "live_media_fault_reopen_recommended_by_channel",
+                &self.live_media_fault_reopen_recommended_by_channel,
+            )
+            .field(
+                "live_media_fault_reopens_by_session",
+                &self.live_media_fault_reopens_by_session,
             )
             .field(
                 "session_event_stream_open_result_sequence",
@@ -17628,6 +17648,25 @@ pub mod inputs {
         pub degradation_detail: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestLiveMediaHealth {
+        pub session_id: String,
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub output_id: String,
+        pub assistant_transcript_nonempty: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveLiveChannelMediaHealth {
+        pub session_id: String,
+        pub channel_id: String,
+        pub output_id: String,
+        pub decoded_frames: u64,
+        pub audible_frames: u64,
+        pub max_rms_micros: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnDrain {
         pub mode: DrainMode,
     }
@@ -18403,6 +18442,8 @@ pub enum Input {
     RecordMobEventStreamTerminated(inputs::RecordMobEventStreamTerminated),
     ResolveMobEventStreamClose(inputs::ResolveMobEventStreamClose),
     RecordLiveChannelStatus(inputs::RecordLiveChannelStatus),
+    RequestLiveMediaHealth(inputs::RequestLiveMediaHealth),
+    ObserveLiveChannelMediaHealth(inputs::ObserveLiveChannelMediaHealth),
     SpawnDrain(inputs::SpawnDrain),
     StopDrain(inputs::StopDrain),
     StageVisibilityFilter(inputs::StageVisibilityFilter),
@@ -18943,6 +18984,8 @@ impl Input {
             Self::RecordMobEventStreamTerminated(_) => InputKind::RecordMobEventStreamTerminated,
             Self::ResolveMobEventStreamClose(_) => InputKind::ResolveMobEventStreamClose,
             Self::RecordLiveChannelStatus(_) => InputKind::RecordLiveChannelStatus,
+            Self::RequestLiveMediaHealth(_) => InputKind::RequestLiveMediaHealth,
+            Self::ObserveLiveChannelMediaHealth(_) => InputKind::ObserveLiveChannelMediaHealth,
             Self::SpawnDrain(_) => InputKind::SpawnDrain,
             Self::StopDrain(_) => InputKind::StopDrain,
             Self::StageVisibilityFilter(_) => InputKind::StageVisibilityFilter,
@@ -19370,6 +19413,8 @@ pub enum InputKind {
     RecordMobEventStreamTerminated,
     ResolveMobEventStreamClose,
     RecordLiveChannelStatus,
+    RequestLiveMediaHealth,
+    ObserveLiveChannelMediaHealth,
     SpawnDrain,
     StopDrain,
     StageVisibilityFilter,
@@ -20865,6 +20910,21 @@ pub mod effects {
         pub status_observation_sequence: u64,
         pub degradation_reason: Option<LiveChannelDegradationReason>,
         pub degradation_detail: Option<String>,
+        pub media_fault_reopen_recommended: Option<bool>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveMediaHealthRequested {
+        pub session_id: String,
+        pub channel_id: String,
+        pub output_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveChannelMediaHealthJudged {
+        pub session_id: String,
+        pub channel_id: String,
+        pub output_id: String,
+        pub media_faulted: bool,
+        pub reopen_recommended: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RealtimeTranscriptAppended {
@@ -21352,6 +21412,8 @@ pub enum Effect {
     MobEventStreamTerminalResolved(effects::MobEventStreamTerminalResolved),
     MobEventStreamCloseResolved(effects::MobEventStreamCloseResolved),
     LiveChannelStatusResolved(effects::LiveChannelStatusResolved),
+    LiveMediaHealthRequested(effects::LiveMediaHealthRequested),
+    LiveChannelMediaHealthJudged(effects::LiveChannelMediaHealthJudged),
     RealtimeTranscriptAppended(effects::RealtimeTranscriptAppended),
     PeerIngressClassified(effects::PeerIngressClassified),
     PeerResponseReplyClassified(effects::PeerResponseReplyClassified),
@@ -21606,6 +21668,8 @@ pub enum EffectKind {
     MobEventStreamTerminalResolved,
     MobEventStreamCloseResolved,
     LiveChannelStatusResolved,
+    LiveMediaHealthRequested,
+    LiveChannelMediaHealthJudged,
     RealtimeTranscriptAppended,
     PeerIngressClassified,
     PeerResponseReplyClassified,
@@ -23905,6 +23969,18 @@ pub enum TransitionId {
     RecordLiveChannelStatusRunning,
     RecordLiveChannelStatusRetired,
     RecordLiveChannelStatusStopped,
+    RequestLiveMediaHealthIdle,
+    RequestLiveMediaHealthAttached,
+    RequestLiveMediaHealthRunning,
+    ObserveLiveChannelMediaHealthAudibleIdle,
+    ObserveLiveChannelMediaHealthAudibleAttached,
+    ObserveLiveChannelMediaHealthAudibleRunning,
+    ObserveLiveChannelMediaHealthSilentReopenIdle,
+    ObserveLiveChannelMediaHealthSilentReopenAttached,
+    ObserveLiveChannelMediaHealthSilentReopenRunning,
+    ObserveLiveChannelMediaHealthSilentExhaustedIdle,
+    ObserveLiveChannelMediaHealthSilentExhaustedAttached,
+    ObserveLiveChannelMediaHealthSilentExhaustedRunning,
     ResolveWaitAllAdmissionDuplicateRejectedIdle,
     ResolveWaitAllAdmissionDuplicateRejectedAttached,
     ResolveWaitAllAdmissionDuplicateRejectedRunning,
@@ -25003,6 +25079,10 @@ pub fn initial_state() -> State {
         live_channel_status_result_sequence: 0,
         live_channel_status_observation_sequence_by_channel: Default::default(),
         live_channel_status_by_channel: Default::default(),
+        live_media_health_requested_output_by_channel: Default::default(),
+        live_media_health_judged_channels: Default::default(),
+        live_media_fault_reopen_recommended_by_channel: Default::default(),
+        live_media_fault_reopens_by_session: Default::default(),
         session_event_stream_open_result_sequence: 0,
         session_event_stream_close_result_sequence: 0,
         session_event_stream_terminal_sequence: 0,

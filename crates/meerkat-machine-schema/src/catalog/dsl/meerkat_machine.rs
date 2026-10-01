@@ -4109,6 +4109,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_channel_status_result_sequence: u64,
             live_channel_status_observation_sequence_by_channel: Map<String, u64>,
             live_channel_status_by_channel: Map<String, Enum<LiveChannelPublicStatus>>,
+            // --- Live media health ---
+            //
+            // The first assistant output of each channel is judged once: the
+            // runtime requests the client's raw decoded-audio counters for
+            // that exact output at its typed end, and the generated edge
+            // judges them. An output whose transcript is non-empty but whose
+            // decoded audio stayed silent is a media fault: the channel closes
+            // with that reason. Each session may recommend one reopen on a
+            // media fault; a second fault on the same session closes without
+            // the recommendation, so a broken media path never loops.
+            live_media_health_requested_output_by_channel: Map<String, String>,
+            live_media_health_judged_channels: Set<String>,
+            live_media_fault_reopen_recommended_by_channel: Map<String, bool>,
+            live_media_fault_reopens_by_session: Map<String, u64>,
 
             // --- RPC event-stream public result authority ---
             //
@@ -4692,6 +4706,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_channel_status_result_sequence = 0,
             live_channel_status_observation_sequence_by_channel = EmptyMap,
             live_channel_status_by_channel = EmptyMap,
+            live_media_health_requested_output_by_channel = EmptyMap,
+            live_media_health_judged_channels = EmptySet,
+            live_media_fault_reopen_recommended_by_channel = EmptyMap,
+            live_media_fault_reopens_by_session = EmptyMap,
             // RPC event-stream public result authority
             session_event_stream_open_result_sequence = 0,
             session_event_stream_close_result_sequence = 0,
@@ -6362,6 +6380,23 @@ macro_rules! meerkat_catalog_machine_dsl {
                 degradation_reason: Option<Enum<LiveChannelDegradationReason>>,
                 degradation_detail: Option<String>,
             },
+            RequestLiveMediaHealth {
+                session_id: String,
+                channel_id: String,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+                output_id: String,
+                assistant_transcript_nonempty: bool,
+            },
+            ObserveLiveChannelMediaHealth {
+                session_id: String,
+                channel_id: String,
+                output_id: String,
+                decoded_frames: u64,
+                audible_frames: u64,
+                max_rms_micros: u64,
+            },
             // Comms drain inputs
             SpawnDrain { mode: DrainMode },
             StopDrain,
@@ -7794,6 +7829,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 status_observation_sequence: u64,
                 degradation_reason: Option<Enum<LiveChannelDegradationReason>>,
                 degradation_detail: Option<String>,
+                media_fault_reopen_recommended: Option<bool>,
+            },
+            LiveMediaHealthRequested {
+                session_id: String,
+                channel_id: String,
+                output_id: String,
+            },
+            LiveChannelMediaHealthJudged {
+                session_id: String,
+                channel_id: String,
+                output_id: String,
+                media_faulted: bool,
+                reopen_recommended: bool,
             },
             // #51: machine-owned realtime transcript staging fact. Emitted when
             // a realtime turn stages a transcript item (the explicit-commit
@@ -8258,6 +8306,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition MobEventStreamTerminalResolved => local seam SurfaceResultAlignment,
         disposition MobEventStreamCloseResolved => local seam SurfaceResultAlignment,
         disposition LiveChannelStatusResolved => local seam SurfaceResultAlignment,
+        disposition LiveMediaHealthRequested => external seam OwnerRealizationOnly,
+        disposition LiveChannelMediaHealthJudged => external seam OwnerRealizationOnly,
         disposition RealtimeTranscriptAppended => local seam SurfaceResultAlignment,
         disposition PeerIngressClassified => local seam NoOwnerRealization,
         disposition PeerResponseReplyClassified => local seam NoOwnerRealization,
@@ -31683,7 +31733,163 @@ macro_rules! meerkat_catalog_machine_dsl {
                 sequence: self.live_channel_status_result_sequence,
                 status_observation_sequence: status_observation_sequence,
                 degradation_reason: degradation_reason,
-                degradation_detail: degradation_detail
+                degradation_detail: degradation_detail,
+                media_fault_reopen_recommended: self.live_media_fault_reopen_recommended_by_channel.get_copied(channel_id)
+            }
+        }
+
+        // RequestLiveMediaHealth: the typed end of a channel's first assistant
+        // output with a non-empty transcript. The runtime asks the client for
+        // its raw decoded-audio counters for exactly that output; the request
+        // is made once per channel, only while the channel's execution
+        // binding is the exact active one.
+        transition RequestLiveMediaHealth {
+            per_phase [Idle, Attached, Running]
+            on input RequestLiveMediaHealth {
+                session_id, channel_id, runtime_id, fence_token, generation,
+                output_id, assistant_transcript_nonempty
+            }
+            guard "output_present" { output_id != "" }
+            guard "assistant_transcript_nonempty" { assistant_transcript_nonempty == true }
+            guard "channel_belongs_to_session" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "channel_execution_active" {
+                self.live_execution_phase_by_channel.get_copied(channel_id)
+                    == Some(LiveExecutionChannelPhase::Active)
+            }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "first_output_only" {
+                !self.live_media_health_requested_output_by_channel.contains_key(channel_id)
+            }
+            update {
+                self.live_media_health_requested_output_by_channel.insert(channel_id, output_id);
+            }
+            to Idle
+            emit LiveMediaHealthRequested {
+                session_id: session_id,
+                channel_id: channel_id,
+                output_id: output_id
+            }
+        }
+
+        // ObserveLiveChannelMediaHealth: the client's raw counters for the
+        // requested output. The exact requested output on the session's
+        // active channel is the report's authority (the client holds no
+        // runtime binding). Audible when any decoded frame reached the
+        // audible floor (2000 micro-RMS, the peer's non-silent floor).
+        transition ObserveLiveChannelMediaHealthAudible {
+            per_phase [Idle, Attached, Running]
+            on input ObserveLiveChannelMediaHealth {
+                session_id, channel_id, output_id, decoded_frames, audible_frames,
+                max_rms_micros
+            }
+            guard "audible" { audible_frames > 0 || max_rms_micros >= 2000 }
+            guard "channel_belongs_to_session" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "channel_execution_active" {
+                self.live_execution_phase_by_channel.get_copied(channel_id)
+                    == Some(LiveExecutionChannelPhase::Active)
+            }
+            guard "exact_requested_output" {
+                self.live_media_health_requested_output_by_channel.get_cloned(channel_id) == Some(output_id)
+                && !self.live_media_health_judged_channels.contains(channel_id)
+            }
+            update {
+                self.live_media_health_judged_channels.insert(channel_id);
+            }
+            to Idle
+            emit LiveChannelMediaHealthJudged {
+                session_id: session_id,
+                channel_id: channel_id,
+                output_id: output_id,
+                media_faulted: false,
+                reopen_recommended: false
+            }
+        }
+
+        // A requested output whose transcript is non-empty decoded no audible
+        // frame: a media fault. The session's first media fault recommends a
+        // reopen.
+        transition ObserveLiveChannelMediaHealthSilentReopen {
+            per_phase [Idle, Attached, Running]
+            on input ObserveLiveChannelMediaHealth {
+                session_id, channel_id, output_id, decoded_frames, audible_frames,
+                max_rms_micros
+            }
+            guard "silent" { audible_frames == 0 && max_rms_micros < 2000 }
+            guard "reopen_budget_remains" {
+                !self.live_media_fault_reopens_by_session.contains_key(session_id)
+            }
+            guard "channel_belongs_to_session" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "channel_execution_active" {
+                self.live_execution_phase_by_channel.get_copied(channel_id)
+                    == Some(LiveExecutionChannelPhase::Active)
+            }
+            guard "exact_requested_output" {
+                self.live_media_health_requested_output_by_channel.get_cloned(channel_id) == Some(output_id)
+                && !self.live_media_health_judged_channels.contains(channel_id)
+            }
+            update {
+                self.live_media_health_judged_channels.insert(channel_id);
+                self.live_media_fault_reopen_recommended_by_channel.insert(channel_id, true);
+                self.live_media_fault_reopens_by_session.insert(session_id, 1);
+            }
+            to Idle
+            emit LiveChannelMediaHealthJudged {
+                session_id: session_id,
+                channel_id: channel_id,
+                output_id: output_id,
+                media_faulted: true,
+                reopen_recommended: true
+            }
+        }
+
+        // A media fault after the session already spent its reopen: the
+        // channel closes with the fault and no reopen recommendation.
+        transition ObserveLiveChannelMediaHealthSilentExhausted {
+            per_phase [Idle, Attached, Running]
+            on input ObserveLiveChannelMediaHealth {
+                session_id, channel_id, output_id, decoded_frames, audible_frames,
+                max_rms_micros
+            }
+            guard "silent" { audible_frames == 0 && max_rms_micros < 2000 }
+            guard "reopen_budget_spent" {
+                self.live_media_fault_reopens_by_session.contains_key(session_id)
+            }
+            guard "channel_belongs_to_session" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "channel_execution_active" {
+                self.live_execution_phase_by_channel.get_copied(channel_id)
+                    == Some(LiveExecutionChannelPhase::Active)
+            }
+            guard "exact_requested_output" {
+                self.live_media_health_requested_output_by_channel.get_cloned(channel_id) == Some(output_id)
+                && !self.live_media_health_judged_channels.contains(channel_id)
+            }
+            update {
+                self.live_media_health_judged_channels.insert(channel_id);
+                self.live_media_fault_reopen_recommended_by_channel.insert(channel_id, false);
+            }
+            to Idle
+            emit LiveChannelMediaHealthJudged {
+                session_id: session_id,
+                channel_id: channel_id,
+                output_id: output_id,
+                media_faulted: true,
+                reopen_recommended: false
             }
         }
 

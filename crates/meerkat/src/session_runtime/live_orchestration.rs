@@ -4163,10 +4163,10 @@ mod orchestrator {
                 )
                 .await?
             } else {
-                if self
+                if !self
                     .live_channel_status(host, channel, Some(&session))
                     .await?
-                    != meerkat_contracts::WireLiveAdapterStatus::Closed
+                    .is_closed()
                 {
                     return Err(ExperimentalLiveChannelCloseError::BindingMismatch);
                 }
@@ -5035,7 +5035,13 @@ mod orchestrator {
             LiveChannelPublicStatus::Opening => Ok(WireLiveAdapterStatus::Opening),
             LiveChannelPublicStatus::Ready => Ok(WireLiveAdapterStatus::Ready),
             LiveChannelPublicStatus::Closing => Ok(WireLiveAdapterStatus::Closing),
-            LiveChannelPublicStatus::Closed => Ok(WireLiveAdapterStatus::Closed),
+            LiveChannelPublicStatus::Closed => Ok(match authority.media_fault_reopen_recommended {
+                Some(reopen_recommended) => WireLiveAdapterStatus::Closed {
+                    reason: Some(meerkat_contracts::WireLiveCloseReason::MediaFault),
+                    reopen_recommended,
+                },
+                None => WireLiveAdapterStatus::closed(),
+            }),
             LiveChannelPublicStatus::Degraded => {
                 let reason = authority.degradation_reason.ok_or_else(|| {
                     "LiveChannelStatusResolved emitted degraded status without reason".to_string()

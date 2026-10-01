@@ -360,6 +360,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_channel_status_result_sequence`: `u64`
 - `live_channel_status_observation_sequence_by_channel`: `Map<String, u64>`
 - `live_channel_status_by_channel`: `Map<String, LiveChannelPublicStatus>`
+- `live_media_health_requested_output_by_channel`: `Map<String, String>`
+- `live_media_health_judged_channels`: `Set<String>`
+- `live_media_fault_reopen_recommended_by_channel`: `Map<String, Bool>`
+- `live_media_fault_reopens_by_session`: `Map<String, u64>`
 - `session_event_stream_open_result_sequence`: `u64`
 - `session_event_stream_close_result_sequence`: `u64`
 - `session_event_stream_terminal_sequence`: `u64`
@@ -779,6 +783,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecordMobEventStreamTerminated`(stream_id: String, observation: RpcEventStreamTerminalObservationKind, detail: Option<String>)
 - `ResolveMobEventStreamClose`(stream_id: String)
 - `RecordLiveChannelStatus`(channel_id: String, status: LiveChannelPublicStatus, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
+- `RequestLiveMediaHealth`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, output_id: String, assistant_transcript_nonempty: Bool)
+- `ObserveLiveChannelMediaHealth`(session_id: String, channel_id: String, output_id: String, decoded_frames: u64, audible_frames: u64, max_rms_micros: u64)
 - `SpawnDrain`(mode: DrainMode)
 - `StopDrain`
 - `StageVisibilityFilter`(filter: ToolFilter, witnesses: Map<ToolName, ToolVisibilityWitness>)
@@ -1074,7 +1080,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MobEventStreamOpenResolved`(stream_id: String, opened: Bool, sequence: u64)
 - `MobEventStreamTerminalResolved`(stream_id: String, reason: RpcEventStreamTerminalReason, error_code: Option<RpcEventStreamTerminalErrorCode>, detail: Option<String>, sequence: u64)
 - `MobEventStreamCloseResolved`(stream_id: String, closed: Bool, already_closed: Bool, sequence: u64)
-- `LiveChannelStatusResolved`(channel_id: String, status: LiveChannelPublicStatus, sequence: u64, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
+- `LiveChannelStatusResolved`(channel_id: String, status: LiveChannelPublicStatus, sequence: u64, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>, media_fault_reopen_recommended: Option<Bool>)
+- `LiveMediaHealthRequested`(session_id: String, channel_id: String, output_id: String)
+- `LiveChannelMediaHealthJudged`(session_id: String, channel_id: String, output_id: String, media_faulted: Bool, reopen_recommended: Bool)
 - `RealtimeTranscriptAppended`(channel_id: String, item_id: String, text: String, role: RealtimeTranscriptRoleKind, lane: RealtimeTranscriptLaneKind, sequence: u64)
 - `PeerIngressClassified`(class: PeerIngressInputClass, actionable: Bool, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, from_peer_id: Option<PeerId>, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
 - `PeerResponseReplyClassified`(response_terminality: PeerIngressResponseTerminality)
@@ -20405,6 +20413,156 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `degradation_fields_match_status`
 - Emits: `LiveChannelStatusResolved`
 - To: `Stopped`
+
+### `RequestLiveMediaHealthIdle`
+- From: `Idle`
+- On: `RequestLiveMediaHealth`(session_id, channel_id, runtime_id, fence_token, generation, output_id, assistant_transcript_nonempty)
+- Guards:
+  - `output_present`
+  - `assistant_transcript_nonempty`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `first_output_only`
+- Emits: `LiveMediaHealthRequested`
+- To: `Idle`
+
+### `RequestLiveMediaHealthAttached`
+- From: `Attached`
+- On: `RequestLiveMediaHealth`(session_id, channel_id, runtime_id, fence_token, generation, output_id, assistant_transcript_nonempty)
+- Guards:
+  - `output_present`
+  - `assistant_transcript_nonempty`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `first_output_only`
+- Emits: `LiveMediaHealthRequested`
+- To: `Attached`
+
+### `RequestLiveMediaHealthRunning`
+- From: `Running`
+- On: `RequestLiveMediaHealth`(session_id, channel_id, runtime_id, fence_token, generation, output_id, assistant_transcript_nonempty)
+- Guards:
+  - `output_present`
+  - `assistant_transcript_nonempty`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `first_output_only`
+- Emits: `LiveMediaHealthRequested`
+- To: `Running`
+
+### `ObserveLiveChannelMediaHealthAudibleIdle`
+- From: `Idle`
+- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
+- Guards:
+  - `audible`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `exact_requested_output`
+- Emits: `LiveChannelMediaHealthJudged`
+- To: `Idle`
+
+### `ObserveLiveChannelMediaHealthAudibleAttached`
+- From: `Attached`
+- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
+- Guards:
+  - `audible`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `exact_requested_output`
+- Emits: `LiveChannelMediaHealthJudged`
+- To: `Attached`
+
+### `ObserveLiveChannelMediaHealthAudibleRunning`
+- From: `Running`
+- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
+- Guards:
+  - `audible`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `exact_requested_output`
+- Emits: `LiveChannelMediaHealthJudged`
+- To: `Running`
+
+### `ObserveLiveChannelMediaHealthSilentReopenIdle`
+- From: `Idle`
+- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
+- Guards:
+  - `silent`
+  - `reopen_budget_remains`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `exact_requested_output`
+- Emits: `LiveChannelMediaHealthJudged`
+- To: `Idle`
+
+### `ObserveLiveChannelMediaHealthSilentReopenAttached`
+- From: `Attached`
+- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
+- Guards:
+  - `silent`
+  - `reopen_budget_remains`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `exact_requested_output`
+- Emits: `LiveChannelMediaHealthJudged`
+- To: `Attached`
+
+### `ObserveLiveChannelMediaHealthSilentReopenRunning`
+- From: `Running`
+- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
+- Guards:
+  - `silent`
+  - `reopen_budget_remains`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `exact_requested_output`
+- Emits: `LiveChannelMediaHealthJudged`
+- To: `Running`
+
+### `ObserveLiveChannelMediaHealthSilentExhaustedIdle`
+- From: `Idle`
+- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
+- Guards:
+  - `silent`
+  - `reopen_budget_spent`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `exact_requested_output`
+- Emits: `LiveChannelMediaHealthJudged`
+- To: `Idle`
+
+### `ObserveLiveChannelMediaHealthSilentExhaustedAttached`
+- From: `Attached`
+- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
+- Guards:
+  - `silent`
+  - `reopen_budget_spent`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `exact_requested_output`
+- Emits: `LiveChannelMediaHealthJudged`
+- To: `Attached`
+
+### `ObserveLiveChannelMediaHealthSilentExhaustedRunning`
+- From: `Running`
+- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
+- Guards:
+  - `silent`
+  - `reopen_budget_spent`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `exact_requested_output`
+- Emits: `LiveChannelMediaHealthJudged`
+- To: `Running`
 
 ### `ResolveWaitAllAdmissionDuplicateRejectedIdle`
 - From: `Idle`

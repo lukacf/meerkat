@@ -7528,3 +7528,197 @@ fn cancellation_resolution_is_accepted_after_the_worker_terminal_races_it() {
         );
     }
 }
+
+fn request_media_health(
+    authority: &mut mm::MeerkatMachineAuthority,
+    output_id: &str,
+    assistant_transcript_nonempty: bool,
+) -> Result<mm::MeerkatMachineTransition, mm::MeerkatMachineTransitionError> {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::RequestLiveMediaHealth {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            output_id: output_id.to_string(),
+            assistant_transcript_nonempty,
+        },
+    )
+}
+
+fn observe_media_health(
+    authority: &mut mm::MeerkatMachineAuthority,
+    output_id: &str,
+    audible_frames: u64,
+    max_rms_micros: u64,
+) -> Result<mm::MeerkatMachineTransition, mm::MeerkatMachineTransitionError> {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ObserveLiveChannelMediaHealth {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            output_id: output_id.to_string(),
+            decoded_frames: 48_000,
+            audible_frames,
+            max_rms_micros,
+        },
+    )
+}
+
+fn media_health_judged(transition: &mm::MeerkatMachineTransition) -> Option<(bool, bool)> {
+    transition.effects().iter().find_map(|effect| match effect {
+        mm::MeerkatMachineEffect::LiveChannelMediaHealthJudged {
+            channel_id,
+            output_id,
+            media_faulted,
+            reopen_recommended,
+            ..
+        } if channel_id == CHANNEL && output_id == "output-1" => {
+            Some((*media_faulted, *reopen_recommended))
+        }
+        _ => None,
+    })
+}
+
+/// The runtime requests media health for a channel's first assistant output
+/// only, only for a non-empty transcript on the exact active binding, and
+/// judges exactly that output once.
+#[test]
+fn media_health_judges_only_the_first_output_of_an_active_channel_once() {
+    let mut authority = opened_authority();
+    assert!(
+        request_media_health(&mut authority, "output-1", true).is_err(),
+        "a channel without an active execution binding is never judged"
+    );
+    bind_only(&mut authority);
+    assert!(
+        request_media_health(&mut authority, "output-1", false).is_err(),
+        "an output with an empty transcript proves nothing about media"
+    );
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::RequestLiveMediaHealth {
+                session_id: SESSION.to_string(),
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: mm::Generation(generation().0 + 1),
+                output_id: "output-1".to_string(),
+                assistant_transcript_nonempty: true,
+            },
+        )
+        .is_err(),
+        "a stale runtime generation cannot request"
+    );
+    let requested =
+        request_media_health(&mut authority, "output-1", true).expect("first output requested");
+    assert!(requested.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveMediaHealthRequested { channel_id, output_id, .. }
+            if channel_id == CHANNEL && output_id == "output-1"
+    )));
+    assert!(
+        request_media_health(&mut authority, "output-2", true).is_err(),
+        "only the channel's first output is judged"
+    );
+    assert!(
+        observe_media_health(&mut authority, "output-2", 10, 50_000).is_err(),
+        "a report for an output the runtime never requested is refused"
+    );
+    let judged =
+        observe_media_health(&mut authority, "output-1", 10, 50_000).expect("audible report");
+    assert_eq!(media_health_judged(&judged), Some((false, false)));
+    assert!(
+        observe_media_health(&mut authority, "output-1", 0, 0).is_err(),
+        "an output is judged once"
+    );
+    assert!(
+        authority
+            .state()
+            .live_media_fault_reopen_recommended_by_channel
+            .is_empty()
+    );
+}
+
+/// An output with a transcript but no audible frame is a media fault. The
+/// session's first fault recommends a reopen, and the channel's status
+/// carries the fact when it reports closed.
+#[test]
+fn a_silent_first_output_is_a_media_fault_that_recommends_one_reopen() {
+    let mut authority = opened_authority();
+    bind_only(&mut authority);
+    request_media_health(&mut authority, "output-1", true).expect("requested");
+    let judged = observe_media_health(&mut authority, "output-1", 0, 400).expect("silent report");
+    assert_eq!(media_health_judged(&judged), Some((true, true)));
+    assert_eq!(
+        authority
+            .state()
+            .live_media_fault_reopens_by_session
+            .get(SESSION)
+            .copied(),
+        Some(1)
+    );
+    let status = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RecordLiveChannelStatus {
+            channel_id: CHANNEL.to_string(),
+            status: mm::LiveChannelPublicStatus::Closed,
+            status_observation_sequence: 7,
+            degradation_reason: None,
+            degradation_detail: None,
+        },
+    )
+    .expect("closed status");
+    assert!(status.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveChannelStatusResolved {
+            media_fault_reopen_recommended: Some(true),
+            ..
+        }
+    )));
+}
+
+/// A media fault after the session spent its reopen closes without the
+/// recommendation, so a broken media path never loops.
+#[test]
+fn a_second_media_fault_on_a_session_does_not_recommend_another_reopen() {
+    let mut state = mm::MeerkatMachineState {
+        lifecycle_phase: mm::MeerkatPhase::Idle,
+        session_id: Some(mm::SessionId(SESSION.to_string())),
+        active_runtime_id: Some(runtime_id()),
+        active_fence_token: Some(fence()),
+        active_runtime_generation: Some(generation()),
+        live_delegation_channel_worker_cap:
+            meerkat_runtime::live_execution::LIVE_DELEGATION_CHANNEL_WORKER_CAP,
+        ..Default::default()
+    };
+    state
+        .live_active_channel_by_session
+        .insert(SESSION.to_string(), CHANNEL.to_string());
+    state
+        .live_channel_session_by_channel
+        .insert(CHANNEL.to_string(), SESSION.to_string());
+    state
+        .live_channel_identity_by_channel
+        .insert(CHANNEL.to_string(), identity());
+    state
+        .live_media_fault_reopens_by_session
+        .insert(SESSION.to_string(), 1);
+    let mut authority = mm::MeerkatMachineAuthority::recover_from_state(state)
+        .expect("seed state satisfies generated invariants");
+    bind_only(&mut authority);
+    request_media_health(&mut authority, "output-1", true).expect("requested");
+    let judged = observe_media_health(&mut authority, "output-1", 0, 0).expect("silent report");
+    assert_eq!(media_health_judged(&judged), Some((true, false)));
+    assert_eq!(
+        authority
+            .state()
+            .live_media_fault_reopen_recommended_by_channel
+            .get(CHANNEL)
+            .copied(),
+        Some(false)
+    );
+}

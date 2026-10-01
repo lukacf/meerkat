@@ -8599,6 +8599,9 @@ pub struct LiveChannelStatusAuthority {
     pub status_observation_sequence: u64,
     pub degradation_reason: Option<dsl::LiveChannelDegradationReason>,
     pub degradation_detail: Option<String>,
+    /// Set when the channel closed on a media fault: whether the session may
+    /// reopen it (its one media-fault reopen is not spent).
+    pub media_fault_reopen_recommended: Option<bool>,
     pub channel_status_commit_authority: Option<meerkat_live::LiveChannelStatusCommitAuthority>,
 }
 
@@ -8611,6 +8614,7 @@ impl LiveChannelStatusAuthority {
         status_observation_sequence: u64,
         degradation_reason: Option<dsl::LiveChannelDegradationReason>,
         degradation_detail: Option<String>,
+        media_fault_reopen_recommended: Option<bool>,
     ) -> Result<Self, String> {
         Ok(Self {
             status,
@@ -8618,6 +8622,7 @@ impl LiveChannelStatusAuthority {
             status_observation_sequence,
             degradation_reason,
             degradation_detail,
+            media_fault_reopen_recommended,
             channel_status_commit_authority: Some(build_live_channel_status_commit_authority(
                 channel_id,
                 status_observation_sequence,

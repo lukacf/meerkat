@@ -35994,6 +35994,7 @@ fn live_channel_status_result_is_machine_owned() {
                 status_observation_sequence: 11,
                 degradation_reason: Some(mm_dsl::LiveChannelDegradationReason::NetworkUnstable),
                 degradation_detail: None,
+                media_fault_reopen_recommended: None,
             } if channel_id == "live-channel-1"
         )),
         "machine authority must emit the typed public status effect"

@@ -5681,6 +5681,42 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordLiveChannelStatusStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RequestLiveMediaHealthIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestLiveMediaHealthAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestLiveMediaHealthRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthAudibleIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthAudibleAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthAudibleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthSilentReopenIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthSilentReopenAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthSilentReopenRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthSilentExhaustedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthSilentExhaustedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthSilentExhaustedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionDuplicateRejectedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8222,6 +8258,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveChannelStatusResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveMediaHealthRequested`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveChannelMediaHealthJudged`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RealtimeTranscriptAppended`

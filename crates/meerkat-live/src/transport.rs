@@ -3119,7 +3119,7 @@ mod tests {
                     if matches!(
                         observation,
                         WireLiveAdapterObservation::StatusChanged {
-                            status: meerkat_contracts::WireLiveAdapterStatus::Closed
+                            status: meerkat_contracts::WireLiveAdapterStatus::Closed { .. }
                         }
                     ) {
                         let status = state.host().channel_status(&channel_id).await.unwrap();

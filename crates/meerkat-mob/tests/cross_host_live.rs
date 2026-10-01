@@ -330,7 +330,7 @@ async fn close_clears_channel_and_status_reports_not_found() {
     );
     assert_eq!(
         closed_status.status,
-        WireLiveAdapterStatus::Closed,
+        WireLiveAdapterStatus::closed(),
         "closed channel reports its terminal status"
     );
 

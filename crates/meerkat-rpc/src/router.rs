@@ -6515,7 +6515,10 @@ mod tests {
         meerkat_mob::MobId,
         Arc<meerkat_mob::store::InMemoryMobEventStore>,
     ) {
-        let mob_id = meerkat_mob::MobId::from("router-session-archive-partial-destroy");
+        let mob_id = meerkat_mob::MobId::from(format!(
+            "router-session-archive-partial-destroy-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
@@ -6568,7 +6571,14 @@ mod tests {
         SessionId,
         Arc<meerkat_mob::store::InMemoryMobEventStore>,
     ) {
-        let mob_id = meerkat_mob::MobId::from("router-session-archive-live-retire-failure");
+        // Unique per test: the mob id names the process-global in-process
+        // supervisor participant (`{mob_id}/__mob_supervisor__`), which admits
+        // one holder, so tests sharing a fixed id collide under a threaded
+        // runner.
+        let mob_id = meerkat_mob::MobId::from(format!(
+            "router-session-archive-live-retire-failure-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
@@ -7245,7 +7255,7 @@ mod tests {
                     "name": "mob_create",
                     "arguments": {
                         "definition": {
-                            "id": "test_mob",
+                            "id": format!("test_mob_{}", uuid::Uuid::new_v4().simple()),
                             "profiles": {
                                 "worker": {
                                     "model": "claude-sonnet-4-6",
@@ -9948,7 +9958,10 @@ mod tests {
     #[tokio::test]
     async fn mob_stream_open_requires_subscribe_events_scope_before_registration() {
         let owner = meerkat_mob_mcp::MobMcpState::new_in_memory();
-        let mob_id = meerkat_mob::MobId::from("scope-denied-mob-stream");
+        let mob_id = meerkat_mob::MobId::from(format!(
+            "scope-denied-mob-stream-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
@@ -10023,7 +10036,7 @@ mod tests {
                 "mob/create",
                 serde_json::json!({
                     "definition": {
-                        "id": "test_mob",
+                        "id": format!("test_mob_{}", uuid::Uuid::new_v4().simple()),
                         "profiles": {
                             "worker": {
                                 "model": "claude-sonnet-4-6",
@@ -10089,7 +10102,7 @@ mod tests {
                 "mob/create",
                 serde_json::json!({
                     "definition": {
-                        "id": "test_mob",
+                        "id": format!("test_mob_{}", uuid::Uuid::new_v4().simple()),
                         "profiles": {
                             "worker": {
                                 "model": "claude-sonnet-4-6",

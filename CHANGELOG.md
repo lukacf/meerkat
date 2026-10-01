@@ -274,6 +274,18 @@ them.
 
 ### Fixed
 
+- `meerkat-rpc` lib tests pass under the threaded `cargo test` runner. Tests
+  created live mobs with fixed ids (`test_mob` three times,
+  `router-session-archive-live-retire-failure` and
+  `router-session-archive-partial-destroy` through shared helpers,
+  `scope-denied-mob-stream`, `direct-session-archive-partial-destroy`), so
+  `mob_stream_open_close_roundtrip` and three session-archive mob tests
+  failed (three per threaded run on main). The mob id names
+  the process-global in-process supervisor participant
+  (`{mob_id}/__mob_supervisor__`), which admits one holder, so tests sharing
+  an id in one process failed with `ParticipantNameOccupied`. nextest's
+  process-per-test runs hid it. Each live mob now gets a UUID-suffixed id, as
+  #1412 did for comms_drain.
 - The canonical TLC lane (`make machine-verify`, also the machine pre-push
   hook) runs its independent TLC jobs concurrently instead of one after
   another: `xtask machine-verify` schedules every machine sweep, composition

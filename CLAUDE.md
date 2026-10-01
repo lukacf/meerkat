@@ -399,7 +399,11 @@ call it. Local Make commands still default to Cargo.
 **Nightly** (`.github/workflows/nightly.yml`, cron + dispatch) owns everything
 PR CI does not: `workspace-unit` (`make test-unit`), `workspace-int`
 (`make test-int`), `e2e-fast`, `dense-topology` (`mob-dense-topology.yml`),
-`machine-verify` (bounded TLC), `sdk-host`, `gcp-buildbuddy`
+`machine-verify` (bounded TLC, including every non-skipped composition
+witness with its completion proof), `machine-verify-deep` (`make
+machine-verify-deep-compositions`: Deep TLC over the compositions that fit
+the 900 s per-run cap; a capped run fails as TLC INCOMPLETE), `sdk-host`,
+`gcp-buildbuddy`
 (`buildbuddy.yml` in `full-fresh` mode: the whole Bazel graph), plus the
 existing `lint` (clippy `--all-targets`), `lint-feature-matrix`,
 `test-feature-matrix`, `test-minimal`, `test-surface-modularity`,

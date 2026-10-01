@@ -15,6 +15,9 @@ name: Nightly
 #   dense-topology    - the exact 300-member/150-peer Mob stress on hosted
 #                       Linux (17-22 minutes; does not fit PR CI)
 #   machine-verify    - bounded TLC verification of the canonical machines
+#   machine-verify-deep - Deep-profile TLC (deep.cfg, witnesses, coverage
+#                       audit) over the compositions that fit the 900 s
+#                       per-run cap; a capped run fails as TLC INCOMPLETE
 #   sdk-host          - Python + TypeScript SDK suites, unconditional
 #   gcp-buildbuddy    - the whole BuildBuddy/Bazel graph in `full-fresh`
 #                       mode: prebuild, fmt/static, native nextest lanes,
@@ -265,6 +268,63 @@ jobs:
 
       - name: Canonical bounded machine verification
         run: make machine-verify
+
+  machine-verify-deep:
+    name: Deep TLC composition verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      RUSTC_WRAPPER: sccache
+      # A dedicated runner has no Cargo lock contention, so keep xtask under
+      # the standard cached target root instead of the local /tmp isolation.
+      XTASK_TARGET_DIR: ${{ github.workspace }}/target
+      # The generated adaptive composition is large enough that Java's
+      # container-selected ~3.5 GiB heap OOMs during semantic processing.
+      JAVA_TOOL_OPTIONS: -Xmx8g
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-machine-verify
+          # Registry only: compiled objects come from sccache. Per-job target
+          # caches would exceed the repository's 10 GB cache limit and evict the
+          # pull-request lanes' sccache objects every night.
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Install pinned TLC
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/lib" "$HOME/.local/bin"
+          curl --fail --location --retry 5 --retry-delay 2 \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar \
+            --output "$HOME/.local/lib/tla2tools.jar"
+          printf '#!/bin/sh\nexec java -jar "%s/tla2tools.jar" "$@"\n' \
+            "$HOME/.local/lib" > "$HOME/.local/bin/tlc"
+          chmod +x "$HOME/.local/bin/tlc"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Deep composition verification (900 s per-run cap)
+        run: make machine-verify-deep-compositions
 
   sdk-host:
     name: Python + TypeScript SDK suites

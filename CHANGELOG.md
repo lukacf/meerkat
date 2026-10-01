@@ -105,6 +105,14 @@ them.
   the channel and carries every queued stop completion into its teardown
   handoff, so the owed cleanup acknowledges each with its result.
 
+- A GPT Live delegation result that lands while the model is idle gets one
+  short broker-owned speak cue on the instructions lane ("Tell the user this
+  result now."). Measured on gpt-live-1, the model occasionally acknowledged a
+  result commentary and never voiced it. Idleness is read from provider
+  timeline positions: no input since the model's last output, and its last word
+  ended at least 1000 ms before the result landed (voiced deliveries measured
+  -200 to +400 ms). The cue's receipt is consumed by the broker and never
+  surfaced. New public item: `PublicLiveBrokerSession::append_delegation_result`.
 - Retiring a mob member no longer waits on its turn-finalization boundary
   until the retire deadline when an input was admitted but not yet opened as a
   run. Retire's pre-boundary step read "no bound run" as nothing to cancel, so

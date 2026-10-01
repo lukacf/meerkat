@@ -20,7 +20,7 @@ not prerequisites for this default. Earlier acceptances retain their exact scope
 | r1 | `bbf338e21790cf4f300aabfe44954662ad32706ecb5f77fe43397d11ecd44527` | Internal adversarial findings repaired in r2. |
 | r2 | `589ede7935310f466492da380b2f666ba42ee4071fa5b9551999835047b26c9d` | Three internal reviewers GREEN. Four bus reviewers returned the findings below. |
 | r3 | `c765254055ed49bc83c0a4db6b9faf245d3b74fd89e684a72457fe5f55403b18` | Three internal reviewers GREEN. OB3 and Homecore closed their findings; GCP closed F2-F8 but required the premature scheduler choice to become pending and the planned filtering/lease clauses to appear in the text. |
-| r4 | `ff5fc7bc7f87ee3ee715b72dde5efee0fbb5b1e43c4e9d8f3a2c5cc70f7fe31c` | Independent information/runtime delta reviews GREEN; exact candidate sent to all four bus reviewers. Irreducible-request disposition remains expressly pending Luka, so complete final design acceptance is not claimed. |
+| r4 | `ff5fc7bc7f87ee3ee715b72dde5efee0fbb5b1e43c4e9d8f3a2c5cc70f7fe31c` | Independent information/runtime delta reviews GREEN. All four bus reviewers accepted the common contract and closed their findings. Irreducible-request disposition remains expressly pending Luka, so complete final design acceptance is not claimed. |
 
 Frozen candidates, exact patches, manifests and copied reviews live under
 `/Users/luka/.codex/adr-001-evidence/local-governed-default-r{1,2,3,4}`.
@@ -38,7 +38,7 @@ unchanged when a successor candidate is prepared.
 | GCP Meerkat/MobKit lead | Accept with conditions: concrete refused-model outcome, persistent-memory envelopes, pre-inference compaction partitions, conservative MCP unit, authenticated subscribers, every model seam, audit cost/failure split and physical voice audience. | All specified in r3. The lead subsequently proposed permitted-context projection as the simpler normal path. Whether an entirely unprocessable request may end with a local refusal is pending Luka's direct clarification. |
 | Homecore | RED for adoption of existing unlabeled histories and sources; also visible refusal, scoped scheduled/connector service mandates, fresh live context and 10,000-dependency/write-lock measurements. | r3 carries explicit authorized legacy adoption and default envelopes, actual store ownership, service mandates, visible outcomes, retained input, fresh live context and the larger measurement cell. |
 | OB3 | Accept with one blocking audit condition: MobKit's lossy event-log ingress must not be the sole authoritative audit. Also preserve work associations across in-memory loss/reseed and define retained channel audiences/monitoring copies. | r3 requires native audit at the next existing commit, explicit exporter loss, retained associations or fresh authorized admission, and declared future-reader/retention policy. |
-| Meerkat Toolkit | Bounded design acceptance; clarify that ordinary trusted connectors may attest a local retained-copy contract but cannot invent vendor-issued ACL leases. | The exact source-issuer clarification is queued for the successor candidate. Full native-path integration remains required for production use. |
+| Meerkat Toolkit | Bounded design acceptance; clarify that ordinary trusted connectors may attest a local retained-copy contract but cannot invent vendor-issued ACL leases. | The exact source-issuer clarification landed in r4 and Toolkit closed the finding. Full native-path integration remains required for production use. |
 
 Exact bus envelopes are retained in the r2 `bus-reviews` evidence directory:
 `20261001T102006.831549-ob3-f743f1.json`,
@@ -94,6 +94,17 @@ Its information/runtime review manifest is
 `25251445930a713935c69183519634352c1f66c72f465879dacdcb37bdf98e78`.
 Root read both complete reports and verified exact candidate/patch hashes.
 
+All four bus reviewers then accepted the common r4 contract. GCP closed C1-C3;
+Homecore kept S1-S5 closed; OB3 closed the in-memory durability note and kept
+B1/N1/N2 closed; Toolkit closed the retained-copy source-contract ambiguity.
+The exact copied bus envelopes and available full reports are bound by the r4
+`bus-reviews/manifest.json` SHA-256
+`9b4790345d7f91c766147b2359c5d0c1e15c6c5b5f444e88fcfa9e570e98adc2`.
+The preceding r3 bus-review manifest is
+`c9934633747c16c97ae4d824b85790de46039b95fa43bbad38818a9c2d4ed9c5`.
+Root read the complete reports and verified their exact hashes before copying.
+These are design acceptances, not implementation or performance acceptance.
+
 The separate read-only minimal composition plan is frozen with r4, SHA-256
 `aa7ed1be046adfbb1ba9640bf2fab02eb76f7d8b16d77a8e719ff990e91745c3`.
 It starts from a clean main and selectively retains qualified principals, pure
@@ -101,6 +112,21 @@ contracts and an adapted canonical grant owner. The newly authored generic codec
 join, projection, preparation and witness stack is not an inherent prerequisite.
 The port and actual existing-owner integration still require implementation and
 verification; no source-only plan establishes a working governed path.
+
+## Implementation checkpoint
+
+The shared integration worktree now uses `codex/local-governed-default`, based
+on main `4040e8ff6ceb3e7f7ed494de52d6fa2ea9044d71`. Its first three commits
+selectively carry the already reviewed qualified-principal contracts, ending at
+`2ae3237f7bf4eb84915eba8e97f363691a43f244`. The old 26-commit stack remains
+preserved as `codex/native-governed-admission-m1` at
+`69d040f7ed3c2f186662146f8ac7cecb326e64a3`; it is not imported wholesale.
+
+Source work proceeds on the local pure contracts, minimal core extension seams,
+and tool-local refusal handling. Neither irreducible-request option may be
+implemented until Luka decides. GCP's four reserved admission transitions and
+live machine declarations remain untouched pending its separate 2b merge
+handoff. These source changes have not yet been built or tested on this base.
 
 ## Validation and execution posture
 

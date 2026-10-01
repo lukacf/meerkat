@@ -256,6 +256,7 @@ path-classifier-selftest:
 	@echo "$(GREEN)Self-testing path classifiers and gate wiring...$(NC)"
 	@bash scripts/tests/xtask_scripts_dogma_gates.sh
 	@bash scripts/tests/ci_pr_classification_base_test.sh
+	@bash scripts/tests/buildbuddy_launcher_env_test.sh
 
 cargo-agent-gate: rust-lane-doctor
 	@echo "$(GREEN)Running Cargo agent changed-path gate...$(NC)"

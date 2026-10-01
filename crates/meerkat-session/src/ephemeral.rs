@@ -3427,6 +3427,11 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     /// Notified when a new session handle is stored. Used by CLI --stdin
     /// to avoid polling for the session to appear.
     session_registered: tokio::sync::Notify,
+    /// The runtime machine that hosts this service's session runtimes,
+    /// created on first use and owned by this instance: it lives and dies
+    /// with the service, so no other service can ever be handed it.
+    #[cfg(feature = "runtime-machine")]
+    runtime_adapter: std::sync::OnceLock<Arc<meerkat_runtime::MeerkatMachine>>,
     #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
     fail_next_durable_sync: std::sync::atomic::AtomicBool,
     #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
@@ -3740,6 +3745,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             builder,
             staged_registry: Arc::new(StagedSessionRegistry::bounded(max_sessions)),
             session_registered: tokio::sync::Notify::new(),
+            #[cfg(feature = "runtime-machine")]
+            runtime_adapter: std::sync::OnceLock::new(),
             #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
             fail_next_durable_sync: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
@@ -3747,6 +3754,16 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
             fatalized_actor_task_terminations: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// The runtime machine hosting this service's session runtimes, created
+    /// on first use and owned by this instance.
+    #[cfg(feature = "runtime-machine")]
+    pub fn canonical_runtime_adapter(&self) -> Arc<meerkat_runtime::MeerkatMachine> {
+        Arc::clone(
+            self.runtime_adapter
+                .get_or_init(|| Arc::new(meerkat_runtime::MeerkatMachine::ephemeral())),
+        )
     }
 
     #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]

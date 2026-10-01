@@ -41,6 +41,48 @@ impl MeerkatMachine {
     /// such input (or no such key yet). An unregistered session on a store-less
     /// machine fails `NotReady`, and a never-admitted session on a persistent
     /// machine fails `NotFound`.
+    /// Wait until `session_id`'s live runtime has admitted an input for
+    /// `idempotency_key` and return its id. Woken by the admission itself
+    /// (the driver signals every accepted input); never re-reads on a timer.
+    ///
+    /// `Ok(None)` when the session has no live registration, now or once it
+    /// is torn down while waiting: the caller reads durable evidence instead.
+    /// Bound the call by the caller's own deadline.
+    pub async fn wait_input_admitted_by_idempotency_key(
+        &self,
+        session_id: &SessionId,
+        idempotency_key: &str,
+    ) -> Result<Option<InputId>, RuntimeDriverError> {
+        loop {
+            let driver = {
+                let sessions = self.sessions.read().await;
+                sessions.get(session_id).map(|entry| entry.driver.clone())
+            };
+            let Some(driver) = driver else {
+                return Ok(None);
+            };
+            let mut admissions = {
+                let guard = driver.lock().await;
+                if let Some(input_id) = guard
+                    .as_driver()
+                    .input_id_for_idempotency_key(idempotency_key)
+                {
+                    return Ok(Some(input_id));
+                }
+                // Subscribed under the driver: an admission after the check
+                // above is a change on this receiver.
+                guard.subscribe_admissions()
+            };
+            // Hold no session resources while parked, so teardown can drop
+            // the driver and close the signal.
+            drop(driver);
+            if admissions.changed().await.is_err() {
+                // The driver is gone; re-resolve the registration.
+                continue;
+            }
+        }
+    }
+
     pub async fn input_terminal_receipt(
         &self,
         session_id: &SessionId,

@@ -4343,6 +4343,15 @@ impl DriverEntry {
         }
     }
 
+    /// Input admissions of this driver; see
+    /// [`EphemeralRuntimeDriver::subscribe_admissions`].
+    pub(crate) fn subscribe_admissions(&self) -> crate::tokio::sync::watch::Receiver<u64> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.subscribe_admissions(),
+            DriverEntry::Persistent(d) => d.inner_ref().subscribe_admissions(),
+        }
+    }
+
     /// Machine-owned per-run boundary counter — the single producer of the
     /// run-boundary receipt sequence (dogma K10).
     pub(crate) fn run_boundary_sequence(&self, run_id: &RunId) -> u64 {

@@ -4752,6 +4752,7 @@ impl ExperimentalGptLiveDeferredAdapter {
             | LiveSidebandObservationKind::TurnStarted { .. }
             | LiveSidebandObservationKind::TurnSnapshotDelta { .. }
             | LiveSidebandObservationKind::DelegationRequested { .. }
+            | LiveSidebandObservationKind::UserTurnContinuesDelegation { .. }
             | LiveSidebandObservationKind::AppendAcknowledged { .. }
             | LiveSidebandObservationKind::AppendRejected { .. }
             | LiveSidebandObservationKind::AppendDeliveryAmbiguousTerminal { .. } => None,
@@ -6930,6 +6931,7 @@ fn spawn_sideband_actors(
                     let control_observation = matches!(
                         observation.kind(),
                         LiveSidebandObservationKind::DelegationRequested { .. }
+                            | LiveSidebandObservationKind::UserTurnContinuesDelegation { .. }
                             | LiveSidebandObservationKind::DelegationActionableInputUnsupported { .. }
                             | LiveSidebandObservationKind::AppendAcknowledged { .. }
                             | LiveSidebandObservationKind::AppendRejected { .. }
@@ -8410,6 +8412,31 @@ impl ExperimentalGptLiveSideband {
                 LiveSidebandObservationKind::TurnFinished {
                     turn,
                     role,
+                    transcript,
+                }
+            }
+            GptLiveBrokerObservation::UserTurnContinuesDelegation {
+                turn,
+                delegation,
+                transcript,
+            } => {
+                let turn = self.existing_turn_ref(turn).await?;
+                let correlations = self.correlations.lock().await;
+                let provider_id = delegation.__opaque_provider_id();
+                let local = correlations
+                    .delegations
+                    .iter()
+                    .find(|(_, known)| known.__opaque_provider_id() == provider_id)
+                    .map(|(local, _)| local.clone())
+                    .ok_or(ProviderWebrtcBrokerError::ProtocolDrift)?;
+                let delegation = LiveSidebandDelegationRef::__from_provider_observation(
+                    local,
+                    provider_id.to_string(),
+                )
+                .ok_or(ProviderWebrtcBrokerError::ProtocolDrift)?;
+                LiveSidebandObservationKind::UserTurnContinuesDelegation {
+                    turn,
+                    delegation,
                     transcript,
                 }
             }
@@ -12311,6 +12338,13 @@ mod tests {
         sideband.close().await.expect("close requested");
         if late_tail {
             // Stream end flushes the open tail turn as a committed user row.
+            // The tail continues the utterance the delegation was created
+            // in, so it is first marked as continuing that delegation.
+            assert!(matches!(
+                next().await.kind(),
+                LiveSidebandObservationKind::UserTurnContinuesDelegation { transcript, .. }
+                    if transcript == public_wire::USER_TRANSCRIPT_TAIL
+            ));
             assert!(matches!(
                 next().await.kind(),
                 LiveSidebandObservationKind::TurnFinished {

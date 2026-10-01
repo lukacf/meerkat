@@ -1709,6 +1709,10 @@ struct SessionState {
     /// The previous delegation's executor request, re-presented when a
     /// delegation arrives without any new user transcript in its window.
     last_request: Option<String>,
+    /// Provider id of the client delegation created while a user turn was
+    /// open (mid-utterance): the next user turn to finish before another
+    /// client delegation continues that utterance.
+    continuation_of: Option<String>,
     window: DelegationWindow,
     seen_delegation_ids: HashSet<String>,
     queued_observations: VecDeque<GptLiveBrokerObservation>,
@@ -1747,6 +1751,7 @@ impl Default for SessionState {
             last_user_turn: None,
             window_finished_user_turns: Vec::new(),
             last_request: None,
+            continuation_of: None,
             window: DelegationWindow::default(),
             seen_delegation_ids: HashSet::new(),
             queued_observations: VecDeque::new(),
@@ -2268,6 +2273,17 @@ impl SessionState {
         let transcript = join_segments(&open.segments);
         self.window.push(open.role, open.window_transcript());
         if open.role == GptLiveTurnRole::User {
+            if let Some(delegation) = self.continuation_of.take()
+                && !transcript.trim().is_empty()
+            {
+                self.queued_observations.push_back(
+                    GptLiveBrokerObservation::UserTurnContinuesDelegation {
+                        turn: GptLiveTurnRef(open.provider_ref.clone()),
+                        delegation: GptLiveDelegationRef(delegation),
+                        transcript: transcript.clone(),
+                    },
+                );
+            }
             let row = GptLiveRepresentedUserTurn {
                 turn: GptLiveTurnRef(open.provider_ref.clone()),
                 transcript: transcript.clone(),
@@ -2358,8 +2374,12 @@ impl SessionState {
         // the rows behind the last user utterance), so the canonical commit
         // verifies those rows and appends none.
         let finished_in_window = std::mem::take(&mut self.window_finished_user_turns);
+        // A new client delegation ends any earlier continuation; one taking
+        // an open user turn starts its own (the user may still be speaking).
+        self.continuation_of = None;
         let (turn_ref, transcript, represented_turns) = match self.open_turn.take() {
             Some(open) if open.role == GptLiveTurnRole::User => {
+                self.continuation_of = Some(reference.0.clone());
                 let transcript = join_segments(&open.segments);
                 (open.provider_ref, transcript, Vec::new())
             }
@@ -3907,14 +3927,21 @@ mod tests {
             &late[1],
             GptLiveBrokerObservation::UserTranscriptFragment { text, .. } if text == " named it"
         ));
-        // The assistant reply finishes that turn as a plain user turn: the
-        // tail is a committed row, not a lost fragment.
+        // The assistant reply finishes that turn as a user turn: the tail is
+        // a committed row, not a lost fragment. It continues the utterance
+        // the delegation was created in, so it is marked as continuing
+        // "dlg_early" first.
         state
             .apply_frame(frame(output_delta_span("Sure,", 10600.0, 10800.0)))
             .unwrap();
         let finished = drain(&mut state);
         assert!(matches!(
             &finished[0],
+            GptLiveBrokerObservation::UserTurnContinuesDelegation { delegation, transcript, .. }
+                if delegation.0 == "dlg_early" && transcript == " named it"
+        ));
+        assert!(matches!(
+            &finished[1],
             GptLiveBrokerObservation::TurnFinished { role: GptLiveTurnRole::User, transcript, .. }
                 if transcript == " named it"
         ));
@@ -4166,6 +4193,96 @@ mod tests {
             "a rejected cue is not a rejected owner append"
         );
         assert_eq!(state.outstanding_receipt_count(), 0);
+    }
+
+    fn continuation_markers(observations: &[GptLiveBrokerObservation]) -> Vec<(String, String)> {
+        observations
+            .iter()
+            .filter_map(|observation| match observation {
+                GptLiveBrokerObservation::UserTurnContinuesDelegation {
+                    turn, delegation, ..
+                } => Some((turn.0.clone(), delegation.0.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A delegation created at a pause mid-sentence: the rest of the
+    /// sentence is the next user turn to finish, marked as continuing that
+    /// delegation immediately before its `TurnFinished`; only that one turn.
+    #[test]
+    fn speech_after_a_mid_utterance_delegation_continues_it_once() {
+        let mut state = SessionState::default();
+        state
+            .apply_frame(frame(input_delta("write a note of two hundred words")))
+            .unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_split", "client")))
+            .unwrap();
+        drain(&mut state);
+        state
+            .apply_frame(frame(input_delta(" into notes dot md")))
+            .unwrap();
+        state.apply_frame(frame(output_delta("On it."))).unwrap();
+        let observations = drain(&mut state);
+        let markers = continuation_markers(&observations);
+        assert_eq!(markers.len(), 1, "{observations:?}");
+        assert_eq!(markers[0].1, "dlg_split");
+        let marker_at = observations
+            .iter()
+            .position(|o| {
+                matches!(
+                    o,
+                    GptLiveBrokerObservation::UserTurnContinuesDelegation { .. }
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            &observations[marker_at + 1],
+            GptLiveBrokerObservation::TurnFinished { turn, role: GptLiveTurnRole::User, transcript }
+                if turn.0 == markers[0].0 && transcript == " into notes dot md"
+        ));
+        // A later user turn is ordinary speech.
+        state.apply_frame(frame(input_delta("and thanks"))).unwrap();
+        state.apply_frame(frame(output_delta(" Sure."))).unwrap();
+        assert!(continuation_markers(&drain(&mut state)).is_empty());
+    }
+
+    #[test]
+    fn a_detached_delegation_or_a_newer_delegation_starts_no_stale_continuation() {
+        // Detached: the assistant spoke first, no user turn was open.
+        let mut state = SessionState::default();
+        state
+            .apply_frame(frame(input_delta("book a table")))
+            .unwrap();
+        state.apply_frame(frame(output_delta("Sure."))).unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_detached", "client")))
+            .unwrap();
+        state.apply_frame(frame(input_delta("for two"))).unwrap();
+        state.apply_frame(frame(output_delta(" Booking."))).unwrap();
+        assert!(continuation_markers(&drain(&mut state)).is_empty());
+
+        // A second mid-utterance delegation replaces the first one's
+        // continuation before any user turn finished.
+        let mut state = SessionState::default();
+        state.apply_frame(frame(input_delta("first part"))).unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_one", "client")))
+            .unwrap();
+        state
+            .apply_frame(frame(input_delta(" second part")))
+            .unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_two", "client")))
+            .unwrap();
+        state
+            .apply_frame(frame(input_delta(" third part")))
+            .unwrap();
+        state.apply_frame(frame(output_delta("On it."))).unwrap();
+        let markers = continuation_markers(&drain(&mut state));
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].1, "dlg_two");
     }
 
     #[test]

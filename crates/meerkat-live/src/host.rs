@@ -1277,6 +1277,10 @@ struct ChannelState {
     /// them with [`LiveAdapterHost::take_deferred_projections`] and applies
     /// them once the boundary frees.
     deferred_projections: Vec<LiveAdapterObservation>,
+    /// Latest provider input latency telemetry for this channel (see
+    /// [`crate::LiveProviderInputLatency`]). A display measurement only: no
+    /// status, lifecycle, or admission decision reads it.
+    provider_input_latency: Option<crate::LiveProviderInputLatency>,
 }
 
 /// Keeps transport projection state reachable while an already-observed
@@ -2054,6 +2058,7 @@ impl LiveAdapterHost {
                 terminal_error_projection: Arc::new(Mutex::new(None)),
                 playback_terminal_waiters: HashMap::new(),
                 deferred_projections: Vec::new(),
+                provider_input_latency: None,
             },
         );
         inner.by_session.insert(session_id, channel_id.clone());
@@ -3676,6 +3681,36 @@ impl LiveAdapterHost {
         .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
     }
 
+    /// Record provider input latency telemetry for a channel. A missing or
+    /// retired channel ignores it: the measurement has no owner to inform.
+    pub async fn record_provider_input_latency(
+        &self,
+        channel_id: &LiveChannelId,
+        latency: crate::LiveProviderInputLatency,
+    ) {
+        let mut inner = self.inner.lock().await;
+        if let Some(channel) = inner
+            .channels
+            .get_mut(channel_id)
+            .filter(|channel| channel.retire_at.is_none())
+        {
+            channel.provider_input_latency = Some(latency);
+        }
+    }
+
+    /// The latest provider input latency telemetry for a channel, if any was
+    /// measured. Display only; never a status or lifecycle input.
+    pub async fn channel_provider_input_latency(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Option<crate::LiveProviderInputLatency> {
+        let inner = self.inner.lock().await;
+        inner
+            .channels
+            .get(channel_id)
+            .and_then(|channel| channel.provider_input_latency)
+    }
+
     pub async fn reserve_channel_status_observation(
         &self,
         channel_id: &LiveChannelId,
@@ -4155,6 +4190,42 @@ mod tests {
         assert_eq!(first.status(), &LiveAdapterStatus::Opening);
         assert_eq!(first.observation_sequence(), 1);
         assert_eq!(second.observation_sequence(), 2);
+    }
+
+    /// Provider input latency is display telemetry: recording it is
+    /// readable back, and it never moves the channel's machine-owned status.
+    #[tokio::test]
+    async fn provider_input_latency_is_telemetry_that_never_moves_status() {
+        let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
+        assert_eq!(host.channel_provider_input_latency(&ch).await, None);
+
+        let degraded_reading = crate::LiveProviderInputLatency {
+            latest_backlog_ms: Some(71_000),
+            measured_at_reflected_clock_ms: Some(52_000),
+            reflected_input_clock_ms: 123_000,
+        };
+        host.record_provider_input_latency(&ch, degraded_reading)
+            .await;
+
+        assert_eq!(
+            host.channel_provider_input_latency(&ch).await,
+            Some(degraded_reading)
+        );
+        let observed = host.channel_status_observation(&ch).await.unwrap();
+        assert_eq!(
+            observed.status(),
+            &LiveAdapterStatus::Opening,
+            "a large provider backlog is a measurement, never a status change"
+        );
+        // Unknown channels ignore the measurement.
+        let other = LiveChannelId::new("missing");
+        host.record_provider_input_latency(&other, degraded_reading)
+            .await;
+        assert_eq!(host.channel_provider_input_latency(&other).await, None);
     }
 
     #[tokio::test]

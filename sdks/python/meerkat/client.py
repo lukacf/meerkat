@@ -191,6 +191,8 @@ from .generated.types import (
     WireMemberToolDeclaration,
     WorkEventsResult,
     WorkItemsResult,
+    WireLiveProviderInputLatency,
+    WireLiveProviderInputLatencyReading,
 )
 from .generated.types import (
     SessionForkResult as RpcSessionForkResult,
@@ -6817,6 +6819,46 @@ class MeerkatClient:
                     f"{context}: status",
                 ),
             ),
+            provider_input_latency=MeerkatClient._parse_live_provider_input_latency(
+                result.get("provider_input_latency"),
+                f"{context}: provider_input_latency",
+            ),
+        )
+
+    @staticmethod
+    def _parse_live_provider_input_latency(
+        raw: Any, context: str
+    ) -> WireLiveProviderInputLatency | None:
+        """Optional provider input latency telemetry on `live/status`.
+
+        A measurement beside the machine-owned status, never a status itself.
+        """
+        if raw is None:
+            return None
+        value = MeerkatClient._require_dict(raw, "provider_input_latency", context)
+
+        def _millis(container: dict[str, Any], field: str) -> int:
+            number = container.get(field)
+            if not isinstance(number, int) or isinstance(number, bool) or number < 0:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: {field} must be a non-negative integer",
+                )
+            return number
+
+        latest_raw = value.get("latest")
+        latest = None
+        if latest_raw is not None:
+            reading = MeerkatClient._require_dict(latest_raw, "latest", context)
+            latest = WireLiveProviderInputLatencyReading(
+                backlog_ms=_millis(reading, "backlog_ms"),
+                measured_at_reflected_clock_ms=_millis(
+                    reading, "measured_at_reflected_clock_ms"
+                ),
+            )
+        return WireLiveProviderInputLatency(
+            reflected_input_clock_ms=_millis(value, "reflected_input_clock_ms"),
+            latest=latest,
         )
 
     @staticmethod

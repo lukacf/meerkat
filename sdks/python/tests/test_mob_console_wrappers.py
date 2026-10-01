@@ -756,6 +756,44 @@ def test_member_live_status_recursively_rejects_invalid_degradation_reason(
     assert exc_info.value.code == "INVALID_RESPONSE"
 
 
+def test_live_status_keeps_optional_provider_input_latency() -> None:
+    """Provider input latency is optional telemetry beside the status."""
+    absent = MeerkatClient._parse_live_status_result(
+        {"channel_id": "channel-1", "status": {"status": "ready"}},
+        "live/status",
+    )
+    assert absent.provider_input_latency is None
+
+    present = MeerkatClient._parse_live_status_result(
+        {
+            "channel_id": "channel-1",
+            "status": {"status": "ready"},
+            "provider_input_latency": {
+                "latest": {"backlog_ms": 44000, "measured_at_reflected_clock_ms": 52200},
+                "reflected_input_clock_ms": 61000,
+            },
+        },
+        "live/status",
+    )
+    latency = present.provider_input_latency
+    assert latency is not None
+    assert latency.reflected_input_clock_ms == 61000
+    assert latency.latest is not None
+    assert latency.latest.backlog_ms == 44000
+    assert latency.latest.measured_at_reflected_clock_ms == 52200
+
+    with pytest.raises(MeerkatError) as exc_info:
+        MeerkatClient._parse_live_status_result(
+            {
+                "channel_id": "channel-1",
+                "status": {"status": "ready"},
+                "provider_input_latency": {"reflected_input_clock_ms": -1},
+            },
+            "live/status",
+        )
+    assert exc_info.value.code == "INVALID_RESPONSE"
+
+
 @pytest.mark.asyncio
 async def test_member_live_control_correlates_response_to_requested_verb() -> None:
     client = MeerkatClient()

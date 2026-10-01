@@ -4843,6 +4843,26 @@ modality. See [`LiveCommitInputParams`]."""
 
 
 @dataclass
+class WireLiveProviderInputLatencyReading:
+    """One provider input latency reading: how far the provider's input
+processing ran behind the audio it had received, measured when its
+reflected input clock read `measured_at_reflected_clock_ms`."""
+    backlog_ms: int
+    measured_at_reflected_clock_ms: int
+
+
+@dataclass
+class WireLiveProviderInputLatency:
+    """Provider input latency telemetry for a live channel: the latest reading
+beside the provider's current reflected input clock. A reading whose
+`measured_at_reflected_clock_ms` trails `reflected_input_clock_ms` by a
+long way is stale (no input transcript has arrived since), visible from
+the provider's own clock. A measurement, never a status."""
+    reflected_input_clock_ms: int
+    latest: Optional[WireLiveProviderInputLatencyReading] = None
+
+
+@dataclass
 class LiveStatusResult:
     """Response payload for `live/status`.
 
@@ -4857,6 +4877,7 @@ payloads (the wire mirror serializes byte-compatible with the core
 enum — see `wire_live_adapter_status_byte_compatible_with_core`)."""
     channel_id: str
     status: WireLiveAdapterStatus
+    provider_input_latency: Optional[WireLiveProviderInputLatency] = None
 
 
 @dataclass

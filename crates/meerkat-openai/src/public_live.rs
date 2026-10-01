@@ -46,6 +46,7 @@ use crate::gpt_live_broker::{
     summarize_unknown_provider_event,
 };
 
+pub use crate::gpt_live_broker::{GptLiveProviderInputLatency, GptLiveProviderInputLatencyStatus};
 pub use crate::runtime::GPT_LIVE_MODEL_FAMILY;
 
 /// Scoped diagnostic capture for offline fixtures and explicitly opted-in live
@@ -104,6 +105,13 @@ pub mod thinking_capture {
             client_event_id: Option<String>,
             matched_owned: bool,
             accepted: bool,
+        },
+        /// A provider `info` notice (for example a throttle notice): evidence
+        /// only, never acted on.
+        ProviderInfo {
+            event_id: String,
+            code: String,
+            message: String,
         },
     }
 
@@ -221,6 +229,15 @@ pub mod thinking_capture {
                 } => client_event_id
                     .as_ref()
                     .is_none_or(|id| id.len() <= Self::MAX_ID_BYTES),
+                EventKind::ProviderInfo {
+                    event_id,
+                    code,
+                    message,
+                } => {
+                    event_id.len() <= Self::MAX_ID_BYTES
+                        && code.len() <= Self::MAX_ID_BYTES
+                        && message.len() <= Self::MAX_TEXT_BYTES
+                }
             };
             if !valid {
                 self.inner.fault.store(2, Ordering::Release);
@@ -1331,6 +1348,31 @@ impl PublicLiveBrokerSession {
             };
             let mut state = self.state.lock().await;
             #[cfg(feature = "test-realtime-fixtures")]
+            if let (
+                Some(capture),
+                ServerEvent::Info {
+                    event_id,
+                    code,
+                    message,
+                },
+            ) = (&self.thinking_capture, &frame.event)
+            {
+                // A notice is evidence; an oversized one is truncated rather
+                // than faulting the whole capture.
+                let bounded = |text: &str, limit: usize| {
+                    let mut end = text.len().min(limit);
+                    while !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    text[..end].to_owned()
+                };
+                capture.record(thinking_capture::EventKind::ProviderInfo {
+                    event_id: bounded(event_id, thinking_capture::Capture::MAX_ID_BYTES),
+                    code: bounded(code, thinking_capture::Capture::MAX_ID_BYTES),
+                    message: bounded(message, thinking_capture::Capture::MAX_TEXT_BYTES),
+                });
+            }
+            #[cfg(feature = "test-realtime-fixtures")]
             let instructions_ack = self.thinking_capture.as_ref().and_then(|capture| {
                 if !matches!(&frame.event, ServerEvent::InstructionsAppended { .. }) {
                     return None;
@@ -1401,6 +1443,16 @@ impl PublicLiveBrokerSession {
                 drop(state);
                 self.send_due_result_cues().await?;
             }
+        }
+    }
+
+    /// Latest provider input latency reading beside the current reflected
+    /// input clock (see [`GptLiveProviderInputLatency`]). Telemetry only.
+    pub async fn provider_input_latency(&self) -> GptLiveProviderInputLatencyStatus {
+        let state = self.state.lock().await;
+        GptLiveProviderInputLatencyStatus {
+            latest: state.provider_input_latency,
+            reflected_input_clock_ms: state.reflected_input_clock_ms(),
         }
     }
 
@@ -1608,6 +1660,13 @@ struct SessionState {
     seen_delegation_ids: HashSet<String>,
     queued_observations: VecDeque<GptLiveBrokerObservation>,
     reflected_output_audio_frames: u64,
+    /// Samples of reflected provider input (PCM16 24 kHz): the provider's
+    /// input clock, which input-transcript spans are expressed in.
+    reflected_input_samples: u64,
+    /// Latest provider input latency, measured on each input-transcript delta.
+    provider_input_latency: Option<GptLiveProviderInputLatency>,
+    /// Reflected input clock of the last latency telemetry emission.
+    provider_input_latency_emitted_at_ms: u64,
     /// Session-timeline end of the last output transcript delta.
     last_output_end_ms: Option<f64>,
     /// Whether an input transcript delta arrived after the last output one.
@@ -1639,6 +1698,9 @@ impl Default for SessionState {
             seen_delegation_ids: HashSet::new(),
             queued_observations: VecDeque::new(),
             reflected_output_audio_frames: 0,
+            reflected_input_samples: 0,
+            provider_input_latency: None,
+            provider_input_latency_emitted_at_ms: 0,
             last_output_end_ms: None,
             input_since_output: false,
             commentary_ack_start_ms: None,
@@ -1795,6 +1857,7 @@ impl SessionState {
                 tracing::debug!(start_ms, end_ms, "public Live input transcript delta span");
                 self.input_since_output = true;
                 self.record_transcript_delta(GptLiveTurnRole::User, delta);
+                self.measure_provider_input_latency(end_ms);
             }
             ServerEvent::OutputTranscriptDelta { delta, end_ms, .. } => {
                 self.last_output_end_ms = Some(end_ms);
@@ -1823,11 +1886,36 @@ impl SessionState {
                     );
                 }
             }
-            ServerEvent::InputAudio { .. }
-            | ServerEvent::InputAudioMuted { .. }
+            ServerEvent::InputAudio { audio } => {
+                // Reflected input is not conversational authority; it is the
+                // provider's input clock for the backlog measurement.
+                self.reflected_input_samples = self
+                    .reflected_input_samples
+                    .saturating_add(reflected_pcm16_samples(&audio));
+                // Keep the telemetry's clock current even when no transcript
+                // arrives (a total stall), paced by the provider's own input
+                // clock rather than a timer.
+                if self.reflected_input_clock_ms()
+                    >= self
+                        .provider_input_latency_emitted_at_ms
+                        .saturating_add(PROVIDER_INPUT_LATENCY_CLOCK_STEP_MS)
+                {
+                    self.emit_provider_input_latency();
+                }
+            }
+            // A provider notice (for example a throttle notice) is telemetry:
+            // logged with its identity so it becomes evidence, and nothing
+            // in the runtime decides on it.
+            ServerEvent::Info {
+                event_id,
+                code,
+                message,
+            } => {
+                tracing::info!(%event_id, %code, %message, "public Live provider info");
+            }
+            ServerEvent::InputAudioMuted { .. }
             | ServerEvent::InputAudioUnmuted { .. }
             | ServerEvent::UsageUpdated { .. }
-            | ServerEvent::Info { .. }
             | ServerEvent::DtmfReceived { .. }
             | ServerEvent::DtmfSend { .. }
             | ServerEvent::Ringing { .. }
@@ -1994,6 +2082,42 @@ impl SessionState {
                 "public Live result delivered with speech in progress; result cue suppressed"
             );
         }
+    }
+
+    fn reflected_input_clock_ms(&self) -> u64 {
+        self.reflected_input_samples.saturating_mul(1000) / SIDEBAND_INPUT_SAMPLE_RATE_HZ
+    }
+
+    fn measure_provider_input_latency(&mut self, transcribed_through_ms: f64) {
+        let measured_at_reflected_clock_ms = self.reflected_input_clock_ms();
+        // Provider spans are non-negative milliseconds; anything else
+        // measures from the clock origin rather than inventing a lag.
+        let transcribed_through_ms = if transcribed_through_ms.is_finite() {
+            transcribed_through_ms.max(0.0) as u64
+        } else {
+            0
+        };
+        let latency = GptLiveProviderInputLatency {
+            backlog_ms: measured_at_reflected_clock_ms.saturating_sub(transcribed_through_ms),
+            measured_at_reflected_clock_ms,
+        };
+        tracing::debug!(
+            backlog_ms = latency.backlog_ms,
+            measured_at_reflected_clock_ms,
+            "public Live provider input latency"
+        );
+        self.provider_input_latency = Some(latency);
+        self.emit_provider_input_latency();
+    }
+
+    fn emit_provider_input_latency(&mut self) {
+        let status = GptLiveProviderInputLatencyStatus {
+            latest: self.provider_input_latency,
+            reflected_input_clock_ms: self.reflected_input_clock_ms(),
+        };
+        self.provider_input_latency_emitted_at_ms = status.reflected_input_clock_ms;
+        self.queued_observations
+            .push_back(GptLiveBrokerObservation::ProviderInputLatency(status));
     }
 
     fn record_transcript_delta(&mut self, role: GptLiveTurnRole, delta: String) {
@@ -2258,6 +2382,27 @@ fn pending_event_id(token: GptLiveAppendToken) -> String {
     format!("meerkat-append-{}", token.0)
 }
 
+/// The sideband carries input and output audio as PCM16 at 24 kHz regardless
+/// of the negotiated media codec.
+const SIDEBAND_INPUT_SAMPLE_RATE_HZ: u64 = 24_000;
+
+/// Reflected-clock advance between provider input latency telemetry
+/// emissions when no input transcript arrives.
+const PROVIDER_INPUT_LATENCY_CLOCK_STEP_MS: u64 = 1_000;
+
+/// PCM16 samples in one base64 sideband audio payload, from its length alone
+/// (the payload is never decoded here).
+fn reflected_pcm16_samples(audio: &str) -> u64 {
+    let encoded = audio.trim_end_matches('=').len() as u64;
+    let bytes = encoded / 4 * 3
+        + match encoded % 4 {
+            2 => 1,
+            3 => 2,
+            _ => 0,
+        };
+    bytes / 2
+}
+
 /// Test support: the `client_event_id` a public Live commentary append with
 /// this token carries, which `session.commentary.appended` echoes.
 #[cfg(feature = "test-realtime-fixtures")]
@@ -2435,8 +2580,19 @@ mod tests {
             .expect("fixture event decodes")
     }
 
+    /// Conversational observations; provider input latency telemetry is
+    /// asserted by its own tests.
     fn drain(state: &mut SessionState) -> Vec<GptLiveBrokerObservation> {
-        state.queued_observations.drain(..).collect()
+        state
+            .queued_observations
+            .drain(..)
+            .filter(|observation| {
+                !matches!(
+                    observation,
+                    GptLiveBrokerObservation::ProviderInputLatency(_)
+                )
+            })
+            .collect()
     }
 
     fn input_delta(text: &str) -> Value {
@@ -3038,6 +3194,102 @@ mod tests {
             PublicLiveOpenConfig::new("v=0", " "),
             Err(GptLiveBrokerError::MissingVoice)
         ));
+    }
+
+    fn reflected_input_frame(bytes: usize) -> Value {
+        use base64::Engine as _;
+        json!({
+            "type": "session.input_audio.append",
+            "audio": base64::engine::general_purpose::STANDARD.encode(vec![0_u8; bytes]),
+        })
+    }
+
+    /// A provider `info` notice is telemetry: it is logged, never lowered
+    /// into an observation the runtime could act on.
+    #[test]
+    fn provider_info_notice_is_telemetry_only() {
+        let mut state = SessionState::default();
+        state
+            .apply_frame(frame(json!({
+                "type": "info",
+                "event_id": "n1",
+                "code": "rate_limited",
+                "message": "slow down",
+            })))
+            .unwrap();
+        assert!(state.queued_observations.is_empty());
+    }
+
+    #[test]
+    fn reflected_pcm16_samples_counts_from_base64_length() {
+        use base64::Engine as _;
+        let encode =
+            |bytes: usize| base64::engine::general_purpose::STANDARD.encode(vec![0_u8; bytes]);
+        // 200 ms of PCM16 at 24 kHz.
+        assert_eq!(reflected_pcm16_samples(&encode(9_600)), 4_800);
+        // Padded tails: 4 bytes ("...==" is 1 byte past a group) and 2 bytes.
+        assert_eq!(reflected_pcm16_samples(&encode(4)), 2);
+        assert_eq!(reflected_pcm16_samples(&encode(2)), 1);
+        // Unpadded payloads count the same bytes.
+        assert_eq!(reflected_pcm16_samples(encode(2).trim_end_matches('=')), 1);
+        assert_eq!(reflected_pcm16_samples(""), 0);
+    }
+
+    /// The provider input backlog is the reflected input clock at an
+    /// input-transcript delta minus the span it transcribes: about a second
+    /// on a healthy session, growing on a degraded one whose transcription
+    /// runs behind the audio it has received.
+    #[test]
+    fn provider_input_latency_measures_reflected_clock_minus_transcribed_span() {
+        let mut state = SessionState::default();
+        assert_eq!(state.provider_input_latency, None);
+        // Reflected input alone (silence) measures nothing.
+        for _ in 0..10 {
+            state
+                .apply_frame(frame(reflected_input_frame(9_600)))
+                .unwrap();
+        }
+        assert_eq!(state.provider_input_latency, None);
+
+        state
+            .apply_frame(frame(input_delta_span("hello ", 1_000.0, 1_200.0)))
+            .unwrap();
+        assert_eq!(
+            state.provider_input_latency,
+            Some(GptLiveProviderInputLatency {
+                backlog_ms: 800,
+                measured_at_reflected_clock_ms: 2_000,
+            })
+        );
+
+        // Ten more seconds of received audio while the provider has only
+        // transcribed through 1.4 s: the backlog grows with the clock.
+        for _ in 0..50 {
+            state
+                .apply_frame(frame(reflected_input_frame(9_600)))
+                .unwrap();
+        }
+        state
+            .apply_frame(frame(input_delta_span("there", 1_200.0, 1_400.0)))
+            .unwrap();
+        assert_eq!(
+            state.provider_input_latency,
+            Some(GptLiveProviderInputLatency {
+                backlog_ms: 10_600,
+                measured_at_reflected_clock_ms: 12_000,
+            })
+        );
+
+        // A span past the reflected clock never reports a negative lag.
+        state
+            .apply_frame(frame(input_delta_span("ahead", 12_000.0, 12_500.0)))
+            .unwrap();
+        assert_eq!(
+            state
+                .provider_input_latency
+                .map(|latency| latency.backlog_ms),
+            Some(0)
+        );
     }
 
     #[test]
@@ -4754,6 +5006,16 @@ mod tests {
         assert!(matches!(
             session.next_observation().await.unwrap(),
             Some(GptLiveBrokerObservation::TurnSnapshotDelta { .. })
+        ));
+        // Each input-transcript delta is followed by its latency telemetry.
+        assert!(matches!(
+            session.next_observation().await.unwrap(),
+            Some(GptLiveBrokerObservation::ProviderInputLatency(
+                GptLiveProviderInputLatencyStatus {
+                    latest: Some(_),
+                    ..
+                }
+            ))
         ));
         let delegation = match session.next_observation().await.unwrap() {
             Some(GptLiveBrokerObservation::ClientDelegationFinal {

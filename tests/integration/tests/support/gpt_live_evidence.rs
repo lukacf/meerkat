@@ -77,6 +77,110 @@ pub enum Outcome {
     Failed,
     TimedOut,
     CancelledOrPanicked,
+    /// The provider's input processing ran degraded during the run (see
+    /// [`provider_degradation_verdict`]): the run is void, neither green nor
+    /// red, and a [`Record::ProviderDegraded`] names the cause.
+    ProviderDegraded,
+}
+
+/// Turbo S provider-degradation rule: one exchange whose speech end to input
+/// final lag is at least this is provider-degraded evidence.
+pub const PROVIDER_DEGRADED_EXCHANGE_LAG_MS: i64 = 10_000;
+/// Turbo S provider-degradation rule: a run whose speech end to input final
+/// lag p90 exceeds this is provider-degraded evidence.
+pub const PROVIDER_DEGRADED_P90_LAG_MS: i64 = 2_000;
+
+/// Why a run was classified provider-degraded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProviderDegradationCause {
+    /// One exchange's speech end to input final lag reached
+    /// [`PROVIDER_DEGRADED_EXCHANGE_LAG_MS`].
+    ExchangeLag { lag_ms: i64 },
+    /// The run's lag p90 exceeded [`PROVIDER_DEGRADED_P90_LAG_MS`].
+    LagP90 { p90_ms: i64 },
+    /// An exchange never reached its input final while the provider's own
+    /// measured input backlog was at least
+    /// [`PROVIDER_DEGRADED_EXCHANGE_LAG_MS`]: the provider received the
+    /// speech and was behind processing it. A timeout without that provider
+    /// evidence is not degradation; it stays a failure.
+    TimedOutBehindProviderBacklog { backlog_ms: u64 },
+}
+
+/// The provider input latency read from `live/status` when an exchange timed
+/// out (all `None` when the provider reported no measurement).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProviderInputLatencyAtTimeout {
+    pub backlog_ms: Option<u64>,
+    pub reflected_input_clock_ms: Option<u64>,
+    pub reflected_clock_since_reading_ms: Option<u64>,
+}
+
+/// The typed provider-degraded verdict for one run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderDegradation {
+    /// The exchange that established the verdict.
+    pub exchange: String,
+    pub cause: ProviderDegradationCause,
+    /// Lag p90 over the exchanges that reached an input final.
+    pub p90_ms: Option<i64>,
+    /// The provider's measured input backlog at the timeout, when one was
+    /// read.
+    pub provider_input_backlog_ms: Option<u64>,
+}
+
+/// Classify a run from its own evidence: the speech end to input final lag
+/// of every exchange that reached its final, plus the exchange that timed
+/// out before its final (if any) with the provider input backlog read at
+/// that moment. `None` is a valid (healthy) run.
+pub fn provider_degradation_verdict(
+    lags: &[(String, i64)],
+    timed_out: Option<(&str, Option<u64>)>,
+) -> Option<ProviderDegradation> {
+    let mut sorted: Vec<i64> = lags.iter().map(|(_, lag)| *lag).collect();
+    sorted.sort_unstable();
+    let p90_ms =
+        (!sorted.is_empty()).then(|| sorted[((sorted.len() * 9) / 10).min(sorted.len() - 1)]);
+    let backlog_ms = timed_out.and_then(|(_, backlog)| backlog);
+    if let Some((exchange, lag_ms)) = lags
+        .iter()
+        .find(|(_, lag)| *lag >= PROVIDER_DEGRADED_EXCHANGE_LAG_MS)
+    {
+        return Some(ProviderDegradation {
+            exchange: exchange.clone(),
+            cause: ProviderDegradationCause::ExchangeLag { lag_ms: *lag_ms },
+            p90_ms,
+            provider_input_backlog_ms: backlog_ms,
+        });
+    }
+    if let Some(p90) = p90_ms.filter(|p90| *p90 > PROVIDER_DEGRADED_P90_LAG_MS) {
+        let exchange = lags
+            .iter()
+            .find(|(_, lag)| *lag == p90)
+            .map(|(exchange, _)| exchange.clone())
+            .unwrap_or_default();
+        return Some(ProviderDegradation {
+            exchange,
+            cause: ProviderDegradationCause::LagP90 { p90_ms: p90 },
+            p90_ms,
+            provider_input_backlog_ms: backlog_ms,
+        });
+    }
+    match timed_out {
+        Some((exchange, Some(backlog)))
+            if backlog >= PROVIDER_DEGRADED_EXCHANGE_LAG_MS.unsigned_abs() =>
+        {
+            Some(ProviderDegradation {
+                exchange: exchange.to_owned(),
+                cause: ProviderDegradationCause::TimedOutBehindProviderBacklog {
+                    backlog_ms: backlog,
+                },
+                p90_ms,
+                provider_input_backlog_ms: Some(backlog),
+            })
+        }
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -645,6 +749,28 @@ pub enum Record {
         outcome: Outcome,
         last_stage: Stage,
     },
+    /// One exchange's speech end to input final lag (provider health
+    /// evidence for [`provider_degradation_verdict`]).
+    ExchangeLag {
+        exchange: String,
+        speech_end_to_input_final_ms: i64,
+    },
+    /// The provider input backlog read when an exchange timed out before its
+    /// input final.
+    ExchangeTimedOut {
+        exchange: String,
+        provider_input_backlog_ms: Option<u64>,
+        /// The provider's reflected input clock when the timeout was read.
+        reflected_input_clock_ms: Option<u64>,
+        /// Reflected-clock time since the backlog reading was measured (the
+        /// last input transcript delta): a large value means the reading is
+        /// stale because transcription stopped entirely.
+        reflected_clock_since_reading_ms: Option<u64>,
+    },
+    /// The run's provider-degraded verdict.
+    ProviderDegraded {
+        degradation: ProviderDegradation,
+    },
     /// Downsampled assistant energy windows (t_ms, rms) for one channel.
     Energy {
         channel: u32,
@@ -823,6 +949,14 @@ struct State {
     instructions_appends: HashMap<String, InstructionsAppendReassembly>,
     /// Soft browser faults (overlap, duplicate readout); never invalidate.
     browser_faults: Vec<BrowserFault>,
+    /// Speech end to input final lag of every exchange that reached its
+    /// final, in order.
+    exchange_lags: Vec<(String, i64)>,
+    /// The exchange awaiting its input final, if any.
+    pending_exchange: Option<String>,
+    /// The exchange that timed out before its final, with the provider input
+    /// backlog read at that moment.
+    timed_out_exchange: Option<(String, Option<u64>)>,
 }
 
 #[derive(Default)]
@@ -967,6 +1101,9 @@ impl Journal {
                 framed_summary_attempts: 0,
                 instructions_appends: HashMap::new(),
                 browser_faults: Vec::new(),
+                exchange_lags: Vec::new(),
+                pending_exchange: None,
+                timed_out_exchange: None,
             }),
             started: Instant::now(),
             path,
@@ -1001,6 +1138,58 @@ impl Journal {
     }
     pub fn wire(&self, channel: u32) -> thinking_capture::Capture {
         self.0.wire.for_channel(channel)
+    }
+
+    /// An exchange's fixture is about to play; it awaits its input final.
+    pub fn exchange_started(&self, exchange: &str) -> Result<(), Fault> {
+        let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+        state.pending_exchange = Some(exchange.to_owned());
+        Ok(())
+    }
+
+    /// An exchange reached its input final `lag_ms` after its speech ended.
+    pub fn exchange_heard(&self, exchange: &str, lag_ms: i64) -> Result<(), Fault> {
+        {
+            let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+            state.pending_exchange = None;
+            state.exchange_lags.push((exchange.to_owned(), lag_ms));
+        }
+        self.record(Record::ExchangeLag {
+            exchange: exchange.to_owned(),
+            speech_end_to_input_final_ms: lag_ms,
+        })
+    }
+
+    /// The pending exchange timed out before its input final, with the
+    /// provider input latency read at that moment.
+    pub fn exchange_timed_out(&self, latency: ProviderInputLatencyAtTimeout) -> Result<(), Fault> {
+        let backlog_ms = latency.backlog_ms;
+        let exchange = {
+            let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+            let Some(exchange) = state.pending_exchange.take() else {
+                return Ok(());
+            };
+            state.timed_out_exchange = Some((exchange.clone(), backlog_ms));
+            exchange
+        };
+        self.record(Record::ExchangeTimedOut {
+            exchange,
+            provider_input_backlog_ms: backlog_ms,
+            reflected_input_clock_ms: latency.reflected_input_clock_ms,
+            reflected_clock_since_reading_ms: latency.reflected_clock_since_reading_ms,
+        })
+    }
+
+    /// This run's provider-degraded verdict from its own evidence.
+    pub fn provider_degradation(&self) -> Result<Option<ProviderDegradation>, Fault> {
+        let state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+        Ok(provider_degradation_verdict(
+            &state.exchange_lags,
+            state
+                .timed_out_exchange
+                .as_ref()
+                .map(|(exchange, backlog)| (exchange.as_str(), *backlog)),
+        ))
     }
 
     pub fn stage(&self, stage: Stage) -> Result<(), Fault> {
@@ -1474,6 +1663,53 @@ impl Journal {
         Err(fault)
     }
 
+    /// Finish with this run's own provider-health verdict: when its evidence
+    /// shows provider-degraded input processing, the run is recorded as
+    /// [`Outcome::ProviderDegraded`] (void: neither green nor red) with the
+    /// [`Record::ProviderDegraded`] that caused it, whatever `outcome` the
+    /// scenario reached. Otherwise it finishes with `outcome`.
+    pub fn finish_classified(
+        &self,
+        outcome: Outcome,
+    ) -> Result<Option<ProviderDegradation>, Fault> {
+        let already_finished = self.0.state.lock().map_err(|_| Fault::Poisoned)?.finished;
+        let degradation = if already_finished {
+            // The inner scenario already recorded its verdict; finishing
+            // again is the journal's idempotent no-op.
+            None
+        } else {
+            self.provider_degradation()?
+        };
+        let Some(degradation) = degradation else {
+            return self.finish(outcome).map(|()| None);
+        };
+        self.record(Record::ProviderDegraded {
+            degradation: degradation.clone(),
+        })?;
+        self.finish(Outcome::ProviderDegraded)?;
+        Ok(Some(degradation))
+    }
+
+    /// The typed void verdict line and error text for a provider-degraded
+    /// run. The run must never count as green, and it is not a red either.
+    pub fn provider_degraded_verdict(&self, degradation: &ProviderDegradation) -> String {
+        let cause = serde_json::to_string(&degradation.cause).unwrap_or_default();
+        println!(
+            "GPT_LIVE_VERDICT scenario={} verdict=provider_degraded exchange={} cause={cause} p90_ms={:?} provider_input_backlog_ms={:?}",
+            self.0.label,
+            degradation.exchange,
+            degradation.p90_ms,
+            degradation.provider_input_backlog_ms
+        );
+        format!(
+            "PROVIDER_DEGRADED: {} is void (neither green nor red): provider input processing was degraded at {} ({cause}, p90_ms={:?}, provider_input_backlog_ms={:?}); a valid run needs a healthy provider window",
+            self.0.label,
+            degradation.exchange,
+            degradation.p90_ms,
+            degradation.provider_input_backlog_ms
+        )
+    }
+
     pub fn finish(&self, outcome: Outcome) -> Result<(), Fault> {
         if let Err(fault) = self.flush_wire() {
             let _ = self.fail(fault);
@@ -1602,6 +1838,71 @@ fn redact_and_bound(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lags(values: &[(&str, i64)]) -> Vec<(String, i64)> {
+        values
+            .iter()
+            .map(|(exchange, lag)| ((*exchange).to_owned(), *lag))
+            .collect()
+    }
+
+    #[test]
+    fn healthy_run_has_no_provider_degradation() {
+        let healthy = lags(&[("e1", 950), ("e2", 1_050), ("e3", 1_300), ("e4", 1_100)]);
+        assert_eq!(provider_degradation_verdict(&healthy, None), None);
+    }
+
+    #[test]
+    fn one_exchange_at_ten_seconds_is_provider_degraded() {
+        let run = lags(&[("e1", 1_000), ("e8", 15_200), ("e9", 44_000)]);
+        let verdict = provider_degradation_verdict(&run, None).expect("degraded");
+        assert_eq!(verdict.exchange, "e8");
+        assert_eq!(
+            verdict.cause,
+            ProviderDegradationCause::ExchangeLag { lag_ms: 15_200 }
+        );
+    }
+
+    #[test]
+    fn lag_p90_above_two_seconds_is_provider_degraded() {
+        let run = lags(&[
+            ("e1", 900),
+            ("e2", 2_600),
+            ("e3", 2_800),
+            ("e4", 3_100),
+            ("e5", 1_000),
+        ]);
+        let verdict = provider_degradation_verdict(&run, None).expect("degraded");
+        assert_eq!(
+            verdict.cause,
+            ProviderDegradationCause::LagP90 { p90_ms: 3_100 }
+        );
+        assert_eq!(verdict.exchange, "e4");
+    }
+
+    /// A timeout is degradation only with the provider's own evidence that it
+    /// was behind: a meerkat-side input loss (healthy or unknown backlog)
+    /// stays a failure, never void.
+    #[test]
+    fn timeout_is_degraded_only_behind_a_measured_provider_backlog() {
+        let healthy = lags(&[("e8", 1_000), ("e9", 1_200)]);
+        assert_eq!(
+            provider_degradation_verdict(&healthy, Some(("e10", None))),
+            None
+        );
+        assert_eq!(
+            provider_degradation_verdict(&healthy, Some(("e10", Some(1_100)))),
+            None
+        );
+        let verdict =
+            provider_degradation_verdict(&healthy, Some(("e10", Some(71_000)))).expect("degraded");
+        assert_eq!(verdict.exchange, "e10");
+        assert_eq!(
+            verdict.cause,
+            ProviderDegradationCause::TimedOutBehindProviderBacklog { backlog_ms: 71_000 }
+        );
+        assert_eq!(verdict.provider_input_backlog_ms, Some(71_000));
+    }
 
     fn root() -> tempfile::TempDir {
         let root = super::super::workspace_root().join("target/e2e-live-audio-artifacts/offline");

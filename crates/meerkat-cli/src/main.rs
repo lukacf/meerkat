@@ -16376,6 +16376,7 @@ async fn handle_mob_live_command(
                 serde_json::to_string_pretty(&meerkat_contracts::wire::LiveStatusResult {
                     channel_id: status.channel_id,
                     status: status.status,
+                    provider_input_latency: None,
                 })?
             );
             Ok(())

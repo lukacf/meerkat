@@ -16,6 +16,40 @@ pub enum GptLiveBrokerTerminalClass {
     Closed,
 }
 
+/// Provider input latency measured from the sideband alone.
+///
+/// The provider reflects every input audio frame it receives on the sideband
+/// (before any model-input muting) at a fixed PCM16 24 kHz format, so the sum
+/// of reflected samples is the provider's input clock. Each input-transcript
+/// delta names the provider-clock span it transcribes. `backlog_ms` is the
+/// reflected input clock at the delta's arrival
+/// (`measured_at_reflected_clock_ms`) minus that span's end: how far the
+/// provider's input processing (transcription and the turn handling gated on
+/// it) runs behind the audio it has received. Healthy sessions measure about
+/// one second; a degraded provider session grows it without bound and emits
+/// no other signal.
+///
+/// This is telemetry, never authority: no machine input is derived from it
+/// and no runtime branch reads it to decide anything. "Degraded" remains a
+/// machine status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GptLiveProviderInputLatency {
+    /// Provider input processing lag behind received audio, in milliseconds.
+    pub backlog_ms: u64,
+    /// Reflected provider input clock when the lag was measured.
+    pub measured_at_reflected_clock_ms: u64,
+}
+
+/// The latest provider input latency reading beside the current reflected
+/// input clock. A reading whose anchor trails the clock by a long way is
+/// stale (no input transcript has arrived since), which a consumer can see
+/// from the provider's own clock without any wall-clock timer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GptLiveProviderInputLatencyStatus {
+    pub latest: Option<GptLiveProviderInputLatency>,
+    pub reflected_input_clock_ms: u64,
+}
+
 /// Opaque local identity for one append attempt.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GptLiveAppendToken(pub(crate) u64);
@@ -228,6 +262,11 @@ pub enum GptLiveBrokerObservation {
         token: GptLiveAppendToken,
     },
     UnsupportedProviderEvent,
+    /// Provider input latency telemetry (see [`GptLiveProviderInputLatency`]):
+    /// the latest reading beside the current reflected input clock. Emitted on
+    /// each input-transcript delta and on each second the reflected clock
+    /// advances. Never authority: consumers only record it for display.
+    ProviderInputLatency(GptLiveProviderInputLatencyStatus),
 }
 
 impl std::fmt::Debug for GptLiveBrokerObservation {
@@ -266,6 +305,7 @@ impl std::fmt::Debug for GptLiveBrokerObservation {
             }
             Self::DelegationContextAppendRejected { .. } => "delegation_context_append_rejected",
             Self::UnsupportedProviderEvent => "unsupported_provider_event",
+            Self::ProviderInputLatency(_) => "provider_input_latency",
         };
         formatter
             .debug_struct("GptLiveBrokerObservation")

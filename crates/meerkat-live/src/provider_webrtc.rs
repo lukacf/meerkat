@@ -1089,6 +1089,22 @@ pub enum LiveSidebandCommandDelivery {
     AmbiguousTerminal,
 }
 
+/// Provider input latency telemetry: how far the provider's input processing
+/// runs behind the audio it has received, measured on its own reflected input
+/// clock. `latest_backlog_ms` was measured when that clock read
+/// `measured_at_reflected_clock_ms`; `reflected_input_clock_ms` is the clock
+/// now, so a reading whose anchor trails it is visibly stale.
+///
+/// This is a measurement, never authority: it never becomes a machine input,
+/// takes no context ordinal, and nothing in the runtime decides on it. Live
+/// degradation remains a machine status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveProviderInputLatency {
+    pub latest_backlog_ms: Option<u64>,
+    pub measured_at_reflected_clock_ms: Option<u64>,
+    pub reflected_input_clock_ms: u64,
+}
+
 /// Sanitized provider-neutral observation kind emitted by the sideband actor.
 #[derive(Clone, PartialEq, Eq)]
 pub enum LiveSidebandObservationKind {
@@ -1166,6 +1182,9 @@ pub enum LiveSidebandObservationKind {
         attempt: LiveSidebandAppendAttempt,
     },
     UnsupportedProviderEvent,
+    /// Non-authoritative provider input latency telemetry. The sideband actor
+    /// records it for `live/status` and routes it nowhere else.
+    ProviderInputLatency(LiveProviderInputLatency),
 }
 
 impl fmt::Debug for LiveSidebandObservationKind {
@@ -1185,6 +1204,7 @@ impl fmt::Debug for LiveSidebandObservationKind {
             Self::AppendRejected { .. } => "append_rejected",
             Self::AppendDeliveryAmbiguousTerminal { .. } => "append_delivery_ambiguous_terminal",
             Self::UnsupportedProviderEvent => "unsupported_provider_event",
+            Self::ProviderInputLatency(_) => "provider_input_latency",
         };
         formatter
             .debug_struct("LiveSidebandObservationKind")

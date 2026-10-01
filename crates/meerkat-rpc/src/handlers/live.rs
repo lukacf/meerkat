@@ -1694,9 +1694,15 @@ pub async fn handle_live_status(
 
     match runtime.live_channel_status(host, &channel_id).await {
         Ok(status) => {
+            // Telemetry beside the machine-owned status, never folded into it.
+            let provider_input_latency = host
+                .channel_provider_input_latency(&channel_id)
+                .await
+                .map(wire_provider_input_latency);
             let result = LiveStatusResult {
                 channel_id: parsed.channel_id,
                 status,
+                provider_input_latency,
             };
             match serde_json::to_value(result) {
                 Ok(value) => RpcResponse::success(id, value),
@@ -1708,6 +1714,23 @@ pub async fn handle_live_status(
             }
         }
         Err(verb_error) => live_verb_error_response(id, verb_error),
+    }
+}
+
+fn wire_provider_input_latency(
+    latency: meerkat_live::LiveProviderInputLatency,
+) -> meerkat_contracts::wire::WireLiveProviderInputLatency {
+    meerkat_contracts::wire::WireLiveProviderInputLatency {
+        latest: latency
+            .latest_backlog_ms
+            .zip(latency.measured_at_reflected_clock_ms)
+            .map(|(backlog_ms, measured_at_reflected_clock_ms)| {
+                meerkat_contracts::wire::WireLiveProviderInputLatencyReading {
+                    backlog_ms,
+                    measured_at_reflected_clock_ms,
+                }
+            }),
+        reflected_input_clock_ms: latency.reflected_input_clock_ms,
     }
 }
 
@@ -2486,8 +2509,46 @@ mod tests {
         let v = LiveStatusResult {
             channel_id: "live_1".into(),
             status: WireLiveAdapterStatus::from(LiveAdapterStatus::Idle),
+            provider_input_latency: None,
         };
         assert_eq!(round_trip(&v), v);
+    }
+
+    /// Provider input latency is optional telemetry beside the status: absent
+    /// readings leave the existing JSON byte-identical, present ones carry
+    /// the reading with its own reflected-clock anchor.
+    #[test]
+    fn live_status_result_carries_optional_provider_input_latency() {
+        let without = LiveStatusResult {
+            channel_id: "live_1".into(),
+            status: WireLiveAdapterStatus::from(LiveAdapterStatus::Ready),
+            provider_input_latency: None,
+        };
+        let json = serde_json::to_value(&without).expect("serialize");
+        assert!(json.get("provider_input_latency").is_none());
+
+        let with = LiveStatusResult {
+            provider_input_latency: Some(meerkat_contracts::wire::WireLiveProviderInputLatency {
+                latest: Some(
+                    meerkat_contracts::wire::WireLiveProviderInputLatencyReading {
+                        backlog_ms: 44_000,
+                        measured_at_reflected_clock_ms: 52_200,
+                    },
+                ),
+                reflected_input_clock_ms: 61_000,
+            }),
+            ..without
+        };
+        assert_eq!(round_trip(&with), with);
+        let json = serde_json::to_value(&with).expect("serialize");
+        assert_eq!(
+            json["provider_input_latency"]["latest"]["backlog_ms"],
+            44_000
+        );
+        assert_eq!(
+            json["provider_input_latency"]["reflected_input_clock_ms"],
+            61_000
+        );
     }
 
     #[test]
@@ -2495,6 +2556,7 @@ mod tests {
         let v = LiveStatusResult {
             channel_id: "live_1".into(),
             status: WireLiveAdapterStatus::from(LiveAdapterStatus::Ready),
+            provider_input_latency: None,
         };
         assert_eq!(round_trip(&v), v);
     }
@@ -2510,6 +2572,7 @@ mod tests {
         let ready = LiveStatusResult {
             channel_id: "live_1".into(),
             status: WireLiveAdapterStatus::from(LiveAdapterStatus::Ready),
+            provider_input_latency: None,
         };
         let j = serde_json::to_value(&ready).expect("round-trip should succeed");
         // The wire mirror is internally-tagged on `status`; payload-less
@@ -2543,6 +2606,7 @@ mod tests {
         let reply = serde_json::to_value(LiveStatusResult {
             channel_id: "live_1".to_string(),
             status,
+            provider_input_latency: None,
         })
         .expect("LiveStatusResult must round-trip through serde");
 

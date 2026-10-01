@@ -4726,6 +4726,9 @@ impl ExperimentalGptLiveDeferredAdapter {
                 }
                 LiveSidebandTurnRole::Unknown => None,
             },
+            // Telemetry is recorded by the sideband actor and never routed
+            // to the adapter.
+            LiveSidebandObservationKind::ProviderInputLatency(_) => None,
             LiveSidebandObservationKind::UnsupportedProviderEvent
             | LiveSidebandObservationKind::DelegationActionableInputUnsupported { .. } => {
                 Some(LiveAdapterObservation::Error {
@@ -6898,6 +6901,22 @@ fn spawn_sideband_actors(
             };
             match next {
                 Ok(Some(observation)) => {
+                    // Provider input latency is display telemetry: record it
+                    // for `live/status` and route it nowhere else. It takes
+                    // no context ordinal and never reaches the machine, the
+                    // adapter, or the control lane.
+                    if let LiveSidebandObservationKind::ProviderInputLatency(latency) =
+                        observation.kind()
+                    {
+                        activation
+                            .live_adapter_host
+                            .record_provider_input_latency(
+                                observation_binding.channel_id(),
+                                *latency,
+                            )
+                            .await;
+                        continue;
+                    }
                     let control_observation = matches!(
                         observation.kind(),
                         LiveSidebandObservationKind::DelegationRequested { .. }
@@ -8461,6 +8480,17 @@ impl ExperimentalGptLiveSideband {
             }
             GptLiveBrokerObservation::UnsupportedProviderEvent => {
                 LiveSidebandObservationKind::UnsupportedProviderEvent
+            }
+            GptLiveBrokerObservation::ProviderInputLatency(status) => {
+                LiveSidebandObservationKind::ProviderInputLatency(
+                    meerkat_live::LiveProviderInputLatency {
+                        latest_backlog_ms: status.latest.map(|latency| latency.backlog_ms),
+                        measured_at_reflected_clock_ms: status
+                            .latest
+                            .map(|latency| latency.measured_at_reflected_clock_ms),
+                        reflected_input_clock_ms: status.reflected_input_clock_ms,
+                    },
+                )
             }
         };
         Ok(LiveSidebandObservation::new(self.binding.clone(), kind))
@@ -11739,10 +11769,8 @@ mod tests {
 
         let mut finished_user_items = Vec::new();
         let represented = loop {
-            let observation = sideband
-                .next_observation()
+            let observation = next_semantic_observation(sideband.as_ref())
                 .await
-                .expect("provider observation")
                 .expect("provider observation present");
             match observation.into_kind() {
                 LiveSidebandObservationKind::TurnFinished {
@@ -11871,6 +11899,27 @@ mod tests {
             );
         }
         server.abort();
+    }
+
+    #[cfg(feature = "test-realtime-fixtures")]
+    /// The next semantic sideband observation. Provider input latency is
+    /// display telemetry the sideband actor records and routes nowhere else;
+    /// its own tests assert it, so the conversational sequence skips it.
+    async fn next_semantic_observation(
+        sideband: &dyn ProviderWebrtcSidebandSession,
+    ) -> Option<LiveSidebandObservation> {
+        loop {
+            let observation = sideband
+                .next_observation()
+                .await
+                .expect("provider observation")?;
+            if !matches!(
+                observation.kind(),
+                LiveSidebandObservationKind::ProviderInputLatency(_)
+            ) {
+                return Some(observation);
+            }
+        }
     }
 
     #[cfg(feature = "test-realtime-fixtures")]
@@ -12109,10 +12158,8 @@ mod tests {
             expected_seed_cursor
         );
         let next = || async {
-            sideband
-                .next_observation()
+            next_semantic_observation(sideband.as_ref())
                 .await
-                .expect("provider observation")
                 .expect("provider observation present")
         };
         let ready = next().await;
@@ -12143,10 +12190,8 @@ mod tests {
         ));
         async fn expect_assistant_start(sideband: &dyn ProviderWebrtcSidebandSession) {
             let next = || async {
-                sideband
-                    .next_observation()
+                next_semantic_observation(sideband)
                     .await
-                    .expect("provider observation")
                     .expect("provider observation present")
             };
             assert!(matches!(
@@ -12274,13 +12319,7 @@ mod tests {
                 } if transcript == public_wire::ASSISTANT_TRANSCRIPT
             ));
         }
-        assert!(
-            sideband
-                .next_observation()
-                .await
-                .expect("stream end")
-                .is_none()
-        );
+        assert!(next_semantic_observation(sideband.as_ref()).await.is_none());
 
         let events = capture.lock().expect("capture lock").client_events.clone();
         assert_eq!(events.len(), 3);

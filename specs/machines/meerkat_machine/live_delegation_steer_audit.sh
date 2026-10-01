@@ -11,7 +11,9 @@
 #   2. proves each steer outcome reachable: for each goal it checks the goal's
 #      negation and requires TLC to report that invariant violated.
 # An anchor this script expects but cannot find fails the run instead of
-# silently narrowing the check.
+# silently narrowing the check. Each TLC run is held to the canonical lane's
+# per-run cap (`TLC_RUN_CAP_SECS`, default 900 s); a run that hits it fails as
+# INCOMPLETE (exit 3).
 set -euo pipefail
 
 max_steps="${1:?usage: live_delegation_steer_audit.sh <max-steps> [extra tlc args...]}"
@@ -64,16 +66,44 @@ if [[ " ${JDK_JAVA_OPTIONS:-} " != *" -Xss"* ]]; then
   export JDK_JAVA_OPTIONS="-Xss512m${JDK_JAVA_OPTIONS:+ ${JDK_JAVA_OPTIONS}}"
 fi
 workers="${TLC_WORKERS:-auto}"
+# The canonical TLC lane's per-run wall-clock cap (`TLC_RUN_CAP_SECS`,
+# default 900 s, see `xtask machine-verify`): a run that hits it is killed and
+# fails as INCOMPLETE, never as a pass.
+cap_secs="${TLC_RUN_CAP_SECS:-900}"
+if ! [[ "${cap_secs}" =~ ^[0-9]+$ ]] || (( cap_secs < 1 )); then
+  echo "error: TLC_RUN_CAP_SECS must be whole seconds >= 1, got '${cap_secs}'" >&2
+  exit 2
+fi
 cd "${spec_dir}"
 
 run_tlc() {
   local name="$1" cfg="$2"
   local log="${work_dir}/${name}.log"
+  local capped="${work_dir}/${name}.capped"
   set +e
   tlc -workers "${workers}" -metadir "${work_dir}/${name}-states" -config "${cfg}" "${@:3}" \
-    live_delegation_steer_audit.tla > "${log}" 2>&1
+    live_delegation_steer_audit.tla > "${log}" 2>&1 &
+  local tlc_pid=$!
+  # The cap watchdog ends TLC (which execs java) when the cap elapses first,
+  # and is itself ended, with its sleep, when TLC exits first.
+  (
+    trap 'kill "${sleep_pid}" 2>/dev/null; exit 0' TERM
+    sleep "${cap_secs}" &
+    sleep_pid=$!
+    wait "${sleep_pid}"
+    : > "${capped}"
+    kill -TERM "${tlc_pid}" 2>/dev/null
+  ) &
+  local watchdog_pid=$!
+  wait "${tlc_pid}"
   local status=$?
+  kill -TERM "${watchdog_pid}" 2>/dev/null
+  wait "${watchdog_pid}" 2>/dev/null
   set -e
+  if [[ -e "${capped}" ]]; then
+    echo "TLC INCOMPLETE for live_delegation_steer_audit (${name}): hit the ${cap_secs} s per-run cap and was killed; an unexhausted state space is not a pass" >&2
+    exit 3
+  fi
   grep -E 'states generated|distinct states|Invariant .* is violated|Error:|Model checking completed' "${log}" | sed "s/^/[${name}] /"
   echo "${status}" > "${work_dir}/${name}.status"
 }

@@ -176,6 +176,9 @@ TLC_WORKERS="${tlc_workers}" "${live_steer_audit}" "${LIVE_STEER_AUDIT_MAX_STEPS
 # the bounded witness TLC proof above. It still composes two full MobMachine
 # instances, so the full composition TLC sweep exceeds the required CI budget.
 #
+# The live delegation steer audit above runs on its own first (it is small:
+# well under a minute at its default bound).
+#
 # Scheduling: the two audits and `machine-verify` are independent TLC work.
 # With a total budget of at least three 4-worker shares (TLC_WORKERS, or the
 # core count), the audits run concurrently with `machine-verify`, which itself

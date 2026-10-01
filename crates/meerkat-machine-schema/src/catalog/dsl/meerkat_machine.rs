@@ -27158,11 +27158,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // The runtime's exact boundary delivery of one authorized steer
-        // resolved: delivered into the running turn (with its owner receipt
-        // on the runtime boundary), or not delivered because the run ended
-        // first or no run was active. Exactly one outcome per steer; a steer
-        // that was not delivered never becomes a turn.
+        // The runtime's exact delivery of one authorized steer resolved.
+        // Delivered is either into the running turn (with its owner receipt
+        // on the runtime boundary) or, for a worker that had not started,
+        // folded into the worker's initial task (no boundary receipt: the
+        // continuation is part of the task the worker starts with). Not
+        // delivered means the run ended first or no run was active. Exactly
+        // one outcome per steer; a steer that was not delivered never becomes
+        // a turn.
         transition ResolveLiveDelegationSteerDelivery {
             per_phase [Idle, Attached, Running]
             on input ResolveLiveDelegationSteerDelivery {

@@ -16457,6 +16457,198 @@ mod stop_teardown_coordinator_class {
         );
     }
 
+    /// An until-terminal stop of a registration that already reached Stopped
+    /// reports the terminal it reached. The generated machine has no
+    /// StopRuntimeExecutor edge out of Stopped, so the stop must not stage that
+    /// input: it is not refused, it does not run cleanup again, and it leaves no
+    /// failed stop cleanup behind for a later stop or binding preparation to
+    /// join.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stop_until_terminal_on_a_stopped_registration_reports_the_reached_terminal() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let release_cleanup = Arc::new(Notify::new());
+        // One stored permit: the first cleanup runs straight through; a second
+        // cleanup run would park and surface as a timeout below.
+        release_cleanup.notify_one();
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedCleanupExecutor {
+                    machine: Arc::clone(&machine),
+                    session_id: session_id.clone(),
+                    cleanup_started: Arc::new(Notify::new()),
+                    release_cleanup: Arc::clone(&release_cleanup),
+                    unregister_during_cleanup: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    fail_cleanup_attempts: Arc::new(AtomicUsize::new(0)),
+                    cleanup_calls: Arc::clone(&cleanup_calls),
+                    loop_task_id: Arc::new(std::sync::Mutex::new(None)),
+                    cleanup_task_id: Arc::new(std::sync::Mutex::new(None)),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+        let registration = machine
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("registered runtime exposes an exact registration witness");
+
+        assert!(
+            machine
+                .stop_runtime_executor_until_terminal_if_current(&registration, "first stop")
+                .await
+                .expect("the first until-terminal stop completes"),
+            "the exact registration is stopped"
+        );
+        let stopped_phase = || async {
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("stopped session authority")
+                .lifecycle_phase
+        };
+        assert_eq!(stopped_phase().await, mm_dsl::MeerkatPhase::Stopped);
+
+        let again = tokio::time::timeout(
+            Duration::from_secs(10),
+            machine.stop_runtime_executor_until_terminal_if_current(&registration, "stop again"),
+        )
+        .await
+        .expect("an already-terminal stop returns without parking on cleanup")
+        .expect("an already-terminal stop reports its terminal instead of being refused");
+        assert!(
+            again,
+            "the exact registration is the one that reached Stopped"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            machine.stop_runtime_executor(&session_id, "grace-bounded stop again"),
+        )
+        .await
+        .expect("an already-terminal grace-bounded stop returns")
+        .expect("an already-terminal grace-bounded stop is not refused");
+        assert_eq!(stopped_phase().await, mm_dsl::MeerkatPhase::Stopped);
+        assert_eq!(
+            cleanup_calls.load(Ordering::SeqCst),
+            1,
+            "the reached terminal does not run cleanup again"
+        );
+
+        // No failed stop cleanup is retained for the next preparation to join.
+        machine
+            .prepare_local_session_bindings(session_id.clone())
+            .await
+            .expect("binding preparation after the already-terminal stops is not poisoned");
+    }
+
+    /// The same contract when the registration reached Stopped through a
+    /// loop-owned stop and no stop-cleanup coordinator was ever installed.
+    /// The machine has no StopRuntimeExecutor edge out of Stopped, so the
+    /// stop must not stage one: it finishes the cleanup that is still owed,
+    /// reports the reached terminal, and leaves no failed coordinator result
+    /// behind to poison the next binding preparation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stop_until_terminal_after_loop_owned_stop_reports_the_reached_terminal() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let release_cleanup = Arc::new(Notify::new());
+        release_cleanup.notify_one();
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedCleanupExecutor {
+                    machine: Arc::clone(&machine),
+                    session_id: session_id.clone(),
+                    cleanup_started: Arc::new(Notify::new()),
+                    release_cleanup: Arc::clone(&release_cleanup),
+                    unregister_during_cleanup: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    fail_cleanup_attempts: Arc::new(AtomicUsize::new(0)),
+                    cleanup_calls: Arc::clone(&cleanup_calls),
+                    loop_task_id: Arc::new(std::sync::Mutex::new(None)),
+                    cleanup_task_id: Arc::new(std::sync::Mutex::new(None)),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+        let registration = machine
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("registered runtime exposes an exact registration witness");
+        // A loop-owned stop that never went through the stop-cleanup
+        // coordinator (the shape a host crash-stop leaves behind): the
+        // generated stop is committed and its effect reaches the loop with no
+        // stop completion, the loop terminalizes to Stopped and publishes its
+        // teardown handoff for the external cleanup still owed.
+        let staged = machine
+            .stage_session_dsl_transition(
+                &session_id,
+                mm_dsl::MeerkatMachineInput::StopRuntimeExecutor {
+                    reason: "loop-owned stop".into(),
+                },
+                "test:LoopOwnedStopRuntimeExecutor",
+            )
+            .await
+            .expect("the generated machine admits the loop-owned stop");
+        let effect = crate::effect::runtime_effect_projection_from_dsl_effects(&staged.effects)
+            .expect("the stop projects one runtime effect")
+            .into_effect();
+        let (effect_tx, teardown_slot) = {
+            let sessions = machine.sessions.read().await;
+            let entry = sessions.get(&session_id).expect("registered entry");
+            (
+                entry.effect_sender().expect("live loop effect sender"),
+                entry
+                    .runtime_loop_teardown
+                    .clone()
+                    .expect("live loop teardown slot"),
+            )
+        };
+        effect_tx
+            .send(effect)
+            .await
+            .expect("the live loop receives the stop effect");
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            teardown_slot.wait_until_published(),
+        )
+        .await
+        .expect("the loop publishes its teardown after the loop-owned stop");
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("session authority")
+                .lifecycle_phase,
+            mm_dsl::MeerkatPhase::Stopped
+        );
+
+        let stopped = tokio::time::timeout(
+            Duration::from_secs(10),
+            machine.stop_runtime_executor_until_terminal_if_current(
+                &registration,
+                "stop after loop stop",
+            ),
+        )
+        .await
+        .expect("the already-terminal stop returns")
+        .expect("an already-terminal stop reports its terminal instead of being refused");
+        assert!(
+            stopped,
+            "the exact registration is the one that reached Stopped"
+        );
+        assert_eq!(
+            cleanup_calls.load(Ordering::SeqCst),
+            1,
+            "the already-terminal stop runs the external cleanup that was still owed"
+        );
+        machine
+            .prepare_local_session_bindings(session_id.clone())
+            .await
+            .expect("binding preparation after the already-terminal stop is not poisoned");
+    }
+
     /// Regression for #1104: member retirement disposes a terminal registration
     /// through the exact-witness unregister API. Under load the
     /// coordinator-owned teardown can outlive the 2 s caller grace; the

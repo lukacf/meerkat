@@ -65,8 +65,15 @@ pub(super) enum RuntimeStopCallerWait {
 }
 
 enum RuntimeStopCleanupWork {
-    Request { reason: String },
+    Request {
+        reason: String,
+    },
     CleanupOnly,
+    /// A stop request against a registration whose generated lifecycle is
+    /// already Stopped. The machine has no StopRuntimeExecutor edge out of
+    /// Stopped, so the request is satisfied by the reached terminal: nothing
+    /// is staged, and only the cleanup still owed runs (idempotently).
+    AlreadyTerminal,
 }
 
 fn pending_unregister_finalization_matches(
@@ -7182,6 +7189,18 @@ impl MeerkatMachine {
                         }
                     }
                     None => {
+                        // Read under the gate that installs the coordinator:
+                        // a generated Stopped here is the stop terminal itself
+                        // (a loop-owned stop or the executor-exit observation
+                        // reached it without a coordinator), so no
+                        // StopRuntimeExecutor is staged.
+                        let already_terminal = entry
+                            .dsl_authority
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .state()
+                            .lifecycle_phase
+                            == crate::meerkat_machine::dsl::MeerkatPhase::Stopped;
                         let epoch_id = entry.epoch_id.clone();
                         let coordinator_id = uuid::Uuid::new_v4();
                         let (result_tx, result_rx) = crate::tokio::sync::watch::channel(None);
@@ -7199,6 +7218,9 @@ impl MeerkatMachine {
                             result_rx,
                             teardown_slot: entry.runtime_loop_teardown.clone(),
                             work: match initial_reason {
+                                Some(_) if already_terminal => {
+                                    RuntimeStopCleanupWork::AlreadyTerminal
+                                }
                                 Some(reason) => RuntimeStopCleanupWork::Request { reason },
                                 None => RuntimeStopCleanupWork::CleanupOnly,
                             },
@@ -7406,7 +7428,7 @@ impl MeerkatMachine {
                 self.dispatch_owned_runtime_stop_request(session_id, epoch_id, reason)
                     .await?
             }
-            RuntimeStopCleanupWork::CleanupOnly => None,
+            RuntimeStopCleanupWork::CleanupOnly | RuntimeStopCleanupWork::AlreadyTerminal => None,
         };
 
         let (driver, completions, publication_handle) = {

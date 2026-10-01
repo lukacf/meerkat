@@ -367,8 +367,9 @@ if grep -Fq 'name: CI' .github/workflows/ci.yml &&
   job_has_line .github/workflows/ci.yml gate 'name: CI gate' &&
   job_has_line .github/workflows/ci.yml gate 'name: Check lane results' &&
   job_has_line .github/workflows/ci.yml gate 'require_ran "Clippy"' &&
-  job_has_line .github/workflows/ci.yml gate 'Enforce push-to-terminal budget' &&
-  grep -Fq 'CI_MAX_SECONDS: "1200"' .github/workflows/ci.yml &&
+  job_has_line .github/workflows/ci.yml gate 'Enforce lane execution budget' &&
+  grep -Fq 'CI_MAX_EXEC_SECONDS: "1500"' .github/workflows/ci.yml &&
+  grep -Fq 'CI_MAX_TERMINAL_SECONDS: "2700"' .github/workflows/ci.yml &&
   grep -Fq 'scripts/ci-cargo-lanes.mjs' .github/workflows/ci.yml &&
   ! grep -Fq 'uses: ./.github/workflows/cargo.yml' .github/workflows/ci.yml &&
   ! grep -Fq 'uses: ./.github/workflows/buildbuddy.yml' .github/workflows/ci.yml &&

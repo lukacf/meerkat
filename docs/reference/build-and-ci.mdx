@@ -203,7 +203,7 @@ need the unbounded verification set.
 Pull-request CI is `.github/workflows/ci.yml`. It runs on pull requests,
 pushes to `main`, and manual dispatches (a branch head runs once, through its
 pull request), entirely with Cargo on GitHub-hosted `ubuntu-latest` runners
-(4 vCPU), and it is sized to a 25-minute push-to-terminal budget. Compiled
+(4 vCPU), and it is sized to a 25-minute lane execution budget. Compiled
 objects are cached by sccache (content-addressed, shared by every lane and
 readable from `main` by every pull request); rust-cache holds only the
 registry, because per-lane target caches exceeded the repository's 10 GB
@@ -225,27 +225,43 @@ the release tag carry the rest):
 | `sdk-host`: Python + TypeScript SDK suites | deferred | yes | yes, plus Web SDK | Bazel SDK suites |
 | `example-web`: build the `sdks/web` wasm runtime once (wasm-pack 0.13.1, no wasm-opt), then run examples 031, 032 and 033 in Playwright Chromium | when `sdks/web/`, `crates/meerkat-web-runtime/`, `crates/meerkat-contracts/` or those examples change | yes | - | - |
 | integration-fast, `e2e-fast`, dense Mob topology, bounded TLC, feature matrices, minimal builds, audit, `e2e-system`, release packaging | - | - | yes | BuildBuddy `full-fresh` graph |
-| `gate` (`CI gate`): fail-closed aggregate; 1500-second push-to-terminal budget on pull requests; schema-4 attestation on `main` | yes | yes (no budget) | - | consumed by `require_ci_green` |
+| `gate` (`CI gate`): fail-closed aggregate; on pull requests a 1500-second lane execution budget and a 2700-second push-to-terminal runaway ceiling, runner queue reported as a warning; schema-4 attestation on `main` | yes | yes (no budget) | - | consumed by `require_ci_green` |
 
-How the budget is measured: the gate takes every completed lane and times
-it from the start of the run attempt in which that lane ran, and the budget
-applies to the latest lane terminal. A re-run of a failed lane therefore gets
-a fresh clock (the run's `created_at` never changes, so a budget measured from
-it made every re-run fail), while lanes carried over from an earlier attempt
-keep that attempt's clock, so re-running only the gate cannot turn an overrun
-green. The gate prints the critical-path lane, the slowest lane and the ten
-latest lane terminals on every run that was not cancelled, including runs
-whose lanes failed and `main` pushes, where the budget is not enforced and a
-failure to measure it is only a warning. The 1500 s figure is sized from
-measurement: over the last 64 pull-request runs before the change the lane
-terminal was p50 847 s, p90 1194 s and max 1244 s, and the tail is the
-`example-web` lane (about 60 s of classification, then up to 1182 s, 984 s of
-it the wasm release build, under its own 20-minute timeout). A 1200 s budget
-was tighter than that lane's own timeout and failed runs in which every lane
-passed. 1500 s is about 20% above the observed maximum and deliberately below
-the longest pull-request lane timeouts (40 minutes): a lane timeout only stops
-a hung lane, while a run that takes more than 25 minutes end to end has
-drifted.
+How the budget is measured: the gate reads every completed lane from the
+Actions jobs API and splits its time into runner queue (`created_at` to
+`started_at`) and execution (`started_at` to `completed_at`). On pull requests
+it enforces two limits:
+
+- **Lane execution, 1500 s** (`CI_MAX_EXEC_SECONDS`): each lane's own run time
+  plus the run time of the change classification it waits for, over the
+  slowest lane. This is the part the code controls: a lane that grows or an
+  aggregate that drifts fails here. Run times belong to the job, so
+  re-running only the gate cannot turn an overrun green.
+- **Push-to-terminal, 2700 s** (`CI_MAX_TERMINAL_SECONDS`): the runaway
+  backstop on the latest lane terminal, queue included, each lane timed from
+  the start of the run attempt it ran in (a re-run lane gets a fresh clock, a
+  carried-over lane keeps its attempt's clock). Past it a run is stuck,
+  whatever the cause.
+
+Runner queue wait is reported, not budgeted: at 300 s or more on the critical
+path (`CI_QUEUE_WARN_SECONDS`) the gate emits a `CI runner queue wait`
+warning. The account runs at most 40 hosted jobs at once, shared by every
+pull request, `main` push and nightly, and a busy hour fills that cap. The
+gate writes a typed verdict (`within_budget`, `queue_delayed`,
+`exec_over_budget`, `runaway`) with the execution path, terminal and queue
+seconds to its step outputs and summary, and prints the lane table on every
+run that was not cancelled, including runs whose lanes failed and `main`
+pushes, where nothing is enforced and a failure to measure is only a warning.
+
+Sizing (66 pull-request run attempts, 2026-09-30 to 2026-10-01): execution
+path p50 816 s, p90 968 s, max 1244 s; critical-path queue p50 39 s, p90
+474 s, max 742 s; terminal p50 897 s, p90 1173 s, max 1492 s. The execution
+tail is the `example-web` lane's cold wasm release build (up to 1002 s of a
+1172 s lane). The previous single 1500 s push-to-terminal budget failed run
+36809608388 at 1511 s with every lane passing and an execution path of
+1009 s: its closure check waited 647 s for a runner. 1500 s of execution is
+about 20% above the observed maximum and below the 40-minute lane timeouts,
+which only stop a hung lane.
 
 Why the meerkat-mob chain is deferred: measured on 4-vCPU hosted runners,
 every unit lane that ever exceeded the budget compiled `meerkat-mob`'s 442k

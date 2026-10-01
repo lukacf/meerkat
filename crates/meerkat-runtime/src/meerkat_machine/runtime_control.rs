@@ -15916,11 +15916,13 @@ impl MeerkatMachine {
         preparation: super::dispatch_session::SessionBindingPreparation,
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
         let mut attempt = super::session_management::IdempotentBindingPreparationAttempt::new();
-        let first = Box::pin(self.prepare_session_runtime_bindings_with_attempt(
-            session_id.clone(),
-            preparation,
-            Some(&mut attempt),
-        ))
+        let first = crate::stack_relief::box_in_own_frame(|| {
+            self.prepare_session_runtime_bindings_with_attempt(
+                session_id.clone(),
+                preparation,
+                Some(&mut attempt),
+            )
+        })
         .await;
         let error = match first {
             Ok(result) => return Ok(result),
@@ -15929,11 +15931,13 @@ impl MeerkatMachine {
         if !attempt.wait_for_captured_unregister(session_id).await? {
             return Err(error);
         }
-        Box::pin(self.prepare_session_runtime_bindings_with_attempt(
-            session_id.clone(),
-            preparation,
-            Some(&mut attempt),
-        ))
+        crate::stack_relief::box_in_own_frame(|| {
+            self.prepare_session_runtime_bindings_with_attempt(
+                session_id.clone(),
+                preparation,
+                Some(&mut attempt),
+            )
+        })
         .await
     }
 }

@@ -22,7 +22,7 @@ use clap::{Parser, Subcommand};
 
 use crate::machine_alphabet::MachineAlphabetArgs;
 #[cfg(feature = "machine-authority")]
-use crate::machines::HopcroftArgs;
+use crate::machines::{HopcroftArgs, VerifyWitnessArgs};
 use crate::machines::{SelectionArgs, VerifyArgs};
 use crate::ownership_ledger::OwnershipLedgerArgs;
 use crate::rmat_audit::RmatAuditArgs;
@@ -42,6 +42,11 @@ enum Commands {
     Codegen(SelectionArgs),
     #[command(name = "machine-verify")]
     Verify(VerifyArgs),
+    /// Run one composition witness and require TLC proof that its script
+    /// completed (not merely that TLC exited 0).
+    #[cfg(feature = "machine-authority")]
+    #[command(name = "machine-verify-witness")]
+    VerifyWitness(VerifyWitnessArgs),
     #[cfg(feature = "machine-authority")]
     #[command(name = "machine-hopcroft")]
     Hopcroft(HopcroftArgs),
@@ -99,6 +104,10 @@ pub fn run() -> Result<()> {
         }
         Commands::Verify(args) => {
             run_machine_authority_task(move || machines::machine_verify(args))
+        }
+        #[cfg(feature = "machine-authority")]
+        Commands::VerifyWitness(args) => {
+            run_machine_authority_task(move || machines::machine_verify_witness(args))
         }
         #[cfg(feature = "machine-authority")]
         Commands::Hopcroft(args) => {

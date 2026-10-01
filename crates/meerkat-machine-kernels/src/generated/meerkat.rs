@@ -13480,7 +13480,7 @@ pub enum Phase {
     Destroyed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub phase: Phase,
     pub session_id: Option<SessionId>,
@@ -13991,6 +13991,1472 @@ pub struct State {
     pub mob_overlay_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
     pub peer_projection_epoch: u64,
     pub mob_overlay_epoch: u64,
+}
+impl std::fmt::Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("State")
+            .field("phase", &self.phase)
+            .field("session_id", &self.session_id)
+            .field("active_runtime_id", &self.active_runtime_id)
+            .field("active_fence_token", &self.active_fence_token)
+            .field("active_runtime_generation", &self.active_runtime_generation)
+            .field("active_runtime_epoch_id", &self.active_runtime_epoch_id)
+            .field("current_run_id", &self.current_run_id)
+            .field("pre_run_phase", &self.pre_run_phase)
+            .field("runtime_stop_deferred", &self.runtime_stop_deferred)
+            .field("turn_phase", &self.turn_phase)
+            .field("primitive_kind", &self.primitive_kind)
+            .field("admitted_content_shape", &self.admitted_content_shape)
+            .field("vision_enabled", &self.vision_enabled)
+            .field(
+                "image_tool_results_enabled",
+                &self.image_tool_results_enabled,
+            )
+            .field("tool_calls_pending", &self.tool_calls_pending)
+            .field("pending_op_refs", &self.pending_op_refs)
+            .field("barrier_operation_ids", &self.barrier_operation_ids)
+            .field("has_barrier_ops", &self.has_barrier_ops)
+            .field("barrier_satisfied", &self.barrier_satisfied)
+            .field("boundary_count", &self.boundary_count)
+            .field("cancel_after_boundary", &self.cancel_after_boundary)
+            .field(
+                "boundary_cancel_dispatch_pending",
+                &self.boundary_cancel_dispatch_pending,
+            )
+            .field(
+                "boundary_cancel_dispatch_generation",
+                &self.boundary_cancel_dispatch_generation,
+            )
+            .field("turn_terminal_run_id", &self.turn_terminal_run_id)
+            .field(
+                "recovered_boundary_sequence",
+                &self.recovered_boundary_sequence,
+            )
+            .field("terminal_outcome", &self.terminal_outcome)
+            .field("terminal_cause_kind", &self.terminal_cause_kind)
+            .field(
+                "last_runtime_apply_failure_cause",
+                &self.last_runtime_apply_failure_cause,
+            )
+            .field(
+                "last_runtime_apply_failure_message",
+                &self.last_runtime_apply_failure_message,
+            )
+            .field(
+                "runtime_completion_result_run_id",
+                &self.runtime_completion_result_run_id,
+            )
+            .field(
+                "runtime_completion_result_resolved",
+                &self.runtime_completion_result_resolved,
+            )
+            .field("extraction_attempts", &self.extraction_attempts)
+            .field("max_extraction_retries", &self.max_extraction_retries)
+            .field("extraction_active", &self.extraction_active)
+            .field("llm_retry_attempt", &self.llm_retry_attempt)
+            .field("llm_retry_max_retries", &self.llm_retry_max_retries)
+            .field(
+                "llm_retry_selected_delay_ms",
+                &self.llm_retry_selected_delay_ms,
+            )
+            .field(
+                "llm_retry_last_failure_kind",
+                &self.llm_retry_last_failure_kind,
+            )
+            .field("silent_intent_overrides", &self.silent_intent_overrides)
+            .field(
+                "model_routing_baseline_model",
+                &self.model_routing_baseline_model,
+            )
+            .field(
+                "model_routing_baseline_realtime",
+                &self.model_routing_baseline_realtime,
+            )
+            .field(
+                "model_routing_topology_epoch",
+                &self.model_routing_topology_epoch,
+            )
+            .field(
+                "model_routing_turn_override_id",
+                &self.model_routing_turn_override_id,
+            )
+            .field(
+                "model_routing_turn_request_id",
+                &self.model_routing_turn_request_id,
+            )
+            .field(
+                "model_routing_turn_target_model",
+                &self.model_routing_turn_target_model,
+            )
+            .field(
+                "model_routing_turn_realtime",
+                &self.model_routing_turn_realtime,
+            )
+            .field(
+                "model_routing_turn_remaining_turns",
+                &self.model_routing_turn_remaining_turns,
+            )
+            .field(
+                "model_routing_operation_override_id",
+                &self.model_routing_operation_override_id,
+            )
+            .field(
+                "model_routing_operation_target_model",
+                &self.model_routing_operation_target_model,
+            )
+            .field(
+                "model_routing_operation_realtime",
+                &self.model_routing_operation_realtime,
+            )
+            .field(
+                "model_routing_pending_switch_request_id",
+                &self.model_routing_pending_switch_request_id,
+            )
+            .field(
+                "model_routing_pending_switch_target_model",
+                &self.model_routing_pending_switch_target_model,
+            )
+            .field(
+                "model_routing_pending_switch_realtime",
+                &self.model_routing_pending_switch_realtime,
+            )
+            .field(
+                "model_routing_pending_switch_turns",
+                &self.model_routing_pending_switch_turns,
+            )
+            .field(
+                "model_routing_pending_switch_phase",
+                &self.model_routing_pending_switch_phase,
+            )
+            .field(
+                "model_routing_switch_terminal",
+                &self.model_routing_switch_terminal,
+            )
+            .field(
+                "model_routing_switch_denials",
+                &self.model_routing_switch_denials,
+            )
+            .field(
+                "model_routing_switch_approval_reasons",
+                &self.model_routing_switch_approval_reasons,
+            )
+            .field(
+                "model_routing_image_operation_phases",
+                &self.model_routing_image_operation_phases,
+            )
+            .field(
+                "model_routing_image_operation_target_models",
+                &self.model_routing_image_operation_target_models,
+            )
+            .field(
+                "model_routing_image_operation_realtime",
+                &self.model_routing_image_operation_realtime,
+            )
+            .field(
+                "model_routing_image_operation_requires_scoped_override",
+                &self.model_routing_image_operation_requires_scoped_override,
+            )
+            .field(
+                "model_routing_image_classified_terminals",
+                &self.model_routing_image_classified_terminals,
+            )
+            .field(
+                "model_routing_image_classified_provider_text",
+                &self.model_routing_image_classified_provider_text,
+            )
+            .field(
+                "model_routing_image_terminals",
+                &self.model_routing_image_terminals,
+            )
+            .field(
+                "model_routing_image_terminal_payloads",
+                &self.model_routing_image_terminal_payloads,
+            )
+            .field(
+                "model_routing_image_denials",
+                &self.model_routing_image_denials,
+            )
+            .field(
+                "model_routing_image_approval_reasons",
+                &self.model_routing_image_approval_reasons,
+            )
+            .field(
+                "model_routing_image_plan_denials",
+                &self.model_routing_image_plan_denials,
+            )
+            .field(
+                "model_routing_approval_phases",
+                &self.model_routing_approval_phases,
+            )
+            .field(
+                "model_routing_approval_parent_kind",
+                &self.model_routing_approval_parent_kind,
+            )
+            .field("model_routing_handoff", &self.model_routing_handoff)
+            .field("registration_phase", &self.registration_phase)
+            .field(
+                "unregister_runtime_loop_drain_pending",
+                &self.unregister_runtime_loop_drain_pending,
+            )
+            .field(
+                "unregister_comms_drain_exit_pending",
+                &self.unregister_comms_drain_exit_pending,
+            )
+            .field(
+                "unregister_completion_waiter_drain_pending",
+                &self.unregister_completion_waiter_drain_pending,
+            )
+            .field(
+                "unregister_teardown_retains_snapshot",
+                &self.unregister_teardown_retains_snapshot,
+            )
+            .field(
+                "unregister_runtime_loop_forced_abort",
+                &self.unregister_runtime_loop_forced_abort,
+            )
+            .field(
+                "unregister_comms_drain_forced_abort",
+                &self.unregister_comms_drain_forced_abort,
+            )
+            .field("staged_session_phase", &self.staged_session_phase)
+            .field("staged_session_id", &self.staged_session_id)
+            .field("staged_session_keep_alive", &self.staged_session_keep_alive)
+            .field(
+                "staged_session_llm_identity",
+                &self.staged_session_llm_identity,
+            )
+            .field(
+                "staged_session_machine_archived_resume_authorized",
+                &self.staged_session_machine_archived_resume_authorized,
+            )
+            .field(
+                "current_session_llm_identity",
+                &self.current_session_llm_identity,
+            )
+            .field(
+                "current_session_capability_surface",
+                &self.current_session_capability_surface,
+            )
+            .field(
+                "current_session_capability_surface_status",
+                &self.current_session_capability_surface_status,
+            )
+            .field(
+                "current_session_capability_base_filter",
+                &self.current_session_capability_base_filter,
+            )
+            .field(
+                "session_llm_reconfigure_previous_capability_surface",
+                &self.session_llm_reconfigure_previous_capability_surface,
+            )
+            .field(
+                "session_llm_reconfigure_current_capability_surface",
+                &self.session_llm_reconfigure_current_capability_surface,
+            )
+            .field(
+                "session_llm_reconfigure_capability_changed",
+                &self.session_llm_reconfigure_capability_changed,
+            )
+            .field(
+                "session_llm_reconfigure_previous_capability_base_filter",
+                &self.session_llm_reconfigure_previous_capability_base_filter,
+            )
+            .field(
+                "session_llm_reconfigure_current_capability_base_filter",
+                &self.session_llm_reconfigure_current_capability_base_filter,
+            )
+            .field(
+                "session_llm_reconfigure_committed_visible_set_changed",
+                &self.session_llm_reconfigure_committed_visible_set_changed,
+            )
+            .field(
+                "session_llm_reconfigure_revision_bumped",
+                &self.session_llm_reconfigure_revision_bumped,
+            )
+            .field(
+                "session_llm_reconfigure_active_visibility_revision",
+                &self.session_llm_reconfigure_active_visibility_revision,
+            )
+            .field(
+                "mob_operator_authority_present",
+                &self.mob_operator_authority_present,
+            )
+            .field(
+                "mob_operator_principal_token",
+                &self.mob_operator_principal_token,
+            )
+            .field(
+                "mob_operator_can_create_mobs",
+                &self.mob_operator_can_create_mobs,
+            )
+            .field(
+                "mob_operator_can_mutate_profiles",
+                &self.mob_operator_can_mutate_profiles,
+            )
+            .field(
+                "mob_operator_managed_mob_scope",
+                &self.mob_operator_managed_mob_scope,
+            )
+            .field(
+                "mob_operator_spawn_profile_scope",
+                &self.mob_operator_spawn_profile_scope,
+            )
+            .field(
+                "mob_operator_caller_provenance",
+                &self.mob_operator_caller_provenance,
+            )
+            .field(
+                "mob_operator_audit_invocation_id",
+                &self.mob_operator_audit_invocation_id,
+            )
+            .field("drain_phase", &self.drain_phase)
+            .field("drain_mode", &self.drain_mode)
+            .field(
+                "next_staged_visibility_revision",
+                &self.next_staged_visibility_revision,
+            )
+            .field("inherited_base_filter", &self.inherited_base_filter)
+            .field("active_filter", &self.active_filter)
+            .field("staged_filter", &self.staged_filter)
+            .field(
+                "active_visibility_revision",
+                &self.active_visibility_revision,
+            )
+            .field(
+                "staged_visibility_revision",
+                &self.staged_visibility_revision,
+            )
+            .field("active_deferred_names", &self.active_deferred_names)
+            .field("staged_deferred_names", &self.staged_deferred_names)
+            .field(
+                "requested_visibility_witnesses",
+                &self.requested_visibility_witnesses,
+            )
+            .field(
+                "filter_visibility_witnesses",
+                &self.filter_visibility_witnesses,
+            )
+            .field(
+                "active_deferred_authorities",
+                &self.active_deferred_authorities,
+            )
+            .field(
+                "staged_deferred_authorities",
+                &self.staged_deferred_authorities,
+            )
+            .field(
+                "deferred_visibility_authority_catalog",
+                &self.deferred_visibility_authority_catalog,
+            )
+            .field(
+                "filter_visibility_authority_catalog",
+                &self.filter_visibility_authority_catalog,
+            )
+            .field(
+                "turn_tool_overlay_allow_active",
+                &self.turn_tool_overlay_allow_active,
+            )
+            .field(
+                "turn_tool_overlay_allow_names",
+                &self.turn_tool_overlay_allow_names,
+            )
+            .field(
+                "turn_tool_overlay_deny_names",
+                &self.turn_tool_overlay_deny_names,
+            )
+            .field("input_phases", &self.input_phases)
+            .field("input_terminal_kind", &self.input_terminal_kind)
+            .field("input_superseded_by", &self.input_superseded_by)
+            .field("input_aggregate_id", &self.input_aggregate_id)
+            .field("input_abandon_reason", &self.input_abandon_reason)
+            .field(
+                "input_abandon_attempt_count",
+                &self.input_abandon_attempt_count,
+            )
+            .field("input_attempt_counts", &self.input_attempt_counts)
+            .field("max_stage_attempts", &self.max_stage_attempts)
+            .field("input_run_associations", &self.input_run_associations)
+            .field("input_boundary_sequences", &self.input_boundary_sequences)
+            .field(
+                "input_completion_boundaries",
+                &self.input_completion_boundaries,
+            )
+            .field(
+                "live_boundary_context_sequence_by_run",
+                &self.live_boundary_context_sequence_by_run,
+            )
+            .field("next_admission_seq", &self.next_admission_seq)
+            .field(
+                "next_priority_admission_seq",
+                &self.next_priority_admission_seq,
+            )
+            .field("input_admission_seq", &self.input_admission_seq)
+            .field("input_runtime_boundary", &self.input_runtime_boundary)
+            .field(
+                "input_runtime_execution_kind",
+                &self.input_runtime_execution_kind,
+            )
+            .field(
+                "input_runtime_peer_response_terminal_apply_intent",
+                &self.input_runtime_peer_response_terminal_apply_intent,
+            )
+            .field("input_is_prompt", &self.input_is_prompt)
+            .field("input_lane", &self.input_lane)
+            .field("input_recovery_lanes", &self.input_recovery_lanes)
+            .field(
+                "admission_authorized_lanes",
+                &self.admission_authorized_lanes,
+            )
+            .field(
+                "admission_authorized_plans",
+                &self.admission_authorized_plans,
+            )
+            .field(
+                "admission_authorized_existing_actions",
+                &self.admission_authorized_existing_actions,
+            )
+            .field(
+                "admission_authorized_existing_targets",
+                &self.admission_authorized_existing_targets,
+            )
+            .field(
+                "admission_idempotency_inputs",
+                &self.admission_idempotency_inputs,
+            )
+            .field("input_idempotency_keys", &self.input_idempotency_keys)
+            .field("recovered_admitted_inputs", &self.recovered_admitted_inputs)
+            .field(
+                "admission_authorized_live_boundary_delivery",
+                &self.admission_authorized_live_boundary_delivery,
+            )
+            .field(
+                "input_live_boundary_delivery",
+                &self.input_live_boundary_delivery,
+            )
+            .field(
+                "input_live_boundary_join_run",
+                &self.input_live_boundary_join_run,
+            )
+            .field(
+                "input_live_boundary_join_phase",
+                &self.input_live_boundary_join_phase,
+            )
+            .field("run_stop_requested", &self.run_stop_requested)
+            .field("recovered_admitted_lanes", &self.recovered_admitted_lanes)
+            .field("op_statuses", &self.op_statuses)
+            .field("op_completion_seq", &self.op_completion_seq)
+            .field(
+                "completion_sequence_claims",
+                &self.completion_sequence_claims,
+            )
+            .field("completion_feed_sequences", &self.completion_feed_sequences)
+            .field("completion_feed_kinds", &self.completion_feed_kinds)
+            .field(
+                "completion_feed_terminal_outcomes",
+                &self.completion_feed_terminal_outcomes,
+            )
+            .field(
+                "completion_feed_terminal_payload",
+                &self.completion_feed_terminal_payload,
+            )
+            .field("op_terminal_outcomes", &self.op_terminal_outcomes)
+            .field("op_terminal_payload", &self.op_terminal_payload)
+            .field("op_kinds", &self.op_kinds)
+            .field("op_sources", &self.op_sources)
+            .field("op_peer_ready", &self.op_peer_ready)
+            .field("op_progress_counts", &self.op_progress_counts)
+            .field("active_op_count", &self.active_op_count)
+            .field("wait_active", &self.wait_active)
+            .field("wait_request_id", &self.wait_request_id)
+            .field("wait_run_id", &self.wait_run_id)
+            .field("wait_operation_ids", &self.wait_operation_ids)
+            .field("wait_operation_id_tokens", &self.wait_operation_id_tokens)
+            .field("next_completion_seq", &self.next_completion_seq)
+            .field(
+                "completion_agent_applied_cursor",
+                &self.completion_agent_applied_cursor,
+            )
+            .field(
+                "completion_runtime_observed_cursor",
+                &self.completion_runtime_observed_cursor,
+            )
+            .field(
+                "completion_runtime_injected_cursor",
+                &self.completion_runtime_injected_cursor,
+            )
+            .field("surface_request_phases", &self.surface_request_phases)
+            .field(
+                "surface_request_terminal_policies",
+                &self.surface_request_terminal_policies,
+            )
+            .field(
+                "live_open_admission_sequence",
+                &self.live_open_admission_sequence,
+            )
+            .field(
+                "live_active_channel_by_session",
+                &self.live_active_channel_by_session,
+            )
+            .field(
+                "live_channel_session_by_channel",
+                &self.live_channel_session_by_channel,
+            )
+            .field(
+                "live_channel_identity_by_channel",
+                &self.live_channel_identity_by_channel,
+            )
+            .field(
+                "live_execution_runtime_id_by_channel",
+                &self.live_execution_runtime_id_by_channel,
+            )
+            .field(
+                "live_execution_fence_by_channel",
+                &self.live_execution_fence_by_channel,
+            )
+            .field(
+                "live_execution_generation_by_channel",
+                &self.live_execution_generation_by_channel,
+            )
+            .field(
+                "live_execution_phase_by_channel",
+                &self.live_execution_phase_by_channel,
+            )
+            .field(
+                "live_revoked_execution_channels",
+                &self.live_revoked_execution_channels,
+            )
+            .field(
+                "live_conversation_started_channels",
+                &self.live_conversation_started_channels,
+            )
+            .field(
+                "live_cancelled_recovery_channels",
+                &self.live_cancelled_recovery_channels,
+            )
+            .field(
+                "live_execution_profile_by_channel",
+                &self.live_execution_profile_by_channel,
+            )
+            .field(
+                "live_execution_mode_by_channel",
+                &self.live_execution_mode_by_channel,
+            )
+            .field(
+                "live_function_bridge_capable_channels",
+                &self.live_function_bridge_capable_channels,
+            )
+            .field(
+                "live_client_context_capable_channels",
+                &self.live_client_context_capable_channels,
+            )
+            .field(
+                "live_playback_owner_by_channel",
+                &self.live_playback_owner_by_channel,
+            )
+            .field(
+                "live_playback_readiness_by_channel",
+                &self.live_playback_readiness_by_channel,
+            )
+            .field(
+                "live_activation_receipt_by_channel",
+                &self.live_activation_receipt_by_channel,
+            )
+            .field(
+                "live_active_control_operation_by_authority",
+                &self.live_active_control_operation_by_authority,
+            )
+            .field(
+                "live_consumed_active_control_authorities",
+                &self.live_consumed_active_control_authorities,
+            )
+            .field(
+                "live_experimental_staged_runtime_by_channel",
+                &self.live_experimental_staged_runtime_by_channel,
+            )
+            .field(
+                "live_experimental_staged_fence_by_channel",
+                &self.live_experimental_staged_fence_by_channel,
+            )
+            .field(
+                "live_experimental_staged_generation_by_channel",
+                &self.live_experimental_staged_generation_by_channel,
+            )
+            .field(
+                "live_experimental_staged_seed_cursor_by_channel",
+                &self.live_experimental_staged_seed_cursor_by_channel,
+            )
+            .field(
+                "live_experimental_pending_receipt_by_channel",
+                &self.live_experimental_pending_receipt_by_channel,
+            )
+            .field(
+                "live_experimental_execution_channels",
+                &self.live_experimental_execution_channels,
+            )
+            .field(
+                "live_interaction_channel_by_id",
+                &self.live_interaction_channel_by_id,
+            )
+            .field(
+                "live_active_interaction_by_channel",
+                &self.live_active_interaction_by_channel,
+            )
+            .field(
+                "live_provider_turn_by_channel",
+                &self.live_provider_turn_by_channel,
+            )
+            .field(
+                "live_provider_interaction_by_turn",
+                &self.live_provider_interaction_by_turn,
+            )
+            .field(
+                "live_provider_turn_channel_by_ref",
+                &self.live_provider_turn_channel_by_ref,
+            )
+            .field(
+                "live_awaiting_assistant_interaction_by_channel",
+                &self.live_awaiting_assistant_interaction_by_channel,
+            )
+            .field(
+                "live_assistant_interaction_by_turn",
+                &self.live_assistant_interaction_by_turn,
+            )
+            .field(
+                "live_assistant_origin_by_turn",
+                &self.live_assistant_origin_by_turn,
+            )
+            .field(
+                "live_assistant_turn_channel_by_ref",
+                &self.live_assistant_turn_channel_by_ref,
+            )
+            .field(
+                "live_assistant_playback_segment_by_turn",
+                &self.live_assistant_playback_segment_by_turn,
+            )
+            .field(
+                "live_abandoned_interactions",
+                &self.live_abandoned_interactions,
+            )
+            .field(
+                "live_delegation_operation_by_interaction",
+                &self.live_delegation_operation_by_interaction,
+            )
+            .field(
+                "live_delegation_channel_by_operation",
+                &self.live_delegation_channel_by_operation,
+            )
+            .field(
+                "live_delegation_schedule_state_by_operation",
+                &self.live_delegation_schedule_state_by_operation,
+            )
+            .field(
+                "live_delegation_active_worker_count_by_channel",
+                &self.live_delegation_active_worker_count_by_channel,
+            )
+            .field(
+                "live_delegation_channel_worker_cap",
+                &self.live_delegation_channel_worker_cap,
+            )
+            .field(
+                "live_delegation_last_narration_by_operation",
+                &self.live_delegation_last_narration_by_operation,
+            )
+            .field(
+                "live_delegation_interaction_by_operation",
+                &self.live_delegation_interaction_by_operation,
+            )
+            .field(
+                "live_delegation_provider_turn_by_operation",
+                &self.live_delegation_provider_turn_by_operation,
+            )
+            .field(
+                "live_delegation_reconciliation_by_operation",
+                &self.live_delegation_reconciliation_by_operation,
+            )
+            .field(
+                "live_delegation_worker_identity_by_operation",
+                &self.live_delegation_worker_identity_by_operation,
+            )
+            .field(
+                "live_delegation_existing_member_operations",
+                &self.live_delegation_existing_member_operations,
+            )
+            .field(
+                "live_delegation_worker_phase_by_operation",
+                &self.live_delegation_worker_phase_by_operation,
+            )
+            .field(
+                "live_delegation_cancellation_reason_by_operation",
+                &self.live_delegation_cancellation_reason_by_operation,
+            )
+            .field(
+                "live_delegation_worker_terminal_by_operation",
+                &self.live_delegation_worker_terminal_by_operation,
+            )
+            .field(
+                "live_delegation_result_eligible_operations",
+                &self.live_delegation_result_eligible_operations,
+            )
+            .field(
+                "live_delegation_late_terminal_operations",
+                &self.live_delegation_late_terminal_operations,
+            )
+            .field(
+                "live_consequential_effect_operation_by_authority",
+                &self.live_consequential_effect_operation_by_authority,
+            )
+            .field(
+                "live_result_released_operations",
+                &self.live_result_released_operations,
+            )
+            .field(
+                "live_result_release_disposition_by_operation",
+                &self.live_result_release_disposition_by_operation,
+            )
+            .field(
+                "live_result_delivery_channel_by_operation",
+                &self.live_result_delivery_channel_by_operation,
+            )
+            .field(
+                "live_result_delivery_operation_by_channel",
+                &self.live_result_delivery_operation_by_channel,
+            )
+            .field(
+                "live_result_delivery_digest_by_operation",
+                &self.live_result_delivery_digest_by_operation,
+            )
+            .field(
+                "live_result_delivery_observation_by_operation",
+                &self.live_result_delivery_observation_by_operation,
+            )
+            .field(
+                "live_result_speech_suppressed_operations",
+                &self.live_result_speech_suppressed_operations,
+            )
+            .field(
+                "live_result_recovery_replacement_by_channel",
+                &self.live_result_recovery_replacement_by_channel,
+            )
+            .field(
+                "live_result_recovery_source_by_replacement",
+                &self.live_result_recovery_source_by_replacement,
+            )
+            .field(
+                "live_result_recovery_session_by_channel",
+                &self.live_result_recovery_session_by_channel,
+            )
+            .field(
+                "live_result_recovery_operation_by_channel",
+                &self.live_result_recovery_operation_by_channel,
+            )
+            .field(
+                "live_result_recovery_digest_by_channel",
+                &self.live_result_recovery_digest_by_channel,
+            )
+            .field(
+                "live_result_recovery_seed_cursor_by_channel",
+                &self.live_result_recovery_seed_cursor_by_channel,
+            )
+            .field(
+                "live_result_recovery_identity_by_channel",
+                &self.live_result_recovery_identity_by_channel,
+            )
+            .field(
+                "live_result_recovery_runtime_id_by_channel",
+                &self.live_result_recovery_runtime_id_by_channel,
+            )
+            .field(
+                "live_result_recovery_fence_by_channel",
+                &self.live_result_recovery_fence_by_channel,
+            )
+            .field(
+                "live_result_recovery_generation_by_channel",
+                &self.live_result_recovery_generation_by_channel,
+            )
+            .field(
+                "live_bridge_operation_by_channel",
+                &self.live_bridge_operation_by_channel,
+            )
+            .field(
+                "live_bridge_channel_by_operation",
+                &self.live_bridge_channel_by_operation,
+            )
+            .field(
+                "live_bridge_interaction_by_operation",
+                &self.live_bridge_interaction_by_operation,
+            )
+            .field(
+                "live_bridge_provider_turn_by_operation",
+                &self.live_bridge_provider_turn_by_operation,
+            )
+            .field(
+                "live_bridge_provider_delegation_by_operation",
+                &self.live_bridge_provider_delegation_by_operation,
+            )
+            .field(
+                "live_bridge_provider_call_by_operation",
+                &self.live_bridge_provider_call_by_operation,
+            )
+            .field(
+                "live_bridge_agent_identity_by_operation",
+                &self.live_bridge_agent_identity_by_operation,
+            )
+            .field(
+                "live_bridge_context_revision_by_operation",
+                &self.live_bridge_context_revision_by_operation,
+            )
+            .field(
+                "live_bridge_request_digest_by_operation",
+                &self.live_bridge_request_digest_by_operation,
+            )
+            .field(
+                "live_bridge_phase_by_operation",
+                &self.live_bridge_phase_by_operation,
+            )
+            .field(
+                "live_bridge_effect_operation_by_authority",
+                &self.live_bridge_effect_operation_by_authority,
+            )
+            .field(
+                "live_bridge_effect_kind_by_authority",
+                &self.live_bridge_effect_kind_by_authority,
+            )
+            .field(
+                "live_bridge_consumed_effect_authorities",
+                &self.live_bridge_consumed_effect_authorities,
+            )
+            .field(
+                "live_bridge_in_flight_effect_authorities",
+                &self.live_bridge_in_flight_effect_authorities,
+            )
+            .field(
+                "live_bridge_effect_outcome_by_authority",
+                &self.live_bridge_effect_outcome_by_authority,
+            )
+            .field(
+                "live_bridge_model_computation_authorized_operations",
+                &self.live_bridge_model_computation_authorized_operations,
+            )
+            .field(
+                "live_bridge_read_snapshot_authorized_operations",
+                &self.live_bridge_read_snapshot_authorized_operations,
+            )
+            .field(
+                "live_bridge_execution_started_operations",
+                &self.live_bridge_execution_started_operations,
+            )
+            .field(
+                "live_bridge_outcome_receipt_required_operations",
+                &self.live_bridge_outcome_receipt_required_operations,
+            )
+            .field(
+                "live_bridge_outcome_receipt_operations",
+                &self.live_bridge_outcome_receipt_operations,
+            )
+            .field(
+                "live_bridge_execution_terminal_by_operation",
+                &self.live_bridge_execution_terminal_by_operation,
+            )
+            .field(
+                "live_bridge_execution_result_digest_by_operation",
+                &self.live_bridge_execution_result_digest_by_operation,
+            )
+            .field(
+                "live_bridge_cancellation_reason_by_operation",
+                &self.live_bridge_cancellation_reason_by_operation,
+            )
+            .field(
+                "live_bridge_submission_output_kind_by_operation",
+                &self.live_bridge_submission_output_kind_by_operation,
+            )
+            .field(
+                "live_bridge_submission_digest_by_operation",
+                &self.live_bridge_submission_digest_by_operation,
+            )
+            .field(
+                "live_bridge_submission_state_by_operation",
+                &self.live_bridge_submission_state_by_operation,
+            )
+            .field(
+                "live_context_cursor_by_channel",
+                &self.live_context_cursor_by_channel,
+            )
+            .field(
+                "live_context_preparation_phase_by_channel",
+                &self.live_context_preparation_phase_by_channel,
+            )
+            .field(
+                "live_context_preparation_failure_by_channel",
+                &self.live_context_preparation_failure_by_channel,
+            )
+            .field(
+                "live_context_preparation_lease_by_channel",
+                &self.live_context_preparation_lease_by_channel,
+            )
+            .field(
+                "live_context_preparation_runtime_by_channel",
+                &self.live_context_preparation_runtime_by_channel,
+            )
+            .field(
+                "live_context_preparation_fence_by_channel",
+                &self.live_context_preparation_fence_by_channel,
+            )
+            .field(
+                "live_context_preparation_generation_by_channel",
+                &self.live_context_preparation_generation_by_channel,
+            )
+            .field(
+                "live_context_observation_counter_by_channel",
+                &self.live_context_observation_counter_by_channel,
+            )
+            .field(
+                "live_context_ack_cut_by_channel",
+                &self.live_context_ack_cut_by_channel,
+            )
+            .field(
+                "live_context_observation_channel_by_id",
+                &self.live_context_observation_channel_by_id,
+            )
+            .field(
+                "live_context_observation_lease_by_id",
+                &self.live_context_observation_lease_by_id,
+            )
+            .field(
+                "live_context_observation_runtime_by_id",
+                &self.live_context_observation_runtime_by_id,
+            )
+            .field(
+                "live_context_observation_fence_by_id",
+                &self.live_context_observation_fence_by_id,
+            )
+            .field(
+                "live_context_observation_generation_by_id",
+                &self.live_context_observation_generation_by_id,
+            )
+            .field(
+                "live_context_observation_ordinal_by_id",
+                &self.live_context_observation_ordinal_by_id,
+            )
+            .field(
+                "live_context_reserved_cursor_by_channel",
+                &self.live_context_reserved_cursor_by_channel,
+            )
+            .field(
+                "live_context_bootstrap_append_by_channel",
+                &self.live_context_bootstrap_append_by_channel,
+            )
+            .field(
+                "live_context_bootstrap_digest_by_channel",
+                &self.live_context_bootstrap_digest_by_channel,
+            )
+            .field(
+                "live_context_queued_session_by_append",
+                &self.live_context_queued_session_by_append,
+            )
+            .field(
+                "live_context_queued_cursor_by_append",
+                &self.live_context_queued_cursor_by_append,
+            )
+            .field(
+                "live_context_queued_digest_by_append",
+                &self.live_context_queued_digest_by_append,
+            )
+            .field(
+                "live_context_queued_commit_token_by_append",
+                &self.live_context_queued_commit_token_by_append,
+            )
+            .field(
+                "live_context_queued_disposition_by_append",
+                &self.live_context_queued_disposition_by_append,
+            )
+            .field(
+                "live_context_queued_append_by_cursor",
+                &self.live_context_queued_append_by_cursor,
+            )
+            .field(
+                "live_context_pending_append_by_channel",
+                &self.live_context_pending_append_by_channel,
+            )
+            .field(
+                "live_context_pending_channel_by_append",
+                &self.live_context_pending_channel_by_append,
+            )
+            .field(
+                "live_context_pending_previous_cursor_by_append",
+                &self.live_context_pending_previous_cursor_by_append,
+            )
+            .field(
+                "live_context_pending_next_cursor_by_append",
+                &self.live_context_pending_next_cursor_by_append,
+            )
+            .field(
+                "live_context_delivered_append_ids",
+                &self.live_context_delivered_append_ids,
+            )
+            .field(
+                "live_context_ambiguous_no_retry",
+                &self.live_context_ambiguous_no_retry,
+            )
+            .field(
+                "live_context_recovery_replacement_by_channel",
+                &self.live_context_recovery_replacement_by_channel,
+            )
+            .field(
+                "live_context_recovery_source_by_replacement",
+                &self.live_context_recovery_source_by_replacement,
+            )
+            .field(
+                "live_context_recovery_session_by_channel",
+                &self.live_context_recovery_session_by_channel,
+            )
+            .field(
+                "live_context_recovery_append_by_channel",
+                &self.live_context_recovery_append_by_channel,
+            )
+            .field(
+                "live_context_recovery_seed_cursor_by_channel",
+                &self.live_context_recovery_seed_cursor_by_channel,
+            )
+            .field(
+                "live_context_recovery_identity_by_channel",
+                &self.live_context_recovery_identity_by_channel,
+            )
+            .field(
+                "live_context_recovery_runtime_id_by_channel",
+                &self.live_context_recovery_runtime_id_by_channel,
+            )
+            .field(
+                "live_context_recovery_fence_by_channel",
+                &self.live_context_recovery_fence_by_channel,
+            )
+            .field(
+                "live_context_recovery_generation_by_channel",
+                &self.live_context_recovery_generation_by_channel,
+            )
+            .field(
+                "live_refresh_result_sequence",
+                &self.live_refresh_result_sequence,
+            )
+            .field(
+                "live_refresh_queue_acceptance_sequence_by_channel",
+                &self.live_refresh_queue_acceptance_sequence_by_channel,
+            )
+            .field(
+                "live_refresh_status_by_channel",
+                &self.live_refresh_status_by_channel,
+            )
+            .field(
+                "live_close_result_sequence",
+                &self.live_close_result_sequence,
+            )
+            .field(
+                "live_close_observation_sequence_by_channel",
+                &self.live_close_observation_sequence_by_channel,
+            )
+            .field(
+                "live_close_status_by_channel",
+                &self.live_close_status_by_channel,
+            )
+            .field(
+                "live_close_settlement_deferred_channels",
+                &self.live_close_settlement_deferred_channels,
+            )
+            .field(
+                "live_command_result_sequence",
+                &self.live_command_result_sequence,
+            )
+            .field(
+                "live_command_acceptance_sequence_by_channel",
+                &self.live_command_acceptance_sequence_by_channel,
+            )
+            .field(
+                "live_command_kind_by_channel",
+                &self.live_command_kind_by_channel,
+            )
+            .field(
+                "live_command_rejection_sequence",
+                &self.live_command_rejection_sequence,
+            )
+            .field(
+                "live_command_rejection_reason_by_channel",
+                &self.live_command_rejection_reason_by_channel,
+            )
+            .field(
+                "live_command_rejection_public_error_class_by_channel",
+                &self.live_command_rejection_public_error_class_by_channel,
+            )
+            .field(
+                "live_channel_request_rejection_sequence",
+                &self.live_channel_request_rejection_sequence,
+            )
+            .field(
+                "live_channel_request_rejection_reason_by_channel",
+                &self.live_channel_request_rejection_reason_by_channel,
+            )
+            .field(
+                "live_channel_request_rejection_public_error_class_by_channel",
+                &self.live_channel_request_rejection_public_error_class_by_channel,
+            )
+            .field(
+                "live_webrtc_token_issue_sequence",
+                &self.live_webrtc_token_issue_sequence,
+            )
+            .field(
+                "live_webrtc_token_channel_by_token",
+                &format_args!(
+                    "<redacted; {} entries>",
+                    self.live_webrtc_token_channel_by_token.len()
+                ),
+            )
+            .field(
+                "live_webrtc_token_expires_at_ms_by_token",
+                &format_args!(
+                    "<redacted; {} entries>",
+                    self.live_webrtc_token_expires_at_ms_by_token.len()
+                ),
+            )
+            .field(
+                "live_webrtc_consumed_tokens",
+                &format_args!(
+                    "<redacted; {} entries>",
+                    self.live_webrtc_consumed_tokens.len()
+                ),
+            )
+            .field(
+                "live_webrtc_answer_admission_sequence",
+                &self.live_webrtc_answer_admission_sequence,
+            )
+            .field(
+                "live_webrtc_answer_result_sequence",
+                &self.live_webrtc_answer_result_sequence,
+            )
+            .field(
+                "live_webrtc_answer_observation_sequence_by_channel",
+                &self.live_webrtc_answer_observation_sequence_by_channel,
+            )
+            .field(
+                "live_webrtc_answer_status_by_channel",
+                &self.live_webrtc_answer_status_by_channel,
+            )
+            .field(
+                "live_websocket_token_issue_sequence",
+                &self.live_websocket_token_issue_sequence,
+            )
+            .field(
+                "live_websocket_token_channel_by_token",
+                &format_args!(
+                    "<redacted; {} entries>",
+                    self.live_websocket_token_channel_by_token.len()
+                ),
+            )
+            .field(
+                "live_websocket_token_expires_at_ms_by_token",
+                &format_args!(
+                    "<redacted; {} entries>",
+                    self.live_websocket_token_expires_at_ms_by_token.len()
+                ),
+            )
+            .field(
+                "live_websocket_consumed_tokens",
+                &format_args!(
+                    "<redacted; {} entries>",
+                    self.live_websocket_consumed_tokens.len()
+                ),
+            )
+            .field(
+                "live_websocket_token_admission_sequence",
+                &self.live_websocket_token_admission_sequence,
+            )
+            .field(
+                "live_channel_status_result_sequence",
+                &self.live_channel_status_result_sequence,
+            )
+            .field(
+                "live_channel_status_observation_sequence_by_channel",
+                &self.live_channel_status_observation_sequence_by_channel,
+            )
+            .field(
+                "live_channel_status_by_channel",
+                &self.live_channel_status_by_channel,
+            )
+            .field(
+                "session_event_stream_open_result_sequence",
+                &self.session_event_stream_open_result_sequence,
+            )
+            .field(
+                "session_event_stream_close_result_sequence",
+                &self.session_event_stream_close_result_sequence,
+            )
+            .field(
+                "session_event_stream_terminal_sequence",
+                &self.session_event_stream_terminal_sequence,
+            )
+            .field(
+                "active_session_event_streams",
+                &self.active_session_event_streams,
+            )
+            .field(
+                "closed_session_event_streams",
+                &self.closed_session_event_streams,
+            )
+            .field(
+                "session_event_stream_session_ids",
+                &self.session_event_stream_session_ids,
+            )
+            .field(
+                "mob_event_stream_open_result_sequence",
+                &self.mob_event_stream_open_result_sequence,
+            )
+            .field(
+                "mob_event_stream_close_result_sequence",
+                &self.mob_event_stream_close_result_sequence,
+            )
+            .field(
+                "mob_event_stream_terminal_sequence",
+                &self.mob_event_stream_terminal_sequence,
+            )
+            .field("active_mob_event_streams", &self.active_mob_event_streams)
+            .field("closed_mob_event_streams", &self.closed_mob_event_streams)
+            .field("known_surfaces", &self.known_surfaces)
+            .field("active_surfaces", &self.active_surfaces)
+            .field("visible_surfaces", &self.visible_surfaces)
+            .field("surface_base_state", &self.surface_base_state)
+            .field("surface_pending_op", &self.surface_pending_op)
+            .field("surface_staged_op", &self.surface_staged_op)
+            .field("reload_staged_surfaces", &self.reload_staged_surfaces)
+            .field(
+                "surface_staged_intent_sequence",
+                &self.surface_staged_intent_sequence,
+            )
+            .field(
+                "next_staged_intent_sequence",
+                &self.next_staged_intent_sequence,
+            )
+            .field(
+                "surface_pending_task_sequence",
+                &self.surface_pending_task_sequence,
+            )
+            .field(
+                "next_pending_task_sequence",
+                &self.next_pending_task_sequence,
+            )
+            .field(
+                "surface_pending_lineage_sequence",
+                &self.surface_pending_lineage_sequence,
+            )
+            .field("surface_inflight_calls", &self.surface_inflight_calls)
+            .field(
+                "surface_last_delta_operation",
+                &self.surface_last_delta_operation,
+            )
+            .field("surface_last_delta_phase", &self.surface_last_delta_phase)
+            .field("snapshot_epoch", &self.snapshot_epoch)
+            .field("snapshot_aligned_epoch", &self.snapshot_aligned_epoch)
+            .field("surface_draining_since_ms", &self.surface_draining_since_ms)
+            .field(
+                "surface_removal_timeout_at_ms",
+                &self.surface_removal_timeout_at_ms,
+            )
+            .field(
+                "surface_removal_applied_at_turn",
+                &self.surface_removal_applied_at_turn,
+            )
+            .field("surface_phase", &self.surface_phase)
+            .field("removal_timeout_ms", &self.removal_timeout_ms)
+            .field("mcp_server_states", &self.mcp_server_states)
+            .field("pending_peer_requests", &self.pending_peer_requests)
+            .field("inbound_peer_requests", &self.inbound_peer_requests)
+            .field(
+                "inbound_peer_request_lanes",
+                &self.inbound_peer_request_lanes,
+            )
+            .field(
+                "last_session_context_updated_at_ms",
+                &self.last_session_context_updated_at_ms,
+            )
+            .field(
+                "reserved_interaction_streams",
+                &self.reserved_interaction_streams,
+            )
+            .field(
+                "attached_interaction_streams",
+                &self.attached_interaction_streams,
+            )
+            .field("peer_ingress_owner_kind", &self.peer_ingress_owner_kind)
+            .field(
+                "peer_ingress_comms_runtime_id",
+                &self.peer_ingress_comms_runtime_id,
+            )
+            .field("peer_ingress_mob_id", &self.peer_ingress_mob_id)
+            .field(
+                "peer_ingress_authority_phase",
+                &self.peer_ingress_authority_phase,
+            )
+            .field("supervisor_binding_kind", &self.supervisor_binding_kind)
+            .field("supervisor_bound_name", &self.supervisor_bound_name)
+            .field("supervisor_bound_peer_id", &self.supervisor_bound_peer_id)
+            .field("supervisor_bound_address", &self.supervisor_bound_address)
+            .field(
+                "supervisor_bound_signing_public_key",
+                &self.supervisor_bound_signing_public_key,
+            )
+            .field("supervisor_bound_epoch", &self.supervisor_bound_epoch)
+            .field(
+                "supervisor_publish_pending_name",
+                &self.supervisor_publish_pending_name,
+            )
+            .field(
+                "supervisor_publish_pending_peer_id",
+                &self.supervisor_publish_pending_peer_id,
+            )
+            .field(
+                "supervisor_publish_pending_address",
+                &self.supervisor_publish_pending_address,
+            )
+            .field(
+                "supervisor_publish_pending_signing_public_key",
+                &self.supervisor_publish_pending_signing_public_key,
+            )
+            .field(
+                "supervisor_publish_pending_epoch",
+                &self.supervisor_publish_pending_epoch,
+            )
+            .field(
+                "supervisor_revoke_pending_name",
+                &self.supervisor_revoke_pending_name,
+            )
+            .field(
+                "supervisor_revoke_pending_peer_id",
+                &self.supervisor_revoke_pending_peer_id,
+            )
+            .field(
+                "supervisor_revoke_pending_address",
+                &self.supervisor_revoke_pending_address,
+            )
+            .field(
+                "supervisor_revoke_pending_signing_public_key",
+                &self.supervisor_revoke_pending_signing_public_key,
+            )
+            .field(
+                "supervisor_revoke_pending_epoch",
+                &self.supervisor_revoke_pending_epoch,
+            )
+            .field(
+                "supervisor_revoked_peer_id",
+                &self.supervisor_revoked_peer_id,
+            )
+            .field(
+                "supervisor_revoked_signing_public_key",
+                &self.supervisor_revoked_signing_public_key,
+            )
+            .field("supervisor_revoked_epoch", &self.supervisor_revoked_epoch)
+            .field(
+                "supervisor_rotation_operation_id",
+                &self.supervisor_rotation_operation_id,
+            )
+            .field("supervisor_rotation_phase", &self.supervisor_rotation_phase)
+            .field(
+                "supervisor_rotation_rejection",
+                &self.supervisor_rotation_rejection,
+            )
+            .field(
+                "supervisor_rotation_previous_name",
+                &self.supervisor_rotation_previous_name,
+            )
+            .field(
+                "supervisor_rotation_previous_peer_id",
+                &self.supervisor_rotation_previous_peer_id,
+            )
+            .field(
+                "supervisor_rotation_previous_address",
+                &self.supervisor_rotation_previous_address,
+            )
+            .field(
+                "supervisor_rotation_previous_signing_public_key",
+                &self.supervisor_rotation_previous_signing_public_key,
+            )
+            .field(
+                "supervisor_rotation_previous_epoch",
+                &self.supervisor_rotation_previous_epoch,
+            )
+            .field(
+                "supervisor_rotation_next_name",
+                &self.supervisor_rotation_next_name,
+            )
+            .field(
+                "supervisor_rotation_next_peer_id",
+                &self.supervisor_rotation_next_peer_id,
+            )
+            .field(
+                "supervisor_rotation_next_address",
+                &self.supervisor_rotation_next_address,
+            )
+            .field(
+                "supervisor_rotation_next_signing_public_key",
+                &self.supervisor_rotation_next_signing_public_key,
+            )
+            .field(
+                "supervisor_rotation_next_epoch",
+                &self.supervisor_rotation_next_epoch,
+            )
+            .field(
+                "supervisor_rotation_terminal_phases",
+                &self.supervisor_rotation_terminal_phases,
+            )
+            .field(
+                "supervisor_rotation_terminal_rejections",
+                &self.supervisor_rotation_terminal_rejections,
+            )
+            .field(
+                "supervisor_rotation_terminal_previous_names",
+                &self.supervisor_rotation_terminal_previous_names,
+            )
+            .field(
+                "supervisor_rotation_terminal_previous_peer_ids",
+                &self.supervisor_rotation_terminal_previous_peer_ids,
+            )
+            .field(
+                "supervisor_rotation_terminal_previous_addresses",
+                &self.supervisor_rotation_terminal_previous_addresses,
+            )
+            .field(
+                "supervisor_rotation_terminal_previous_signing_public_keys",
+                &self.supervisor_rotation_terminal_previous_signing_public_keys,
+            )
+            .field(
+                "supervisor_rotation_terminal_previous_epochs",
+                &self.supervisor_rotation_terminal_previous_epochs,
+            )
+            .field(
+                "supervisor_rotation_terminal_next_names",
+                &self.supervisor_rotation_terminal_next_names,
+            )
+            .field(
+                "supervisor_rotation_terminal_next_peer_ids",
+                &self.supervisor_rotation_terminal_next_peer_ids,
+            )
+            .field(
+                "supervisor_rotation_terminal_next_addresses",
+                &self.supervisor_rotation_terminal_next_addresses,
+            )
+            .field(
+                "supervisor_rotation_terminal_next_signing_public_keys",
+                &self.supervisor_rotation_terminal_next_signing_public_keys,
+            )
+            .field(
+                "supervisor_rotation_terminal_next_epochs",
+                &self.supervisor_rotation_terminal_next_epochs,
+            )
+            .field("local_endpoint", &self.local_endpoint)
+            .field("direct_peer_endpoints", &self.direct_peer_endpoints)
+            .field(
+                "mob_overlay_peer_endpoints",
+                &self.mob_overlay_peer_endpoints,
+            )
+            .field("peer_projection_epoch", &self.peer_projection_epoch)
+            .field("mob_overlay_epoch", &self.mob_overlay_epoch)
+            .finish()
+    }
 }
 impl Default for State {
     fn default() -> Self {
@@ -15963,7 +17429,7 @@ pub mod inputs {
         pub request: LiveChannelRequestPublicKind,
         pub rejection: LiveChannelRequestRejectionReason,
     }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordLiveWebrtcTokenIssued {
         pub session_id: String,
         pub channel_id: String,
@@ -15971,12 +17437,33 @@ pub mod inputs {
         pub issued_at_ms: u64,
         pub ttl_ms: u64,
     }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    impl std::fmt::Debug for RecordLiveWebrtcTokenIssued {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("RecordLiveWebrtcTokenIssued")
+                .field("session_id", &self.session_id)
+                .field("channel_id", &self.channel_id)
+                .field("token", &"<redacted>")
+                .field("issued_at_ms", &self.issued_at_ms)
+                .field("ttl_ms", &self.ttl_ms)
+                .finish()
+        }
+    }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveLiveWebrtcAnswerAdmission {
         pub session_id: String,
         pub channel_id: String,
         pub token: String,
         pub observed_at_ms: u64,
+    }
+    impl std::fmt::Debug for ResolveLiveWebrtcAnswerAdmission {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ResolveLiveWebrtcAnswerAdmission")
+                .field("session_id", &self.session_id)
+                .field("channel_id", &self.channel_id)
+                .field("token", &"<redacted>")
+                .field("observed_at_ms", &self.observed_at_ms)
+                .finish()
+        }
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordLiveWebrtcAnswerAccepted {
@@ -15995,7 +17482,7 @@ pub mod inputs {
         pub canonical_seed_cursor: u64,
         pub activation_receipt: String,
     }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordLiveWebsocketTokenIssued {
         pub session_id: String,
         pub channel_id: String,
@@ -16003,12 +17490,33 @@ pub mod inputs {
         pub issued_at_ms: u64,
         pub ttl_ms: u64,
     }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    impl std::fmt::Debug for RecordLiveWebsocketTokenIssued {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("RecordLiveWebsocketTokenIssued")
+                .field("session_id", &self.session_id)
+                .field("channel_id", &self.channel_id)
+                .field("token", &"<redacted>")
+                .field("issued_at_ms", &self.issued_at_ms)
+                .field("ttl_ms", &self.ttl_ms)
+                .finish()
+        }
+    }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveLiveWebsocketTokenAdmission {
         pub session_id: String,
         pub channel_id: String,
         pub token: String,
         pub observed_at_ms: u64,
+    }
+    impl std::fmt::Debug for ResolveLiveWebsocketTokenAdmission {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ResolveLiveWebsocketTokenAdmission")
+                .field("session_id", &self.session_id)
+                .field("channel_id", &self.channel_id)
+                .field("token", &"<redacted>")
+                .field("observed_at_ms", &self.observed_at_ms)
+                .finish()
+        }
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordSessionEventStreamOpened {
@@ -18503,7 +20011,7 @@ pub mod effects {
         pub public_error_class: LiveChannelRequestRejectionPublicErrorClass,
         pub sequence: u64,
     }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveWebrtcTokenIssued {
         pub session_id: String,
         pub channel_id: String,
@@ -18511,7 +20019,18 @@ pub mod effects {
         pub expires_at_ms: u64,
         pub sequence: u64,
     }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    impl std::fmt::Debug for LiveWebrtcTokenIssued {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("LiveWebrtcTokenIssued")
+                .field("session_id", &self.session_id)
+                .field("channel_id", &self.channel_id)
+                .field("token", &"<redacted>")
+                .field("expires_at_ms", &self.expires_at_ms)
+                .field("sequence", &self.sequence)
+                .finish()
+        }
+    }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveWebrtcAnswerAdmissionResolved {
         pub session_id: String,
         pub channel_id: String,
@@ -18520,6 +20039,19 @@ pub mod effects {
         pub rejection: Option<LiveWebrtcAnswerAdmissionRejection>,
         pub public_error_class: Option<LiveChannelRequestRejectionPublicErrorClass>,
         pub sequence: u64,
+    }
+    impl std::fmt::Debug for LiveWebrtcAnswerAdmissionResolved {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("LiveWebrtcAnswerAdmissionResolved")
+                .field("session_id", &self.session_id)
+                .field("channel_id", &self.channel_id)
+                .field("token", &"<redacted>")
+                .field("admitted", &self.admitted)
+                .field("rejection", &self.rejection)
+                .field("public_error_class", &self.public_error_class)
+                .field("sequence", &self.sequence)
+                .finish()
+        }
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveWebrtcAnswerResultResolved {
@@ -18543,7 +20075,7 @@ pub mod effects {
         pub canonical_seed_cursor: u64,
         pub activation_receipt: String,
     }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveWebsocketTokenIssued {
         pub session_id: String,
         pub channel_id: String,
@@ -18551,7 +20083,18 @@ pub mod effects {
         pub expires_at_ms: u64,
         pub sequence: u64,
     }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    impl std::fmt::Debug for LiveWebsocketTokenIssued {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("LiveWebsocketTokenIssued")
+                .field("session_id", &self.session_id)
+                .field("channel_id", &self.channel_id)
+                .field("token", &"<redacted>")
+                .field("expires_at_ms", &self.expires_at_ms)
+                .field("sequence", &self.sequence)
+                .finish()
+        }
+    }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveWebsocketTokenAdmissionResolved {
         pub session_id: String,
         pub channel_id: String,
@@ -18560,6 +20103,19 @@ pub mod effects {
         pub rejection: Option<LiveWebsocketTokenAdmissionRejection>,
         pub public_error_class: Option<LiveWebsocketTokenAdmissionPublicErrorClass>,
         pub sequence: u64,
+    }
+    impl std::fmt::Debug for LiveWebsocketTokenAdmissionResolved {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("LiveWebsocketTokenAdmissionResolved")
+                .field("session_id", &self.session_id)
+                .field("channel_id", &self.channel_id)
+                .field("token", &"<redacted>")
+                .field("admitted", &self.admitted)
+                .field("rejection", &self.rejection)
+                .field("public_error_class", &self.public_error_class)
+                .field("sequence", &self.sequence)
+                .finish()
+        }
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveOpenAdmissionResolved {

@@ -528,8 +528,19 @@ impl BinaryFormat {
 /// Constructor enforces that every byte is in the URL-safe unreserved
 /// alphabet: `A-Z a-z 0-9 - _ . ~`. This means callers can interpolate
 /// the value into URL query strings without percent-encoding.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// The value is bearer material: `Debug` prints `LiveTokenString("<redacted>")`.
+/// `Display` and [`Self::as_str`] still yield the token for URL construction.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct LiveTokenString(String);
+
+impl std::fmt::Debug for LiveTokenString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LiveTokenString")
+            .field(&meerkat_core::redact::REDACTED)
+            .finish()
+    }
+}
 
 impl LiveTokenString {
     /// Construct from an arbitrary string, validating the URL-safe alphabet.
@@ -1595,6 +1606,23 @@ pub async fn serve_live_ws_listener(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_token_debug_redacts_value() {
+        let token = LiveTokenString::new("live-bootstrap-secret").unwrap();
+        let issue = LiveWsTokenIssue {
+            token: token.clone(),
+            expires_at_ms: 1,
+            sequence: 2,
+        };
+        let rendered = format!("{token:?} {issue:?} {issue:#?}");
+        assert!(
+            !rendered.contains("live-bootstrap-secret"),
+            "secret leaked: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert_eq!(token.to_string(), "live-bootstrap-secret");
+    }
     use crate::host::{
         LiveProjectionError, LiveProjectionSink, LiveTranscriptIdentity, NoOpProjectionSink,
     };

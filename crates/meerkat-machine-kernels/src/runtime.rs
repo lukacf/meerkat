@@ -2845,6 +2845,7 @@ mod tests {
             .push(meerkat_machine_schema::FieldSchema {
                 name: field_id("status"),
                 ty: meerkat_machine_schema::TypeRef::Enum(enum_type_id("OperationStatus")),
+                disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
             });
 
         let transition = schema
@@ -2878,6 +2879,7 @@ mod tests {
             .push(meerkat_machine_schema::FieldSchema {
                 name: field_id("unbound_runtime_id"),
                 ty: meerkat_machine_schema::TypeRef::Named(named_type_id("UnboundRuntimeId")),
+                disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
             });
 
         let transition = schema
@@ -2922,6 +2924,7 @@ mod tests {
             params: vec![meerkat_machine_schema::FieldSchema {
                 name: field_id("operation_id"),
                 ty: meerkat_machine_schema::TypeRef::String,
+                disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
             }],
             returns: meerkat_machine_schema::TypeRef::Enum(enum_type_id("OperationStatus")),
             body: meerkat_machine_schema::Expr::MapGet {
@@ -3363,6 +3366,7 @@ mod tests {
             .push(meerkat_machine_schema::FieldSchema {
                 name: field_id("unbound_runtime_id"),
                 ty: meerkat_machine_schema::TypeRef::Named(named_type_id("UnboundRuntimeId")),
+                disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
             });
 
         let refusal = GeneratedMachineKernel::new(schema)
@@ -3462,6 +3466,7 @@ mod tests {
             .push(meerkat_machine_schema::FieldSchema {
                 name: field_id("defaulted_status"),
                 ty: meerkat_machine_schema::TypeRef::Enum(enum_type_id("OperationStatus")),
+                disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
             });
 
         let kernel = GeneratedMachineKernel::new(schema);

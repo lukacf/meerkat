@@ -7658,12 +7658,25 @@ pub struct LiveChannelRequestRejectionAuthority {
 /// Constructed only from `MeerkatMachineEffect::LiveWebrtcTokenIssued`.
 /// The transport supplies random bearer material, but it is not returned to a
 /// caller until the generated machine records the channel binding and expiry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` redacts the bearer token.
+#[derive(Clone, PartialEq, Eq)]
 #[cfg(feature = "live")]
 pub struct LiveWebrtcTokenAuthority {
     pub token: String,
     pub expires_at_ms: u64,
     pub sequence: u64,
+}
+
+#[cfg(feature = "live")]
+impl std::fmt::Debug for LiveWebrtcTokenAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveWebrtcTokenAuthority")
+            .field("token", &meerkat_core::redact::REDACTED)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("sequence", &self.sequence)
+            .finish()
+    }
 }
 
 /// Generated authority output for WebRTC answer token admission.
@@ -8444,12 +8457,74 @@ impl LiveWebrtcAnswerExecutionRollbackAuthority {
 /// Constructed only from `MeerkatMachineEffect::LiveWebsocketTokenIssued`.
 /// The WebSocket transport supplies random bearer material, but it is not
 /// returned until generated authority records channel binding and expiry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` redacts the bearer token.
+#[derive(Clone, PartialEq, Eq)]
 #[cfg(feature = "live")]
 pub struct LiveWebsocketTokenAuthority {
     pub token: String,
     pub expires_at_ms: u64,
     pub sequence: u64,
+}
+
+#[cfg(feature = "live")]
+impl std::fmt::Debug for LiveWebsocketTokenAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveWebsocketTokenAuthority")
+            .field("token", &meerkat_core::redact::REDACTED)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("sequence", &self.sequence)
+            .finish()
+    }
+}
+
+#[cfg(all(test, feature = "live"))]
+mod live_token_authority_debug_tests {
+    use super::{LiveWebrtcTokenAuthority, LiveWebsocketTokenAuthority};
+
+    #[test]
+    fn live_token_authorities_debug_redact_token() {
+        const SECRET: &str = "live-bootstrap-secret";
+        let webrtc = LiveWebrtcTokenAuthority {
+            token: SECRET.into(),
+            expires_at_ms: 10,
+            sequence: 1,
+        };
+        let websocket = LiveWebsocketTokenAuthority {
+            token: SECRET.into(),
+            expires_at_ms: 20,
+            sequence: 2,
+        };
+        let rendered = format!("{webrtc:?} {webrtc:#?} {websocket:?} {websocket:#?}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
+
+    #[test]
+    fn dsl_live_token_state_and_effects_debug_redact_token() {
+        const SECRET: &str = "live-bootstrap-secret";
+        let mut state = super::dsl::MeerkatMachineState::default();
+        state
+            .live_websocket_token_expires_at_ms_by_token
+            .insert(SECRET.to_owned(), 5);
+        let effect = super::dsl::MeerkatMachineEffect::LiveWebrtcTokenIssued {
+            session_id: "session-visible".to_owned(),
+            channel_id: "channel-visible".to_owned(),
+            token: SECRET.to_owned(),
+            expires_at_ms: 3,
+            sequence: 4,
+        };
+        let rendered = format!("{state:?} {effect:?} {effect:#?}");
+        assert!(!rendered.contains(SECRET), "token leaked into Debug output");
+        assert!(
+            rendered.contains("live_websocket_token_expires_at_ms_by_token: <redacted; 1 entries>"),
+            "state map not redacted"
+        );
+        assert!(
+            rendered.contains("channel-visible"),
+            "visible field missing"
+        );
+    }
 }
 
 /// Generated authority output for WebSocket token admission.

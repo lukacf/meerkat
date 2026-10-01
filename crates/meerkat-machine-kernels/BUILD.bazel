@@ -283,6 +283,58 @@ rust_test(
     ),
 )
 
+rust_test(
+    name = "live_token_debug_redaction_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-kernels",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "live_token_debug_redaction",
+    crate_root = "tests/live_token_debug_redaction.rs",
+    crate_features = [
+        "test-oracle",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/live_token_debug_redaction.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_BIN_NAME": "live_token_debug_redaction",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-kernels",
+    },
+    tags = [
+        "live",
+    ],
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-machine-kernels",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-kernels:meerkat_machine_kernels",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-kernels",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
 test_suite(
     name = "fast_tests",
     tests = [

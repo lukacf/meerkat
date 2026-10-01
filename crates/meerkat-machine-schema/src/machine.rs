@@ -702,6 +702,22 @@ impl VariantSchema {
 pub struct FieldSchema {
     pub name: FieldId,
     pub ty: TypeRef,
+    /// Whether generated `Debug` output may print this field's value.
+    pub disclosure: FieldDisclosure,
+}
+
+/// Whether a machine field's value may appear in generated `Debug` output.
+///
+/// Declared in the machine DSL with `#[redacted]` on a state, input, signal
+/// or effect field. Disclosure affects only generated `Debug`; transitions,
+/// guards, serialization and the TLA+ model see the value unchanged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FieldDisclosure {
+    #[default]
+    Visible,
+    /// Credential material such as a bearer token. Generated `Debug` prints
+    /// `"<redacted>"` (or the entry count for a collection) instead.
+    Redacted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

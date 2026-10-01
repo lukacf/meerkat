@@ -90,6 +90,10 @@ them.
   discriminants move). Exhaustive matches on these enums must handle the new
   variants.
 
+- `meerkat_machine_schema::FieldSchema` gains a public `disclosure:
+  FieldDisclosure` field, so struct literals must set it
+  (`FieldDisclosure::Visible` keeps the previous behaviour).
+
 ### Added
 
 - Optional connection-local host form elicitation for MCP stdio, SSE and
@@ -123,6 +127,15 @@ them.
   at a time, before the bind, to the cursor its provider session was seeded
   with, consuming a row already queued at that cursor), and changes one guard
   and its complementary deferral guard; no new state or effects.
+
+- Machine DSL fields accept `#[redacted]` (state, input, signal and effect
+  fields; helper parameters reject it). The schema records it as
+  `FieldDisclosure::Redacted`, and both the DSL expansion and the generated
+  kernels give the containing struct or enum a hand-written `Debug` that
+  prints presence for an option, the entry count for a collection and
+  `"<redacted>"` otherwise. Transitions, serialization and the TLA+ model are
+  unchanged. `meerkat_core::redact` is public, exposing `REDACTED` and
+  `RedactedUrl` so credential types in other crates print the same marker.
 
 ### Fixed
 
@@ -240,6 +253,16 @@ them.
   transcript whose spoken punctuation in names means the character ("dot",
   "slash", "underscore"). A file the user called "notes dot md" was written as
   `notes-dot-md`.
+- Live-session bootstrap tokens no longer appear in `Debug` output. The
+  MeerkatMachine DSL marks the WebRTC and WebSocket token fields and the
+  token-keyed state maps `#[redacted]`, so the generated kernel state, input
+  and effect types redact them, and `LiveTransportBootstrap`,
+  `WireLiveTransportBootstrap`, `LiveWebrtcAnswerParams`, `LiveTokenString`
+  and the runtime `LiveWebrtcTokenAuthority` / `LiveWebsocketTokenAuthority`
+  redact the token and the bootstrap URL query by hand. WebRTC SDP offers and
+  answers (`LiveWebrtcAnswerParams.offer_sdp`, `LiveWebrtcAnswerResult`,
+  `LiveWebrtcAnswerAccepted`) print only their length, since their ICE
+  credentials (`ice-ufrag`, `ice-pwd`) are per-connection secrets.
 - The `meerkat_schedule_create` and `meerkat_schedule_update` tool schemas
   advertise the existing `host_runnable` target (`target_kind`
   `"host_runnable"`, a required non-empty `runnable` name and optional opaque

@@ -36,9 +36,10 @@ pub use composition::{
 };
 pub use machine::{
     CommandPlanSchema, EffectClosureSchema, EffectDisposition, EffectDispositionRule, EffectEmit,
-    EnumSchema, Expr, FieldInit, FieldSchema, FieldType, Guard, HelperSchema, InitSchema,
-    InputMatch, InvariantSchema, MachineSchema, MachineSchemaError, Quantifier, RustBinding,
-    StateSchema, TransitionSchema, TriggerKind, TriggerMatch, TypeRef, Update, VariantSchema,
+    EnumSchema, Expr, FieldDisclosure, FieldInit, FieldSchema, FieldType, Guard, HelperSchema,
+    InitSchema, InputMatch, InvariantSchema, MachineSchema, MachineSchemaError, Quantifier,
+    RustBinding, StateSchema, TransitionSchema, TriggerKind, TriggerMatch, TypeRef, Update,
+    VariantSchema,
 };
 pub use seam::SeamClassification;
 

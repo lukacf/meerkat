@@ -1407,14 +1407,16 @@ mod tests {
                 .is_err()
         );
         release.notify_one();
-        let receipt = resolution
-            .await
-            .expect("resolution task")
-            .expect("pending seed resolves");
+        let resolved = resolution.await.expect("resolution task");
 
+        // The receipt is consumable only through the generated-authority
+        // bridge; without that feature the test still requires resolution.
+        #[cfg(not(feature = "__meerkat-generated-authority-bridge"))]
+        assert!(resolved.is_ok(), "pending seed resolves");
         #[cfg(feature = "__meerkat-generated-authority-bridge")]
         assert_eq!(
-            receipt
+            resolved
+                .expect("pending seed resolves")
                 .__consume_for_generated_bind(&expected)
                 .expect("exact binding consumes receipt"),
             41

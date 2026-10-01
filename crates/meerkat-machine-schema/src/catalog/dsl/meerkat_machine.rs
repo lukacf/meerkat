@@ -4084,16 +4084,22 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_channel_request_rejection_reason_by_channel: Map<String, Enum<LiveChannelRequestRejectionReason>>,
             live_channel_request_rejection_public_error_class_by_channel: Map<String, Enum<LiveChannelRequestRejectionPublicErrorClass>>,
             live_webrtc_token_issue_sequence: u64,
+            #[redacted]
             live_webrtc_token_channel_by_token: Map<String, String>,
+            #[redacted]
             live_webrtc_token_expires_at_ms_by_token: Map<String, u64>,
+            #[redacted]
             live_webrtc_consumed_tokens: Set<String>,
             live_webrtc_answer_admission_sequence: u64,
             live_webrtc_answer_result_sequence: u64,
             live_webrtc_answer_observation_sequence_by_channel: Map<String, u64>,
             live_webrtc_answer_status_by_channel: Map<String, Enum<LiveWebrtcAnswerPublicStatus>>,
             live_websocket_token_issue_sequence: u64,
+            #[redacted]
             live_websocket_token_channel_by_token: Map<String, String>,
+            #[redacted]
             live_websocket_token_expires_at_ms_by_token: Map<String, u64>,
+            #[redacted]
             live_websocket_consumed_tokens: Set<String>,
             live_websocket_token_admission_sequence: u64,
             live_channel_status_result_sequence: u64,
@@ -6240,6 +6246,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             RecordLiveWebrtcTokenIssued {
                 session_id: String,
                 channel_id: String,
+                #[redacted]
                 token: String,
                 issued_at_ms: u64,
                 ttl_ms: u64,
@@ -6247,6 +6254,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             ResolveLiveWebrtcAnswerAdmission {
                 session_id: String,
                 channel_id: String,
+                #[redacted]
                 token: String,
                 observed_at_ms: u64,
             },
@@ -6268,6 +6276,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             RecordLiveWebsocketTokenIssued {
                 session_id: String,
                 channel_id: String,
+                #[redacted]
                 token: String,
                 issued_at_ms: u64,
                 ttl_ms: u64,
@@ -6275,6 +6284,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             ResolveLiveWebsocketTokenAdmission {
                 session_id: String,
                 channel_id: String,
+                #[redacted]
                 token: String,
                 observed_at_ms: u64,
             },
@@ -7121,6 +7131,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             LiveWebrtcTokenIssued {
                 session_id: String,
                 channel_id: String,
+                #[redacted]
                 token: String,
                 expires_at_ms: u64,
                 sequence: u64,
@@ -7128,6 +7139,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             LiveWebrtcAnswerAdmissionResolved {
                 session_id: String,
                 channel_id: String,
+                #[redacted]
                 token: String,
                 admitted: bool,
                 rejection: Option<Enum<LiveWebrtcAnswerAdmissionRejection>>,
@@ -7157,6 +7169,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             LiveWebsocketTokenIssued {
                 session_id: String,
                 channel_id: String,
+                #[redacted]
                 token: String,
                 expires_at_ms: u64,
                 sequence: u64,
@@ -7164,6 +7177,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             LiveWebsocketTokenAdmissionResolved {
                 session_id: String,
                 channel_id: String,
+                #[redacted]
                 token: String,
                 admitted: bool,
                 rejection: Option<Enum<LiveWebsocketTokenAdmissionRejection>>,

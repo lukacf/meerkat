@@ -423,6 +423,86 @@ mod tests {
         crate::parse::parse_machine(tokens).expect("parse")
     }
 
+    const REDACTED_TOKEN_MACHINE: &str = r#"
+machine TokenProbe {
+    version: 1,
+    rust: "test" / "token_probe",
+
+    state {
+        phase: TokenPhase,
+        issued: u64,
+        #[redacted]
+        channel_by_token: Map<String, String>,
+    }
+
+    init(Open) {
+        issued = 0,
+        channel_by_token = EmptyMap,
+    }
+
+    terminal []
+
+    phase TokenPhase {
+        Open,
+    }
+
+    input TokenInput {
+        Record { channel_id: String, #[redacted] token: String },
+    }
+
+    effect TokenEffect {
+        Recorded { #[redacted] token: String },
+    }
+
+    disposition Recorded => local seam NoOwnerRealization,
+
+    transition RecordToken {
+        on input Record { channel_id, token }
+        guard { self.phase == Phase::Open }
+        update {
+            self.issued += 1;
+            self.channel_by_token.insert(token, channel_id);
+        }
+        to Open
+        emit Recorded { token: token }
+    }
+}
+"#;
+
+    #[test]
+    fn redacted_attribute_marks_fields_and_drives_generated_debug() {
+        let def = parse(REDACTED_TOKEN_MACHINE);
+        let state: Vec<_> = def
+            .state_fields
+            .iter()
+            .map(|f| (f.name.to_string(), f.redacted))
+            .collect();
+        assert!(state.contains(&("channel_by_token".to_owned(), true)));
+        assert!(state.contains(&("issued".to_owned(), false)));
+        let record = &def.inputs.variants[0].fields;
+        assert!(!record[0].redacted && record[1].redacted);
+        assert!(def.effects.variants[0].fields[0].redacted);
+
+        let tokens: proc_macro2::TokenStream = REDACTED_TOKEN_MACHINE.parse().expect("tokenize");
+        let expanded = crate::expand_machine(tokens).expect("expand").to_string();
+        assert!(expanded.contains("FieldDisclosure :: Redacted"));
+        assert!(expanded.contains("impl std :: fmt :: Debug for TokenProbeState"));
+        assert!(expanded.contains("impl std :: fmt :: Debug for TokenInput"));
+        assert!(expanded.contains("impl std :: fmt :: Debug for TokenEffect"));
+        assert!(expanded.contains("\"<redacted>\""));
+    }
+
+    #[test]
+    fn unsupported_field_attribute_is_rejected() {
+        let source = REDACTED_TOKEN_MACHINE.replace(
+            "#[redacted]\n        channel_by_token",
+            "#[secret]\n        channel_by_token",
+        );
+        let tokens: proc_macro2::TokenStream = source.parse().expect("tokenize");
+        let error = crate::parse::parse_machine(tokens).expect_err("unknown attribute must fail");
+        assert!(error.to_string().contains("only `#[redacted]` is allowed"));
+    }
+
     #[test]
     fn parse_traffic_light() {
         let def = parse(TRAFFIC_LIGHT);

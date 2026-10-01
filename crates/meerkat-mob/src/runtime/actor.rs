@@ -28749,16 +28749,30 @@ impl MobActor {
                 )));
             }
         }
-        let bindings = io
-            .adapter
-            .prepare_local_session_bindings(generated_owner_session_id.clone())
-            .await
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "restore operation owner binding failed for member '{}': {error}",
-                    entry.agent_identity
-                ))
-            })?;
+        // The binding chain (session registration through the generated
+        // MeerkatMachine) carries large debug poll frames. Run it on its own
+        // task so those frames start at the worker loop rather than beneath
+        // the actor run loop and restore frames: inline, the sum overflowed
+        // the 2 MiB worker-stack canary
+        // `mob_cold_restart_partial_resume_respawns_wired_member` once #1416
+        // widened the generated machine types. Binding preparation is
+        // idempotent, so a late completion after a cancelled restore is
+        // harmless (see `relieve_caller_stack`). Do not move this back inline:
+        // that re-stacks the registration chain beneath the actor frames.
+        let adapter = Arc::clone(&io.adapter);
+        let owner_session_id = generated_owner_session_id.clone();
+        let bindings = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            adapter
+                .prepare_local_session_bindings(owner_session_id)
+                .await
+        })
+        .await
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "restore operation owner binding failed for member '{}': {error}",
+                entry.agent_identity
+            ))
+        })?;
         if bindings.session_id() != &generated_owner_session_id {
             return Err(MobError::Internal(format!(
                 "restore operation owner binding returned session '{}' for member '{}' generated owner '{}'",

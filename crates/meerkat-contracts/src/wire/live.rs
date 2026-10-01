@@ -246,7 +246,7 @@ pub struct LiveOpenResult {
 /// The core enum is `#[non_exhaustive]`; new transports (e.g. WebRTC
 /// reintroduction per Round-4 T4) appear here as additional typed variants
 /// rather than as a free-form JSON blob.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "transport", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -280,6 +280,32 @@ pub enum WireLiveTransportBootstrap {
     /// forward `From` impl above this variant — `Unknown` is the floor, not
     /// the destination.**
     Unknown { debug: String },
+}
+
+/// Redacts the bearer token and the URL query, which can carry it.
+impl std::fmt::Debug for WireLiveTransportBootstrap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use meerkat_core::redact::{REDACTED, RedactedUrl};
+        match self {
+            Self::Websocket { url, .. } => f
+                .debug_struct("Websocket")
+                .field("url", &RedactedUrl(url))
+                .field("token", &REDACTED)
+                .finish(),
+            Self::Webrtc {
+                answer_method,
+                http_url,
+                ..
+            } => f
+                .debug_struct("Webrtc")
+                .field("token", &REDACTED)
+                .field("answer_method", answer_method)
+                .field("http_url", &http_url.as_deref().map(RedactedUrl))
+                .finish(),
+            // Already the redacted `Debug` of the core variant.
+            Self::Unknown { debug } => f.debug_struct("Unknown").field("debug", debug).finish(),
+        }
+    }
 }
 
 impl From<LiveTransportBootstrap> for WireLiveTransportBootstrap {
@@ -351,7 +377,7 @@ impl TryFrom<WireLiveTransportBootstrap> for LiveTransportBootstrap {
 }
 
 /// Request payload for `live/webrtc/answer`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveWebrtcAnswerParams {
     pub channel_id: String,
@@ -359,11 +385,39 @@ pub struct LiveWebrtcAnswerParams {
     pub offer_sdp: String,
 }
 
+/// Redacts the token and the SDP offer, whose ICE credentials (`ice-ufrag`,
+/// `ice-pwd`) are per-connection secrets; prints the SDP length only.
+impl std::fmt::Debug for LiveWebrtcAnswerParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveWebrtcAnswerParams")
+            .field("channel_id", &self.channel_id)
+            .field("token", &meerkat_core::redact::REDACTED)
+            .field(
+                "offer_sdp",
+                &format_args!("<redacted; {} bytes>", self.offer_sdp.len()),
+            )
+            .finish()
+    }
+}
+
 /// Response payload for `live/webrtc/answer`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveWebrtcAnswerResult {
     pub answer_sdp: String,
+}
+
+/// Prints the SDP answer length only; its ICE credentials are per-connection
+/// secrets.
+impl std::fmt::Debug for LiveWebrtcAnswerResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveWebrtcAnswerResult")
+            .field(
+                "answer_sdp",
+                &format_args!("<redacted; {} bytes>", self.answer_sdp.len()),
+            )
+            .finish()
+    }
 }
 
 /// Wire projection of [`meerkat_core::live_adapter::LiveChannelCapabilities`].
@@ -2274,6 +2328,45 @@ impl From<LiveAdapterObservation> for WireLiveAdapterObservation {
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_bootstrap_wire_debug_redacts_token_and_url_query() {
+        const SECRET: &str = "live-bootstrap-secret";
+        let bootstraps = [
+            WireLiveTransportBootstrap::Websocket {
+                url: format!("ws://127.0.0.1:9000/live/ws?token={SECRET}"),
+                token: SECRET.into(),
+            },
+            WireLiveTransportBootstrap::Webrtc {
+                token: SECRET.into(),
+                answer_method: "live/webrtc/answer".into(),
+                http_url: None,
+            },
+        ];
+        let answer = LiveWebrtcAnswerParams {
+            channel_id: "channel-visible".into(),
+            token: SECRET.into(),
+            offer_sdp: format!("v=0\r\na=ice-ufrag:{SECRET}\r\na=ice-pwd:{SECRET}\r\n"),
+        };
+        let result = LiveWebrtcAnswerResult {
+            answer_sdp: format!("v=0\r\na=ice-pwd:{SECRET}\r\n"),
+        };
+        let rendered =
+            format!("{bootstraps:?} {bootstraps:#?} {answer:?} {answer:#?} {result:?} {result:#?}");
+        assert!(
+            rendered.contains("bytes>"),
+            "SDP length missing: {rendered}"
+        );
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        for kept in [
+            "ws://127.0.0.1:9000/live/ws?<redacted>",
+            "live/webrtc/answer",
+            "channel-visible",
+            "<redacted>",
+        ] {
+            assert!(rendered.contains(kept), "missing {kept}: {rendered}");
+        }
+    }
 
     #[test]
     fn live_open_params_round_trip() {

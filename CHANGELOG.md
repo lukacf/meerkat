@@ -89,6 +89,32 @@ them.
   `AdvanceLiveExperimentalStagedSeedRunning` are added (`TransitionId::*`
   discriminants move). Exhaustive matches on these enums must handle the new
   variants.
+- Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
+  meerkat-runtime `meerkat_machine::dsl`) gains the input
+  `CancelLiveRecoveryObligation { session_id, closing_channel_id,
+  replacement_channel_id, retained_sessions, retained_cursors,
+  retained_digests, retained_commits, retained_dispositions,
+  retained_append_by_cursor }` and the effect `LiveRecoveryObligationCancelled
+  { session_id, closing_channel_id, replacement_channel_id }`, both added
+  mid-enum (`MeerkatMachineInput::*`, `MeerkatMachineInputVariant::*`,
+  `MeerkatMachineEffect::*`, `MeerkatMachineEffectVariant::*`, kernel
+  `Input::*`, `InputKind::*`, `Effect::*` and `EffectKind::*` discriminants
+  move). The transitions `CancelLiveContextRecoveryObligationIdle`,
+  `CancelLiveContextRecoveryObligationAttached`,
+  `CancelLiveContextRecoveryObligationRunning`,
+  `CancelLiveContextRecoveryObligationRetired`,
+  `CancelLiveContextRecoveryObligationStopped`,
+  `CancelLiveDelegationResultRecoveryObligationIdle`,
+  `CancelLiveDelegationResultRecoveryObligationAttached`,
+  `CancelLiveDelegationResultRecoveryObligationRunning`,
+  `CancelLiveDelegationResultRecoveryObligationRetired` and
+  `CancelLiveDelegationResultRecoveryObligationStopped` are added
+  (`TransitionId::*` discriminants move). Exhaustive matches on
+  these enums must handle the new variants.
+
+- `meerkat_machine_schema::FieldSchema` gains a public `disclosure:
+  FieldDisclosure` field, so struct literals must set it
+  (`FieldDisclosure::Visible` keeps the previous behaviour).
 
 - `OAuthFlowAuthority::start` and `OAuthFlowAuthority::verify` now accept
   `OAuthBrowserFlowIdentity`; `OAuthFlowAuthority::consume` accepts verified
@@ -132,6 +158,13 @@ them.
 
 ### Added
 
+- `meerkat_mob::store::MobRunStore` gains
+  `flow_authority_validation_boundary`, a `#[doc(hidden)]` method with a
+  default body. Not a break: existing implementations compile unchanged. Its
+  return type lives in a crate-private module, so only `meerkat-mob`'s own
+  flow-authority validation boundary can override it. Custom stores keep the
+  default and are always validated. It exists so the boundary is applied once
+  per store (see Fixed).
 - Optional connection-local host form elicitation for MCP stdio, SSE and
   streamable HTTP, including both native router connection paths. Existing
   constructors keep their default handler. Host factories receive the exact
@@ -164,12 +197,49 @@ them.
   with, consuming a row already queued at that cursor), and changes one guard
   and its complementary deferral guard; no new state or effects.
 
+- Machine DSL fields accept `#[redacted]` (state, input, signal and effect
+  fields; helper parameters reject it). The schema records it as
+  `FieldDisclosure::Redacted`, and both the DSL expansion and the generated
+  kernels give the containing struct or enum a hand-written `Debug` that
+  prints presence for an option, the entry count for a collection and
+  `"<redacted>"` otherwise. Transitions, serialization and the TLA+ model are
+  unchanged. `meerkat_core::redact` is public, exposing `REDACTED` and
+  `RedactedUrl` so credential types in other crates print the same marker.
+
 ### Fixed
 
 - Expired OAuth attempts now retire their private persisted payloads when the
   native owner prunes them, including late callbacks and cancelled MCP login.
   Cleanup preserves concurrent live attempts and their deadlines; a failed
   durable write returns `PersistenceFailed` and remains retryable.
+- A GPT Live reopen whose context summary is not ready yet (a Late open) now
+  seeds the most recent conversation turns (up to the recent-turns window, when
+  they fit the startup limits) verbatim as startup input, instead of opening
+  with no history. A fact from the last turns, such as one typed while the
+  call was closed, is answered natively; before, the model sometimes
+  delegated the recall to the executor because the late summary carrying it
+  landed at the same moment it decided (6 of 151 Late reopens in S106, never
+  on a seeded reopen). The canonical projection stays unseeded and the late
+  summary still covers those rows, so no row enters the live outbox twice. The open
+  reads only a bounded committed tail, never the transcript body.
+- A REST turn whose runtime teardown outlasts the plain unregister's 2 s
+  caller grace now delivers its outcome instead of failing with
+  `AuthorityUnavailable` ("REST runtime completion cleanup failed ...
+  UnregisterInProgress"). Completion cleanup joins the exact registration's
+  teardown until terminal, so the outcome arrives once the runtime is gone and
+  a client reusing the session cannot race a half-torn-down registration.
+- Mob flow runs no longer validate their MobMachine authority log three to
+  five times per run-store operation. Every read and mutation through the
+  flow-authority validation boundary replays the run's whole authority log,
+  and storage, the builder, the flow engine, its frame kernel and flow
+  terminalization each wrapped the store they received in another boundary,
+  so each layer replayed the log again. A branch-fallback flow with 37
+  authority inputs ran 515 full validations, 32.5 s of its 33.9 s in a debug
+  build (`test_branch_winner_is_selected_only_after_success_allowing_fallback`
+  timed out under load). Wrapping is now idempotent: the boundary reports
+  itself through a sealed, doc-hidden, defaulted `MobRunStore` method that
+  only this crate can implement, and the same run takes 151 validations and
+  11 s. Validation coverage is unchanged.
 - The Cargo test lanes provide the MCP form-elicitation fixture again. Since
   #1338, `meerkat-mcp`'s `form_elicitation` tests (which require
   `MEERKAT_MCP_TEST_SERVER` to name the exact `mcp-test-server` binary and
@@ -193,6 +263,29 @@ them.
   base SHA, which is read when the run is queued and goes stale when main
   advances before checkout (over-testing today, under-testing in the reverse
   race). A pull-request checkout that is not a two-parent merge fails closed.
+- The CI gate failed pull-request runs in which every lane passed when hosted
+  runners were scarce: its single 1500 s push-to-terminal budget charged
+  runner queue wait to the code (run 36809608388 failed at 1511 s with an
+  execution path of 1009 s; its closure check waited 647 s for a runner, the
+  account's 40 concurrent hosted jobs being full). The gate now budgets lane
+  execution: each lane's own run time plus the change classification's, at
+  most 1500 s. Runner queue wait of 300 s or more on the critical path is a
+  `CI runner queue wait` warning, and a 2700 s push-to-terminal ceiling, queue
+  included, still fails a stuck run. The gate writes a typed verdict
+  (`within_budget`, `queue_delayed`, `exec_over_budget`, `runaway`) and the
+  execution, terminal and queue seconds to its outputs and summary. Sized from
+  66 pull-request run attempts: execution path p50 816 s, p90 968 s, max
+  1244 s; critical-path queue p90 474 s, max 742 s.
+
+- `xtask machine-verify` runs every composition witness in every profile,
+  not only `--profile deep`, so the canonical TLC lane (`make machine-verify`:
+  nightly, the machine pre-push hook, and the release BuildBuddy graph) now
+  requires each non-skipped composition's witnesses to prove completion. Each
+  TLC run is bounded by a harness-enforced per-run cap (`--tlc-run-cap-secs`,
+  `TLC_RUN_CAP_SECS`, default 900 s); a run that hits it is killed and fails
+  as a typed TLC INCOMPLETE error instead of riding to the job timeout.
+  Nightly adds `machine-verify-deep`, Deep-profile TLC over the compositions
+  that fit the cap (`make machine-verify-deep-compositions`).
 - Mob shutdown no longer fails intermittently with `failed to materialize
   committed HeadCanonical metadata ... metadata read authority is no longer
   current`. The shutdown visibility observation reads session metadata
@@ -270,6 +363,16 @@ them.
   transcript whose spoken punctuation in names means the character ("dot",
   "slash", "underscore"). A file the user called "notes dot md" was written as
   `notes-dot-md`.
+- Live-session bootstrap tokens no longer appear in `Debug` output. The
+  MeerkatMachine DSL marks the WebRTC and WebSocket token fields and the
+  token-keyed state maps `#[redacted]`, so the generated kernel state, input
+  and effect types redact them, and `LiveTransportBootstrap`,
+  `WireLiveTransportBootstrap`, `LiveWebrtcAnswerParams`, `LiveTokenString`
+  and the runtime `LiveWebrtcTokenAuthority` / `LiveWebsocketTokenAuthority`
+  redact the token and the bootstrap URL query by hand. WebRTC SDP offers and
+  answers (`LiveWebrtcAnswerParams.offer_sdp`, `LiveWebrtcAnswerResult`,
+  `LiveWebrtcAnswerAccepted`) print only their length, since their ICE
+  credentials (`ice-ufrag`, `ice-pwd`) are per-connection secrets.
 - The `meerkat_schedule_create` and `meerkat_schedule_update` tool schemas
   advertise the existing `host_runnable` target (`target_kind`
   `"host_runnable"`, a required non-empty `runnable` name and optional opaque
@@ -349,6 +452,29 @@ them.
   and its past-deadline read accepts both documented outcomes
   (`NotAdmittedByDeadline`, or `NotObservedByDeadline` when the one read
   cannot finish within the 100 ms floor).
+- Three `meerkat-mob` runtime tests no longer fail on a loaded host:
+  - `test_retire_fanout_notifies_150_peers_with_bounded_parallelism` joins
+    its retirement saga to its terminal reply instead of failing on the typed
+    `MemberRetirementInProgress` that a plain `retire` returns once the 2 s
+    test budget elapses while the saga keeps running. The shared
+    `retire_to_terminal` helper now waits on the exact single-flight saga's
+    result (a new cfg(test) `MobHandle` join). Before, it called `retire`
+    again, rejoined a slot whose deadline had already passed and spun on
+    immediate in-progress answers. The test's wall-clock `elapsed < 10s`
+    assertion is gone, because the observed concurrency bound is what proves
+    bounded parallelism. Regression test
+    `retire_to_terminal_joins_a_saga_that_outlives_the_retire_budget` parks
+    the saga on a peer's trust removal.
+  - `load_one_wedged_member_does_not_page_or_delay_peers` releases the wedged
+    member when its lane depth is recorded (the admission backlog gauge
+    signals every record under cfg(test)), bounded by the run's own budget
+    calibrated from the unwedged baseline. Before, it polled with a fixed 5 s
+    deadline, shorter than that budget.
+  - `test_branch_winner_is_selected_only_after_success_allowing_fallback`
+    awaits the exact run's terminalization through `start_flow_bounded`
+    instead of polling `flow_status` every 20 ms. Each status read replays the
+    run's whole MobMachine authority log inline on the actor, so the poll
+    starved the flow's own commits.
 - A GPT Live voice channel reopened on a session whose earlier channel was
   seeded with a context summary (or had one validated for late delivery) now
   opens with that summary plus the conversation rows committed since it,
@@ -386,6 +512,54 @@ them.
   finds them stale or the session archived, retired or gone, by a bounded
   background sweep after each retain, by eviction, or with the policy when a
   new one replaces it.
+- Closing a GPT Live channel (or abandoning its open admission) now ends the
+  session's live-context outbox: rows queued for that channel and never
+  delivered are dropped, in the generated outbox and in the runtime's row
+  custody together. A later channel is seeded from the committed transcript,
+  so it never needed them, but left behind they did harm after a transcript
+  rewrite that shrank the session (compaction). They then sat above the next
+  channel's smaller seed: its drain picked the stale row, the authorize edge
+  refused it, and every drain failed. Enqueue also started past the stale
+  cursor, so the real rows committed after the rewrite were never queued. On
+  a late-prepared channel, any leftover also blocked delegation result
+  delivery and bridge submission, which wait for an empty outbox.
+  While an ambiguity recovery obligation is live anywhere in the session, the
+  outbox is kept for its replacement. An admitted replacement that closes
+  before its recovery bind cancels that recovery. The recovery authorization drops the
+  queued rows its seed already carries: its guard proves they are at or below
+  the replacement's seed. Rows at or below a live recovery seed can no longer
+  re-enter the outbox: the generated enqueue refuses them, and the runtime
+  starts classifying past the highest live recovery seed. Before, the source
+  channel re-queued them, including the ambiguous row's cursor under a fresh
+  append id. Two new `MeerkatMachine` invariants hold this:
+  `live_context_outbox_has_no_closed_channel_leftover` and
+  `live_context_outbox_is_above_every_seed`. While a recovery is live, every
+  queued row is above every live recovery seed. Otherwise every queued row is
+  above every staged seed and every bound context cursor. The outbox is never
+  persisted (the machine state is not serialized, and a session's authority
+  is rebuilt from its lifecycle record and the live bridge recovery image), so
+  a session left with a leftover by an earlier build restarts with an empty
+  outbox. A test pins that. The canonical TLC lane gains
+  `specs/machines/meerkat_machine/live_context_outbox_audit.{tla,sh}`, a
+  bounded audit over the generated model: every generated invariant holds at
+  20 steps (4,718 distinct states), and TLC must reach each of three goals: a
+  close ending a leftover, a recovery authorization ending the rows its seed
+  carries, and a row queued after the authorization reaching the replacement.
+- A GPT Live ambiguity recovery whose replacement could not be realized (the
+  replacement open failed before admission, for example when a row committed
+  between the ambiguity and the replacement open) now ends through the
+  generated input `CancelLiveRecoveryObligation` instead of staying live
+  forever. The runtime applies it when the host's recovery realization
+  fails, and it drops the outbox rows owed only to that replacement. It keeps
+  the exact complement: rows still owed to another live recovery, or above
+  the active channel's bound cursor or staged seed. Before, the obligation
+  outlived the failure, so the session's outbox kept its rows indefinitely
+  and every later close kept them too. A replacement that was admitted still
+  ends its recovery through its own close or abandonment, and a close of a
+  channel never admitted no longer cancels anything. The bounded TLC audit
+  gains a third channel and a fourth goal: a failed realization followed by a
+  plain reopen binds with no live obligation left. Safety holds at 20 steps
+  (54,742 distinct states).
 - On a GPT Live channel seeded at open, runtime work output committed after the
   voice session was created (the member's reply to a job result merged after
   the previous call ended) is no longer replayed on the thinking lane while the
@@ -399,6 +573,46 @@ them.
 
 ### Changed
 
+- PR CI runs xtask's unit tests and its `xtask[machine-authority]` feature
+  suite when `crates/xtask` changes (and machine-dsl-tests' when it changes).
+  The classifier deferred every crate whose dependency closure reached
+  meerkat-mob to the push-to-main run, but that closure followed
+  dependencies' dev-dependencies, which Cargo never builds: xtask reached
+  mob only through meerkat-machine-codegen's dev-dependency, so #1362
+  changed xtask and turned main red with no PR lane running its tests. The
+  meerkat-mob chain is now each unit lane's real build graph. Measured on 4
+  cores: xtask's lane 249 s (about 245 s of it one workflow test), the
+  machine-authority suite 149 s; on main the suite's hosted job took 467 s.
+
+- CI on `main`: a newer main commit now supersedes (cancels) the
+  still-running first attempt of an older one, so a merge burst no longer
+  fills the account's 40 concurrent hosted jobs with main runs (35-50 jobs
+  each) while pull-request CI waits for runners. In the 2026-10-01 02:27-03:50
+  UTC burst this would have freed 806 of 1760 main-run job-minutes (46%).
+  Release commits (`chore: release v...` in the head commit message), every
+  re-run attempt and dispatches keep one concurrency group per commit and are
+  never cancelled, so the release workflow's exact-main CI requirement still
+  holds; when it finds the release commit's run cancelled it prints the
+  `gh run rerun` command that recovers it. A cancelled run never builds an
+  exact-tree attestation.
+
+- PR CI runs crate integration tests (`tests/*.rs`) for the suites in
+  `INTEGRATION_SUITES` (`scripts/ci-cargo-lanes.mjs`) when their trigger
+  packages change: meerkat-runtime (machine schema, DSL and kernel crates,
+  runtime) and meerkat-machine-codegen (the same plus meerkat-mob and
+  codegen). The unit lanes run `--lib --bins` only, so #1349 merged with
+  three failures in `runtime_alphabet_parity` and
+  `gpt_live_generated_authority` that no PR lane could see. Measured on 4
+  cores: 168 s and 396 s; over the last 60 merges the suites would have run
+  on 17 and 25. The CI gate requires every selected suite, and main's
+  attestation records the lane's result. The Bazel generator's `live` tag
+  (filtered out by every Bazel CI lane) is now an explicit opt-in for real
+  provider tests (`LIVE_PROVIDER_TESTS`, or the `openai-live-e2e` feature)
+  instead of any target with "live" in its name or path. That substring
+  rule hid 15 provider-free targets from every Bazel lane, among them GPT
+  Live region tests and `durable_delivery_inbox` ("delivery"); all 15 pass
+  with provider keys unset and an unreachable proxy, and now carry `fast`.
+
 - Main CI builds meerkat-mob's unit tests once and runs them in parallel
   partitions. Its default and `openai-live` lanes took 12.5-20 min on the
   hosted 4-vCPU runners, two thirds of it compiling the crate's own
@@ -407,6 +621,13 @@ them.
   two jobs run it with `--partition hash:k/2`. The CI gate and attestation
   count the archived lanes as main unit coverage, and a manual dispatch
   runs the main unit lanes so a branch can measure them.
+
+- Nightly holds about ten of the account's 40 concurrent hosted jobs instead
+  of up to 22: the BuildBuddy graph runs alone first, then five sequential
+  chains (each job needs the previous one and runs under `!cancelled()`).
+  The 2026-10-01 nightly held 22 slots for most of 02:17-04:40 UTC while
+  pull-request jobs queued for up to 11 minutes. Nightly now takes about
+  three hours instead of about two and a half.
 
 
 ## [0.8.49] - 2026-09-30

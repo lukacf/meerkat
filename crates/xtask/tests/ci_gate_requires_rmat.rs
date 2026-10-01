@@ -4,8 +4,8 @@
 //!
 //! Pull-request CI (ci.yml) is Cargo-only on GitHub-hosted runners: the lanes
 //! are selected from the changed paths by scripts/ci-cargo-lanes.mjs, which
-//! fails closed, and the aggregate "CI gate" enforces a 25-minute
-//! push-to-terminal budget. Nightly owns the full workspace test lanes, the
+//! fails closed, and the aggregate "CI gate" enforces a 25-minute lane
+//! execution budget and a 45-minute push-to-terminal runaway ceiling. Nightly owns the full workspace test lanes, the
 //! dense Mob topology stress, bounded TLC, and the whole BuildBuddy/Bazel
 //! graph; the release workflow re-runs that graph on the tag. The full
 //! GitHub-hosted Cargo workflow (cargo.yml) remains a diagnostic fallback.
@@ -70,6 +70,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
             "example-web",
             "fmt-governance",
             "gate",
+            "integration",
             "main-unit",
             "main-unit-archive-build",
             "main-unit-archive-run",
@@ -115,10 +116,25 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         ci.contains("sudo apt-get install -y ripgrep") && ci.contains("rg --version"),
         "PR CI installs ripgrep and proves it is on PATH before the tombstone scans"
     );
-    assert!(ci.contains("name: Enforce push-to-terminal budget"));
+    assert!(ci.contains("name: Enforce lane execution budget"));
+    // The budget measures what the code controls: lane execution (started to
+    // completed) plus the classification it waits for. Runner queue wait is a
+    // warning, and a generous push-to-terminal ceiling still fails a stuck CI.
     assert!(
-        ci.contains("CI_MAX_SECONDS: \"1500\""),
-        "the push-to-terminal budget is 1500 seconds"
+        ci.contains("CI_MAX_EXEC_SECONDS: \"1500\""),
+        "the lane execution budget is 1500 seconds"
+    );
+    assert!(
+        ci.contains("CI_MAX_TERMINAL_SECONDS: \"2700\""),
+        "the push-to-terminal runaway ceiling is 2700 seconds"
+    );
+    assert!(
+        ci.contains("title=CI runner queue wait") && ci.contains("budget_verdict="),
+        "runner queue wait is reported as a typed warning, not budgeted"
+    );
+    assert!(
+        !ci.contains("CI_MAX_SECONDS:"),
+        "no single push-to-terminal budget that charges runner queue to the code"
     );
     // Each lane is timed from the start of the attempt it ran in: a re-run
     // lane gets a fresh clock, a carried-over lane keeps its own attempt's
@@ -140,13 +156,23 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         ci.contains("format('pr-{0}', github.event.pull_request.number)"),
         "one concurrency group per pull request"
     );
+    // A newer main commit supersedes an older commit's first attempt, but a
+    // release commit, every re-run attempt and a dispatch keep one group per
+    // commit and are never cancelled: the release workflow needs a
+    // successful exact-main run on the release commit.
     assert!(
-        ci.contains("format('main-{0}-{1}', github.ref_name, github.sha)"),
-        "one concurrency group per pushed commit, so main runs never cancel each other"
+        ci.contains("format('main-{0}-superseded', github.ref_name)"),
+        "first attempts of main pushes share a superseding group"
     );
     assert!(
-        ci.contains("cancel-in-progress: ${{ github.event_name == 'pull_request' }}"),
-        "only pull-request runs are cancelled by a newer push"
+        ci.contains("format('main-{0}-{1}', github.ref_name, github.sha)"),
+        "release commits, re-runs and dispatches keep one group per commit"
+    );
+    let supersedable = "github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v')";
+    assert_eq!(
+        ci.matches(supersedable).count(),
+        2,
+        "the superseding group and its cancel-in-progress use the same condition"
     );
 
     let jobs = doc
@@ -180,6 +206,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "ratchets",
         "clippy",
         "unit",
+        "integration",
         "main-unit",
         "main-unit-archive-build",
         "main-unit-archive-run",
@@ -203,6 +230,8 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "require_ran \"Bazel graph check\"",
         "require_ran \"Example web suites\"",
         "require_ran \"WASM timer ownership\"",
+        "require_ran \"Integration tests\"",
+        "--test '*' --profile ci-pr",
         "a build-relevant change produced no lanes",
         "neither a unit lane nor a deferred package list",
         "unit tests deferred to the push-to-main run",
@@ -443,6 +472,61 @@ fn nightly_covers_the_deferred_heavy_lanes() {
     ] {
         assert!(nightly.contains(lane), "nightly must run `{lane}`");
     }
+}
+
+#[test]
+fn nightly_holds_a_bounded_number_of_hosted_slots() {
+    // The account's 40 concurrent hosted jobs are shared with pull-request
+    // and main CI. Nightly runs the BuildBuddy graph alone first, then a few
+    // sequential chains: every other job needs exactly one job, no job is
+    // needed by two others, and each runs under !cancelled() so a red job
+    // never skips the rest of its chain.
+    const ROOT: &str = "gcp-buildbuddy";
+    const MAX_CHAINS: usize = 5;
+    let doc = read_workflow(&workflow_yml_path("nightly.yml"));
+    let jobs = doc
+        .get("jobs")
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("nightly jobs mapping");
+    let mut needed_by: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut chain_heads = 0;
+    for (name, job) in jobs {
+        let name = name.as_str().expect("job name");
+        if name == ROOT {
+            assert!(job.get("needs").is_none(), "{ROOT} runs first");
+            continue;
+        }
+        let need = job
+            .get("needs")
+            .and_then(serde_yaml::Value::as_str)
+            .unwrap_or_else(|| panic!("nightly job {name} must need exactly one job (a chain)"));
+        assert_eq!(
+            job.get("if").and_then(serde_yaml::Value::as_str),
+            Some("${{ !cancelled() }}"),
+            "nightly job {name} must run under !cancelled() so a red predecessor does not skip it"
+        );
+        *needed_by.entry(need.to_string()).or_default() += 1;
+        if need == ROOT {
+            chain_heads += 1;
+        }
+    }
+    for (need, count) in &needed_by {
+        if need != ROOT {
+            assert_eq!(
+                *count, 1,
+                "{need} starts two nightly jobs: chains must not fan out"
+            );
+        }
+        assert!(
+            jobs.contains_key(serde_yaml::Value::String(need.clone())),
+            "unknown job {need}"
+        );
+    }
+    assert!(
+        (1..=MAX_CHAINS).contains(&chain_heads),
+        "nightly must run at most {MAX_CHAINS} chains after {ROOT} (found {chain_heads})"
+    );
 }
 
 #[test]

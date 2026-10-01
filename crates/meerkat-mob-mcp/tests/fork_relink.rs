@@ -1279,10 +1279,13 @@ async fn relink_settles_a_running_child_whose_turn_fails() {
     );
     // The re-link retires the child after it delivers the failed outcome, so
     // the retirement can trail the completion record. Settle on the mob
-    // actor's machine-state publications (a roster change publishes), with a
-    // deadline that only bounds a broken run.
+    // actor's machine-state publications (a roster change publishes). The
+    // re-link does not surface the retire's outcome (#1391), so the deadline
+    // is a pure hang guard, and it must exceed the production member-retire
+    // deadline (30 s): equal deadlines made a retire that ran out its own
+    // budget indistinguishable from a hang.
     let child = AgentIdentity::from("failing-child");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
     let mut changes = handle.machine_state_changes();
     while handle.get_member(&child).await.unwrap().is_some() {
         tokio::select! {

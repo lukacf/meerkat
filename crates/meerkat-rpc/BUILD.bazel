@@ -654,8 +654,9 @@ rust_test(
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
     },
     tags = [
-        "live",
+        "fast",
     ],
+    size = "medium",
     data = [
         ":package_runfiles",
         "//crates/meerkat-rpc:rkat_rpc_bin",
@@ -1490,6 +1491,7 @@ test_suite(
         ":atif_export_contract_test",
         ":binary_fatal_error_display_test",
         ":lazy_resume_uncommitted_terminal_test",
+        ":live_dependency_guards_test",
         ":meerkat_rpc_unit_test",
         ":realm_config_ingress_test",
         ":regression_rpc_test",

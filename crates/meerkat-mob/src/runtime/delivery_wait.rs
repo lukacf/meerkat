@@ -417,14 +417,16 @@ impl super::MobHandle {
     ) {
         let (entered_tx, entered_rx) = crate::tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
-        let mut gate = DELIVERY_INPUT_SETTLE_TEST_GATE
+        // Keyed by identity: concurrently running tests (threaded `cargo
+        // test`) each hold their own member's settle.
+        let replaced = DELIVERY_INPUT_SETTLE_TEST_GATE
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(identity, (entered_tx, release_rx));
         assert!(
-            gate.is_none(),
-            "delivery input settle test gate already armed"
+            replaced.is_none(),
+            "delivery input settle test gate already armed for this identity"
         );
-        *gate = Some((identity, entered_tx, release_rx));
         (entered_rx, release_tx)
     }
 }
@@ -445,33 +447,26 @@ pub enum DeliveryInputSettleTestRelease {
 /// [`super::MobHandle::arm_delivery_input_settle_test_gate`]).
 #[cfg(all(feature = "runtime-adapter", any(test, feature = "test-support")))]
 type DeliveryInputSettleTestGate = (
-    AgentIdentity,
     crate::tokio::sync::oneshot::Sender<()>,
     crate::tokio::sync::oneshot::Receiver<DeliveryInputSettleTestRelease>,
 );
 
+/// Armed gates, one per identity, so tests running concurrently in one
+/// process each hold only their own member's settle.
 #[cfg(all(feature = "runtime-adapter", any(test, feature = "test-support")))]
-static DELIVERY_INPUT_SETTLE_TEST_GATE: std::sync::Mutex<Option<DeliveryInputSettleTestGate>> =
-    std::sync::Mutex::new(None);
+static DELIVERY_INPUT_SETTLE_TEST_GATE: std::sync::Mutex<
+    std::collections::BTreeMap<AgentIdentity, DeliveryInputSettleTestGate>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 #[cfg(all(feature = "runtime-adapter", any(test, feature = "test-support")))]
 async fn run_delivery_input_settle_test_gate(
     identity: &AgentIdentity,
 ) -> DeliveryInputSettleTestRelease {
-    let armed = {
-        let mut gate = DELIVERY_INPUT_SETTLE_TEST_GATE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if gate
-            .as_ref()
-            .is_some_and(|(armed_identity, _, _)| armed_identity == identity)
-        {
-            gate.take()
-        } else {
-            None
-        }
-    };
-    let Some((_, entered_tx, release_rx)) = armed else {
+    let armed = DELIVERY_INPUT_SETTLE_TEST_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(identity);
+    let Some((entered_tx, release_rx)) = armed else {
         return DeliveryInputSettleTestRelease::Proceed;
     };
     let _ = entered_tx.send(());

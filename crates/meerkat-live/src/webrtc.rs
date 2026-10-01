@@ -879,12 +879,30 @@ fn observation_requires_generated_close(observation: &LiveAdapterObservation) ->
 ///
 /// The SDP is transport payload. The sequence is monotonic evidence consumed
 /// by MeerkatMachine before the RPC surface projects a public success result.
-#[derive(Debug)]
+/// `Debug` prints the SDP length only; its ICE credentials are per-connection
+/// secrets.
 pub struct LiveWebrtcAnswerAccepted {
     pub answer_sdp: String,
     pub answer_observation_sequence: u64,
     #[doc(hidden)]
     pub pending_bound_ready: Option<crate::provider_webrtc::ProviderWebrtcPendingBoundReadySeal>,
+}
+
+impl std::fmt::Debug for LiveWebrtcAnswerAccepted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LiveWebrtcAnswerAccepted")
+            .field(
+                "answer_sdp",
+                &format_args!("<redacted; {} bytes>", self.answer_sdp.len()),
+            )
+            .field(
+                "answer_observation_sequence",
+                &self.answer_observation_sequence,
+            )
+            .field("pending_bound_ready", &self.pending_bound_ready)
+            .finish()
+    }
 }
 
 /// Provider-neutral answer request passed only after token admission.
@@ -2957,6 +2975,25 @@ mod tests {
     };
     use meerkat_core::types::{SessionId, StopReason, Usage};
     use tokio::sync::mpsc;
+
+    #[test]
+    fn answer_accepted_debug_prints_sdp_length_only() {
+        let accepted = LiveWebrtcAnswerAccepted {
+            answer_sdp: "v=0\r\na=ice-pwd:live-ice-secret\r\n".to_owned(),
+            answer_observation_sequence: 7,
+            pending_bound_ready: None,
+        };
+        let rendered = format!("{accepted:?} {accepted:#?}");
+        assert!(
+            !rendered.contains("live-ice-secret"),
+            "SDP leaked: {rendered}"
+        );
+        assert!(rendered.contains("<redacted; 32 bytes>"), "{rendered}");
+        assert!(
+            rendered.contains("answer_observation_sequence: 7"),
+            "{rendered}"
+        );
+    }
 
     #[test]
     fn webrtc_filters_raw_adapter_receipt_until_host_commit_outcome() {

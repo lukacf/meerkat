@@ -1834,29 +1834,20 @@ async fn load_one_wedged_member_does_not_page_or_delay_peers() {
     let wedged_deliveries = (0..DELIVERIES).filter(|n| n % MEMBERS == 0).count();
     let (outcomes, peak_parked) = tokio::time::timeout(run_timeout, async {
         // Member 0's deliveries stay parked; release them once its lane
-        // holds every one of them so the join can complete.
+        // holds every one of them so the join can complete. The lane depth
+        // record is the signal; `run_timeout`, calibrated from the unwedged
+        // baseline, bounds it (a fixed 5 s poll here was shorter than that
+        // budget on a loaded host).
         let store = Arc::clone(&mob.store);
         let handle = mob.handle.clone();
         let identity = mob.member(0).clone();
         let releaser = async move {
-            wait_until(
-                "member 0 lane holds every one of its deliveries",
-                Duration::from_secs(5),
-                || {
-                    let handle = handle.clone();
-                    let identity = identity.clone();
-                    async move {
-                        handle
-                            .member_admission_backlog()
-                            .parked
-                            .get(&identity)
-                            .copied()
-                            .unwrap_or(0)
-                            == wedged_deliveries - 1
-                    }
-                },
-            )
-            .await;
+            handle
+                .member_admission_backlog
+                .wait_for_snapshot(|backlog| {
+                    backlog.parked.get(&identity).copied().unwrap_or(0) == wedged_deliveries - 1
+                })
+                .await;
             let peak = handle.member_admission_backlog().peak_parked;
             store.release_admissions();
             peak

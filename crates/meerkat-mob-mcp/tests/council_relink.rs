@@ -58,12 +58,19 @@ fn is_completion_record(message: &meerkat_core::Message, job_id: &str) -> bool {
 /// Wait until job `job_id`'s completion record is in `session`: delivery
 /// admits it as the convener's next turn input, which commits with that
 /// turn.
+///
+/// The deadline is a pure hang guard. A re-link after a restore delivers
+/// through the detached recovery sweep, whose retry of a convener whose
+/// revival is still pending is paced by a capped backoff over at most 16
+/// passes (about 56 s of pauses, #1406), so the guard must exceed that
+/// production budget: a 30 s guard failed a slow but successful delivery
+/// under load.
 async fn await_completion_records(
     fixture: &CouncilFixture,
     session: &meerkat_core::SessionId,
     job_id: &str,
 ) -> Vec<String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     loop {
         let records = completion_records(fixture, session, job_id).await;
         if !records.is_empty() {

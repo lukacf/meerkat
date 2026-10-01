@@ -260,10 +260,12 @@ impl Fixture {
     }
 
     async fn build(blocked: bool, skills: &[(&SourceUuid, &SkillName, &str)]) -> Self {
+        // The system temp dir, not the source tree: a run killed before the
+        // TempDir drops must not leave fixture state in the worktree.
         let root = tempfile::Builder::new()
-            .prefix(".host-human-input-")
-            .tempdir_in(".")
-            .expect("fixture storage stays inside this worktree");
+            .prefix("meerkat-host-human-input-")
+            .tempdir()
+            .expect("fixture storage in the system temp dir");
         let root_path = root.path().canonicalize().expect("absolute fixture root");
         for directory in ["config", "runtime", "project", "context"] {
             std::fs::create_dir_all(root_path.join(directory)).expect("fixture root");

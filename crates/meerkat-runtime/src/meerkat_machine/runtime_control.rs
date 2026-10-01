@@ -1357,6 +1357,29 @@ mod live_context_mirror_tests {
                 appends[0].append_id().to_string(),
             )
         };
+        // The authorization ended every row the replacement's seed carries;
+        // the same commit observed again on the source channel queues none of
+        // them back (classification starts past the live recovery seed).
+        assert_eq!(
+            machine
+                .enqueue_committed_parent_session_boundary(
+                    &session_id,
+                    &committed,
+                    "old-prefix-again"
+                )
+                .await
+                .expect("re-observe the old prefix"),
+            0
+        );
+        assert!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("state")
+                .live_context_queued_append_by_cursor
+                .is_empty(),
+            "no carried row re-enters the outbox"
+        );
         machine
             .apply_session_dsl_input(
                 &session_id,
@@ -1403,8 +1426,8 @@ mod live_context_mirror_tests {
                 .lock()
                 .expect("payload custody")
                 .len(),
-            2,
-            "reservation retains old payload custody"
+            0,
+            "the recovery authorization ended the rows the replacement's seed covers"
         );
         assert_eq!(
             machine
@@ -1413,7 +1436,7 @@ mod live_context_mirror_tests {
                 .expect("state")
                 .live_context_queued_append_by_cursor
                 .len(),
-            2
+            0
         );
         session.push(meerkat_core::Message::User(
             meerkat_core::UserMessage::text("new tail beyond capture"),
@@ -1473,8 +1496,8 @@ mod live_context_mirror_tests {
                 .lock()
                 .expect("payload custody")
                 .len(),
-            3,
-            "bind zero retains both covered prefix and newer tail"
+            1,
+            "bind zero retains the newer tail"
         );
         machine
             .mark_live_context_preparation_generating(&lease)
@@ -1526,7 +1549,7 @@ mod live_context_mirror_tests {
                 .lock()
                 .expect("payload custody")
                 .len(),
-            3
+            1
         );
         barrier.release.add_permits(1);
         delivery.await.expect("delivery task").expect("summary ACK");
@@ -2109,13 +2132,52 @@ mod live_context_mirror_tests {
         }
     }
 
-    /// A row queued for a channel that then closes stays in the session's
-    /// outbox (close does not clear queued rows). On the next channel, staged
-    /// and bound at a seed cursor that covers that row, neither the drain nor
-    /// the authorize edge can ever select it: authorization keys on the new
-    /// channel's context cursor, which starts past it.
+    fn user_rows_commit(
+        session_id: &SessionId,
+        texts: &[&str],
+    ) -> meerkat_core::lifecycle::core_executor::BoundSessionCommit {
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        for text in texts {
+            session.push(meerkat_core::Message::User(
+                meerkat_core::UserMessage::text(*text),
+            ));
+        }
+        meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+            .expect("seal the user rows")
+    }
+
+    fn assert_live_context_outbox_is_empty(
+        machine: &crate::MeerkatMachine,
+        state: &crate::meerkat_machine::dsl::MeerkatMachineState,
+        session_id: &SessionId,
+        context: &str,
+    ) {
+        assert!(
+            state.live_context_queued_append_by_cursor.is_empty()
+                && state.live_context_queued_session_by_append.is_empty()
+                && state.live_context_queued_cursor_by_append.is_empty()
+                && state.live_context_queued_digest_by_append.is_empty()
+                && state.live_context_queued_commit_token_by_append.is_empty()
+                && state.live_context_queued_disposition_by_append.is_empty(),
+            "{context}: the generated outbox is empty"
+        );
+        assert!(
+            !machine
+                .shared
+                .live_context_queued_rows
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .keys()
+                .any(|(row_session, _)| row_session == session_id),
+            "{context}: no runtime row custody is left"
+        );
+    }
+
+    /// Unbinding the session's channel ends its outbox, in generated truth
+    /// and in runtime row custody: the next channel is seeded from the
+    /// committed transcript and is never owed a closed channel's row.
     #[tokio::test]
-    async fn a_row_queued_for_a_closed_channel_is_unreachable_from_the_next_channel() {
+    async fn a_close_ends_its_channels_outbox() {
         let (machine, session_id, first) = prepared_experimental_live_machine().await;
         stage_experimental_live_machine(&machine, &session_id, &first, 0).await;
         bind_experimental_live_machine(&machine, &session_id, &first, 0).await;
@@ -2129,43 +2191,175 @@ mod live_context_mirror_tests {
             .await
             .expect("queue on the first channel");
         let state = machine.session_dsl_state(&session_id).await.expect("state");
-        let stale: Vec<(u64, String)> = state
-            .live_context_queued_append_by_cursor
-            .iter()
-            .map(|(cursor, append)| (*cursor, append.clone()))
-            .collect();
         assert!(
-            !stale.is_empty(),
+            !state.live_context_queued_append_by_cursor.is_empty(),
             "the merge turn is queued on the first channel"
         );
-        // A real open stages at the committed boundary, which every row
-        // queued before it is at or below.
-        let stale_cursor = stale
-            .iter()
-            .map(|(cursor, _)| *cursor)
-            .max()
-            .expect("cursor");
+        let binding = machine
+            .live_delegation_runtime_binding(&session_id, &first)
+            .await
+            .expect("first binding");
         machine
-            .apply_session_dsl_input(
-                &session_id,
-                crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveCloseClosed {
-                    session_id: session_id.to_string(),
-                    channel_id: first.to_string(),
-                    close_observation_sequence: 1,
-                },
-                "test:RecordLiveCloseClosed",
-            )
+            .__test_close_live_context_channel(&binding)
             .await
             .expect("close the first channel");
         let state = machine.session_dsl_state(&session_id).await.expect("state");
-        assert!(
-            state
-                .live_context_queued_append_by_cursor
-                .contains_key(&stale_cursor),
-            "close leaves the queued row behind (the leak this test pins)"
-        );
+        assert_live_context_outbox_is_empty(&machine, &state, &session_id, "after close");
+    }
 
-        let second = meerkat_live::LiveChannelId::new("bound-experimental-live-second");
+    /// An abandoned admission ends its outbox exactly as a close does.
+    #[tokio::test]
+    async fn an_abandoned_admission_ends_its_channels_outbox() {
+        let (machine, session_id, first) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &first, 0).await;
+        machine
+            .enqueue_committed_parent_session_boundary(
+                &session_id,
+                &merge_turn_commit(&session_id, "Reply committed during the open."),
+                "store-commit",
+            )
+            .await
+            .expect("queue on the staged channel");
+        assert!(
+            !machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("state")
+                .live_context_queued_append_by_cursor
+                .is_empty(),
+            "the merge turn is queued on the staged channel"
+        );
+        machine
+            .abandon_live_open_admission(&session_id, &first)
+            .await
+            .expect("abandon the admission");
+        let state = machine.session_dsl_state(&session_id).await.expect("state");
+        assert_live_context_outbox_is_empty(&machine, &state, &session_id, "after abandon");
+    }
+
+    /// Upgrade safety for the outbox invariants: a build before this fix
+    /// left a closed channel's rows queued, which generated recovery now
+    /// rejects. No persisted surface carries the outbox (the state is never
+    /// serialized; a session's authority is rebuilt from its lifecycle record
+    /// and the live bridge recovery image), so such a session restarts with an
+    /// empty outbox and recovers. Should the outbox ever become persisted,
+    /// this test fails and recovery needs a typed normalization first.
+    #[tokio::test]
+    async fn a_session_left_with_a_closed_channels_rows_recovers_with_an_empty_outbox() {
+        let (machine, session_id, first) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &first, 0).await;
+        bind_experimental_live_machine(&machine, &session_id, &first, 0).await;
+        machine
+            .enqueue_committed_parent_session_boundary(
+                &session_id,
+                &merge_turn_commit(&session_id, "Reply queued before the close."),
+                "store-commit",
+            )
+            .await
+            .expect("queue on the first channel");
+        // The state an earlier build's close left behind: everything this
+        // build's close does, except that the rows stay queued.
+        let queued = machine.session_dsl_state(&session_id).await.expect("state");
+        let binding = machine
+            .live_delegation_runtime_binding(&session_id, &first)
+            .await
+            .expect("first binding");
+        machine
+            .__test_close_live_context_channel(&binding)
+            .await
+            .expect("close the first channel");
+        let mut legacy = machine.session_dsl_state(&session_id).await.expect("state");
+        legacy.live_context_queued_session_by_append =
+            queued.live_context_queued_session_by_append.clone();
+        legacy.live_context_queued_cursor_by_append =
+            queued.live_context_queued_cursor_by_append.clone();
+        legacy.live_context_queued_digest_by_append =
+            queued.live_context_queued_digest_by_append.clone();
+        legacy.live_context_queued_commit_token_by_append =
+            queued.live_context_queued_commit_token_by_append.clone();
+        legacy.live_context_queued_disposition_by_append =
+            queued.live_context_queued_disposition_by_append.clone();
+        legacy.live_context_queued_append_by_cursor =
+            queued.live_context_queued_append_by_cursor.clone();
+        assert!(!legacy.live_context_queued_append_by_cursor.is_empty());
+        match crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(
+            legacy.clone(),
+        ) {
+            Err(crate::meerkat_machine::dsl::MeerkatMachineTransitionError::RecoveredStateInvariantRejected {
+                invariant,
+                ..
+            }) => assert_eq!(invariant, "live_context_outbox_has_no_closed_channel_leftover"),
+            Err(other) => panic!("the leftover is rejected by its invariant: {other:?}"),
+            Ok(_) => panic!("the leftover is rejected as recovered state"),
+        }
+
+        // What a restart actually recovers: the persisted live bridge image
+        // over a fresh state in the persisted lifecycle phase.
+        let image = crate::live_execution::LiveBridgeRecoveryImage::capture(&legacy)
+            .expect("capture the persisted live bridge image");
+        let persisted = serde_json::to_value(&image).expect("persist the image");
+        let image: crate::live_execution::LiveBridgeRecoveryImage =
+            serde_json::from_value(persisted).expect("load the image");
+        let mut restored = crate::meerkat_machine::dsl::MeerkatMachineState {
+            lifecycle_phase: legacy.lifecycle_phase,
+            ..Default::default()
+        };
+        image
+            .restore_into(&mut restored)
+            .expect("restore the image");
+        let recovered =
+            crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(restored)
+                .expect("the restarted session recovers");
+        let state = recovered.state();
+        assert!(
+            state.live_context_queued_append_by_cursor.is_empty()
+                && state.live_context_queued_session_by_append.is_empty()
+                && state.live_context_queued_cursor_by_append.is_empty()
+                && state.live_context_queued_digest_by_append.is_empty()
+                && state.live_context_queued_commit_token_by_append.is_empty()
+                && state.live_context_queued_disposition_by_append.is_empty(),
+            "the restarted session's outbox is empty"
+        );
+    }
+
+    /// Compaction after a close (#1349 follow-up): rows queued for a channel
+    /// that closed must not survive a transcript rewrite that shrinks the
+    /// session. Left behind, they sat above the next channel's smaller seed:
+    /// the drain selected a stale row on the new channel, and the enqueue
+    /// started past the stale cursor, so the real rows after the rewrite were
+    /// never queued.
+    #[tokio::test]
+    async fn rows_queued_before_a_close_do_not_survive_a_compaction() {
+        let (machine, session_id, first) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &first, 0).await;
+        bind_experimental_live_machine(&machine, &session_id, &first, 0).await;
+        machine
+            .enqueue_committed_parent_session_boundary(
+                &session_id,
+                &user_rows_commit(
+                    &session_id,
+                    &[
+                        "First call opening row.",
+                        "First call second row.",
+                        "First call third row.",
+                    ],
+                ),
+                "store-commit-before-close",
+            )
+            .await
+            .expect("queue on the first channel");
+        let binding = machine
+            .live_delegation_runtime_binding(&session_id, &first)
+            .await
+            .expect("first binding");
+        machine
+            .__test_close_live_context_channel(&binding)
+            .await
+            .expect("close the first channel");
+
+        // Compaction rewrites the transcript to one summary row; the next
+        // channel is seeded at that smaller committed boundary.
+        let second = meerkat_live::LiveChannelId::new("bound-experimental-live-after-compaction");
         machine
             .resolve_live_open_admission(
                 &session_id,
@@ -2180,37 +2374,10 @@ mod live_context_mirror_tests {
             )
             .await
             .expect("admit the second channel");
-        stage_experimental_live_machine(&machine, &session_id, &second, stale_cursor).await;
-        bind_experimental_live_machine(&machine, &session_id, &second, stale_cursor).await;
+        stage_experimental_live_machine(&machine, &session_id, &second, 1).await;
+        bind_experimental_live_machine(&machine, &session_id, &second, 1).await;
         let host = Arc::new(RecordingMirrorHost::default());
         machine.set_live_context_mirror_host(host.clone());
-
-        // The authorize edge, driven directly with the second channel's
-        // exact binding at each stale row's edge, is refused.
-        let state = machine.session_dsl_state(&session_id).await.expect("state");
-        for (cursor, append_id) in &stale {
-            let authorize = machine
-                .apply_session_dsl_input(
-                    &session_id,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::AuthorizeLiveContextAppend {
-                        channel_id: second.to_string(),
-                        runtime_id: state.active_runtime_id.clone().expect("runtime"),
-                        fence_token: state.active_fence_token.expect("fence"),
-                        generation: state.active_runtime_generation.expect("generation"),
-                        append_id: append_id.clone(),
-                        previous_cursor: cursor - 1,
-                        next_cursor: *cursor,
-                    },
-                    "test:AuthorizeStaleRow",
-                )
-                .await;
-            assert!(
-                authorize.is_err(),
-                "the stale row at {cursor} is behind the second channel's cursor: {authorize:?}"
-            );
-        }
-
-        // The drain, through the whole conversation, never selects it.
         let (provider_binding, turn) = first_user_turn(&machine, &session_id, &second).await;
         machine
             .observe_live_provider_turn_started(&meerkat_live::LiveSidebandObservation::new(
@@ -2228,18 +2395,56 @@ mod live_context_mirror_tests {
                 meerkat_live::LiveSidebandObservationKind::TurnFinished {
                     turn,
                     role: meerkat_live::LiveSidebandTurnRole::User,
-                    transcript: "anything new".into(),
+                    transcript: "what changed".into(),
                 },
             ))
             .await
             .expect("the user's turn finishes");
+
+        // A row committed after the rewrite takes canonical cursor 2.
+        machine
+            .enqueue_committed_parent_session_boundary(
+                &session_id,
+                &user_rows_commit(
+                    &session_id,
+                    &[
+                        "Summary of the compacted call.",
+                        "Typed after the compaction.",
+                    ],
+                ),
+                "store-commit-after-compaction",
+            )
+            .await
+            .expect("queue the row after the compaction");
         machine
             .drain_live_context_outbox_for_channel(&session_id, &second)
             .await
             .expect("drain the second channel");
+        let appends: Vec<String> = host
+            .appends
+            .lock()
+            .expect("appends")
+            .iter()
+            .map(|(_, text)| text.clone())
+            .collect();
         assert!(
-            host.appends.lock().expect("appends").is_empty(),
-            "the stale row is never appended on the second channel"
+            appends
+                .iter()
+                .any(|text| text.contains("Typed after the compaction.")),
+            "the row after the compaction reaches the second channel: {appends:?}"
+        );
+        assert!(
+            !appends.iter().any(|text| text.contains("First call")),
+            "no row of the closed channel reaches the second channel: {appends:?}"
+        );
+        let state = machine.session_dsl_state(&session_id).await.expect("state");
+        assert_eq!(
+            state
+                .live_context_cursor_by_channel
+                .get(&second.to_string())
+                .copied(),
+            Some(2),
+            "the second channel's outbox advanced past the new row"
         );
     }
 
@@ -5326,6 +5531,105 @@ mod live_context_mirror_tests {
                 .await
                 .is_err(),
             "a late acknowledgement for the ambiguous old edge is stale"
+        );
+    }
+
+    /// A recovery whose replacement could not be realized ends through the
+    /// generated cancellation (#1349 follow-up 2b): it is never left live, so
+    /// the source channel's close ends the outbox and a reopen starts with
+    /// no live obligation and no carried row.
+    #[tokio::test]
+    async fn a_failed_recovery_realization_ends_its_obligation() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let host = Arc::new(AmbiguousMirrorHost::default());
+        host.fail_recovery
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        machine.set_live_context_mirror_host(host.clone());
+        machine
+            .enqueue_committed_parent_session_boundary(
+                &session_id,
+                &user_rows_commit(&session_id, &["Ambiguous row."]),
+                "store-commit-1",
+            )
+            .await
+            .expect("queue the row");
+        machine
+            .drain_live_context_outbox(&session_id)
+            .await
+            .expect_err("the failed realization is still reported");
+        let replacement = host.recoveries.lock().expect("recoveries")[0].1.clone();
+        let state = machine.session_dsl_state(&session_id).await.expect("state");
+        assert!(
+            state
+                .live_cancelled_recovery_channels
+                .contains(&replacement),
+            "the unrealized recovery is cancelled"
+        );
+        assert!(
+            !state
+                .live_context_recovery_replacement_by_channel
+                .values()
+                .any(|other| !state.live_cancelled_recovery_channels.contains(other)),
+            "no live recovery obligation remains"
+        );
+
+        // A row committed afterwards is not carried for the cancelled
+        // replacement: the source's close ends the outbox.
+        machine
+            .enqueue_committed_parent_session_boundary(
+                &session_id,
+                &user_rows_commit(&session_id, &["Ambiguous row.", "Typed after the failure."]),
+                "store-commit-2",
+            )
+            .await
+            .expect("queue the later row");
+        let binding = machine
+            .live_delegation_runtime_binding(&session_id, &channel_id)
+            .await
+            .expect("source binding");
+        machine
+            .__test_close_live_context_channel(&binding)
+            .await
+            .expect("close the source channel");
+        let state = machine.session_dsl_state(&session_id).await.expect("state");
+        assert_live_context_outbox_is_empty(
+            &machine,
+            &state,
+            &session_id,
+            "after the source closes",
+        );
+
+        // The reopen is a plain channel with no obligation to wait on.
+        let reopened = meerkat_live::LiveChannelId::new("bound-experimental-live-reopened");
+        machine
+            .resolve_live_open_admission(
+                &session_id,
+                &reopened,
+                &meerkat_core::SessionLlmIdentity {
+                    model: "experimental-realtime-model".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+            )
+            .await
+            .expect("admit the reopen");
+        stage_experimental_live_machine(&machine, &session_id, &reopened, 2).await;
+        bind_experimental_live_machine(&machine, &session_id, &reopened, 2).await;
+        let state = machine.session_dsl_state(&session_id).await.expect("state");
+        assert_live_context_outbox_is_empty(
+            &machine,
+            &state,
+            &session_id,
+            "after the reopen binds",
+        );
+        assert_eq!(
+            state
+                .live_context_cursor_by_channel
+                .get(&reopened.to_string())
+                .copied(),
+            Some(2)
         );
     }
 
@@ -9079,17 +9383,8 @@ impl MeerkatMachine {
         &self,
         binding: &crate::live_execution::LiveDelegationRuntimeBinding,
     ) -> Result<(), RuntimeDriverError> {
-        self.apply_session_dsl_input(
-            binding.session_id(),
-            crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveCloseClosed {
-                session_id: binding.session_id().to_string(),
-                channel_id: binding.channel_id().to_string(),
-                close_observation_sequence: 1,
-            },
-            "test:RecordLiveCloseClosed",
-        )
-        .await
-        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.commit_live_close_closed(binding.session_id(), &binding.channel_id().to_string(), 1)
+            .await?;
         Ok(())
     }
 
@@ -10641,6 +10936,42 @@ impl MeerkatMachine {
         .await
     }
 
+    /// Mirror generated outbox custody into runtime row custody for
+    /// `session_id`: a runtime-held row survives only while the generated
+    /// outbox still queues its cursor or holds it pending delivery. Generated
+    /// transitions that end an outbox (a close or abandoned admission without
+    /// a live recovery obligation, an ambiguity recovery authorization) are
+    /// followed by this with the session's projection gate held, so no
+    /// enqueue or drain observes a row the generated outbox no longer owes.
+    #[cfg(feature = "live")]
+    async fn retain_live_context_rows_owed_by_generated_outbox(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
+            }
+        })?;
+        let pending: std::collections::BTreeSet<u64> = state
+            .live_context_pending_next_cursor_by_append
+            .values()
+            .copied()
+            .collect();
+        self.shared
+            .live_context_queued_rows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(row_session, cursor), _| {
+                row_session != session_id
+                    || state
+                        .live_context_queued_append_by_cursor
+                        .contains_key(cursor)
+                    || pending.contains(cursor)
+            });
+        Ok(())
+    }
+
     #[cfg(feature = "live")]
     pub(super) fn live_context_projection_gate(
         &self,
@@ -10841,7 +11172,44 @@ impl MeerkatMachine {
             .get(channel)
             .copied()
             .unwrap_or(0);
-        let canonical_cursor = authority_cursor.max(reserved_cursor).max(queued_cursor);
+        // A live recovery replacement's seed carries every row up to it; the
+        // generated enqueue refuses those rows, so classification starts past
+        // the highest live recovery seed.
+        let live_recovery_seed = state
+            .live_context_recovery_replacement_by_channel
+            .iter()
+            .filter(|(_, replacement)| {
+                !state
+                    .live_cancelled_recovery_channels
+                    .contains(*replacement)
+            })
+            .filter_map(|(source, _)| {
+                state
+                    .live_context_recovery_seed_cursor_by_channel
+                    .get(source)
+            })
+            .chain(
+                state
+                    .live_result_recovery_replacement_by_channel
+                    .iter()
+                    .filter(|(_, replacement)| {
+                        !state
+                            .live_cancelled_recovery_channels
+                            .contains(*replacement)
+                    })
+                    .filter_map(|(source, _)| {
+                        state
+                            .live_result_recovery_seed_cursor_by_channel
+                            .get(source)
+                    }),
+            )
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let canonical_cursor = authority_cursor
+            .max(reserved_cursor)
+            .max(queued_cursor)
+            .max(live_recovery_seed);
         let existing_member_interactions = state
             .live_delegation_existing_member_operations
             .iter()
@@ -11333,15 +11701,29 @@ impl MeerkatMachine {
                     // authority for this append. Release local row custody
                     // before physical replacement realization so a host I/O
                     // failure can never make the old append retryable again.
+                    // The authorization also ended every row the
+                    // replacement's seed carries; release those too.
                     self.shared
                         .live_context_queued_rows
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .remove(&key);
+                    self.retain_live_context_rows_owed_by_generated_outbox(session_id)
+                        .await?;
                     drop(projection_guard);
-                    host.recover_ambiguous_append(recovery)
-                        .await
-                        .map_err(RuntimeDriverError::Internal)?;
+                    let closing = recovery.closing_channel_id().clone();
+                    let replacement = recovery.replacement_channel_id().clone();
+                    if let Err(error) = host.recover_ambiguous_append(recovery).await {
+                        // The replacement was never realized: end its
+                        // obligation instead of leaving it live forever.
+                        self.cancel_unrealized_live_recovery_obligation(
+                            session_id,
+                            &closing,
+                            &replacement,
+                        )
+                        .await?;
+                        return Err(RuntimeDriverError::Internal(error));
+                    }
                     return Ok(());
                 }
             }
@@ -12229,6 +12611,31 @@ impl MeerkatMachine {
         observation: crate::live_execution::LiveDelegationResultDeliveryObservation,
     ) -> Result<crate::live_execution::LiveDelegationResultDeliveryResolution, RuntimeDriverError>
     {
+        let resolution = self
+            .resolve_live_delegation_result_delivery_under_mutation_gate(authority, observation)
+            .await?;
+        // Runtime row custody exists only with live context mirroring.
+        #[cfg(feature = "live")]
+        if matches!(
+            resolution,
+            crate::live_execution::LiveDelegationResultDeliveryResolution::AmbiguityRecovery(_)
+        ) {
+            // The recovery authorization ended the outbox rows its
+            // replacement's seed carries; release their runtime custody.
+            let projection_gate = self.live_context_projection_gate(authority.session_id());
+            let _projection_guard = projection_gate.lock().await;
+            self.retain_live_context_rows_owed_by_generated_outbox(authority.session_id())
+                .await?;
+        }
+        Ok(resolution)
+    }
+
+    async fn resolve_live_delegation_result_delivery_under_mutation_gate(
+        &self,
+        authority: &crate::live_execution::LiveDelegationResultDeliveryAuthority,
+        observation: crate::live_execution::LiveDelegationResultDeliveryObservation,
+    ) -> Result<crate::live_execution::LiveDelegationResultDeliveryResolution, RuntimeDriverError>
+    {
         let session_id = authority.session_id();
         let operation = authority.operation();
         let channel = operation.domain_correlation().channel_id().to_string();
@@ -12475,21 +12882,139 @@ impl MeerkatMachine {
     }
 
     /// Hand committed ambiguity recovery authority to the installed recovery
-    /// host. A host failure leaves typed recovery pending; callers must not
-    /// retry result resolution or replay the provider context append.
+    /// host. A host failure ends the recovery through the generated
+    /// cancellation (its replacement was never realized and can never bind);
+    /// callers must not retry result resolution or replay the provider
+    /// context append.
     #[cfg(feature = "live")]
     pub async fn realize_live_delegation_result_ambiguity_recovery(
         &self,
         authority: crate::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority,
     ) -> Result<(), RuntimeDriverError> {
-        let host = self.live_context_mirror_host().ok_or_else(|| {
-            RuntimeDriverError::ValidationFailed {
+        let session_id = authority.session_id().clone();
+        let closing = authority.closing_channel_id().clone();
+        let replacement = authority.replacement_channel_id().clone();
+        let outcome = match self.live_context_mirror_host() {
+            Some(host) => host
+                .recover_ambiguous_delegation_result(authority)
+                .await
+                .map_err(RuntimeDriverError::Internal),
+            None => Err(RuntimeDriverError::ValidationFailed {
                 reason: "live result ambiguity recovery host is not installed".to_string(),
+            }),
+        };
+        if outcome.is_err() {
+            self.cancel_unrealized_live_recovery_obligation(&session_id, &closing, &replacement)
+                .await?;
+        }
+        outcome
+    }
+
+    /// End an ambiguity recovery whose replacement was never admitted (its
+    /// realization failed), through the generated cancellation, and release
+    /// the runtime rows of the outbox rows only that replacement was owed.
+    /// Returns whether an obligation was ended: a replacement that was
+    /// admitted ends its recovery through its own close or abandonment, and a
+    /// recovery already bound or cancelled needs nothing.
+    #[cfg(feature = "live")]
+    pub(crate) async fn cancel_unrealized_live_recovery_obligation(
+        &self,
+        session_id: &SessionId,
+        closing: &meerkat_core::LiveChannelId,
+        replacement: &meerkat_core::LiveChannelId,
+    ) -> Result<bool, RuntimeDriverError> {
+        let projection_gate = self.live_context_projection_gate(session_id);
+        let _projection_guard = projection_gate.lock().await;
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
             }
         })?;
-        host.recover_ambiguous_delegation_result(authority)
-            .await
-            .map_err(RuntimeDriverError::Internal)
+        let session_key = session_id.to_string();
+        let closing = closing.to_string();
+        let replacement = replacement.to_string();
+        let owns = |recoveries: &std::collections::BTreeMap<String, String>| {
+            recoveries.get(&closing) == Some(&replacement)
+        };
+        if !(owns(&state.live_context_recovery_replacement_by_channel)
+            || owns(&state.live_result_recovery_replacement_by_channel))
+            || state
+                .live_cancelled_recovery_channels
+                .contains(&replacement)
+            || state
+                .live_channel_session_by_channel
+                .contains_key(&replacement)
+        {
+            return Ok(false);
+        }
+        // The exact complement the generated guard requires: a row stays only
+        // while another live obligation or the active channel is still owed it.
+        let other_live_obligation = state
+            .live_context_recovery_replacement_by_channel
+            .values()
+            .chain(state.live_result_recovery_replacement_by_channel.values())
+            .any(|other| {
+                other != &replacement && !state.live_cancelled_recovery_channels.contains(other)
+            });
+        let active_floor = state
+            .live_active_channel_by_session
+            .get(&session_key)
+            .and_then(|active| {
+                state
+                    .live_context_cursor_by_channel
+                    .get(active)
+                    .or_else(|| {
+                        state
+                            .live_experimental_staged_seed_cursor_by_channel
+                            .get(active)
+                    })
+            })
+            .copied();
+        let keep = |append: &String| {
+            other_live_obligation
+                || state
+                    .live_context_queued_cursor_by_append
+                    .get(append)
+                    .zip(active_floor)
+                    .is_some_and(|(cursor, floor)| *cursor > floor)
+        };
+        let mut retained_sessions = state.live_context_queued_session_by_append.clone();
+        retained_sessions.retain(|append, _| keep(append));
+        let mut retained_cursors = state.live_context_queued_cursor_by_append.clone();
+        retained_cursors.retain(|append, _| keep(append));
+        let mut retained_digests = state.live_context_queued_digest_by_append.clone();
+        retained_digests.retain(|append, _| keep(append));
+        let mut retained_commits = state.live_context_queued_commit_token_by_append.clone();
+        retained_commits.retain(|append, _| keep(append));
+        let mut retained_dispositions = state.live_context_queued_disposition_by_append.clone();
+        retained_dispositions.retain(|append, _| keep(append));
+        let mut retained_append_by_cursor = state.live_context_queued_append_by_cursor.clone();
+        retained_append_by_cursor.retain(|_, append| keep(append));
+        self.apply_session_dsl_input(
+            session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::CancelLiveRecoveryObligation {
+                session_id: session_key,
+                closing_channel_id: closing,
+                replacement_channel_id: replacement,
+                retained_sessions,
+                retained_cursors,
+                retained_digests,
+                retained_commits,
+                retained_dispositions,
+                retained_append_by_cursor,
+            },
+            "CancelLiveRecoveryObligation",
+        )
+        .await
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.persist_live_bridge_recovery_state(session_id, "CancelLiveRecoveryObligation")
+            .await?;
+        self.retain_live_context_rows_owed_by_generated_outbox(session_id)
+            .await?;
+        Ok(true)
     }
 
     #[cfg(feature = "live")]
@@ -12574,6 +13099,8 @@ impl MeerkatMachine {
         session_id: &SessionId,
         channel_id: &meerkat_live::LiveChannelId,
     ) -> Result<(), RuntimeDriverError> {
+        let projection_gate = self.live_context_projection_gate(session_id);
+        let _projection_guard = projection_gate.lock().await;
         let _mutation_guard = self
             .lock_current_durability_ready_session_mutation_gate(session_id)
             .await?;
@@ -12588,6 +13115,8 @@ impl MeerkatMachine {
         .await
         .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         self.persist_live_bridge_recovery_state(session_id, "AbandonLiveOpenAdmission")
+            .await?;
+        self.retain_live_context_rows_owed_by_generated_outbox(session_id)
             .await
     }
 
@@ -12882,29 +13411,57 @@ impl MeerkatMachine {
             })
     }
 
+    /// Commit the generated close of `channel_id` and release the runtime
+    /// rows of the outbox it ended, as one step under the session's
+    /// projection gate, which is taken before the mutation gate (the order
+    /// live-context preparation uses). The mutation guard is returned so the
+    /// caller finishes close cleanup under it.
     #[cfg(feature = "live")]
-    pub async fn resolve_live_close_result(
+    async fn commit_live_close_closed(
         &self,
         session_id: &SessionId,
-        observation: &meerkat_live::LiveChannelCloseObservation,
-    ) -> Result<LiveCloseResultAuthority, RuntimeDriverError> {
-        let _mutation_guard = self
+        channel_id: &str,
+        close_observation_sequence: u64,
+    ) -> Result<
+        (
+            DslTransitionEffects,
+            crate::tokio::sync::OwnedMutexGuard<()>,
+        ),
+        RuntimeDriverError,
+    > {
+        let projection_gate = self.live_context_projection_gate(session_id);
+        let _projection_guard = projection_gate.lock().await;
+        let mutation_guard = self
             .lock_current_durability_ready_session_mutation_gate(session_id)
             .await?;
-        let channel_id = observation.channel_id().to_string();
         let (_, effects) = self
             .apply_session_dsl_input(
                 session_id,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveCloseClosed {
                     session_id: session_id.to_string(),
-                    channel_id: channel_id.clone(),
-                    close_observation_sequence: observation.close_sequence(),
+                    channel_id: channel_id.to_string(),
+                    close_observation_sequence,
                 },
                 "RecordLiveCloseClosed",
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         self.persist_live_bridge_recovery_state(session_id, "RecordLiveCloseClosed")
+            .await?;
+        self.retain_live_context_rows_owed_by_generated_outbox(session_id)
+            .await?;
+        Ok((effects, mutation_guard))
+    }
+
+    #[cfg(feature = "live")]
+    pub async fn resolve_live_close_result(
+        &self,
+        session_id: &SessionId,
+        observation: &meerkat_live::LiveChannelCloseObservation,
+    ) -> Result<LiveCloseResultAuthority, RuntimeDriverError> {
+        let channel_id = observation.channel_id().to_string();
+        let (effects, _mutation_guard) = self
+            .commit_live_close_closed(session_id, &channel_id, observation.close_sequence())
             .await?;
 
         let authority = effects.as_slice().iter().find_map(|effect| match effect {

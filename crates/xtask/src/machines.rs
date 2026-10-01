@@ -4,7 +4,7 @@ use std::{
     io::Write as _,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -66,6 +66,10 @@ pub struct VerifyArgs {
     /// TLC worker count. Defaults to local core count or TLC_WORKERS.
     #[arg(long)]
     workers: Option<usize>,
+    /// Wall-clock cap for each TLC run, in seconds. A run that hits it is
+    /// killed and fails as INCOMPLETE. Defaults to TLC_RUN_CAP_SECS or 900.
+    #[arg(long)]
+    tlc_run_cap_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -129,15 +133,16 @@ pub fn machine_verify(args: VerifyArgs) -> Result<()> {
 
     let selection = registry.select(&args.selection)?;
     let root = repo_root()?;
-    let workers = resolve_tlc_workers(args.workers)?;
+    let budget = TlcRunBudget::resolve(args.workers, args.tlc_run_cap_secs)?;
     let skip_tlc_compositions =
         resolve_skip_tlc_compositions(&selection, &args.skip_tlc_compositions)?;
     println!(
-        "machine-verify ({:?}): {} machine(s), {} composition(s), tlc={}",
+        "machine-verify ({:?}): {} machine(s), {} composition(s), tlc={}, per-run cap {}s",
         args.profile,
         selection.machines.len(),
         selection.compositions.len(),
-        !args.skip_tlc
+        !args.skip_tlc,
+        budget.cap.as_secs()
     );
     machine_verify_at_root(
         &root,
@@ -145,7 +150,7 @@ pub fn machine_verify(args: VerifyArgs) -> Result<()> {
         !args.skip_tlc,
         !args.skip_cargo_tests,
         args.profile,
-        workers,
+        budget,
         &skip_tlc_compositions,
     )
 }
@@ -411,7 +416,7 @@ fn machine_verify_at_root(
     run_tlc: bool,
     run_cargo_tests: bool,
     profile: VerifyProfile,
-    workers: usize,
+    budget: TlcRunBudget,
     skip_tlc_compositions: &BTreeSet<String>,
 ) -> Result<()> {
     ensure_no_drift(root, selection)?;
@@ -423,7 +428,7 @@ fn machine_verify_at_root(
                 &machine_dir(root, &machine.slug),
                 &machine.slug,
                 profile,
-                workers,
+                budget,
             )?;
             if matches!(profile, VerifyProfile::Deep)
                 && let Some(coverage) = coverage
@@ -452,67 +457,66 @@ fn machine_verify_at_root(
                 &composition_dir(root, &composition.slug),
                 &composition.slug,
                 profile,
-                workers,
+                budget,
             )?;
             // Structural requirements (expected routes / scheduler rules /
             // states / transitions) are enforced in EVERY verify profile via the
             // structural invariants emitted into the composition `ci.cfg`
-            // INVARIANTS block (see render_composition_ci_cfg) — that is the
-            // promotion (#188) that makes the standard CI gate fail closed on a
-            // structurally under-specified composition.
+            // INVARIANTS block (see render_composition_ci_cfg), which makes the
+            // standard CI gate fail closed on a structurally under-specified
+            // composition.
             //
-            // The per-witness `.cfg` TLC model-checks are TEMPORAL/liveness
-            // checks: they assert that a scripted input sequence drives the
-            // composition through the expected routes. They REQUIRE the Deep
-            // profile's witness-script driving machinery — an un-driven witness
-            // run stutters and vacuously violates its temporal property. Those
-            // (and the coverage-aggregation audit they feed, which also needs
-            // Deep's `-coverage 1` instrumentation) therefore stay Deep-gated.
+            // Every witness `.cfg` also runs in every profile. Each one is a
+            // self-contained `WitnessSpec_<w>` and must prove its script
+            // completed (see `verify_composition_witness`); exit 0 alone is
+            // not evidence. Only the Deep profile aggregates witness coverage
+            // into the zero-hit route/scheduler audit, because that audit also
+            // needs the Deep main run's `-coverage 1` instrumentation.
+            let mut aggregated_coverage = main_coverage.unwrap_or_default();
+            let mut witness_covered_routes = BTreeSet::new();
+            let mut witness_covered_scheduler_rules = BTreeSet::new();
+            let mut witness_failures = Vec::new();
+            for witness in &composition.schema.witnesses {
+                // A witness credits its declared routes and scheduler rules
+                // only after TLC proves its script completed. An exit-0 run
+                // can still be a truncation by the witness state constraint,
+                // and every generated witness invariant is vacuous until
+                // completion, so exit status alone proves nothing.
+                let witness_coverage =
+                    match verify_composition_witness(root, composition, witness, budget) {
+                        Ok(coverage) => coverage,
+                        Err(err) => {
+                            witness_failures.push(format!("{err:#}"));
+                            continue;
+                        }
+                    };
+                merge_tlc_coverage(&mut aggregated_coverage, Some(&witness_coverage));
+                witness_covered_routes.extend(
+                    witness
+                        .expected_routes
+                        .iter()
+                        .map(|r| r.as_str().to_owned()),
+                );
+                witness_covered_scheduler_rules.extend(
+                    witness
+                        .expected_scheduler_rules
+                        .iter()
+                        .map(composition_scheduler_coverage_operator_name),
+                );
+            }
+            if !witness_failures.is_empty() {
+                bail!(
+                    "{} witness(es) of composition {} did not prove completion:\n{}",
+                    witness_failures.len(),
+                    composition.schema.name,
+                    witness_failures
+                        .iter()
+                        .map(|failure| format!("- {failure}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+            }
             if matches!(profile, VerifyProfile::Deep) {
-                let mut aggregated_coverage = main_coverage.unwrap_or_default();
-                let mut witness_covered_routes = BTreeSet::new();
-                let mut witness_covered_scheduler_rules = BTreeSet::new();
-                let mut witness_failures = Vec::new();
-                for witness in &composition.schema.witnesses {
-                    // A witness credits its declared routes and scheduler rules
-                    // only after TLC proves its script completed. An exit-0 run
-                    // can still be a truncation by the witness state constraint,
-                    // and every generated witness invariant is vacuous until
-                    // completion, so exit status alone proves nothing.
-                    let witness_coverage =
-                        match verify_composition_witness(root, composition, witness, workers) {
-                            Ok(coverage) => coverage,
-                            Err(err) => {
-                                witness_failures.push(format!("{err:#}"));
-                                continue;
-                            }
-                        };
-                    merge_tlc_coverage(&mut aggregated_coverage, Some(&witness_coverage));
-                    witness_covered_routes.extend(
-                        witness
-                            .expected_routes
-                            .iter()
-                            .map(|r| r.as_str().to_owned()),
-                    );
-                    witness_covered_scheduler_rules.extend(
-                        witness
-                            .expected_scheduler_rules
-                            .iter()
-                            .map(composition_scheduler_coverage_operator_name),
-                    );
-                }
-                if !witness_failures.is_empty() {
-                    bail!(
-                        "{} witness(es) of composition {} did not prove completion:\n{}",
-                        witness_failures.len(),
-                        composition.schema.name,
-                        witness_failures
-                            .iter()
-                            .map(|failure| format!("- {failure}"))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    );
-                }
                 ensure_composition_coverage(
                     &composition.schema,
                     &aggregated_coverage,
@@ -4102,13 +4106,13 @@ fn maybe_run_tlc_in_dir(
     dir: &Path,
     slug: &str,
     profile: VerifyProfile,
-    workers: usize,
+    budget: TlcRunBudget,
 ) -> Result<Option<TlcCoverageSummary>> {
     let config_name = match profile {
         VerifyProfile::Ci => "ci.cfg",
         VerifyProfile::Deep => "deep.cfg",
     };
-    maybe_run_tlc_in_dir_with_config(dir, slug, config_name, profile, workers)
+    maybe_run_tlc_in_dir_with_config(dir, slug, config_name, profile, budget)
 }
 
 fn maybe_run_tlc_in_dir_with_config(
@@ -4116,7 +4120,7 @@ fn maybe_run_tlc_in_dir_with_config(
     slug: &str,
     config_name: &str,
     profile: VerifyProfile,
-    workers: usize,
+    budget: TlcRunBudget,
 ) -> Result<Option<TlcCoverageSummary>> {
     let model = dir.join("model.tla");
     let config = dir.join(config_name);
@@ -4140,7 +4144,7 @@ fn maybe_run_tlc_in_dir_with_config(
 
     let mut cmd = Command::new("tlc");
     cmd.arg("-workers")
-        .arg(workers.to_string())
+        .arg(budget.workers.to_string())
         .args(match profile {
             VerifyProfile::Ci => Vec::new(),
             VerifyProfile::Deep => vec!["-coverage".to_string(), "1".to_string()],
@@ -4157,12 +4161,11 @@ fn maybe_run_tlc_in_dir_with_config(
             merged_jdk_java_options(&merged_java_tool_options()),
         );
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("run tlc for {slug}"))?;
+    let run =
+        run_tlc_with_cap(&mut cmd, budget.cap).with_context(|| format!("run tlc for {slug}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
     print!("{stdout}");
     eprint!("{stderr}");
 
@@ -4175,8 +4178,24 @@ fn maybe_run_tlc_in_dir_with_config(
         );
     }
 
-    if !tlc_run_succeeded(&output.status) {
-        bail!("tlc failed for {slug} ({config_name}): {}", output.status);
+    match run.status {
+        None => {
+            return Err(TlcRunError::Incomplete {
+                slug: slug.to_owned(),
+                config: config_name.to_owned(),
+                cap_secs: budget.cap.as_secs(),
+            }
+            .into());
+        }
+        Some(status) if !tlc_run_succeeded(&status) => {
+            return Err(TlcRunError::Failed {
+                slug: slug.to_owned(),
+                config: config_name.to_owned(),
+                status,
+            }
+            .into());
+        }
+        Some(_) => {}
     }
 
     let coverage = if matches!(profile, VerifyProfile::Deep) {
@@ -4192,6 +4211,134 @@ pub fn tlc_run_succeeded(status: &ExitStatus) -> bool {
     status.success()
 }
 
+/// Default per-run TLC wall-clock cap when neither `--tlc-run-cap-secs` nor
+/// `TLC_RUN_CAP_SECS` is set.
+pub const DEFAULT_TLC_RUN_CAP_SECS: u64 = 900;
+
+/// Worker count and per-run wall-clock cap shared by every TLC child that
+/// `machine-verify` launches.
+#[derive(Debug, Clone, Copy)]
+pub struct TlcRunBudget {
+    pub workers: usize,
+    pub cap: Duration,
+}
+
+impl TlcRunBudget {
+    fn resolve(workers: Option<usize>, cap_secs: Option<u64>) -> Result<Self> {
+        let cap_secs = match cap_secs {
+            Some(secs) => secs,
+            None => match env::var("TLC_RUN_CAP_SECS") {
+                Ok(raw) => raw.trim().parse::<u64>().with_context(|| {
+                    format!("TLC_RUN_CAP_SECS must be whole seconds, got `{raw}`")
+                })?,
+                Err(_) => DEFAULT_TLC_RUN_CAP_SECS,
+            },
+        };
+        if cap_secs == 0 {
+            bail!("the TLC per-run cap must be at least one second");
+        }
+        Ok(Self {
+            workers: resolve_tlc_workers(workers)?,
+            cap: Duration::from_secs(cap_secs),
+        })
+    }
+}
+
+/// Typed outcome of a TLC run that did not pass.
+#[derive(Debug)]
+pub enum TlcRunError {
+    /// The run hit the harness per-run cap and was killed. The state space was
+    /// not exhausted, so this is never a pass.
+    Incomplete {
+        slug: String,
+        config: String,
+        cap_secs: u64,
+    },
+    /// TLC exited non-zero: a deadlock (11), an invariant or property
+    /// violation (12, 13), or a model error.
+    Failed {
+        slug: String,
+        config: String,
+        status: ExitStatus,
+    },
+}
+
+impl std::fmt::Display for TlcRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Incomplete {
+                slug,
+                config,
+                cap_secs,
+            } => write!(
+                f,
+                "TLC INCOMPLETE for {slug} ({config}): hit the {cap_secs} s per-run cap and was \
+                 killed; an unexhausted state space is not a pass"
+            ),
+            Self::Failed {
+                slug,
+                config,
+                status,
+            } => write!(f, "tlc failed for {slug} ({config}): {status}"),
+        }
+    }
+}
+
+impl std::error::Error for TlcRunError {}
+
+struct CappedTlcRun {
+    /// `None` when the run hit the cap and was killed.
+    status: Option<ExitStatus>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Run a TLC child, draining its output concurrently, and kill it once `cap`
+/// elapses. The `tlc` launcher `exec`s the JVM, so the kill reaches TLC.
+fn run_tlc_with_cap(cmd: &mut Command, cap: Duration) -> Result<CappedTlcRun> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawn tlc")?;
+    let mut stdout_pipe = child.stdout.take().context("tlc stdout pipe")?;
+    let mut stderr_pipe = child.stderr.take().context("tlc stderr pipe")?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut stdout_pipe, &mut buf).map(|_| buf)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut stderr_pipe, &mut buf).map(|_| buf)
+    });
+    let deadline = Instant::now() + cap;
+    let status = loop {
+        if let Some(status) = child.try_wait().context("poll tlc")? {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            child.kill().context("kill capped tlc")?;
+            child.wait().context("reap capped tlc")?;
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| anyhow!("tlc stdout reader panicked"))?
+        .context("read tlc stdout")?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| anyhow!("tlc stderr reader panicked"))?
+        .context("read tlc stderr")?;
+    Ok(CappedTlcRun {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// Run one composition witness with TLC coverage and require proof that its
 /// script completed. Returns the witness run's coverage on success.
 ///
@@ -4204,7 +4351,7 @@ fn verify_composition_witness(
     root: &Path,
     composition: &CompositionEntry,
     witness: &CompositionWitness,
-    workers: usize,
+    budget: TlcRunBudget,
 ) -> Result<TlcCoverageSummary> {
     let config_name = composition_witness_cfg_name(&witness.name);
     // Witness runs always use the coverage-instrumented (Deep) invocation:
@@ -4214,7 +4361,7 @@ fn verify_composition_witness(
         &composition.slug,
         &config_name,
         VerifyProfile::Deep,
-        workers,
+        budget,
     )
     .with_context(|| {
         format!(
@@ -4304,6 +4451,10 @@ pub struct VerifyWitnessArgs {
     /// TLC worker count. Defaults to local core count or TLC_WORKERS.
     #[arg(long)]
     workers: Option<usize>,
+    /// Wall-clock cap for the TLC run, in seconds. Defaults to
+    /// TLC_RUN_CAP_SECS or 900; a run that hits it fails as INCOMPLETE.
+    #[arg(long)]
+    tlc_run_cap_secs: Option<u64>,
 }
 
 /// Run a single composition witness through the completion-proving harness,
@@ -4335,8 +4486,8 @@ pub fn machine_verify_witness(args: VerifyWitnessArgs) -> Result<()> {
                 args.witness
             )
         })?;
-    let workers = resolve_tlc_workers(args.workers)?;
-    verify_composition_witness(&root, composition, witness, workers)?;
+    let budget = TlcRunBudget::resolve(args.workers, args.tlc_run_cap_secs)?;
+    verify_composition_witness(&root, composition, witness, budget)?;
     println!(
         "witness {} of composition {} completed under TLC",
         witness.name, composition.schema.name

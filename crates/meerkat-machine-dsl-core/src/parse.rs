@@ -164,11 +164,27 @@ fn parse_state_block(input: ParseStream) -> Result<Vec<FieldDef>> {
 }
 
 fn parse_field_def(input: ParseStream) -> Result<FieldDef> {
+    let mut redacted = false;
+    for attr in input.call(syn::Attribute::parse_outer)? {
+        if attr.path().is_ident("redacted") && matches!(attr.meta, syn::Meta::Path(_)) {
+            redacted = true;
+        } else {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "unsupported field attribute; only `#[redacted]` is allowed",
+            ));
+        }
+    }
     let name: Ident = input.parse()?;
     let span = name.span();
     let _: Token![:] = input.parse()?;
     let ty = parse_type_def(input)?;
-    Ok(FieldDef { name, ty, span })
+    Ok(FieldDef {
+        name,
+        ty,
+        span,
+        redacted,
+    })
 }
 
 fn parse_type_def(input: ParseStream) -> Result<TypeDef> {
@@ -338,7 +354,14 @@ fn parse_helper(input: ParseStream) -> Result<HelperDef> {
     syn::parenthesized!(paren_content in input);
     let mut params = Vec::new();
     while !paren_content.is_empty() {
-        params.push(parse_field_def(&paren_content)?);
+        let param = parse_field_def(&paren_content)?;
+        if param.redacted {
+            return Err(syn::Error::new(
+                param.span,
+                "helper parameters cannot be `#[redacted]`; mark the state, input, signal or effect field",
+            ));
+        }
+        params.push(param);
         if paren_content.peek(Token![,]) {
             let _: Token![,] = paren_content.parse()?;
         }

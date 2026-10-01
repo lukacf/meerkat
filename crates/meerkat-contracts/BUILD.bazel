@@ -439,8 +439,9 @@ rust_test(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-contracts",
     },
     tags = [
-        "live",
+        "fast",
     ],
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -497,8 +498,9 @@ rust_test(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-contracts",
     },
     tags = [
-        "live",
+        "fast",
     ],
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -555,8 +557,9 @@ rust_test(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-contracts",
     },
     tags = [
-        "live",
+        "fast",
     ],
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -613,8 +616,9 @@ rust_test(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-contracts",
     },
     tags = [
-        "live",
+        "fast",
     ],
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -941,6 +945,10 @@ test_suite(
         ":auth_binding_wire_test",
         ":image_generation_wire_test",
         ":jobs_wire_test",
+        ":live_audio_format_test",
+        ":live_barge_in_test",
+        ":live_deadline_and_jitter_test",
+        ":live_execution_identity_wire_test",
         ":meerkat_contracts_unit_test",
         ":mob_wire_test",
         ":regression_wire_types_test",

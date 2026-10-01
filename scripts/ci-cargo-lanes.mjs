@@ -102,6 +102,36 @@ export const FEATURE_UNIT_SUITES = [
   { package: "xtask", id: "machine-authority", features: ["machine-authority"] },
 ];
 
+// Integration-test suites. Every unit lane runs `--lib --bins`, so a crate's
+// tests/*.rs binaries ran in no pull-request lane: #1349 merged with three
+// failures there (runtime_alphabet_parity in meerkat-machine-codegen,
+// gpt_live_generated_authority in meerkat-runtime). Each suite below is one
+// lane,
+//   nextest run -p <package> --test '*'
+// on a pull request or main push whose directly changed packages include any
+// of its triggers (a workspace-mode plan changes every package, so it runs
+// every suite). The codegen parity tests compare the machine catalog with the
+// runtime's and meerkat-mob's generated manifests, so the machine schema and
+// DSL crates, the kernels, the runtime and meerkat-mob trigger them. Lane
+// cost on 4 cores (measured on e20cc9ad9 after a meerkat-runtime change, deps
+// cached): runtime 168 s, machine-codegen 396 s (meerkat-mob is compiled as
+// a plain library, not its lib-test). Over the last 60 merges to main the
+// runtime suite would have run on 17 and the codegen suite on 25.
+const MACHINE_AUTHORITY_PACKAGES = [
+  "meerkat-machine-schema",
+  "meerkat-machine-dsl",
+  "meerkat-machine-dsl-core",
+  "meerkat-machine-derive",
+  "meerkat-machine-kernels",
+];
+export const INTEGRATION_SUITES = [
+  { package: "meerkat-runtime", triggers: [...MACHINE_AUTHORITY_PACKAGES, "meerkat-runtime"] },
+  {
+    package: "meerkat-machine-codegen",
+    triggers: [...MACHINE_AUTHORITY_PACKAGES, "meerkat-runtime", "meerkat-mob", "meerkat-machine-codegen"],
+  },
+];
+
 // Packages whose own lib-test binary dominates their push-to-main lane. On
 // the hosted 4-vCPU runners meerkat-mob's lanes took 12.5-20 min: 7.7-14.5
 // min of cargo compile (one rustc unit, sccache-dependent) plus 4-5 min of
@@ -555,10 +585,36 @@ function plan(args) {
   const model = { lines: lineCounts, closures };
   // Crates whose unit lane compiles meerkat-mob (mob itself and everything
   // that depends on it) run their unit tests on push to main, not in the
-  // pull-request lane.
+  // pull-request lane. "Compiles" is the unit lane's real build graph: the
+  // package's own dependencies of every kind (its dev-dependencies build its
+  // lib-test), then only normal and build dependencies below that, since
+  // Cargo never builds a dependency's dev-dependencies. The cost-model
+  // closure above follows every kind at every level; using it here put xtask
+  // and machine-dsl-tests in the chain through meerkat-machine-codegen's
+  // dev-dependency on meerkat-mob, so a pull request that changed crates/xtask
+  // merged without its unit tests (#1362 turned main red that way).
+  const buildClosure = (pkg) => {
+    const seen = new Set();
+    const queue = [];
+    const visit = (dep) => {
+      if (dep.source !== null) return;
+      const depPkg = byName.get(dep.name);
+      if (depPkg && !seen.has(depPkg.name)) {
+        seen.add(depPkg.name);
+        queue.push(depPkg);
+      }
+    };
+    for (const dep of pkg.dependencies) visit(dep);
+    while (queue.length) {
+      for (const dep of queue.pop().dependencies) {
+        if (dep.kind !== "dev") visit(dep);
+      }
+    }
+    return seen;
+  };
   const heavyChain = new Set(
     packages
-      .filter((pkg) => pkg.name === HEAVY_ANCHOR || closures.get(pkg.name).has(HEAVY_ANCHOR))
+      .filter((pkg) => pkg.name === HEAVY_ANCHOR || buildClosure(pkg).has(HEAVY_ANCHOR))
       .map((pkg) => pkg.name),
   );
   result.unit_deferred_chain = [...heavyChain].sort();
@@ -701,6 +757,22 @@ function plan(args) {
     result.main_archive_runs = [];
   }
 
+  // Integration suites of the directly changed packages' triggers. Package
+  // names are checked against cargo metadata, so a rename fails the plan
+  // instead of silently dropping a suite.
+  for (const suite of INTEGRATION_SUITES) {
+    for (const name of [suite.package, ...suite.triggers]) {
+      if (!byName.has(name)) throw new Error(`integration suite ${suite.package} names unknown package ${name}`);
+    }
+  }
+  result.integration_suites = result.rust_changed
+    ? INTEGRATION_SUITES.filter((suite) => suite.triggers.some((name) => result.packages.includes(name))).map((suite) => ({
+        name: shortName(suite.package),
+        packages: [suite.package],
+        package_flags: `-p ${suite.package}`,
+      }))
+    : [];
+
   result.closure_flags = result.closure.map((name) => `-p ${name}`).join(" ");
   result.closure_beyond_packages = result.closure.filter((name) => !result.packages.includes(name));
   return result;
@@ -823,6 +895,8 @@ function githubOutput(result) {
   scalar("main_archive_build_matrix", archiveMatrixOf(result.main_archive_builds));
   scalar("main_archive_run_count", String(result.main_archive_runs.length));
   scalar("main_archive_run_matrix", archiveMatrixOf(result.main_archive_runs));
+  scalar("integration_count", String(result.integration_suites.length));
+  scalar("integration_matrix", matrixOf(result.integration_suites));
   return `${lines.join("\n")}\n`;
 }
 
@@ -835,7 +909,7 @@ function main() {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   }
   process.stderr.write(
-    `ci-cargo-lanes: mode=${result.mode} packages=${result.packages.length} closure=${result.closure.length} clippy_shards=${result.shards.length} unit_shards=${result.unit_shards.length} feature_suites=${result.unit_feature_shards.length}/${result.main_feature_unit_shards.length} unit_deferred=${result.unit_deferred.length} (${result.reason})\n`,
+    `ci-cargo-lanes: mode=${result.mode} packages=${result.packages.length} closure=${result.closure.length} clippy_shards=${result.shards.length} unit_shards=${result.unit_shards.length} feature_suites=${result.unit_feature_shards.length}/${result.main_feature_unit_shards.length} unit_deferred=${result.unit_deferred.length} integration=${result.integration_suites.length} (${result.reason})\n`,
   );
 }
 

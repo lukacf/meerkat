@@ -313,7 +313,13 @@ enum PublicLiveContextSeed {
         recent: Vec<InitialItem>,
         coverage: SummaryCoverage,
     },
-    HistoricalContextPending,
+    /// Historical context is still being prepared (a late summary). The most
+    /// recent canonical turns, when any are given, already ride the startup
+    /// input verbatim so the model can answer about them before the summary
+    /// lands.
+    HistoricalContextPending {
+        recent: Vec<InitialItem>,
+    },
 }
 
 /// What a seeded summary covers relative to the verbatim turns after it.
@@ -433,6 +439,16 @@ pub fn preceding_history_summary_fits(summary: &str, following: &[Message]) -> b
     items.len() < LIVE_STARTUP_INPUT_MAX_ITEMS && tokens <= LIVE_STARTUP_INPUT_TOKEN_BUDGET
 }
 
+/// Whether these messages, seeded verbatim with no summary, fit the startup
+/// input limits with nothing dropped (see
+/// [`PublicLiveOpenConfig::with_pending_context_after_recent`]).
+#[must_use]
+pub fn recent_history_fits(recent: &[Message]) -> bool {
+    let items: Vec<InitialItem> = recent.iter().filter_map(history_item).collect();
+    let tokens = items.iter().map(estimated_startup_tokens).sum::<usize>();
+    items.len() < LIVE_STARTUP_INPUT_MAX_ITEMS && tokens <= LIVE_STARTUP_INPUT_TOKEN_BUDGET
+}
+
 /// Compose the startup input from a leading item that is always kept and a
 /// tail of recent items, dropping the oldest tail items until both limits
 /// hold. The truncation is typed and reported by the caller.
@@ -487,7 +503,10 @@ impl PublicLiveContextSeed {
         match self {
             Self::History(items) => (!items.is_empty()).then(|| items.clone()),
             Self::FactualSummary { .. } => Some(self.startup_input_plan().0),
-            Self::Absent | Self::HistoricalContextPending => None,
+            Self::HistoricalContextPending { recent } => {
+                (!recent.is_empty()).then(|| recent.clone())
+            }
+            Self::Absent => None,
         }
     }
 
@@ -530,8 +549,12 @@ impl PublicLiveContextSeed {
     fn instructions_context(&self) -> Option<String> {
         match self {
             Self::Absent | Self::History(_) | Self::FactualSummary { .. } => None,
-            Self::HistoricalContextPending => Some(
+            Self::HistoricalContextPending { recent } if recent.is_empty() => Some(
                 "Voice-channel context availability (factual state, not a new user request):\nHistorical session context is being prepared and is not yet available."
+                    .to_string(),
+            ),
+            Self::HistoricalContextPending { .. } => Some(
+                "Voice-channel context availability (factual state, not a new user request):\nThe most recent conversation turns are in the session input. A summary of the earlier history is being prepared and is not yet available."
                     .to_string(),
             ),
         }
@@ -554,7 +577,10 @@ impl std::fmt::Debug for PublicLiveContextSeed {
                 .field("recent", &recent.len())
                 .field("coverage", coverage)
                 .finish(),
-            Self::HistoricalContextPending => formatter.write_str("HistoricalContextPending"),
+            Self::HistoricalContextPending { recent } => formatter
+                .debug_struct("HistoricalContextPending")
+                .field("recent", &recent.len())
+                .finish(),
         }
     }
 }
@@ -630,9 +656,8 @@ impl PublicLiveOpenConfig {
         {
             PublicLiveContextSeed::History(items) => items,
             PublicLiveContextSeed::FactualSummary { recent, .. } => recent,
-            PublicLiveContextSeed::Absent | PublicLiveContextSeed::HistoricalContextPending => {
-                Vec::new()
-            }
+            PublicLiveContextSeed::HistoricalContextPending { recent } => recent,
+            PublicLiveContextSeed::Absent => Vec::new(),
         };
         self.context_seed = PublicLiveContextSeed::FactualSummary {
             summary: summary.to_owned(),
@@ -675,7 +700,20 @@ impl PublicLiveOpenConfig {
     /// Later factual context arrives through [`PublicLiveBrokerSession::append_thinking_context`].
     #[must_use]
     pub fn with_pending_context(mut self) -> Self {
-        self.context_seed = PublicLiveContextSeed::HistoricalContextPending;
+        self.context_seed = PublicLiveContextSeed::HistoricalContextPending { recent: Vec::new() };
+        self
+    }
+
+    /// [`Self::with_pending_context`], with the most recent canonical turns
+    /// seeded verbatim as startup input under their own roles: the late
+    /// summary still covers the whole history, but a question about the
+    /// newest turns no longer waits for it. Nothing is dropped to fit the
+    /// provider limits; check [`recent_history_fits`] first.
+    #[must_use]
+    pub fn with_pending_context_after_recent(mut self, recent: &[Message]) -> Self {
+        self.context_seed = PublicLiveContextSeed::HistoricalContextPending {
+            recent: recent.iter().filter_map(history_item).collect(),
+        };
         self
     }
 }
@@ -2851,6 +2889,76 @@ mod tests {
         assert!(preceding_history_summary_fits("summary", &with_system));
     }
 
+    /// A late-summary open can still carry the newest turns verbatim: they
+    /// are startup history under their own roles, and the availability
+    /// notice says the earlier history is still being summarized.
+    /// Recent turns past either startup limit do not fit: the Late open then
+    /// carries only the plain pending notice.
+    #[test]
+    fn recent_turns_past_the_startup_limits_do_not_fit() {
+        let utterance = |text: String| Message::User(meerkat_core::types::UserMessage::text(text));
+        let many: Vec<Message> = (0..LIVE_STARTUP_INPUT_MAX_ITEMS)
+            .map(|turn| utterance(format!("turn {turn}")))
+            .collect();
+        assert!(!recent_history_fits(&many));
+        assert!(recent_history_fits(&many[1..]));
+        let long = vec![utterance(
+            "word ".repeat(LIVE_STARTUP_INPUT_TOKEN_BUDGET * 2),
+        )];
+        assert!(!recent_history_fits(&long));
+        assert!(recent_history_fits(&[]));
+    }
+
+    #[test]
+    fn pending_context_can_carry_the_most_recent_turns_verbatim() {
+        let factory = PublicLiveBrokerFactory::try_from_target(realtime_target(
+            "gpt-live-1",
+            OpenAiBackendKind::OpenAiApi,
+        ))
+        .unwrap();
+        let recent = vec![
+            Message::User(meerkat_core::types::UserMessage::text(
+                "typed while the call was closed: the budget code is kestrel",
+            )),
+            Message::System(meerkat_core::types::SystemMessage::new("executor policy")),
+        ];
+        assert!(recent_history_fits(&recent));
+        let config = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_instructions("Catalog behavior.")
+            .with_pending_context_after_recent(&recent);
+        let session = factory.session_config(&config);
+        session
+            .validate()
+            .expect("pinned SDK accepts recent startup history");
+        let encoded = serde_json::to_value(session).unwrap();
+        let input = encoded["input"].as_array().expect("startup input");
+        assert_eq!(
+            input.len(),
+            1,
+            "system rows never reach the voice model: {encoded}"
+        );
+        assert_eq!(input[0]["role"], "user");
+        assert!(
+            input[0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("kestrel")
+        );
+        assert!(
+            encoded["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("A summary of the earlier history is being prepared")
+        );
+        // No recent turns: the original pending notice and no input.
+        let empty = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_pending_context_after_recent(&[]);
+        let encoded = serde_json::to_value(factory.session_config(&empty)).unwrap();
+        assert!(encoded.get("input").is_none());
+    }
+
     #[test]
     fn pending_context_is_instructions_context_distinct_from_the_summary() {
         let factory = PublicLiveBrokerFactory::try_from_target(realtime_target(
@@ -2865,7 +2973,7 @@ mod tests {
             .with_pending_context();
         assert!(matches!(
             config.context_seed,
-            PublicLiveContextSeed::HistoricalContextPending
+            PublicLiveContextSeed::HistoricalContextPending { .. }
         ));
         let session = factory.session_config(&config);
         session

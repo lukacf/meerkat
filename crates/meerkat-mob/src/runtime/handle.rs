@@ -3023,9 +3023,31 @@ const MEMBER_RELOAD_REPLY_GRACE: Duration = Duration::from_secs(2);
 #[derive(Debug, Default)]
 pub struct MemberAdmissionBacklogGauge {
     snapshot: StdMutex<MemberAdmissionBacklogSnapshot>,
+    /// Signalled after every lane depth record, so tests await a depth
+    /// instead of polling the snapshot.
+    #[cfg(test)]
+    recorded: tokio::sync::watch::Sender<()>,
 }
 
 impl MemberAdmissionBacklogGauge {
+    /// Resolve once `predicate` holds for the current snapshot, re-checking
+    /// on every lane depth record.
+    #[cfg(test)]
+    pub(super) async fn wait_for_snapshot(
+        &self,
+        mut predicate: impl FnMut(&MemberAdmissionBacklogSnapshot) -> bool,
+    ) {
+        // Subscribe before the first check so a record between the check
+        // and the await still wakes this waiter.
+        let mut recorded = self.recorded.subscribe();
+        while !predicate(&self.snapshot()) {
+            recorded
+                .changed()
+                .await
+                .expect("the gauge owns its record signal");
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn record_reload_settlement(&self, agent_identity: &AgentIdentity) {
         *self
@@ -3070,6 +3092,9 @@ impl MemberAdmissionBacklogGauge {
             snapshot.parked.insert(agent_identity.clone(), depth);
             snapshot.peak_parked = snapshot.peak_parked.max(depth);
         }
+        drop(snapshot);
+        #[cfg(test)]
+        self.recorded.send_replace(());
     }
 
     pub fn snapshot(&self) -> MemberAdmissionBacklogSnapshot {
@@ -6489,6 +6514,70 @@ impl MobHandle {
         agent_identity: AgentIdentity,
     ) -> Result<(), MobError> {
         let operation_deadline = Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT;
+        let Some((key, pending)) = self
+            .join_or_start_retirement_operation(agent_identity, operation_deadline, true)
+            .await?
+        else {
+            return Ok(());
+        };
+        self.wait_for_retirement_operation(&key, pending).await
+    }
+
+    /// Retire `agent_identity`'s exact incarnation and join its singleflight
+    /// saga until the saga's own terminal reply. [`Self::retire`] bounds the
+    /// caller by the retirement budget and answers a saga that is still
+    /// running with a typed in-progress error; this join waits on the saga
+    /// instead. A saga whose own budget elapsed retains its durable
+    /// retirement anchor and replies typed in-progress; that reply is the
+    /// transition to the next saga, which resumes from the anchor.
+    #[cfg(test)]
+    pub(super) async fn retire_joining_saga_until_terminal_for_test(
+        &self,
+        agent_identity: AgentIdentity,
+    ) -> Result<(), MobError> {
+        loop {
+            let operation_deadline =
+                Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT;
+            let Some((_, pending)) = self
+                .join_or_start_retirement_operation(
+                    agent_identity.clone(),
+                    operation_deadline,
+                    false,
+                )
+                .await?
+            else {
+                return Ok(());
+            };
+            let mut result_rx = pending.result_rx.clone();
+            let result = result_rx
+                .wait_for(Option::is_some)
+                .await
+                .map_err(|_| MobError::ActorReplyChannelClosed)?
+                .clone()
+                .expect("wait_for returns a published retirement result");
+            match result.as_ref() {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if matches!(
+                        error.as_ref(),
+                        MobError::RetirementInProgress { .. }
+                            | MobError::MemberRetirementInProgress { .. }
+                    ) => {}
+                Err(error) => return Err(MobError::SharedRetirementFailure(Arc::clone(error))),
+            }
+        }
+    }
+
+    /// Elect the exact incarnation's singleflight retirement saga: join the
+    /// one in flight or start it. `None` when the incarnation is already
+    /// absent. `bound_admission` holds scope admission and the roster
+    /// observation to `operation_deadline`.
+    async fn join_or_start_retirement_operation(
+        &self,
+        agent_identity: AgentIdentity,
+        operation_deadline: Instant,
+        bound_admission: bool,
+    ) -> Result<Option<(RetirementOperationKey, Arc<PendingRetirementOperation>)>, MobError> {
         // Retire's absent-member convergence is still an operator action.
         // Enter the serialized scope gate before any roster observation so a
         // principal cannot turn an identity miss into an authorization
@@ -6497,31 +6586,37 @@ impl MobHandle {
         // admission belongs to the same absolute retirement budget: a
         // parked actor mailbox must return typed not-yet-admitted state
         // instead of defeating the bounded public contract.
-        let remaining = operation_deadline.saturating_duration_since(Instant::now());
-        tokio::time::timeout(
-            remaining,
-            self.admit_control_scope(mob_dsl::ControlScope::Retire),
-        )
-        .await
-        .map_err(|_| MobError::MemberRetirementAdmissionPending {
-            member_id: agent_identity.clone(),
-            stage: "control_scope_admission".to_string(),
-        })??;
-        let entry = {
+        let admission = self.admit_control_scope(mob_dsl::ControlScope::Retire);
+        if bound_admission {
             let remaining = operation_deadline.saturating_duration_since(Instant::now());
-            let roster = tokio::time::timeout(remaining, self.roster.read())
+            tokio::time::timeout(remaining, admission)
                 .await
                 .map_err(|_| MobError::MemberRetirementAdmissionPending {
                     member_id: agent_identity.clone(),
-                    stage: "roster_incarnation_observation".to_string(),
-                })?;
+                    stage: "control_scope_admission".to_string(),
+                })??;
+        } else {
+            admission.await?;
+        }
+        let entry = {
+            let roster = if bound_admission {
+                let remaining = operation_deadline.saturating_duration_since(Instant::now());
+                tokio::time::timeout(remaining, self.roster.read())
+                    .await
+                    .map_err(|_| MobError::MemberRetirementAdmissionPending {
+                        member_id: agent_identity.clone(),
+                        stage: "roster_incarnation_observation".to_string(),
+                    })?
+            } else {
+                self.roster.read().await
+            };
             roster.get(&agent_identity).cloned()
         };
         let Some(entry) = entry else {
             // Retirement is idempotent. Once the exact roster incarnation is
             // absent there is no authority to enqueue an identity-only command
             // that could retire a later successor.
-            return Ok(());
+            return Ok(None);
         };
         let expected = super::state::RetireMemberIncarnation {
             agent_identity: entry.agent_identity.clone(),
@@ -6599,8 +6694,7 @@ impl MobHandle {
                 pending
             }
         };
-
-        self.wait_for_retirement_operation(&key, pending).await
+        Ok(Some((key, pending)))
     }
 
     // Machine commands are issued from inside calling agents' tool-dispatch
@@ -12999,11 +13093,16 @@ impl MobHandle {
     ) {
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let mut gate = MEMBER_STATUS_READ_TEST_GATE
+        // Keyed by identity: concurrently running tests (threaded `cargo
+        // test`) each hold their own member's read.
+        let replaced = MEMBER_STATUS_READ_TEST_GATE
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(gate.is_none(), "member status read test gate already armed");
-        *gate = Some((identity, entered_tx, release_rx));
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(identity, (entered_tx, release_rx));
+        assert!(
+            replaced.is_none(),
+            "member status read test gate already armed for this identity"
+        );
         (entered_rx, release_tx)
     }
 
@@ -18303,31 +18402,24 @@ mod tests {
 /// [`MobHandle::arm_member_status_read_test_gate`]).
 #[cfg(any(test, feature = "test-support"))]
 type MemberStatusReadTestGate = (
-    AgentIdentity,
     tokio::sync::oneshot::Sender<()>,
     tokio::sync::oneshot::Receiver<()>,
 );
 
+/// Armed gates, one per identity, so tests running concurrently in one
+/// process each hold only their own member's read.
 #[cfg(any(test, feature = "test-support"))]
-static MEMBER_STATUS_READ_TEST_GATE: std::sync::Mutex<Option<MemberStatusReadTestGate>> =
-    std::sync::Mutex::new(None);
+static MEMBER_STATUS_READ_TEST_GATE: std::sync::Mutex<
+    std::collections::BTreeMap<AgentIdentity, MemberStatusReadTestGate>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 #[cfg(any(test, feature = "test-support"))]
 async fn run_member_status_read_test_gate(identity: &AgentIdentity) {
-    let armed = {
-        let mut gate = MEMBER_STATUS_READ_TEST_GATE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if gate
-            .as_ref()
-            .is_some_and(|(armed_identity, _, _)| armed_identity == identity)
-        {
-            gate.take()
-        } else {
-            None
-        }
-    };
-    if let Some((_, entered_tx, release_rx)) = armed {
+    let armed = MEMBER_STATUS_READ_TEST_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(identity);
+    if let Some((entered_tx, release_rx)) = armed {
         let _ = entered_tx.send(());
         let _ = release_rx.await;
     }

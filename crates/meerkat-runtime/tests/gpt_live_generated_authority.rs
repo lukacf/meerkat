@@ -4639,8 +4639,8 @@ fn assert_ambiguity_recovery_answer_and_seed_binding(concurrent: bool, covered_t
         if covered_tail {
             assert_eq!(
                 authority.state().live_context_queued_append_by_cursor.len(),
-                2,
-                "reservation does not retire undelivered obligations"
+                0,
+                "the recovery authorization ended the rows the replacement's seed carries"
             );
             apply(
                 &mut authority,
@@ -4718,8 +4718,8 @@ fn assert_ambiguity_recovery_answer_and_seed_binding(concurrent: bool, covered_t
         if covered_tail {
             assert_eq!(
                 authority.state().live_context_queued_append_by_cursor.len(),
-                3,
-                "binding provider zero does not retire the old prefix"
+                1,
+                "binding provider zero keeps the newer tail"
             );
         }
         acknowledge_recovery_bootstrap(&mut authority, REPLACEMENT, source_cursor);

@@ -5036,6 +5036,36 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveLiveContextAppendAmbiguousRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `CancelLiveContextRecoveryObligationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveContextRecoveryObligationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveContextRecoveryObligationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveContextRecoveryObligationRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveContextRecoveryObligationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveDelegationResultRecoveryObligationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveDelegationResultRecoveryObligationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveDelegationResultRecoveryObligationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveDelegationResultRecoveryObligationRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveDelegationResultRecoveryObligationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BindLiveContextRecoveryChannelIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8032,6 +8062,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveContextAmbiguityRecoveryAuthorized`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveRecoveryObligationCancelled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveContextRecoveryChannelBound`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8272,6 +8305,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_context_outbox_is_exact_and_session_scoped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_context_outbox_has_no_closed_channel_leftover`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_context_outbox_is_above_every_seed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_context_recovery_is_exact_and_channel_scoped`

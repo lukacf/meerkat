@@ -3050,6 +3050,7 @@ runtime_internal_inputs!(
         UpdateDeferredSessionLlmIdentity,
         BindLiveExecutionChannel,
         StageExperimentalLiveExecution,
+        AdvanceLiveExperimentalStagedSeed,
         ResolveLiveExecutionModeAdmission,
         RegisterLivePlaybackOwner,
         AuthorizeLiveActiveChannelControl,
@@ -3112,6 +3113,7 @@ runtime_internal_inputs!(
         AdvanceLiveContextCanonicalCoverage,
         ResolveLiveContextAppend,
         BindLiveContextRecoveryChannel,
+        CancelLiveRecoveryObligation,
         RecordLiveWebrtcAnswerAcceptedAndBindExecution,
     ]
 );

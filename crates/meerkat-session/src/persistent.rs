@@ -13508,7 +13508,10 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
         let mut retry = OptimisticReadRetry::new(id, "session read");
         loop {
-            match self.live_session_authority(id).await? {
+            // An observation like its sibling reads: a head committed between
+            // the authority read and the head materialization re-reads within
+            // the counted budget instead of failing (issue #1104).
+            match self.live_session_authority_for_observation(id).await? {
                 LiveSessionAuthority::DurableAuthoritative { session, .. } => {
                     self.reject_if_archived_session(id, &session)
                         .await
@@ -13549,7 +13552,10 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                     }
                 }
                 LiveSessionAuthority::NoLive => {
-                    let Some(session) = self.load_authoritative_session_base(id).await? else {
+                    let Some(session) = self
+                        .load_authoritative_session_base_for_observation(id)
+                        .await?
+                    else {
                         return Err(SessionError::NotFound { id: id.clone() });
                     };
                     self.reject_if_archived_session(id, &session)
@@ -40557,6 +40563,29 @@ mod tests {
             rendered.contains("second turn"),
             "the converged read must observe the advanced head: {rendered}"
         );
+        assert_eq!(
+            runtime_store.stale_reads_served(),
+            conflicts,
+            "every conflicting read within the budget must be retried"
+        );
+    }
+
+    /// `read` is an observation like `read_history`: a head committed between
+    /// the authority read and the head materialization re-reads within the
+    /// counted budget instead of surfacing `TranscriptRevisionConflict`. Mob
+    /// shutdown polls member activity through `read` while a finishing turn
+    /// commits, and used to fail with that conflict.
+    #[tokio::test]
+    async fn session_read_converges_after_repeated_head_advances_within_budget() {
+        let (runtime_store, service, session_id, superseded, _storage_dir) =
+            stale_authority_observation_fixture().await;
+        let conflicts = OBSERVATION_LOAD_ATTEMPTS - 1;
+        runtime_store.serve_stale_authority(superseded, conflicts);
+        let view = service
+            .read(&session_id)
+            .await
+            .expect("session read converges once the writer's head is observed");
+        assert_eq!(view.state.session_id, session_id);
         assert_eq!(
             runtime_store.stale_reads_served(),
             conflicts,

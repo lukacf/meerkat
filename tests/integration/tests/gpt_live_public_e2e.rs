@@ -3418,7 +3418,9 @@ enum SeedCase {
     /// since it, verbatim; no summary was generated for this open.
     SeededRetained,
     /// The summarizer missed the bound; the summary follows on the thinking
-    /// lane after the channel's first user utterance.
+    /// lane after the channel's first user utterance. The most recent
+    /// conversation turns ride `session.input` verbatim when they fit the
+    /// startup limits.
     Late,
 }
 
@@ -3426,8 +3428,9 @@ enum SeedCase {
 /// the create body) and validates its shape: seeded is exactly one developer
 /// item plus at most `LIVE_STARTUP_RECENT_TURNS` recent turns, seeded retained
 /// is one retained-summary developer item plus every verbatim row since, late
-/// is an empty create body; the startup instructions frame the history in
-/// every case. Journals the case and returns it with any shape failure.
+/// is no developer item, only the most recent turns verbatim when they fit
+/// (fewer than `LIVE_STARTUP_INPUT_MAX_ITEMS` items, possibly none); the
+/// startup instructions frame the history in every case. Journals the case and returns it with any shape failure.
 fn classify_summary_open(
     evidence: &Journal,
     scenario: &str,
@@ -3458,10 +3461,12 @@ fn classify_summary_open(
         (1, items, false) if (1..=1 + LIVE_STARTUP_RECENT_TURNS).contains(&items) => {
             Some(SeedCase::Seeded)
         }
-        (0, 0, false) => Some(SeedCase::Late),
+        // Late: no summary item; the most recent turns ride verbatim when
+        // they fit the startup limits, otherwise the create body is empty.
+        (0, items, false) if items < LIVE_STARTUP_INPUT_MAX_ITEMS => Some(SeedCase::Late),
         (developer, items, retained) => {
             problems.push(format!(
-                "expected one developer item among 1..={} input items (seeded), one retained-summary developer item among 1..={LIVE_STARTUP_INPUT_MAX_ITEMS} (seeded retained) or an empty create body (late), got {developer} developer items among {items} (retained summary: {retained})",
+                "expected one developer item among 1..={} input items (seeded), one retained-summary developer item among 1..={LIVE_STARTUP_INPUT_MAX_ITEMS} (seeded retained) or no developer item among fewer than {LIVE_STARTUP_INPUT_MAX_ITEMS} recent-turn items (late), got {developer} developer items among {items} (retained summary: {retained})",
                 1 + LIVE_STARTUP_RECENT_TURNS
             ));
             None
@@ -4027,6 +4032,18 @@ async fn delegated_request(
     barge_in: Option<PlayAt>,
     seen_executor_turns: &mut std::collections::BTreeSet<String>,
 ) -> Result<DelegatedRequest, Box<dyn std::error::Error>> {
+    // An operation that exists before this request is spoken is never this
+    // request's: a native exchange the model delegated (its delegation is
+    // counted against that exchange's window) may finish, or release its
+    // result, inside this request's window. Only operations created after
+    // this point can be joined to this request's own delegation.
+    let runtime = live.shared()?.0.runtime.clone();
+    for snapshot in runtime
+        .live_delegation_recovery_snapshots(&live.session_id)
+        .await?
+    {
+        seen_executor_turns.insert(snapshot.operation_id().to_string());
+    }
     let events_before = live.peer.events().await?.len();
     let schedule_id = live.peer.play_at(&spec).await?;
     let fixture_start_ms = live

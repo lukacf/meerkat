@@ -38,11 +38,41 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             .collect()
     };
 
+    let state_label = state_name.to_string();
+    let (derive, debug_impl) = if def.state_fields.iter().any(|f| f.redacted) {
+        let debug_fields = def.state_fields.iter().map(|f| {
+            let name = &f.name;
+            let label = name.to_string();
+            let value = if f.redacted {
+                redacted_debug_value(&quote! { self.#name }, &f.ty)
+            } else {
+                quote! { &self.#name }
+            };
+            quote! { .field(#label, #value) }
+        });
+        (
+            quote! { #[derive(Clone, PartialEq, Eq)] },
+            quote! {
+                impl std::fmt::Debug for #state_name {
+                    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        f.debug_struct(#state_label)
+                            #(#debug_fields)*
+                            .finish()
+                    }
+                }
+            },
+        )
+    } else {
+        (quote! { #[derive(Debug, Clone, PartialEq, Eq)] }, quote! {})
+    };
+
     quote! {
-        #[derive(Debug, Clone, PartialEq, Eq)]
+        #derive
         pub struct #state_name {
             #(#fields),*
         }
+
+        #debug_impl
 
         impl Default for #state_name {
             fn default() -> Self {
@@ -51,6 +81,24 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                 }
             }
         }
+    }
+}
+
+/// `Debug` value for a `#[redacted]` field reached through `access`: presence
+/// for an option, the entry count for a collection, otherwise a marker. The
+/// value itself never reaches the formatter.
+pub(crate) fn redacted_debug_value(access: &TokenStream, ty: &TypeDef) -> TokenStream {
+    match ty {
+        TypeDef::Option(_) => quote! { &#access.as_ref().map(|_| "<redacted>") },
+        TypeDef::Seq(_) | TypeDef::Set(_) | TypeDef::Map(_, _) => {
+            quote! { &format_args!("<redacted; {} entries>", #access.len()) }
+        }
+        TypeDef::Bool
+        | TypeDef::U32
+        | TypeDef::U64
+        | TypeDef::String
+        | TypeDef::Named(_)
+        | TypeDef::Enum(_) => quote! { &"<redacted>" },
     }
 }
 

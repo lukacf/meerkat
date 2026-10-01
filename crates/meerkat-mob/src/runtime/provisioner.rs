@@ -2314,6 +2314,49 @@ async fn enter_queued_cancel_test_gate(session_id: &SessionId) -> Option<oneshot
     Some(returned_tx)
 }
 
+/// Per-session holds between retire's pre-boundary step and its
+/// turn-finalization boundary acquisition (entered, release).
+#[cfg(all(test, feature = "runtime-adapter"))]
+fn pre_boundary_step_test_gates()
+-> &'static std::sync::Mutex<HashMap<SessionId, (oneshot::Sender<()>, oneshot::Receiver<()>)>> {
+    static GATES: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<SessionId, (oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    > = std::sync::OnceLock::new();
+    GATES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Hold the next archive-time retire of `session_id` after its pre-boundary
+/// step returned and before it requests the turn-finalization boundary.
+/// Returns the entered signal and the release sender.
+#[cfg(all(test, feature = "runtime-adapter"))]
+pub(super) fn arm_pre_boundary_step_test_gate(
+    session_id: SessionId,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let replaced = pre_boundary_step_test_gates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(session_id, (entered_tx, release_rx));
+    assert!(
+        replaced.is_none(),
+        "pre-boundary step test gate already armed"
+    );
+    (entered_rx, release_tx)
+}
+
+#[cfg(all(test, feature = "runtime-adapter"))]
+async fn run_pre_boundary_step_test_gate(session_id: &SessionId) {
+    let gate = pre_boundary_step_test_gates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(session_id);
+    if let Some((entered_tx, release_rx)) = gate {
+        let _ = entered_tx.send(());
+        let _ = release_rx.await;
+    }
+}
+
 #[cfg(test)]
 fn recovered_ops_after_hook_test_gates()
 -> &'static std::sync::Mutex<HashMap<SessionId, (oneshot::Sender<()>, oneshot::Receiver<()>)>> {
@@ -2618,6 +2661,19 @@ impl MemberSessionDisposalArc {
         session_id: &SessionId,
         deadline: Instant,
     ) -> Result<(), SessionError> {
+        // Fence admission before the boundary, as member retire's saga does
+        // through the member bridge. This path otherwise reaches the
+        // turn-finalization boundary with a live runtime, so an input
+        // admitted after the pre-boundary step could open a run whose turn
+        // holds the boundary until the release deadline. Resolve what is
+        // already admitted first (a retire drains queued inputs as runs),
+        // then retire: once Retired, every generated admission transition
+        // refuses. The quiescent acquisition below repeats the pre-boundary
+        // step for anything that slipped in between, then takes the boundary.
+        self.cancel_active_runtime_turn_before_retire_until(session_id, deadline)
+            .await?;
+        self.fence_live_runtime_admission_before_boundary(session_id, deadline)
+            .await?;
         let quiescent = self
             .acquire_quiescent_runtime_turn_finalization_boundary(session_id, deadline)
             .await?;
@@ -3038,6 +3094,77 @@ impl MemberSessionDisposalArc {
         }
     }
 
+    /// Retire a live runtime through the control plane ahead of the
+    /// turn-finalization boundary so generated admission refuses every later
+    /// input. A runtime that is absent, already terminal, or not owned by a
+    /// live attachment (a cold or reload-required registration) is left to
+    /// the existing under-boundary retire, which owns those cases.
+    async fn fence_live_runtime_admission_before_boundary(
+        &self,
+        session_id: &SessionId,
+        deadline: Instant,
+    ) -> Result<(), SessionError> {
+        let Some(adapter) = &self.runtime_adapter else {
+            return Ok(());
+        };
+        let Some(registration) = adapter
+            .current_session_registration_witness(session_id)
+            .await
+        else {
+            return Ok(());
+        };
+        if adapter
+            .registration_is_current_without_runtime_owner(&registration)
+            .await
+        {
+            return Ok(());
+        }
+        let admitting = adapter
+            .meerkat_machine_archive_snapshot(session_id)
+            .await
+            .is_some_and(|snapshot| {
+                matches!(
+                    snapshot.control.phase,
+                    meerkat_runtime::RuntimeState::Idle
+                        | meerkat_runtime::RuntimeState::Attached
+                        | meerkat_runtime::RuntimeState::Running
+                )
+            });
+        if !admitting {
+            return Ok(());
+        }
+        let remaining =
+            Self::retirement_remaining(session_id, deadline, "runtime_admission_fence")?;
+        let cleanup_spawner = meerkat_runtime::RuntimeCleanupTaskSpawner::acquire()
+            .map_err(|error| Self::runtime_archive_error(error.to_string()))?;
+        let task_adapter = Arc::clone(adapter);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session_id);
+        let (retire_result_tx, retire_result_rx) = oneshot::channel();
+        cleanup_spawner.spawn_detached(async move {
+            let result = task_adapter
+                .retire_runtime_control_plane_before(&runtime_id, deadline)
+                .await;
+            let _ = retire_result_tx.send(result);
+        });
+        let result = tokio::time::timeout(remaining, retire_result_rx)
+            .await
+            .map_err(|_| Self::runtime_retirement_in_progress(session_id, "runtime_admission_fence"))?
+            .map_err(|error| {
+                Self::runtime_archive_error(format!(
+                    "process-owned runtime admission fence ended without a result for {session_id}: {error}"
+                ))
+            })?;
+        match result {
+            Ok(_) | Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => Ok(()),
+            Err(meerkat_runtime::RuntimeControlPlaneError::RetirementInProgress { .. }) => Err(
+                Self::runtime_retirement_in_progress(session_id, "runtime_admission_fence"),
+            ),
+            Err(error) => Err(Self::runtime_archive_error(format!(
+                "runtime admission fence before the disposal boundary failed for {session_id}: {error}"
+            ))),
+        }
+    }
+
     async fn retire_runtime_after_turn_boundary(
         &self,
         session_id: &SessionId,
@@ -3337,6 +3464,8 @@ impl MemberSessionDisposalArc {
                 self.cancel_active_runtime_turn_before_retire_until(session_id, deadline)
                     .await?;
             }
+            #[cfg(test)]
+            run_pre_boundary_step_test_gate(session_id).await;
             let boundary = self
                 .acquire_runtime_turn_finalization_boundary_until(session_id, deadline)
                 .await?;

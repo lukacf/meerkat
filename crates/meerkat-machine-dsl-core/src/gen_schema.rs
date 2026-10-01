@@ -375,11 +375,20 @@ fn gen_state_fields(def: &MachineDef) -> Vec<TokenStream> {
             let name = f.name.to_string();
             let id = typed_id("FieldId", &name);
             let ty = gen_type_ref(&f.ty);
+            let disclosure = gen_disclosure(f.redacted);
             quote! {
-                FieldSchema { name: #id, ty: #ty }
+                FieldSchema { name: #id, ty: #ty, disclosure: #disclosure }
             }
         })
         .collect()
+}
+
+fn gen_disclosure(redacted: bool) -> TokenStream {
+    if redacted {
+        quote! { FieldDisclosure::Redacted }
+    } else {
+        quote! { FieldDisclosure::Visible }
+    }
 }
 
 fn gen_init_fields(def: &MachineDef) -> Vec<TokenStream> {
@@ -756,7 +765,8 @@ fn gen_enum_variants(enum_def: &crate::ast::EnumDef) -> Vec<TokenStream> {
                         let fname = f.name.to_string();
                         let fid = typed_id("FieldId", &fname);
                         let fty = gen_type_ref(&f.ty);
-                        quote! { FieldSchema { name: #fid, ty: #fty } }
+                        let disclosure = gen_disclosure(f.redacted);
+                        quote! { FieldSchema { name: #fid, ty: #fty, disclosure: #disclosure } }
                     })
                     .collect();
                 quote! { VariantSchema { name: #name_id, fields: vec![#(#fields),*] } }
@@ -779,7 +789,7 @@ fn gen_helpers(def: &MachineDef) -> Vec<TokenStream> {
                     let pname = p.name.to_string();
                     let pid = typed_id("FieldId", &pname);
                     let pty = gen_type_ref(&p.ty);
-                    quote! { FieldSchema { name: #pid, ty: #pty } }
+                    quote! { FieldSchema { name: #pid, ty: #pty, disclosure: FieldDisclosure::Visible } }
                 })
                 .collect();
             quote! {

@@ -23,6 +23,11 @@ name: CI
 #                     nextest --lib --bins --profile ci-pr (ci-pr = fast),
 #                     plus the feature-gated suites of those packages
 #                     (FEATURE_UNIT_SUITES in scripts/ci-cargo-lanes.mjs)
+#   integration     - (xN) the tests/*.rs binaries of each integration
+#                     suite whose trigger packages changed
+#                     (INTEGRATION_SUITES in scripts/ci-cargo-lanes.mjs):
+#                     nextest -p <package> --test '*'; pull requests and
+#                     main pushes alike
 #   closure-check   - cargo check (lib and bin targets) over the
 #                     reverse-dependency closure of the changed packages
 #   example-web     - sdks/web wasm runtime build plus the example 031, 032
@@ -31,19 +36,24 @@ name: CI
 #                     examples
 #   wasm-timers     - shared timer ownership in Chrome and Node, selected
 #                     with the web runtime suites
-#   gate            - "CI gate": fail-closed aggregate, 1500-second
-#                     push-to-terminal budget on pull requests (per-attempt
-#                     lane clocks; the slowest lane is reported on every run
-#                     that was not cancelled, failed runs included),
-#                     schema-4 exact-tree attestation on main
+#   gate            - "CI gate": fail-closed aggregate; on pull requests a
+#                     1500-second lane execution budget (classification plus
+#                     each lane's own run time, runner queue excluded) and a
+#                     2700-second push-to-terminal runaway ceiling; runner
+#                     queue wait is reported as a warning (the critical path,
+#                     slowest lane and queue are reported on every run that
+#                     was not cancelled, failed runs included); schema-4
+#                     exact-tree attestation on main
 #
 # Push to main only (no wall-clock budget):
 #   main-unit (xN)  - nextest --lib --bins over the whole workspace in eight
 #                     cost-packed shards (this is where the meerkat-mob chain's
-#                     unit tests run: mob, mob-mcp, mob-pack, rpc, rest,
-#                     mcp-server, rkat, web-runtime, integration-tests,
-#                     machine-codegen, machine-dsl-tests, xtask; their lanes
-#                     compile mob's 442k lines and cannot fit the budget),
+#                     unit tests run: mob, mob-adaptive, mob-mcp, mob-pack,
+#                     rpc, rest, mcp-server, rkat, web-runtime,
+#                     integration-tests, machine-codegen; their lanes
+#                     compile mob's 442k lines and cannot fit the budget;
+#                     xtask and machine-dsl-tests do not build mob and run
+#                     in the pull request),
 #                     plus one lane per feature-gated suite: the default
 #                     feature lanes cannot reach a test behind a non-default
 #                     feature (FEATURE_UNIT_SUITES in ci-cargo-lanes.mjs)
@@ -76,13 +86,42 @@ on:
       - ready_for_review
   workflow_dispatch: {}
 
-# Pull requests: one group per PR, a newer push cancels the older run. Pushes
-# to main: one group per commit and no cancellation, so every main commit
-# completes its run and gets attested even when merges land back to back (a
-# per-ref group cancelled 35918370610 and 35920687943 before their gates).
+# Pull requests: one group per PR, a newer push cancels the older run.
+#
+# Pushes to main: a newer main commit supersedes the still-running run of an
+# older one (group main-<ref>-superseded, cancelled). The account runs at most
+# 40 hosted jobs at once, a main run starts 35-50 of them, and merges arrive
+# about every 13-32 minutes against a 20-34 minute main run, so completing
+# every main run starved pull-request CI of runners: in the 02:27-03:50 UTC
+# merge burst of 2026-10-01, 806 of the 1760 main-run job-minutes (46%) ran
+# after a newer main commit had already been pushed. The newest main commit
+# is still fully tested, and its run covers every superseded commit's change.
+#
+# Never superseded, one group per commit (main-<ref>-<sha>):
+#   - a release commit ("chore: release v..." in the head commit message),
+#     because the release workflow's require_ci_green needs a successful
+#     exact-main run on exactly that commit;
+#   - every re-run attempt (run_attempt > 1). A superseded commit that turns
+#     out to be needed (a tag on it, or bisecting a red main) gets its
+#     attestation with `gh run rerun <id>`, and that attempt runs to the end;
+#   - workflow_dispatch runs.
+# A cancelled run never reaches the CI gate (it runs under !cancelled()), so
+# it leaves no exact-tree attestation; require_ci_green only accepts a run
+# that completed with success. A per-ref group with cancellation for every
+# main push once cancelled 35918370610 and 35920687943 before their gates;
+# the exemptions above are what makes cancellation safe for releases.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('main-{0}-{1}', github.ref_name, github.sha) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: >-
+    ${{
+      github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) ||
+      (github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v')) && format('main-{0}-superseded', github.ref_name) ||
+      format('main-{0}-{1}', github.ref_name, github.sha)
+    }}
+  cancel-in-progress: >-
+    ${{
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v'))
+    }}
 
 permissions:
   actions: read
@@ -125,21 +164,37 @@ env:
   # stayed cold; it now keeps only the cargo registry. Debuginfo is off
   # (above) so the objects stay small.
   SCCACHE_GCS_BUCKET_NAME: ${{ vars.MEERKAT_SCCACHE_GCS_BUCKET || 'meerkat-sccache-king-dnn-training-dev' }}
-  # Push-to-terminal budget in seconds: the latest lane terminal, each lane
-  # timed from the start of the run attempt it ran in (see the gate). It
-  # exists to catch runaway CI (aggregate drift, queueing, a lane that grows),
-  # not to police a single lane; every lane's own timeout-minutes does that.
-  # Sizing (last 64 pull-request runs, 2026-09): lane terminal p50 847 s,
-  # p90 1194 s, max 1244 s. The tail is the example-web lane, which starts
-  # after classification (about 60 s) and then runs up to 1199 s cold, 1038 s
-  # of it the wasm release build, under its own 25-minute timeout. A 1200 s
-  # budget was therefore tighter than that lane's own timeout allows and
-  # failed runs in which every lane passed. 1500 s is about 20% above the
-  # observed maximum. It stays deliberately below the longest pull-request
-  # lane timeouts (40 minutes for ratchets, clippy, unit, closure-check and
-  # sdk-host): those only stop a hung lane, while a run whose lanes take
-  # more than 25 minutes end to end has drifted and must be looked at.
-  CI_MAX_SECONDS: "1500"
+  # Pull-request wall-clock budget, split by who controls the time. It exists
+  # to catch runaway CI (a lane that grows, aggregate drift), not to police a
+  # single lane; every lane's own timeout-minutes does that.
+  #
+  # CI_MAX_EXEC_SECONDS bounds the execution path: for each lane, the change
+  # classification's run time plus the lane's own run time (started_at to
+  # completed_at), and the slowest such path. That is the time the code
+  # controls. Runner queue wait (created_at to started_at) is not in it: the
+  # account runs at most 40 hosted jobs at once, shared by every pull
+  # request, main push and nightly, and a busy hour fills that cap.
+  # CI_MAX_TERMINAL_SECONDS is the runaway backstop on the latest lane
+  # terminal, queue included, so a CI that is truly stuck still fails.
+  # Queue wait on the critical path at or above CI_QUEUE_WARN_SECONDS is a
+  # warning with a typed verdict (queue_delayed), never a failure.
+  #
+  # Sizing (66 pull-request run attempts, 2026-09-30 to 2026-10-01):
+  #   execution path      p50 816 s, p90 968 s, max 1244 s
+  #   critical-path queue p50  39 s, p90 474 s, max 742 s
+  #   terminal            p50 897 s, p90 1173 s, max 1492 s
+  # The execution tail is the example-web lane's cold wasm release build
+  # (up to 1002 s of a 1172 s lane). The concurrent hosted jobs sat at 34-40
+  # for most of 02:00-04:30 UTC on 2026-10-01. Run 36809608388 failed the
+  # previous 1500 s push-to-terminal budget at 1511 s with every lane passing
+  # and an execution path of 1009 s: its closure check waited 647 s for a
+  # runner. 1500 s of execution is about 20% above the observed maximum and
+  # below the 40-minute lane timeouts, which only stop a hung lane. 2700 s of
+  # terminal is the 40-minute lane timeout plus classification and queue
+  # headroom: past it a run is stuck, whatever the cause.
+  CI_MAX_EXEC_SECONDS: "1500"
+  CI_MAX_TERMINAL_SECONDS: "2700"
+  CI_QUEUE_WARN_SECONDS: "300"
   # Target set for the closure-check lane: "lib" checks lib and bin targets
   # of the closure; "all" adds every test target (--all-targets), which
   # measured 16 min after a meerkat-mob change and does not fit the budget.
@@ -177,6 +232,8 @@ jobs:
       main_archive_build_matrix: ${{ steps.plan.outputs.main_archive_build_matrix }}
       main_archive_run_count: ${{ steps.plan.outputs.main_archive_run_count }}
       main_archive_run_matrix: ${{ steps.plan.outputs.main_archive_run_matrix }}
+      integration_count: ${{ steps.plan.outputs.integration_count }}
+      integration_matrix: ${{ steps.plan.outputs.integration_matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -208,7 +265,7 @@ jobs:
           # build-relevant change; a failure here fails the CI gate.
           node scripts/ci-cargo-lanes.mjs --format github --base "${classification_base}" --head HEAD \
             | tee "${RUNNER_TEMP}/ci-cargo-lanes.txt" >> "${GITHUB_OUTPUT}"
-          grep -vE '^(closure_flags|shard_matrix|unit_shard_matrix|main_unit_shard_matrix|main_archive_build_matrix|main_archive_run_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
+          grep -vE '^(closure_flags|shard_matrix|unit_shard_matrix|main_unit_shard_matrix|main_archive_build_matrix|main_archive_run_matrix|integration_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
 
   fmt-governance:
     name: Format + governance
@@ -600,6 +657,79 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: sccache-log-unit-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /home/runner/work/_temp/sccache.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+  integration:
+    name: Integration tests (${{ matrix.name }})
+    needs: changes
+    # A crate's tests/*.rs binaries run in no unit lane (those run --lib
+    # --bins). Each row is an integration suite whose trigger packages
+    # changed (INTEGRATION_SUITES in scripts/ci-cargo-lanes.mjs); measured on
+    # 4 cores after a meerkat-runtime change: runtime 168 s, machine-codegen
+    # 396 s, so about 6 and 13 minutes on a hosted runner, well inside the
+    # lane execution budget.
+    if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.integration_count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.integration_matrix) }}
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Registry only; compiled objects come from sccache (see the unit lanes).
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
+
+      - name: Integration tests (tests/*.rs binaries of the suite package)
+        shell: bash
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: |
+          set -euo pipefail
+          [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in an integration lane"; exit 1; }
+          # --no-tests=fail: a suite whose package lost its tests/ binaries
+          # must be removed from INTEGRATION_SUITES, not pass silently.
+          # shellcheck disable=SC2086
+          ./scripts/repo-cargo nextest run ${PACKAGES} --test '*' --profile ci-pr \
+            --no-tests=fail --no-fail-fast --status-level fail --final-status-level fail
+
+      - name: Upload sccache server log
+        if: ${{ always() }}
+        # Diagnostics can never fail a lane.
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: sccache-log-integration-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3
@@ -1049,8 +1179,8 @@ jobs:
     # step passed but the old 20-minute timeout cancelled it). This is the
     # cost of compiling the crates, not a cache that misses. 25 minutes is
     # about 25% above the slowest cold run, so a legitimate cold run is never
-    # cancelled here; the run-level CI_MAX_SECONDS (1500 s, timed from the
-    # run start, which is about 60 s before this lane starts) still caps it.
+    # cancelled here; the gate's CI_MAX_EXEC_SECONDS (1500 s of execution,
+    # about 60 s of it the change classification) still caps it.
     timeout-minutes: 25
     env:
       RUSTC_WRAPPER: sccache
@@ -1261,6 +1391,7 @@ jobs:
       - ratchets
       - clippy
       - unit
+      - integration
       - main-unit
       - main-unit-archive-build
       - main-unit-archive-run
@@ -1281,6 +1412,8 @@ jobs:
           RATCHETS_RESULT: ${{ needs.ratchets.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          INTEGRATION_COUNT: ${{ needs.changes.outputs.integration_count }}
           MAIN_UNIT_PACKED_RESULT: ${{ needs.main-unit.result }}
           MAIN_UNIT_ARCHIVE_BUILD_RESULT: ${{ needs.main-unit-archive-build.result }}
           MAIN_UNIT_ARCHIVE_RUN_RESULT: ${{ needs.main-unit-archive-run.result }}
@@ -1325,7 +1458,7 @@ jobs:
             echo "::notice::unit tests deferred to the push-to-main run (meerkat-mob compile chain): ${UNIT_DEFERRED}"
           fi
           echo "changes=${CHANGES_RESULT} fmt-governance=${FMT_GOVERNANCE_RESULT} ratchets=${RATCHETS_RESULT}"
-          echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} main-unit=${MAIN_UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT} example-web=${EXAMPLE_WEB_RESULT} wasm-timers=${WASM_TIMERS_RESULT} bazel-graph=${BAZEL_GRAPH_RESULT}"
+          echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} integration=${INTEGRATION_RESULT} (${INTEGRATION_COUNT} suites) main-unit=${MAIN_UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT} example-web=${EXAMPLE_WEB_RESULT} wasm-timers=${WASM_TIMERS_RESULT} bazel-graph=${BAZEL_GRAPH_RESULT}"
           failed=0
           require_success() {
             local lane="$1" result="$2"
@@ -1408,6 +1541,16 @@ jobs:
               forbid_failure "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
             fi
           fi
+          # Integration suites: every suite whose trigger packages changed must
+          # run and pass; with none selected the lane must not have failed.
+          if [[ "${RUST_CHANGED}" == "true" && "${INTEGRATION_COUNT}" =~ ^[0-9]+$ ]] && (( INTEGRATION_COUNT > 0 )); then
+            require_ran "Integration tests" "${INTEGRATION_RESULT}"
+          elif [[ "${RUST_CHANGED}" == "true" && ! "${INTEGRATION_COUNT}" =~ ^[0-9]+$ ]]; then
+            echo "::error::the plan carries no integration suite count (integration_count='${INTEGRATION_COUNT}')."
+            failed=1
+          else
+            forbid_failure "Integration tests" "${INTEGRATION_RESULT}"
+          fi
           # Example web suites: every main push, and pull requests that touch
           # the web runtime, its crates, or examples 031-033.
           if [[ "${IS_MAIN_PUSH}" == "true" || "${EXAMPLE_WEB}" == "true" ]]; then
@@ -1429,23 +1572,40 @@ jobs:
           fi
           echo "All selected lanes succeeded."
 
-      - name: Enforce push-to-terminal budget
+      - name: Enforce lane execution budget
         # Runs on every run that was not cancelled, including runs whose lane
         # check above failed, so a failed run also names its slowest lanes.
         # Enforced on pull requests only (the push-to-main run carries the
         # deferred lanes and has no wall-clock budget; there it only reports,
-        # and a failure to measure is a warning). Each lane is timed from the start of the run attempt it
-        # actually ran in, so re-running a failed lane gets a fresh clock,
-        # while a lane carried over from an earlier attempt keeps that
-        # attempt's clock: re-running only this gate cannot launder a real
-        # overrun.
+        # and a failure to measure is a warning).
+        #
+        # Three numbers per lane, from the Actions jobs API:
+        #   queued    created_at to started_at: waiting for a hosted runner
+        #   ran       started_at to completed_at: the lane's own execution
+        #   terminal  completed_at, timed from the start of the run attempt
+        #             the lane ran in
+        # The execution path of a lane is its own run time plus the change
+        # classification's (every lane but classification and format +
+        # governance waits for the plan). The budgets:
+        #   - execution path <= CI_MAX_EXEC_SECONDS: fails (exec_over_budget)
+        #   - terminal <= CI_MAX_TERMINAL_SECONDS: fails (runaway)
+        #   - critical-path queue >= CI_QUEUE_WARN_SECONDS: warns
+        #     (queue_delayed), never fails
+        # Run times belong to the job, so re-running only this gate cannot
+        # launder an execution overrun. Terminals use per-attempt clocks: a
+        # re-run lane gets a fresh clock, a carried-over lane keeps its own
+        # attempt's clock.
         if: ${{ !cancelled() }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          MAX_SECONDS: ${{ env.CI_MAX_SECONDS }}
+          MAX_EXEC_SECONDS: ${{ env.CI_MAX_EXEC_SECONDS }}
+          MAX_TERMINAL_SECONDS: ${{ env.CI_MAX_TERMINAL_SECONDS }}
+          QUEUE_WARN_SECONDS: ${{ env.CI_QUEUE_WARN_SECONDS }}
           ENFORCE_BUDGET: ${{ github.event_name != 'push' }}
           GATE_JOB_NAME: CI gate
+          CLASSIFICATION_JOB_NAME: Change classification
+          ROOT_JOB_NAMES: Change classification,Format + governance
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -1473,9 +1633,13 @@ jobs:
           repo = os.environ["GITHUB_REPOSITORY"]
           run_id = os.environ["GITHUB_RUN_ID"]
           attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
-          max_seconds = int(os.environ["MAX_SECONDS"])
+          max_exec = int(os.environ["MAX_EXEC_SECONDS"])
+          max_terminal = int(os.environ["MAX_TERMINAL_SECONDS"])
+          queue_warn = int(os.environ["QUEUE_WARN_SECONDS"])
           enforce = os.environ["ENFORCE_BUDGET"] == "true"
           gate_name = os.environ["GATE_JOB_NAME"]
+          classification_name = os.environ["CLASSIFICATION_JOB_NAME"]
+          root_names = set(os.environ["ROOT_JOB_NAMES"].split(","))
 
           def collect_lanes():
               # Start of every attempt so far; a carried-over job belongs to the
@@ -1501,6 +1665,7 @@ jobs:
                   started, completed = ts(job["started_at"]), ts(job["completed_at"])
                   if completed < started:
                       continue
+                  created = ts(job["created_at"]) if job.get("created_at") else started
                   ran_in, clock = attempt_starts[0]
                   for n, begun in attempt_starts:
                       if begun <= started:
@@ -1509,7 +1674,7 @@ jobs:
                       {
                           "name": job["name"],
                           "attempt": ran_in,
-                          "queued": int((started - clock).total_seconds()),
+                          "queued": max(0, int((started - created).total_seconds())),
                           "duration": int((completed - started).total_seconds()),
                           "terminal": int((completed - clock).total_seconds()),
                           "conclusion": job["conclusion"],
@@ -1527,47 +1692,97 @@ jobs:
           except (subprocess.CalledProcessError, KeyError, IndexError, TypeError, ValueError) as error:
               detail = (getattr(error, "stderr", None) or str(error)).strip()
               if enforce:
-                  print(f"::error::could not measure the push-to-terminal budget: {detail}")
+                  print(f"::error::could not measure the lane execution budget: {detail}")
                   sys.exit(1)
-              print(f"::warning::push-to-terminal report unavailable (budget not enforced): {detail}")
+              print(f"::warning::lane execution budget report unavailable (budget not enforced): {detail}")
               sys.exit(0)
           if not lanes:
               level = "error" if enforce else "warning"
-              print(f"::{level}::no completed lanes found for the push-to-terminal budget.")
+              print(f"::{level}::no completed lanes found for the lane execution budget.")
               sys.exit(1 if enforce else 0)
 
+          # Every lane except the roots waits for the change classification,
+          # so its execution path starts with the classification's run time
+          # and its queue includes the classification's queue.
+          classification = next((lane for lane in lanes if lane["name"] == classification_name), None)
+          if classification is None and enforce:
+              print(f"::error::no completed {classification_name} job: the execution path is unmeasurable.")
+              sys.exit(1)
+          for lane in lanes:
+              upstream = classification if lane["name"] not in root_names and classification else None
+              lane["exec_path"] = lane["duration"] + (upstream["duration"] if upstream else 0)
+              # A lane re-run in a later attempt did not wait for the
+              # carried-over classification's runner.
+              same_attempt = upstream is not None and upstream["attempt"] == lane["attempt"]
+              lane["path_queued"] = lane["queued"] + (upstream["queued"] if same_attempt else 0)
+
+          exec_critical = max(lanes, key=lambda lane: lane["exec_path"])
           critical = max(lanes, key=lambda lane: lane["terminal"])
           slowest = max(lanes, key=lambda lane: lane["duration"])
-          elapsed = critical["terminal"]
+          exec_path = exec_critical["exec_path"]
+          terminal = critical["terminal"]
+          queued = critical["path_queued"]
+
+          # The verdict is the measurement; only pull requests fail on it.
+          if terminal > max_terminal:
+              verdict_type = "runaway"
+          elif exec_path > max_exec:
+              verdict_type = "exec_over_budget"
+          elif queued >= queue_warn:
+              verdict_type = "queue_delayed"
+          else:
+              verdict_type = "within_budget"
+
           rows = sorted(lanes, key=lambda lane: lane["terminal"], reverse=True)
           table = [
-              "| lane | attempt | queued s | ran s | terminal s | result |",
-              "| --- | --- | --- | --- | --- | --- |",
+              "| lane | attempt | queued s | ran s | exec path s | terminal s | result |",
+              "| --- | --- | --- | --- | --- | --- | --- |",
           ] + [
-              f"| {r['name']} | {r['attempt']} | {r['queued']} | {r['duration']} | {r['terminal']} | {r['conclusion']} |"
-              for r in rows[:10]
+              f"| {r['name']} | {r['attempt']} | {r['queued']} | {r['duration']} | {r['exec_path']} | {r['terminal']} | {r['conclusion']} |"
+              for r in rows[:12]
           ]
           verdict = (
-              f"Push-to-terminal: {elapsed}/{max_seconds} s "
-              f"(critical path: {critical['name']}, terminal at {elapsed} s in attempt {critical['attempt']}; "
-              f"slowest lane: {slowest['name']}, ran {slowest['duration']} s)"
+              f"Lane execution: {exec_path}/{max_exec} s (execution critical path: {exec_critical['name']}); "
+              f"push-to-terminal: {terminal}/{max_terminal} s (critical path: {critical['name']}, "
+              f"attempt {critical['attempt']}, {queued} s of it runner queue); "
+              f"slowest lane: {slowest['name']}, ran {slowest['duration']} s; verdict: {verdict_type}"
           )
           print(verdict)
           print("\n".join(table))
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
           if summary:
               with open(summary, "a", encoding="utf-8") as handle:
-                  handle.write(f"### Push-to-terminal budget\n\n{verdict}\n\n" + "\n".join(table) + "\n")
+                  handle.write(f"### Lane execution budget\n\n{verdict}\n\n" + "\n".join(table) + "\n")
           output = os.environ.get("GITHUB_OUTPUT")
           if output:
               with open(output, "a", encoding="utf-8") as handle:
-                  handle.write(f"elapsed_seconds={elapsed}\n")
-          if enforce and elapsed > max_seconds:
+                  handle.write(
+                      f"exec_path_seconds={exec_path}\n"
+                      f"terminal_seconds={terminal}\n"
+                      f"queue_seconds={queued}\n"
+                      f"budget_verdict={verdict_type}\n"
+                  )
+          if queued >= queue_warn:
               print(
-                  f"::error::CI exceeded the {max_seconds}-second push-to-terminal budget "
-                  f"({elapsed} s; critical path {critical['name']}, slowest lane "
+                  f"::warning title=CI runner queue wait::{critical['name']} waited {queued} s for hosted "
+                  f"runners on the critical path (classification included); runner queue is reported, "
+                  f"not budgeted."
+              )
+          failed = False
+          if enforce and exec_path > max_exec:
+              print(
+                  f"::error::CI exceeded the {max_exec}-second lane execution budget "
+                  f"({exec_path} s; execution critical path {exec_critical['name']}, slowest lane "
                   f"{slowest['name']} at {slowest['duration']} s)."
               )
+              failed = True
+          if enforce and terminal > max_terminal:
+              print(
+                  f"::error::CI exceeded the {max_terminal}-second push-to-terminal runaway ceiling "
+                  f"({terminal} s, {queued} s of it runner queue; critical path {critical['name']})."
+              )
+              failed = True
+          if failed:
               sys.exit(1)
           PY
 
@@ -1585,6 +1800,7 @@ jobs:
           RATCHETS_RESULT: ${{ needs.ratchets.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
           MAIN_UNIT_PACKED_RESULT: ${{ needs.main-unit.result }}
           MAIN_UNIT_ARCHIVE_BUILD_RESULT: ${{ needs.main-unit-archive-build.result }}
           MAIN_UNIT_ARCHIVE_RUN_RESULT: ${{ needs.main-unit-archive-run.result }}
@@ -1633,6 +1849,7 @@ jobs:
             --arg ratchets "${RATCHETS_RESULT}" \
             --arg clippy "${CLIPPY_RESULT}" \
             --arg unit "${UNIT_RESULT}" \
+            --arg integration "${INTEGRATION_RESULT}" \
             --arg main_unit "${MAIN_UNIT_RESULT}" \
             --arg closure_check "${CLOSURE_CHECK_RESULT}" \
             --arg wasm_check "${WASM_CHECK_RESULT}" \
@@ -1672,6 +1889,7 @@ jobs:
                 ratchets: $ratchets,
                 clippy: $clippy,
                 unit: $unit,
+                integration: $integration,
                 main_unit: $main_unit,
                 closure_check: $closure_check,
                 wasm_check: $wasm_check,

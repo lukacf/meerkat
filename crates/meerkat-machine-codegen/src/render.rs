@@ -515,10 +515,7 @@ fn render_canonical_stub_modeled_module(
     pushln!(&mut out, "}}");
     pushln!(&mut out);
 
-    pushln!(
-        &mut out,
-        "#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
-    );
+    render_value_derive(&mut out, "", &schema.state.fields);
     pushln!(&mut out, "pub struct State {{");
     pushln!(&mut out, "    pub phase: Phase,");
     for field in &schema.state.fields {
@@ -530,6 +527,7 @@ fn render_canonical_stub_modeled_module(
         );
     }
     pushln!(&mut out, "}}");
+    render_redacted_debug_impl(&mut out, "", "State", &["phase"], &schema.state.fields);
     pushln!(&mut out, "impl Default for State {{");
     pushln!(&mut out, "    fn default() -> Self {{");
     pushln!(&mut out, "        initial_state()");
@@ -541,10 +539,7 @@ fn render_canonical_stub_modeled_module(
     pushln!(&mut out, "    #[allow(unused_imports)]");
     pushln!(&mut out, "    use super::*;");
     for variant in &schema.inputs.variants {
-        pushln!(
-            &mut out,
-            "    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
-        );
+        render_value_derive(&mut out, "    ", &variant.fields);
         pushln!(&mut out, "    pub struct {} {{", rust_ident(&variant.name));
         for field in &variant.fields {
             pushln!(
@@ -555,6 +550,13 @@ fn render_canonical_stub_modeled_module(
             );
         }
         pushln!(&mut out, "    }}");
+        render_redacted_debug_impl(
+            &mut out,
+            "    ",
+            &rust_ident(&variant.name),
+            &[],
+            &variant.fields,
+        );
     }
     pushln!(&mut out, "}}");
     pushln!(&mut out);
@@ -602,10 +604,7 @@ fn render_canonical_stub_modeled_module(
         pushln!(&mut out, "    #[allow(unused_imports)]");
         pushln!(&mut out, "    use super::*;");
         for variant in &schema.signals.variants {
-            pushln!(
-                &mut out,
-                "    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
-            );
+            render_value_derive(&mut out, "    ", &variant.fields);
             pushln!(&mut out, "    pub struct {} {{", rust_ident(&variant.name));
             for field in &variant.fields {
                 pushln!(
@@ -616,6 +615,13 @@ fn render_canonical_stub_modeled_module(
                 );
             }
             pushln!(&mut out, "    }}");
+            render_redacted_debug_impl(
+                &mut out,
+                "    ",
+                &rust_ident(&variant.name),
+                &[],
+                &variant.fields,
+            );
         }
         pushln!(&mut out, "}}");
         pushln!(&mut out);
@@ -663,10 +669,7 @@ fn render_canonical_stub_modeled_module(
     pushln!(&mut out, "    #[allow(unused_imports)]");
     pushln!(&mut out, "    use super::*;");
     for variant in &schema.effects.variants {
-        pushln!(
-            &mut out,
-            "    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
-        );
+        render_value_derive(&mut out, "    ", &variant.fields);
         pushln!(&mut out, "    pub struct {} {{", rust_ident(&variant.name));
         for field in &variant.fields {
             pushln!(
@@ -677,6 +680,13 @@ fn render_canonical_stub_modeled_module(
             );
         }
         pushln!(&mut out, "    }}");
+        render_redacted_debug_impl(
+            &mut out,
+            "    ",
+            &rust_ident(&variant.name),
+            &[],
+            &variant.fields,
+        );
     }
     pushln!(&mut out, "}}");
     pushln!(&mut out);
@@ -1860,6 +1870,84 @@ fn render_type_ref(ty: &TypeRef) -> String {
     }
 }
 
+/// Emit the derive line for a generated value struct. A struct with a
+/// `#[redacted]` field gets a hand-written `Debug` from
+/// [`render_redacted_debug_impl`] instead of the derived one.
+#[cfg(not(test))]
+fn render_value_derive(out: &mut String, indent: &str, fields: &[FieldSchema]) {
+    let debug = if has_redacted_field(fields) {
+        ""
+    } else {
+        "Debug, "
+    };
+    pushln!(
+        out,
+        "{indent}#[derive({debug}Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+}
+
+#[cfg(not(test))]
+fn has_redacted_field(fields: &[FieldSchema]) -> bool {
+    fields
+        .iter()
+        .any(|field| field.disclosure == meerkat_machine_schema::FieldDisclosure::Redacted)
+}
+
+/// Emit `Debug` for a value struct that has `#[redacted]` fields: visible
+/// fields print normally, a redacted field prints presence (option), entry
+/// count (collection) or `"<redacted>"`, never its value.
+#[cfg(not(test))]
+fn render_redacted_debug_impl(
+    out: &mut String,
+    indent: &str,
+    type_name: &str,
+    leading_visible: &[&str],
+    fields: &[FieldSchema],
+) {
+    if !has_redacted_field(fields) {
+        return;
+    }
+    pushln!(out, "{indent}impl std::fmt::Debug for {type_name} {{");
+    pushln!(
+        out,
+        "{indent}    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
+    );
+    pushln!(out, "{indent}        f.debug_struct(\"{type_name}\")");
+    for name in leading_visible {
+        pushln!(out, "{indent}            .field(\"{name}\", &self.{name})");
+    }
+    for field in fields {
+        let label = field.name.as_str();
+        let access = format!("self.{}", rust_field_ident(&field.name));
+        let value = match (field.disclosure, &field.ty) {
+            // Paths stay qualified: these helpers are compiled out of test builds.
+            (meerkat_machine_schema::FieldDisclosure::Visible, _) => format!("&{access}"),
+            (meerkat_machine_schema::FieldDisclosure::Redacted, TypeRef::Option(_)) => {
+                format!("&{access}.as_ref().map(|_| \"<redacted>\")")
+            }
+            (
+                meerkat_machine_schema::FieldDisclosure::Redacted,
+                TypeRef::Set(_) | TypeRef::Seq(_) | TypeRef::Map(_, _),
+            ) => {
+                format!("&format_args!(\"<redacted; {{}} entries>\", {access}.len())")
+            }
+            (
+                meerkat_machine_schema::FieldDisclosure::Redacted,
+                TypeRef::Bool
+                | TypeRef::U32
+                | TypeRef::U64
+                | TypeRef::String
+                | TypeRef::Named(_)
+                | TypeRef::Enum(_),
+            ) => "&\"<redacted>\"".to_owned(),
+        };
+        pushln!(out, "{indent}            .field(\"{label}\", {value})");
+    }
+    pushln!(out, "{indent}            .finish()");
+    pushln!(out, "{indent}    }}");
+    pushln!(out, "{indent}}}");
+}
+
 #[cfg(not(test))]
 fn render_rust_type_ref(ty: &TypeRef) -> String {
     match ty {
@@ -2412,6 +2500,7 @@ mod tests {
                 fields: vec![FieldSchema {
                     name: fid("boundary_count"),
                     ty: TypeRef::U64,
+                    disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
                 }],
                 init: InitSchema {
                     phase: pid("Idle"),
@@ -2430,6 +2519,7 @@ mod tests {
                         fields: vec![FieldSchema {
                             name: fid("run_id"),
                             ty: TypeRef::String,
+                            disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
                         }],
                     },
                     VariantSchema {
@@ -2437,6 +2527,7 @@ mod tests {
                         fields: vec![FieldSchema {
                             name: fid("run_id"),
                             ty: TypeRef::String,
+                            disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
                         }],
                     },
                     VariantSchema {
@@ -2464,10 +2555,12 @@ mod tests {
                         FieldSchema {
                             name: fid("run_id"),
                             ty: TypeRef::String,
+                            disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
                         },
                         FieldSchema {
                             name: fid("boundary_sequence"),
                             ty: TypeRef::U64,
+                            disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
                         },
                     ],
                 }],

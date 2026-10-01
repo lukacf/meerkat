@@ -992,6 +992,7 @@ meerkat_machine_runtime_internal_inputs!(
     LiveExecutionLifecycle => [
         BindLiveExecutionChannel,
         StageExperimentalLiveExecution,
+        AdvanceLiveExperimentalStagedSeed,
         ResolveLiveExecutionModeAdmission,
         RegisterLivePlaybackOwner,
         AuthorizeLiveActiveChannelControl,
@@ -1046,6 +1047,7 @@ meerkat_machine_runtime_internal_inputs!(
         AdvanceLiveContextCanonicalCoverage,
         ResolveLiveContextAppend,
         BindLiveContextRecoveryChannel,
+        CancelLiveRecoveryObligation,
         BeginLiveContextPreparation,
         RecordLiveContextObservation,
         RecordLiveContextBootstrapAckCut,

@@ -344,7 +344,7 @@ list.
 
 **CI** (`.github/workflows/ci.yml`) runs on pushes to `main`, PRs, and
 manual dispatch (a branch head runs once, via its PR). It is Cargo-only on
-GitHub-hosted runners and sized to a 25-minute push-to-terminal budget:
+GitHub-hosted runners and sized to a 25-minute lane execution budget:
 - `changes` classifies the diff with `scripts/ci-cargo-lanes.mjs` (fail
   closed: every Rust-relevant change yields lanes; unmapped Rust paths, a
   missing base, or global build configuration escalate to the workspace).
@@ -362,28 +362,40 @@ GitHub-hosted runners and sized to a 25-minute push-to-terminal budget:
   (`clippy --no-deps --all-targets --all-features -D warnings`).
 - `unit`: `nextest --lib --bins --profile ci-pr` (`fast` plus a 4-minute hung-test kill) for
   the changed packages outside the meerkat-mob compile chain; crates that
-  compile `meerkat-mob` (mob, mob-mcp, mob-pack, rpc, rest, mcp-server,
-  rkat, web-runtime, integration-tests, machine-codegen, machine-dsl-tests,
-  xtask; computed from metadata) defer their unit tests to `push: main`
-  because their lanes need 17-22 min on 4 vCPU.
+  compile `meerkat-mob` (mob, mob-adaptive, mob-mcp, mob-pack, rpc, rest,
+  mcp-server, rkat, web-runtime, integration-tests, machine-codegen;
+  computed from each unit lane's real build graph: the package's own deps
+  of every kind, then normal and build deps only) defer their unit tests to
+  `push: main` because their lanes need 17-22 min on 4 vCPU. xtask and
+  machine-dsl-tests do not build mob and run in the pull request.
 - Feature-gated unit suites (`FEATURE_UNIT_SUITES` in
   `scripts/ci-cargo-lanes.mjs`): the unit lanes build default features only,
   so each suite adds a `nextest -p <package> --features <list>` row to
   `main-unit` on every Rust-relevant main push, and to `unit` when that
   package changed outside the meerkat-mob chain. A new test behind a
   non-default feature needs a suite, or no lane runs it.
+- `integration`: the `tests/*.rs` binaries (`nextest -p <package> --test
+  '*'`) of each `INTEGRATION_SUITES` entry in `scripts/ci-cargo-lanes.mjs`
+  whose trigger packages changed (meerkat-runtime; meerkat-machine-codegen,
+  whose parity tests also trigger on meerkat-mob), on PRs and main pushes.
+  The unit lanes run `--lib --bins` only, so no other PR lane runs a
+  crate's integration tests.
 - `closure-check`: `cargo check --all-features` (lib and bin targets) over
   the reverse-dependency closure of the changed packages.
 - `push: main` only (no budget): `main-unit` over the whole workspace in
   eight shards, `wasm-check`, `sdk-host`. A red main run is a failed
   `CI gate` on the main commit and blocks `require_ci_green`.
-- `gate` (`CI gate`, the only required context): fail-closed aggregate,
-  1500-second push-to-terminal budget on pull requests (each lane timed
-  from the start of the run attempt it ran in, so a re-run lane gets a fresh
-  clock but a gate-only re-run cannot launder an overrun; the slowest lane
-  and critical path are reported on every non-cancelled run, failed runs
-  included; a failure to measure only warns on `main`), schema-4 attestation (backend
-  `github-hosted-cargo`) on successful `main` pushes. It runs under
+- `gate` (`CI gate`, the only required context): fail-closed aggregate; on
+  pull requests a 1500-second lane execution budget (classification plus
+  each lane's own run time, runner queue excluded) and a 2700-second
+  push-to-terminal runaway ceiling (each lane timed from the start of the
+  run attempt it ran in); runner queue wait of 300 s or more on the critical
+  path is a `CI runner queue wait` warning with a typed verdict, never a
+  failure (the account's 40 concurrent hosted jobs are shared by every PR,
+  main push and nightly); the lane table is reported on every non-cancelled
+  run, failed runs included; a failure to measure only warns on `main`;
+  schema-4 attestation (backend `github-hosted-cargo`) on successful `main`
+  pushes. It runs under
   `!cancelled()` so superseded runs surface as cancelled.
 
 Integration-fast, e2e-fast, the dense Mob topology stress, bounded TLC, the
@@ -395,7 +407,11 @@ call it. Local Make commands still default to Cargo.
 **Nightly** (`.github/workflows/nightly.yml`, cron + dispatch) owns everything
 PR CI does not: `workspace-unit` (`make test-unit`), `workspace-int`
 (`make test-int`), `e2e-fast`, `dense-topology` (`mob-dense-topology.yml`),
-`machine-verify` (bounded TLC), `sdk-host`, `gcp-buildbuddy`
+`machine-verify` (bounded TLC, including every non-skipped composition
+witness with its completion proof), `machine-verify-deep` (`make
+machine-verify-deep-compositions`: Deep TLC over the compositions that fit
+the 900 s per-run cap; a capped run fails as TLC INCOMPLETE), `sdk-host`,
+`gcp-buildbuddy`
 (`buildbuddy.yml` in `full-fresh` mode: the whole Bazel graph), plus the
 existing `lint` (clippy `--all-targets`), `lint-feature-matrix`,
 `test-feature-matrix`, `test-minimal`, `test-surface-modularity`,

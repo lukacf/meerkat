@@ -35,6 +35,27 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
+  and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
+  `RetainedUnattached { registration }`). The call waits only while a
+  session's actor-materialization claim is in flight, and reports an actor
+  retained without an executor attachment instead of waiting on it.
+
+### Fixed
+
+- Explicit mob resume no longer waits forever on a member whose session
+  claim settled as an actor without an executor. If another in-process owner
+  materializes that actor after the resume's preparation step and never
+  attaches an executor, the member used to wait on
+  `materialization_claim_released`, which only resolves when the claim is
+  vacant, so the member and the mob-wide resume never completed. The member
+  now reclaims the unattached actor through the same preparation path
+  (discard the actor, release its exact registration) and re-attempts. It
+  still waits on in-flight claims. The competitor's old bindings and
+  registration witness are refused typed afterwards.
+
 ## [0.8.50] - 2026-10-01
 
 ### Breaking

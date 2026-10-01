@@ -741,9 +741,45 @@ async fn provision_explicit_resume_member(
                         {
                             entered.notify_one();
                         }
-                        adapter
-                            .materialization_claim_released(&work.rebuild.bridge_session_id)
-                            .await;
+                        match adapter
+                            .observe_materialization_claim_settlement(
+                                &work.rebuild.bridge_session_id,
+                            )
+                            .await
+                        {
+                            meerkat_runtime::MaterializationClaimObservation::Released => {}
+                            meerkat_runtime::MaterializationClaimObservation::RetainedUnattached {
+                                ..
+                            } => {
+                                // The claim settled as an actor committed without
+                                // an executor. Nothing obliges its owner to ever
+                                // attach one, so waiting for it would wedge this
+                                // member. Explicit resume owns its member's
+                                // session, and an unattached actor is not
+                                // executor authority: reclaim it through the
+                                // exact #1251 preparation path (discard the
+                                // actor, release its exact registration). An
+                                // executor attachment committed in between is
+                                // handled by that path exactly as it is at
+                                // preparation; this adds no second rule.
+                                tracing::info!(
+                                    agent_identity = %work.rebuild.entry.agent_identity,
+                                    session_id = %work.rebuild.bridge_session_id,
+                                    "explicit resume member reclaims an unattached retained actor before re-attempting"
+                                );
+                                if let Err(error) = provisioner
+                                    .prepare_member_session_for_explicit_resume(
+                                        &work.rebuild.bridge_session_id,
+                                        Instant::now()
+                                            + crate::runtime::provisioner::EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT,
+                                        None,
+                                    )
+                                    .await
+                                {
+                                    return ExplicitResumeProvisionResult::NotProvisioned(error);
+                                }
+                            }
+                        }
                         continue;
                     }
                     return ExplicitResumeProvisionResult::ProvisionFailed(failure);

@@ -1980,6 +1980,43 @@ struct RuntimeExecutorAttachmentMaterializationClaim {
 /// to admit exact compare-and-remove teardown. Durable epoch identity alone is
 /// not exact because an epoch may survive an in-process entry rebuild; the
 /// private weak mutation-gate identity distinguishes those incarnations.
+/// What a caller refused with
+/// [`RuntimeBindingsError::RegistrationOwned`](crate::RuntimeBindingsError::RegistrationOwned) observes once a session's
+/// actor-materialization claim is no longer in flight.
+///
+/// In-flight claim phases (prepared, staged, actor creating, pending commit,
+/// aborting) always leave through a transition that notifies, so they are
+/// awaited. A claim that settled as an actor committed without an executor is
+/// not in flight: nothing obliges its owner to ever attach one, so waiting for
+/// it to clear could wait forever. That settlement is reported instead of
+/// awaited, and only an authority entitled to replace the session's actor may
+/// reclaim it.
+#[derive(Clone)]
+pub enum MaterializationClaimObservation {
+    /// No claim blocks a new materialization: the claim is vacant, the
+    /// registration left the registry or was replaced, or a committed
+    /// executor attachment now owns the session.
+    Released,
+    /// The claim settled as a retained actor with no executor attachment.
+    /// `registration` names the exact registration that actor was built
+    /// against.
+    RetainedUnattached {
+        registration: RuntimeSessionRegistrationWitness,
+    },
+}
+
+impl std::fmt::Debug for MaterializationClaimObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Released => f.write_str("Released"),
+            Self::RetainedUnattached { registration } => f
+                .debug_struct("RetainedUnattached")
+                .field("session_id", registration.session_id())
+                .finish(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RuntimeSessionRegistrationWitness {
     machine: std::sync::Weak<MeerkatMachineShared>,

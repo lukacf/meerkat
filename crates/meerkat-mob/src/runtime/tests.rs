@@ -55835,16 +55835,19 @@ async fn explicit_resume_preparation_releases_retained_actor_registration() {
 /// the proven `NoEffect(RegistrationOwned)`, which is transient: the member
 /// is neither parked as Unproven nor marked Broken, but re-attempts on the
 /// typed claim-release event, and the resume completes with every member
-/// active once the owner releases the claim.
+/// active once the owner releases the claim. The owner here is an in-flight
+/// unique transaction; a claim that already settled as an unattached
+/// `RetainedActor` is reclaimed instead of awaited
+/// (`cold_resume_retained_actor_claim_never_released_does_not_wedge`).
 #[cfg(feature = "runtime-adapter")]
 #[tokio::test]
 async fn cold_resume_occupied_claim_reattempts_on_claim_release() {
-    let (_service, adapter, resumed, members) =
+    let (_service, _adapter, resumed, members) =
         cold_resume_crew_for_test(&["owned-a", "owned-b"]).await;
     let (blocked_identity, blocked_session) = &members[0];
     super::provisioner::arm_provision_prepare_fault_for_test(
         blocked_session.clone(),
-        super::provisioner::ProvisionPrepareTestFault::OccupiedClaim,
+        super::provisioner::ProvisionPrepareTestFault::InFlightClaim,
     );
     let waiting = Arc::new(tokio::sync::Notify::new());
     super::actor::explicit_resume::CLAIM_RELEASE_WAIT_TEST_HOOKS
@@ -55863,16 +55866,15 @@ async fn cold_resume_occupied_claim_reattempts_on_claim_release() {
         !resume.is_finished(),
         "the member re-attempts instead of failing"
     );
-    let owner = adapter
-        .current_session_registration_witness(blocked_session)
+    let mut in_flight = super::provisioner::IN_FLIGHT_CLAIMS_FOR_TEST
+        .lock()
+        .expect("in-flight claim slot")
+        .remove(blocked_session)
+        .expect("the other owner's in-flight transaction holds the claim");
+    in_flight
+        .rollback_now()
         .await
-        .expect("the other owner's registration holds the claim");
-    assert!(
-        adapter
-            .unregister_session_registration_until_terminal_if_current(&owner)
-            .await
-            .expect("the other owner releases its claim")
-    );
+        .expect("the other owner releases its claim by exact rollback");
 
     tokio::time::timeout(Duration::from_secs(20), resume)
         .await
@@ -84641,3 +84643,193 @@ mod submit_work_pump;
 /// #1105 wiring effect isolation: parked trust installs and peer-lifecycle
 /// notices must not park the actor loop or unrelated members.
 mod wiring_isolation;
+
+/// An occupied claim that settled as an unattached `RetainedActor` (an actor
+/// committed without an executor, through the real runtime claim path) is
+/// never released by its owner. The refused member must not wait forever on
+/// a claim nothing obliges to clear: it reclaims the unattached actor through
+/// the exact #1251 preparation path and the resume settles every member
+/// Active. The 20 s bound is test-only; the production path has no timer.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn cold_resume_retained_actor_claim_never_released_does_not_wedge() {
+    let (_service, adapter, resumed, members) =
+        cold_resume_crew_for_test(&["wedge-a", "wedge-b"]).await;
+    let (_blocked_identity, blocked_session) = &members[0];
+    super::provisioner::arm_provision_prepare_fault_for_test(
+        blocked_session.clone(),
+        super::provisioner::ProvisionPrepareTestFault::OccupiedClaim,
+    );
+    tokio::time::timeout(Duration::from_secs(20), resumed.resume())
+        .await
+        .expect("explicit resume must not wait on a RetainedActor claim nobody releases")
+        .expect("the member reclaims the unattached actor and materializes");
+    for (identity, _) in &members {
+        assert_member_status_for_test(
+            &resumed,
+            identity,
+            crate::runtime::handle::MobMemberStatus::Active,
+            "unattached retained actor reclaimed",
+        )
+        .await;
+    }
+    assert!(
+        adapter
+            .current_executor_attachment_witness(blocked_session)
+            .await
+            .is_some(),
+        "the reclaimed member serves through its own executor attachment"
+    );
+    assert_eq!(resumed.status().await.expect("status"), MobState::Running);
+}
+
+/// After the member reclaimed a competitor's unattached `RetainedActor`, the
+/// competitor's retained handles (its cloneable bindings and its exact
+/// registration witness) are stale. Every later use fails typed: no claim is
+/// resurrected, no registration is torn down, no executor replaces the
+/// member's attachment, and the member stays Active.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn reclaimed_retained_actor_competitor_handles_are_refused_typed() {
+    struct InertExecutor;
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::CoreExecutor for InertExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: meerkat_core::RunId,
+            _primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+        ) -> Result<
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+            meerkat_core::lifecycle::core_executor::CoreExecutorError,
+        > {
+            Err(
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::Internal(
+                    "stale competitor executor must never apply".to_string(),
+                ),
+            )
+        }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+            Ok(())
+        }
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let (_service, adapter, resumed, members) =
+        cold_resume_crew_for_test(&["stale-a", "stale-b"]).await;
+    let (blocked_identity, blocked_session) = &members[0];
+    super::provisioner::arm_provision_prepare_fault_for_test(
+        blocked_session.clone(),
+        super::provisioner::ProvisionPrepareTestFault::OccupiedClaim,
+    );
+    tokio::time::timeout(Duration::from_secs(20), resumed.resume())
+        .await
+        .expect("resume settles")
+        .expect("the member reclaims and materializes");
+    let (stale_bindings, stale_registration) =
+        super::provisioner::OCCUPIED_CLAIM_COMPETITORS_FOR_TEST
+            .lock()
+            .expect("competitor slot")
+            .remove(blocked_session)
+            .expect("the competitor's handles were captured");
+    let stale_registration =
+        stale_registration.expect("the competitor held an exact registration witness");
+    let member_attachment = adapter
+        .current_executor_attachment_witness(blocked_session)
+        .await
+        .expect("the member's executor attachment");
+    let member_registration = adapter
+        .current_session_registration_witness(blocked_session)
+        .await
+        .expect("the member's registration");
+
+    // The competitor's bindings no longer name any current registration and
+    // cannot reopen actor materialization (no resurrected claim).
+    assert!(
+        adapter
+            .session_registration_witness_for_bindings(&stale_bindings)
+            .await
+            .is_none(),
+        "stale bindings must not resolve to the member's registration"
+    );
+    assert!(
+        matches!(
+            meerkat_runtime::begin_session_runtime_actor_materialization(&stale_bindings),
+            Err(
+                meerkat_runtime::RuntimeActorMaterializationError::RegistrationClosed
+                    | meerkat_runtime::RuntimeActorMaterializationError::InvalidAuthority(_)
+            )
+        ),
+        "stale bindings must be refused typed"
+    );
+    // The competitor's exact registration witness is stale: it neither reads
+    // as an ownerless current registration nor tears the member's down.
+    assert!(
+        !adapter
+            .registration_is_current_without_runtime_owner(&stale_registration)
+            .await
+    );
+    assert!(
+        !adapter
+            .unregister_session_registration_until_terminal_if_current(&stale_registration)
+            .await
+            .expect("a stale registration witness is a typed no-op"),
+        "a stale witness must not unregister the member"
+    );
+    // A session-keyed executor attach observes the member's committed
+    // attachment as Existing; the competitor's executor is never constructed.
+    let factory_invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let attach = adapter
+        .ensure_session_with_executor_factory(blocked_session.clone(), {
+            let factory_invoked = Arc::clone(&factory_invoked);
+            move |_witness| {
+                factory_invoked.store(true, std::sync::atomic::Ordering::SeqCst);
+                Box::new(InertExecutor) as Box<dyn meerkat_core::lifecycle::CoreExecutor>
+            }
+        })
+        .await
+        .expect("a session-keyed attach against a committed attachment is typed");
+    assert!(
+        matches!(
+            &attach,
+            meerkat_runtime::EnsureRuntimeExecutorAttachment::Existing(witness)
+                if witness == &member_attachment
+        ),
+        "the competitor must observe the member's attachment, not replace it"
+    );
+    assert!(
+        !factory_invoked.load(std::sync::atomic::Ordering::SeqCst),
+        "the competitor's executor must never be constructed"
+    );
+
+    assert_eq!(
+        adapter
+            .current_executor_attachment_witness(blocked_session)
+            .await
+            .as_ref(),
+        Some(&member_attachment),
+        "the member keeps its exact attachment"
+    );
+    assert_eq!(
+        adapter
+            .current_session_registration_witness(blocked_session)
+            .await
+            .as_ref(),
+        Some(&member_registration),
+        "the member keeps its exact registration"
+    );
+    assert_member_status_for_test(
+        &resumed,
+        blocked_identity,
+        crate::runtime::handle::MobMemberStatus::Active,
+        "competitor handles refused",
+    )
+    .await;
+}

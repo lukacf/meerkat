@@ -5171,6 +5171,76 @@ impl MeerkatMachine {
         }
     }
 
+    /// Wait until `session_id`'s actor-materialization claim is no longer in
+    /// flight and report how it settled.
+    ///
+    /// Unlike [`Self::materialization_claim_released`], a claim that settled
+    /// as a retained actor without an executor attachment is reported as
+    /// [`MaterializationClaimObservation::RetainedUnattached`] instead of
+    /// awaited: no transition is obliged to clear it, so a caller entitled to
+    /// replace the session's actor reclaims it through its own exact path.
+    /// In-flight phases are awaited on the claim's own change notification;
+    /// this never polls or times out.
+    pub async fn observe_materialization_claim_settlement(
+        &self,
+        session_id: &SessionId,
+    ) -> super::MaterializationClaimObservation {
+        enum Observed {
+            Released,
+            RetainedUnattached(RuntimeSessionRegistrationWitness),
+            InFlight(Arc<crate::tokio::sync::Notify>),
+        }
+        let observe = |sessions: &HashMap<SessionId, RuntimeSessionEntry>| -> Observed {
+            let Some(entry) = sessions.get(session_id) else {
+                return Observed::Released;
+            };
+            if entry.has_live_attachment() {
+                return Observed::Released;
+            }
+            let state = entry
+                .materialization_claim_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match (state.current, state.phase) {
+                (None, crate::RuntimeActorMaterializationClaimPhase::Vacant) => Observed::Released,
+                (None, crate::RuntimeActorMaterializationClaimPhase::RetainedActor) => {
+                    Observed::RetainedUnattached(RuntimeSessionRegistrationWitness::new(
+                        Arc::downgrade(&self.shared),
+                        session_id.clone(),
+                        entry.epoch_id.clone(),
+                        Arc::downgrade(&entry.mutation_gate),
+                    ))
+                }
+                _ => Observed::InFlight(Arc::clone(&state.changed)),
+            }
+        };
+        loop {
+            let changed = match observe(&*self.sessions.read().await) {
+                Observed::Released => return super::MaterializationClaimObservation::Released,
+                Observed::RetainedUnattached(registration) => {
+                    return super::MaterializationClaimObservation::RetainedUnattached {
+                        registration,
+                    };
+                }
+                Observed::InFlight(changed) => changed,
+            };
+            let notified = changed.notified();
+            let mut notified = std::pin::pin!(notified);
+            notified.as_mut().enable();
+            // Re-observe after registering: a transition between the first
+            // observation and `enable` must not be missed. A replaced claim
+            // state is observed afresh.
+            let settled = match observe(&*self.sessions.read().await) {
+                Observed::InFlight(current) => !Arc::ptr_eq(&current, &changed),
+                Observed::Released | Observed::RetainedUnattached(_) => true,
+            };
+            if settled {
+                continue;
+            }
+            notified.await;
+        }
+    }
+
     pub async fn registration_is_current_without_runtime_owner(
         &self,
         witness: &RuntimeSessionRegistrationWitness,

@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        where: [host, docker]
+        where: [host, host-userns-relaxed, docker]
     steps:
       - name: Write probe
         run: |
@@ -78,6 +78,13 @@ jobs:
         if: ${{ matrix.where == 'host' }}
         run: |
           sudo apt-get install -y -qq bubblewrap >/dev/null 2>&1 || true
+          python3 /tmp/probe.py
+
+      - name: Probe on the runner host with the AppArmor userns restriction lifted
+        if: ${{ matrix.where == 'host-userns-relaxed' }}
+        run: |
+          sudo apt-get install -y -qq bubblewrap >/dev/null 2>&1 || true
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           python3 /tmp/probe.py
 
       - name: Probe inside a default Docker container

@@ -2263,6 +2263,57 @@ struct QuiescentRuntimeTurnFinalizationBoundary {
     recovered_ops_rebind: Option<Arc<RecoveredSessionOpsRebind>>,
 }
 
+/// Per-session holds around the exact cancellation of a queued input during
+/// retire: (entered, release, returned).
+#[cfg(all(test, feature = "runtime-adapter"))]
+type QueuedCancelTestGate = (
+    oneshot::Sender<()>,
+    oneshot::Receiver<()>,
+    oneshot::Sender<()>,
+);
+
+#[cfg(all(test, feature = "runtime-adapter"))]
+fn queued_cancel_test_gates() -> &'static std::sync::Mutex<HashMap<SessionId, QueuedCancelTestGate>>
+{
+    static GATES: std::sync::OnceLock<std::sync::Mutex<HashMap<SessionId, QueuedCancelTestGate>>> =
+        std::sync::OnceLock::new();
+    GATES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Hold the next retire of `session_id` after its snapshot found a queued
+/// input and before it cancels that input exactly. Returns the entered
+/// signal, the release sender, and the signal that the cancellation returned.
+#[cfg(all(test, feature = "runtime-adapter"))]
+pub(super) fn arm_queued_cancel_test_gate(
+    session_id: SessionId,
+) -> (
+    oneshot::Receiver<()>,
+    oneshot::Sender<()>,
+    oneshot::Receiver<()>,
+) {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let (returned_tx, returned_rx) = oneshot::channel();
+    let replaced = queued_cancel_test_gates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(session_id, (entered_tx, release_rx, returned_tx));
+    assert!(replaced.is_none(), "queued-cancel test gate already armed");
+    (entered_rx, release_tx, returned_rx)
+}
+
+#[cfg(all(test, feature = "runtime-adapter"))]
+async fn enter_queued_cancel_test_gate(session_id: &SessionId) -> Option<oneshot::Sender<()>> {
+    let gate = queued_cancel_test_gates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(session_id);
+    let (entered_tx, release_rx, returned_tx) = gate?;
+    let _ = entered_tx.send(());
+    let _ = release_rx.await;
+    Some(returned_tx)
+}
+
 #[cfg(test)]
 fn recovered_ops_after_hook_test_gates()
 -> &'static std::sync::Mutex<HashMap<SessionId, (oneshot::Sender<()>, oneshot::Receiver<()>)>> {
@@ -3563,7 +3614,7 @@ impl MemberSessionDisposalArc {
                 // New admission is already fenced (the durable Retiring state
                 // and the member's ingress detach), so resolve every queued
                 // input typed through its exact cancellation, then re-observe.
-                Self::cancel_queued_runtime_inputs_before_retire(
+                let settled = Self::cancel_queued_runtime_inputs_before_retire(
                     adapter,
                     session_id,
                     &snapshot,
@@ -3571,6 +3622,18 @@ impl MemberSessionDisposalArc {
                     deadline,
                 )
                 .await?;
+                if settled {
+                    continue;
+                }
+                // A refused cancellation is retried on the next observation,
+                // paced like every other unsettled observation below.
+                if Instant::now() >= deadline {
+                    return Err(Self::runtime_retirement_in_progress(
+                        session_id,
+                        "queued_input_cancel",
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
             }
             let Some(active_run_id) = snapshot.control.current_run_id.clone() else {
@@ -3788,18 +3851,20 @@ impl MemberSessionDisposalArc {
     /// Resolve the snapshot's queued-but-unopened inputs through the exact
     /// input cancellation authority: a still-queued input is abandoned typed
     /// (`Cancelled`) and its waiter resolved; one that a run already staged is
-    /// cancelled on that exact run.
+    /// cancelled on that exact run. Returns whether every cancellation
+    /// settled; `cancelled` records the inputs whose cancellation settled.
     async fn cancel_queued_runtime_inputs_before_retire(
         adapter: &Arc<MeerkatMachine>,
         session_id: &SessionId,
         snapshot: &meerkat_runtime::MeerkatArchiveSnapshot,
         cancelled: &mut std::collections::HashSet<meerkat_core::lifecycle::InputId>,
         deadline: Instant,
-    ) -> Result<(), SessionError> {
+    ) -> Result<bool, SessionError> {
+        let mut settled = true;
         for input_id in snapshot.queue.iter().chain(snapshot.steer_queue.iter()) {
-            if !cancelled.insert(input_id.clone()) {
+            if cancelled.contains(input_id) {
                 return Err(Self::runtime_archive_error(format!(
-                    "queued input {input_id} of {session_id} stayed queued after its exact cancellation during retire"
+                    "queued input {input_id} of {session_id} stayed queued after its exact cancellation settled during retire"
                 )));
             }
             let remaining =
@@ -3809,19 +3874,43 @@ impl MemberSessionDisposalArc {
                 input_id = %input_id,
                 "SessionBackend::cancel_active_runtime_turn_before_retire cancelling queued input"
             );
-            tokio::time::timeout(
+            #[cfg(test)]
+            let returned = enter_queued_cancel_test_gate(session_id).await;
+            let outcome = tokio::time::timeout(
                 remaining,
                 adapter.cancel_input_if_present(session_id, input_id, "member retire"),
             )
             .await
-            .map_err(|_| Self::runtime_retirement_in_progress(session_id, "queued_input_cancel"))?
-            .map_err(|error| {
-                Self::runtime_archive_error(format!(
-                    "queued input {input_id} cancellation before retire failed for {session_id}: {error}"
-                ))
-            })?;
+            .map_err(|_| Self::runtime_retirement_in_progress(session_id, "queued_input_cancel"))?;
+            #[cfg(test)]
+            if let Some(returned) = returned {
+                let _ = returned.send(());
+            }
+            match outcome {
+                Ok(_) => {
+                    cancelled.insert(input_id.clone());
+                }
+                Err(error) => {
+                    // The snapshot is an observation, not a hold: the runtime
+                    // loop can stage the input before this call, and the exact
+                    // cancellation then targets its run through the session's
+                    // interrupt authority, which a session service may not
+                    // implement; that run can also end and requeue the input.
+                    // Not fatal: the caller re-observes, a bound run goes
+                    // through the cancel ladder (which tolerates a refused
+                    // hard cancel), and a still-queued input is cancelled
+                    // again.
+                    settled = false;
+                    tracing::debug!(
+                        session_id = %session_id,
+                        input_id = %input_id,
+                        %error,
+                        "exact queued-input cancellation before retire did not settle; re-observing"
+                    );
+                }
+            }
         }
-        Ok(())
+        Ok(settled)
     }
 
     async fn wait_for_runtime_retire_drain(

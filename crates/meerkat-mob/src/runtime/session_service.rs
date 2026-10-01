@@ -954,14 +954,6 @@ fn ephemeral_runtime_adapter_cache()
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "runtime-adapter"))]
-fn persistent_runtime_adapter_cache()
--> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>> {
-    static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 #[cfg(feature = "runtime-adapter")]
 fn cached_runtime_adapter(
     cache: &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>,
@@ -3202,20 +3194,11 @@ where
         {
             None
         }
+        // The machine the surface composition built and bound into this
+        // service (a directly constructed service owns one of its own).
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let key = std::ptr::from_ref(self) as usize;
-            let store = self.runtime_store();
-            Some(cached_runtime_adapter(
-                persistent_runtime_adapter_cache(),
-                key,
-                || {
-                    Arc::new(meerkat_runtime::MeerkatMachine::persistent(
-                        store,
-                        self.blob_store(),
-                    ))
-                },
-            ))
+            Some(meerkat_session::PersistentSessionService::<B>::canonical_runtime_adapter(self))
         }
     }
 

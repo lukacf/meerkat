@@ -10347,6 +10347,92 @@ impl MeerkatMachine {
         ))
     }
 
+    /// Authorize delivering one utterance continuation to an exact
+    /// delegation's worker as a steer (`AuthorizeLiveDelegationSteer`).
+    /// `continuation_committed` is the caller's verification that the
+    /// continuation's own canonical user row is committed with exactly the
+    /// text it will steer.
+    pub async fn authorize_live_delegation_steer(
+        &self,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+        operation: &meerkat_core::exact_operation::ExactOperationIdentity<
+            meerkat_core::LiveUserTurnCorrelation,
+        >,
+        continuation_id: &str,
+        continuation_committed: bool,
+    ) -> Result<crate::live_execution::LiveDelegationSteerAuthority, RuntimeDriverError> {
+        let session_id = binding.session_id();
+        let correlation = operation.domain_correlation();
+        if correlation.channel_id() != binding.channel_id() {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "live delegation steer does not match the exact runtime binding"
+                    .to_string(),
+            });
+        }
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AuthorizeLiveDelegationSteer {
+                    channel_id: correlation.channel_id().to_string(),
+                    runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                        binding.runtime_id(),
+                    ),
+                    fence_token: crate::meerkat_machine::dsl::FenceToken::from_domain(
+                        binding.fence_token(),
+                    ),
+                    generation: crate::meerkat_machine::dsl::Generation::from_domain(
+                        binding.generation(),
+                    ),
+                    interaction_id: correlation.interaction_id().to_string(),
+                    operation_id: crate::meerkat_machine::dsl::OperationId::from_domain(
+                        operation.operation_id(),
+                    ),
+                    provider_turn_correlation: correlation.provider().user_turn_id().to_string(),
+                    continuation_id: continuation_id.to_owned(),
+                    continuation_committed,
+                },
+                "AuthorizeLiveDelegationSteer",
+            )
+            .await
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        for effect in effects.as_slice() {
+            if let Some(authority) =
+                crate::live_execution::LiveDelegationSteerAuthority::from_generated_effect(
+                    session_id,
+                    operation,
+                    continuation_id,
+                    effect,
+                )
+                .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
+            {
+                return Ok(authority);
+            }
+        }
+        Err(RuntimeDriverError::Internal(
+            "generated live delegation steer emitted no matching authority effect".to_string(),
+        ))
+    }
+
+    /// Whether a continuation was already steered into a delegation's worker
+    /// (`live_delegation_steered_continuations`): a later delegation excludes
+    /// it from its request.
+    pub async fn live_delegation_continuation_steered(
+        &self,
+        session_id: &SessionId,
+        continuation_id: &str,
+    ) -> Result<bool, RuntimeDriverError> {
+        let state = self
+            .session_dsl_state(session_id)
+            .await
+            .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
+        Ok(state
+            .live_delegation_steered_continuations
+            .contains(continuation_id))
+    }
+
     fn live_delegation_cancellation_authority_from_effects(
         &self,
         admission: &crate::live_execution::LiveDelegationExecutionAdmission,

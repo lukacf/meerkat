@@ -6700,6 +6700,28 @@ fn narrate(
     )
 }
 
+fn steer(
+    authority: &mut mm::MeerkatMachineAuthority,
+    index: usize,
+    continuation_id: &str,
+    continuation_committed: bool,
+) -> Result<mm::MeerkatMachineTransition, mm::MeerkatMachineTransitionError> {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationSteer {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(index),
+            operation_id: channel_operation(index),
+            provider_turn_correlation: channel_provider_turn(index),
+            continuation_id: continuation_id.to_string(),
+            continuation_committed,
+        },
+    )
+}
+
 fn schedule_state(
     authority: &mm::MeerkatMachineAuthority,
     index: usize,
@@ -7086,6 +7108,75 @@ fn failed_narration_is_released_once_for_failed_or_cancelled_items_only() {
     narrate(&mut authority, 2, mm::LiveDelegationNarrationKind::Failed)
         .expect("failed worker narrates as failed");
     assert_eq!(active_worker_count(&authority), 0);
+}
+
+/// A continuation of the user's utterance reaches the delegation's worker
+/// only while the worker accepts input, only once its canonical row is
+/// committed, and each continuation at most once (the recorded continuation
+/// is what a later delegation excludes).
+#[test]
+fn a_continuation_steers_a_worker_that_accepts_input_once() {
+    let mut authority = opened_authority();
+    bind_only(&mut authority);
+    admit_parallel_delegation(&mut authority, 1);
+    assert!(
+        steer(&mut authority, 1, "continuation-a", true).is_err(),
+        "a queued delegation has no worker to steer"
+    );
+    authorize_parallel_worker(&mut authority, 1, &channel_worker(1)).expect("worker start");
+    assert!(
+        steer(&mut authority, 1, "continuation-a", false).is_err(),
+        "an uncommitted continuation is never steered"
+    );
+    assert!(
+        steer(&mut authority, 1, "", true).is_err(),
+        "a continuation needs an identity"
+    );
+    let authorized = steer(&mut authority, 1, "continuation-a", true)
+        .expect("a start-authorized worker accepts the continuation");
+    assert!(authorized.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationSteerAuthorized {
+            operation_id,
+            continuation_id,
+            ..
+        } if operation_id == &channel_operation(1) && continuation_id == "continuation-a"
+    )));
+    assert!(
+        authority
+            .state()
+            .live_delegation_steered_continuations
+            .contains("continuation-a")
+    );
+    assert!(
+        steer(&mut authority, 1, "continuation-a", true).is_err(),
+        "each continuation steers once"
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationWorkerStart {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(1),
+            operation_id: channel_operation(1),
+            worker_identity: channel_worker(1),
+            started: true,
+        },
+    )
+    .expect("worker start resolves");
+    steer(&mut authority, 1, "continuation-b", true).expect("a running worker accepts input");
+    record_parallel_terminal(
+        &mut authority,
+        1,
+        &channel_worker(1),
+        mm::LiveDelegationWorkerTerminalKind::Completed,
+    );
+    assert!(
+        steer(&mut authority, 1, "continuation-c", true).is_err(),
+        "a terminal worker takes no more input"
+    );
 }
 
 #[test]

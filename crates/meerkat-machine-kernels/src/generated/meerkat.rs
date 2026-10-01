@@ -13724,6 +13724,7 @@ pub struct State {
     pub live_assistant_turn_channel_by_ref: std::collections::BTreeMap<String, String>,
     pub live_assistant_playback_segment_by_turn: std::collections::BTreeMap<String, u64>,
     pub live_abandoned_interactions: std::collections::BTreeSet<String>,
+    pub live_delegation_steered_continuations: std::collections::BTreeSet<String>,
     pub live_delegation_operation_by_interaction: std::collections::BTreeMap<String, OperationId>,
     pub live_delegation_channel_by_operation: std::collections::BTreeMap<OperationId, String>,
     pub live_delegation_schedule_state_by_operation:
@@ -17014,6 +17015,18 @@ pub mod inputs {
         pub kind: LiveDelegationNarrationKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeLiveDelegationSteer {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub provider_turn_correlation: String,
+        pub continuation_id: String,
+        pub continuation_committed: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AbandonLiveInteraction {
         pub channel_id: String,
         pub runtime_id: AgentRuntimeId,
@@ -18276,6 +18289,7 @@ pub enum Input {
     RequeueLiveDelegation(inputs::RequeueLiveDelegation),
     CancelQueuedLiveDelegation(inputs::CancelQueuedLiveDelegation),
     AuthorizeLiveDelegationNarration(inputs::AuthorizeLiveDelegationNarration),
+    AuthorizeLiveDelegationSteer(inputs::AuthorizeLiveDelegationSteer),
     AbandonLiveInteraction(inputs::AbandonLiveInteraction),
     CompleteLiveInteraction(inputs::CompleteLiveInteraction),
     AuthorizeLiveConsequentialEffect(inputs::AuthorizeLiveConsequentialEffect),
@@ -18766,6 +18780,7 @@ impl Input {
             Self::AuthorizeLiveDelegationNarration(_) => {
                 InputKind::AuthorizeLiveDelegationNarration
             }
+            Self::AuthorizeLiveDelegationSteer(_) => InputKind::AuthorizeLiveDelegationSteer,
             Self::AbandonLiveInteraction(_) => InputKind::AbandonLiveInteraction,
             Self::CompleteLiveInteraction(_) => InputKind::CompleteLiveInteraction,
             Self::AuthorizeLiveConsequentialEffect(_) => {
@@ -19235,6 +19250,7 @@ pub enum InputKind {
     RequeueLiveDelegation,
     CancelQueuedLiveDelegation,
     AuthorizeLiveDelegationNarration,
+    AuthorizeLiveDelegationSteer,
     AbandonLiveInteraction,
     CompleteLiveInteraction,
     AuthorizeLiveConsequentialEffect,
@@ -20389,6 +20405,13 @@ pub mod effects {
         pub kind: LiveDelegationNarrationKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveDelegationSteerAuthorized {
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub continuation_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveDelegationResultReleaseAuthorized {
         pub channel_id: String,
         pub interaction_id: String,
@@ -21199,6 +21222,7 @@ pub enum Effect {
     LiveDelegationRequeued(effects::LiveDelegationRequeued),
     LiveDelegationQueuedCancelled(effects::LiveDelegationQueuedCancelled),
     LiveDelegationNarrationAuthorized(effects::LiveDelegationNarrationAuthorized),
+    LiveDelegationSteerAuthorized(effects::LiveDelegationSteerAuthorized),
     LiveDelegationResultReleaseAuthorized(effects::LiveDelegationResultReleaseAuthorized),
     LiveDelegationResultDeliveryAuthorized(effects::LiveDelegationResultDeliveryAuthorized),
     LiveDelegationResultDeliveryResolved(effects::LiveDelegationResultDeliveryResolved),
@@ -21451,6 +21475,7 @@ pub enum EffectKind {
     LiveDelegationRequeued,
     LiveDelegationQueuedCancelled,
     LiveDelegationNarrationAuthorized,
+    LiveDelegationSteerAuthorized,
     LiveDelegationResultReleaseAuthorized,
     LiveDelegationResultDeliveryAuthorized,
     LiveDelegationResultDeliveryResolved,
@@ -23416,6 +23441,9 @@ pub enum TransitionId {
     AuthorizeLiveDelegationNarrationIdle,
     AuthorizeLiveDelegationNarrationAttached,
     AuthorizeLiveDelegationNarrationRunning,
+    AuthorizeLiveDelegationSteerIdle,
+    AuthorizeLiveDelegationSteerAttached,
+    AuthorizeLiveDelegationSteerRunning,
     AuthorizeLiveConsequentialEffectIdle,
     AuthorizeLiveConsequentialEffectAttached,
     AuthorizeLiveConsequentialEffectRunning,
@@ -24740,6 +24768,7 @@ pub fn initial_state() -> State {
         live_assistant_turn_channel_by_ref: Default::default(),
         live_assistant_playback_segment_by_turn: Default::default(),
         live_abandoned_interactions: Default::default(),
+        live_delegation_steered_continuations: Default::default(),
         live_delegation_operation_by_interaction: Default::default(),
         live_delegation_channel_by_operation: Default::default(),
         live_delegation_schedule_state_by_operation: Default::default(),

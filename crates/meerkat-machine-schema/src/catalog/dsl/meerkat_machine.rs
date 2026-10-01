@@ -3935,6 +3935,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_assistant_turn_channel_by_ref: Map<String, String>,
             live_assistant_playback_segment_by_turn: Map<String, u64>,
             live_abandoned_interactions: Set<String>,
+            live_delegation_steered_continuations: Set<String>,
 
             // Several delegations coexist per channel. Each provider user
             // turn (interaction) carries at most one delegation and every
@@ -4554,6 +4555,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_assistant_playback_segment_by_turn = EmptyMap,
             live_assistant_turn_channel_by_ref = EmptyMap,
             live_abandoned_interactions = EmptySet,
+            live_delegation_steered_continuations = EmptySet,
             live_delegation_operation_by_interaction = EmptyMap,
             live_delegation_channel_by_operation = EmptyMap,
             live_delegation_schedule_state_by_operation = EmptyMap,
@@ -5919,6 +5921,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: OperationId,
                 provider_turn_correlation: String,
                 kind: Enum<LiveDelegationNarrationKind>,
+            },
+            AuthorizeLiveDelegationSteer {
+                channel_id: String,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+                interaction_id: String,
+                operation_id: OperationId,
+                provider_turn_correlation: String,
+                continuation_id: String,
+                continuation_committed: bool,
             },
             AbandonLiveInteraction {
                 channel_id: String,
@@ -7413,6 +7426,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 provider_turn_correlation: String,
                 kind: Enum<LiveDelegationNarrationKind>,
             },
+            LiveDelegationSteerAuthorized {
+                channel_id: String,
+                interaction_id: String,
+                operation_id: OperationId,
+                continuation_id: String,
+            },
             LiveDelegationResultReleaseAuthorized {
                 channel_id: String,
                 interaction_id: String,
@@ -8148,6 +8167,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition LiveCloseSettlementResolved => local seam OwnerRealizationOnly,
         disposition LiveDelegationQueuedCancelled => local seam OwnerRealizationOnly,
         disposition LiveDelegationNarrationAuthorized => external seam OwnerRealizationOnly,
+        disposition LiveDelegationSteerAuthorized => external seam OwnerRealizationOnly,
         disposition LiveDelegationResultReleaseAuthorized => external seam OwnerRealizationOnly,
         disposition LiveDelegationResultDeliveryAuthorized => external seam OwnerRealizationOnly,
         disposition LiveDelegationResultDeliveryResolved => external seam OwnerRealizationOnly,
@@ -26975,6 +26995,63 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: operation_id,
                 provider_turn_correlation: provider_turn_correlation,
                 kind: kind
+            }
+        }
+
+        // Speech that continues a user's utterance after the provider created
+        // its delegation (the delegation fired at a pause mid-sentence) is
+        // delivered to that delegation's worker as a steer. The protocol has
+        // no utterance identity: the continuation is the next finished user
+        // turn after a delegation that took an open user turn, before any
+        // other delegation, which is the closest typed stand-in for "the
+        // same utterance". The worker must still accept input (start
+        // authorized or running), the continuation's own canonical row must
+        // be committed, and each continuation steers at most once; the
+        // recorded continuation is what a later delegation excludes from its
+        // request.
+        transition AuthorizeLiveDelegationSteer {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveDelegationSteer {
+                channel_id, runtime_id, fence_token, generation, interaction_id,
+                operation_id, provider_turn_correlation, continuation_id,
+                continuation_committed
+            }
+            guard "continuation_identity_present" { continuation_id != "" }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "exact_operation_join" {
+                self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
+                && self.live_delegation_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
+                && self.live_delegation_provider_turn_by_operation.get_cloned(operation_id) == Some(provider_turn_correlation)
+                && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id)
+            }
+            guard "interaction_not_abandoned" { !self.live_abandoned_interactions.contains(interaction_id) }
+            guard "worker_accepts_input" {
+                self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationWorkerPhase::StartAuthorized)
+                || self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationWorkerPhase::Running)
+            }
+            guard "continuation_committed" { continuation_committed == true }
+            guard "continuation_steers_once" {
+                !self.live_delegation_steered_continuations.contains(continuation_id)
+            }
+            update {
+                self.live_delegation_steered_continuations.insert(continuation_id);
+            }
+            to Idle
+            emit LiveDelegationSteerAuthorized {
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                operation_id: operation_id,
+                continuation_id: continuation_id
             }
         }
 

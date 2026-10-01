@@ -795,6 +795,11 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 input_variant: iv_id("AuthorizeLiveDelegationNarration"),
             },
             EntryInput {
+                name: entry_input_id("authorize_live_delegation_steer"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("AuthorizeLiveDelegationSteer"),
+            },
+            EntryInput {
                 name: entry_input_id("complete_live_interaction"),
                 machine: mi_id("meerkat"),
                 input_variant: iv_id("CompleteLiveInteraction"),

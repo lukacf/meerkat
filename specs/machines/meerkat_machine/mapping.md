@@ -4484,6 +4484,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeLiveDelegationNarrationRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationSteerIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationSteerAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationSteerRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeLiveConsequentialEffectIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7958,6 +7967,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveDelegationNarrationAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationSteerAuthorized`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveDelegationResultReleaseAuthorized`

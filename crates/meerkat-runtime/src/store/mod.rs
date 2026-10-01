@@ -9750,6 +9750,7 @@ mod runtime_store_write_fence_tests {
                 conversation_digest: None,
                 message_count: 0,
                 sequence: 0,
+                owner_contributions: Vec::new(),
             },
             Vec::new(),
             None,

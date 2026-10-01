@@ -3391,6 +3391,7 @@ mod tests {
             conversation_digest: Some("checkpoint-digest".to_string()),
             message_count: 1,
             sequence: 1,
+            owner_contributions: Vec::new(),
         };
         let whole_blob = meerkat_core::RunCheckpointReceipt::issued(
             meerkat_core::RunCheckpointAuthority::WholeBlob(

@@ -3756,6 +3756,7 @@ mod tests {
             conversation_digest: None,
             message_count: 0,
             sequence: seq,
+            owner_contributions: Vec::new(),
         }
     }
 
@@ -5247,6 +5248,7 @@ mod tests {
             conversation_digest: Some("machine-owned-digest".to_string()),
             message_count: 42,
             sequence: 7,
+            owner_contributions: Vec::new(),
         };
 
         store

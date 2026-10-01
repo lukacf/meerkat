@@ -1928,6 +1928,7 @@ async fn recover_durable_tail_capturing(
         // SAME-sequence race; a recovery that already landed is fenced by the
         // machine's prior-commit guard, not by this key.
         sequence: boundary_sequence,
+        owner_contributions: Vec::new(),
     };
     let document = bind_recovered_store_document(&candidate)?;
     let evidence = seal_recovery_evidence(

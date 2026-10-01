@@ -2821,6 +2821,7 @@ impl EphemeralRuntimeDriver {
             conversation_digest: None,
             message_count: 0,
             sequence: boundary_sequence,
+            owner_contributions: Vec::new(),
         })
     }
 

@@ -6561,6 +6561,7 @@ pub(crate) async fn machine_commit_service_turn_terminal_receipt(
         conversation_digest: Some(terminal_digest),
         message_count: committed_message_count,
         sequence: driver.terminal_boundary_sequence(&run_id)?,
+        owner_contributions: Vec::new(),
     };
     let terminal_checkpoint = driver.begin_terminal_transition("service_turn_terminal_commit")?;
     if let Err(error) = driver.machine_commit_terminal_boundary_sequence(&run_id, receipt.sequence)

@@ -203,6 +203,8 @@ fn host_auth_error_response(error: meerkat::HostAuthError) -> axum::response::Re
         | meerkat::HostAuthError::DeviceFlowUnsupported(_) => StatusCode::BAD_REQUEST,
         meerkat::HostAuthError::OAuthFlow(
             OAuthFlowError::Missing
+            | OAuthFlowError::BrowserIdentityMismatch
+            | OAuthFlowError::Connector(_)
             | OAuthFlowError::ProviderMismatch { .. }
             | OAuthFlowError::RedirectUriMismatch
             | OAuthFlowError::TargetMismatch { .. }
@@ -771,7 +773,7 @@ async fn save_tokens_and_consume_browser_flow_unlocked(
         .consume(
             flow.state,
             &meerkat_core::AuthCredentialIdentity::from_auth_binding(auth_binding),
-            flow.provider,
+            meerkat_providers::oauth_flow::OAuthBrowserFlowCompletion::from(flow.provider),
             flow.redirect_uri,
         )
         .map_err(|err| {
@@ -1853,7 +1855,7 @@ mod tests {
         fn start(
             &self,
             _target: meerkat_core::AuthCredentialIdentity,
-            _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+            _provider: meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity,
             _redirect_uri: String,
             _pkce_verifier: String,
         ) -> Result<String, OAuthFlowError> {
@@ -1864,7 +1866,7 @@ mod tests {
             &self,
             _state: &str,
             _target: &meerkat_core::AuthCredentialIdentity,
-            _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+            _provider: meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity,
             _redirect_uri: &str,
         ) -> Result<meerkat_providers::oauth_flow::OAuthFlowRecord, OAuthFlowError> {
             unreachable!("browser consume rollback test only consumes")
@@ -1874,13 +1876,23 @@ mod tests {
             &self,
             _state: &str,
             _target: &meerkat_core::AuthCredentialIdentity,
-            _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+            _provider: meerkat_providers::oauth_flow::OAuthBrowserFlowCompletion,
             _redirect_uri: &str,
         ) -> Result<meerkat_providers::oauth_flow::OAuthFlowRecord, OAuthFlowError> {
             Err(OAuthFlowError::LifecycleRejected {
                 operation: "consume_oauth_browser_flow",
                 detail: "test rejection".to_string(),
             })
+        }
+
+        fn expire(
+            &self,
+            _state: &str,
+            _target: &meerkat_core::AuthCredentialIdentity,
+            _provider: meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity,
+            _redirect_uri: &str,
+        ) -> Result<(), meerkat_providers::oauth_flow::OAuthFlowError> {
+            unreachable!("test authority never retires browser flows")
         }
 
         fn admit_device_code(
@@ -2433,7 +2445,9 @@ mod tests {
             unrelated_state.oauth_flow_authority().consume(
                 state_token,
                 &credential_identity(&openai_auth_binding()),
-                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                meerkat_providers::oauth_flow::OAuthBrowserFlowCompletion::from(
+                    meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt
+                ),
                 redirect_uri,
             ),
             Err(OAuthFlowError::LifecycleRejected {
@@ -2446,7 +2460,9 @@ mod tests {
             .consume(
                 state_token,
                 &credential_identity(&openai_auth_binding()),
-                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                meerkat_providers::oauth_flow::OAuthBrowserFlowCompletion::from(
+                    meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                ),
                 redirect_uri,
             )
             .expect("starting runtime owns the flow");
@@ -2492,7 +2508,9 @@ mod tests {
             .consume(
                 state_token,
                 &credential_identity(&openai_auth_binding()),
-                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                meerkat_providers::oauth_flow::OAuthBrowserFlowCompletion::from(
+                    meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                ),
                 redirect_uri,
             )
             .expect("runtime AuthMachine authority owns the REST login flow");
@@ -3211,7 +3229,9 @@ mod tests {
         let state = registry
             .start(
                 credential_identity(&auth_binding),
-                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(
+                    meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                ),
                 redirect_uri.to_string(),
                 "registry-only-verifier".to_string(),
             )
@@ -3245,7 +3265,9 @@ mod tests {
             .verify(
                 &state,
                 &credential_identity(&auth_binding),
-                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(
+                    meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                ),
                 redirect_uri,
             )
             .expect("raw registry success path is inert and remains unconsumed");
@@ -3378,7 +3400,9 @@ mod tests {
         let state = meerkat_providers::oauth_flow::OAuthFlowAuthority::start(
             &authority,
             credential_identity(&auth_binding),
-            meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            ),
             redirect_uri.to_string(),
             "new-verifier".to_string(),
         )
@@ -3394,7 +3418,9 @@ mod tests {
             &authority,
             &state,
             &credential_identity(&auth_binding),
-            meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            ),
             redirect_uri,
         )
         .expect("newer OAuth flow remains authoritative");
@@ -3434,7 +3460,9 @@ mod tests {
         let state = meerkat_providers::oauth_flow::OAuthFlowAuthority::start(
             &authority,
             credential_identity(&auth_binding),
-            meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            ),
             redirect_uri.to_string(),
             "existing-flow-verifier".to_string(),
         )
@@ -3468,7 +3496,9 @@ mod tests {
             &authority,
             &state,
             &credential_identity(&auth_binding),
-            meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            ),
             redirect_uri,
         )
         .expect("existing OAuth flow remains authoritative");
@@ -3553,7 +3583,9 @@ mod tests {
         let state = meerkat_providers::oauth_flow::OAuthFlowAuthority::start(
             authority.as_ref(),
             credential_identity(&auth_binding),
-            meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            ),
             redirect_uri.to_string(),
             "verifier".to_string(),
         )
@@ -3562,7 +3594,9 @@ mod tests {
             authority.as_ref(),
             &state,
             &credential_identity(&auth_binding),
-            meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            ),
             redirect_uri,
         )
         .expect("browser flow verifies through runtime authority");
@@ -3570,7 +3604,9 @@ mod tests {
             authority.as_ref(),
             &state,
             &credential_identity(&auth_binding),
-            meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_providers::oauth_flow::OAuthBrowserFlowCompletion::from(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            ),
             redirect_uri,
         )
         .expect("test pre-consumes the browser flow");
@@ -3613,7 +3649,9 @@ mod tests {
         let old_state = meerkat_providers::oauth_flow::OAuthFlowAuthority::start(
             authority.as_ref(),
             credential_identity(&auth_binding),
-            meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            ),
             redirect_uri.to_string(),
             "old-verifier".to_string(),
         )
@@ -3621,7 +3659,9 @@ mod tests {
         let new_state = meerkat_providers::oauth_flow::OAuthFlowAuthority::start(
             authority.as_ref(),
             credential_identity(&auth_binding),
-            meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            ),
             redirect_uri.to_string(),
             "new-verifier".to_string(),
         )
@@ -3653,7 +3693,9 @@ mod tests {
             authority.as_ref(),
             &new_state,
             &credential_identity(&auth_binding),
-            meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            ),
             redirect_uri,
         )
         .expect("rollback preserves other admitted browser flow");

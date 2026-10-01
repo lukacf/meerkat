@@ -9,6 +9,9 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use meerkat_core::AuthBindingRef;
+use meerkat_core::AuthCredentialIdentity;
+#[cfg(test)]
+use meerkat_core::OAuthProviderIdentity;
 use meerkat_core::auth::token_store::{
     CredentialMutationError, CredentialMutationOutcome, PersistedTokens, ProviderAuthPersistence,
     TokenKey, TokenStore,
@@ -17,16 +20,17 @@ use meerkat_core::handles::{
     AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot, AuthLeaseTransition,
     GeneratedAuthLeaseHandle, LeaseKey,
 };
-use meerkat_core::{AuthCredentialIdentity, OAuthProviderIdentity};
 
-use crate::oauth_flow::{OAuthDevicePollLease, OAuthFlowAuthority, OAuthFlowError};
+use crate::oauth_flow::{
+    OAuthBrowserFlowCompletion, OAuthDevicePollLease, OAuthFlowAuthority, OAuthFlowError,
+};
 
 /// One verified browser-flow terminal consume request.
 #[derive(Clone)]
 pub struct BrowserOAuthFlowCommit {
     pub authority: Arc<dyn OAuthFlowAuthority>,
     pub state: String,
-    pub provider: OAuthProviderIdentity,
+    pub completion: OAuthBrowserFlowCompletion,
     pub redirect_uri: String,
 }
 
@@ -154,11 +158,15 @@ pub async fn save_oauth_tokens_and_consume_browser_flow(
         ));
     }
 
+    flow.completion
+        .verify_tokens(&tokens)
+        .map_err(|error| flow_error(error.into()))?;
+
     flow.authority
         .verify(
             &flow.state,
             &credential_identity,
-            flow.provider,
+            flow.completion.identity(),
             &flow.redirect_uri,
         )
         .map_err(flow_error)?;
@@ -192,7 +200,7 @@ pub async fn save_oauth_tokens_and_consume_browser_flow(
                         .consume(
                             &flow.state,
                             &credential_identity,
-                            flow.provider,
+                            flow.completion,
                             &flow.redirect_uri,
                         )
                         .map_err(flow_error)?;
@@ -499,7 +507,7 @@ mod tests {
         fn start(
             &self,
             target: AuthCredentialIdentity,
-            provider: OAuthProviderIdentity,
+            provider: crate::oauth_flow::OAuthBrowserFlowIdentity,
             redirect_uri: String,
             pkce_verifier: String,
         ) -> Result<String, OAuthFlowError> {
@@ -511,7 +519,7 @@ mod tests {
             &self,
             state: &str,
             target: &AuthCredentialIdentity,
-            provider: OAuthProviderIdentity,
+            provider: crate::oauth_flow::OAuthBrowserFlowIdentity,
             redirect_uri: &str,
         ) -> Result<crate::oauth_flow::OAuthFlowRecord, OAuthFlowError> {
             self.inner.verify(state, target, provider, redirect_uri)
@@ -521,10 +529,20 @@ mod tests {
             &self,
             state: &str,
             target: &AuthCredentialIdentity,
-            provider: OAuthProviderIdentity,
+            provider: crate::oauth_flow::OAuthBrowserFlowCompletion,
             redirect_uri: &str,
         ) -> Result<crate::oauth_flow::OAuthFlowRecord, OAuthFlowError> {
             self.inner.consume(state, target, provider, redirect_uri)
+        }
+
+        fn expire(
+            &self,
+            state: &str,
+            target: &meerkat_core::AuthCredentialIdentity,
+            provider: crate::oauth_flow::OAuthBrowserFlowIdentity,
+            redirect_uri: &str,
+        ) -> Result<(), crate::oauth_flow::OAuthFlowError> {
+            self.inner.expire(state, target, provider, redirect_uri)
         }
 
         fn admit_device_code(
@@ -598,7 +616,9 @@ mod tests {
         let state = authority
             .start(
                 credential_identity.clone(),
-                OAuthProviderIdentity::OpenAiChatGpt,
+                crate::oauth_flow::OAuthBrowserFlowIdentity::from(
+                    OAuthProviderIdentity::OpenAiChatGpt,
+                ),
                 "http://127.0.0.1/callback".to_string(),
                 "pkce-verifier".to_string(),
             )
@@ -612,7 +632,7 @@ mod tests {
             BrowserOAuthFlowCommit {
                 authority: Arc::clone(&authority),
                 state: state.clone(),
-                provider: OAuthProviderIdentity::OpenAiChatGpt,
+                completion: (OAuthProviderIdentity::OpenAiChatGpt).into(),
                 redirect_uri: "http://127.0.0.1/callback".to_string(),
             },
         )
@@ -631,7 +651,9 @@ mod tests {
             authority.verify(
                 &state,
                 &credential_identity,
-                OAuthProviderIdentity::OpenAiChatGpt,
+                crate::oauth_flow::OAuthBrowserFlowIdentity::from(
+                    OAuthProviderIdentity::OpenAiChatGpt
+                ),
                 "http://127.0.0.1/callback"
             ),
             Err(OAuthFlowError::Missing | OAuthFlowError::RegistryProjectionMissing { .. })
@@ -688,7 +710,9 @@ mod tests {
         let state = authority
             .start(
                 credential_identity.clone(),
-                OAuthProviderIdentity::OpenAiChatGpt,
+                crate::oauth_flow::OAuthBrowserFlowIdentity::from(
+                    OAuthProviderIdentity::OpenAiChatGpt,
+                ),
                 "http://127.0.0.1/callback".to_string(),
                 "pkce-verifier".to_string(),
             )
@@ -702,7 +726,7 @@ mod tests {
             BrowserOAuthFlowCommit {
                 authority: Arc::clone(&authority),
                 state: state.clone(),
-                provider: OAuthProviderIdentity::OpenAiChatGpt,
+                completion: (OAuthProviderIdentity::OpenAiChatGpt).into(),
                 redirect_uri: "http://127.0.0.1/callback".to_string(),
             },
         )
@@ -714,7 +738,9 @@ mod tests {
             authority.verify(
                 &state,
                 &credential_identity,
-                OAuthProviderIdentity::OpenAiChatGpt,
+                crate::oauth_flow::OAuthBrowserFlowIdentity::from(
+                    OAuthProviderIdentity::OpenAiChatGpt
+                ),
                 "http://127.0.0.1/callback"
             ),
             Err(OAuthFlowError::Missing | OAuthFlowError::RegistryProjectionMissing { .. })

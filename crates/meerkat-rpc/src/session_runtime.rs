@@ -17359,7 +17359,7 @@ mod tests {
             .oauth_flow_authority()
             .start(
                 meerkat_core::AuthCredentialIdentity::from_auth_binding(&target),
-                provider,
+                meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(provider),
                 redirect_uri.to_string(),
                 "rpc-persistent-verifier".to_string(),
             )
@@ -17377,7 +17377,7 @@ mod tests {
             .consume(
                 &state,
                 &meerkat_core::AuthCredentialIdentity::from_auth_binding(&target),
-                provider,
+                meerkat_providers::oauth_flow::OAuthBrowserFlowCompletion::from(provider),
                 redirect_uri,
             )
             .expect("surface construction must preserve PersistenceBundle OAuth authority");

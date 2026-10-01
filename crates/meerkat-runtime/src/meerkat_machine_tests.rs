@@ -1147,7 +1147,9 @@ fn oauth_flow_authority_is_owned_by_meerkat_machine() {
         .oauth_flow_authority()
         .start(
             oauth_target(),
-            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowIdentity::from(
+                meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            ),
             redirect_uri.to_string(),
             "verifier".to_string(),
         )
@@ -1157,7 +1159,9 @@ fn oauth_flow_authority_is_owned_by_meerkat_machine() {
         .consume(
             &state,
             &oauth_target(),
-            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowCompletion::from(
+                meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            ),
             redirect_uri,
         )
         .expect("runtime authority consumes OAuth state admitted through another view");
@@ -1179,7 +1183,7 @@ fn persistent_oauth_flow_authority_survives_adapter_recreation_for_same_store() 
         .oauth_flow_authority()
         .start(
             target.clone(),
-            provider,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowIdentity::from(provider),
             redirect_uri.to_string(),
             "verifier".to_string(),
         )
@@ -1188,7 +1192,12 @@ fn persistent_oauth_flow_authority_survives_adapter_recreation_for_same_store() 
     let recovered = MeerkatMachine::persistent(store, memory_blob_store());
     let flow = recovered
         .oauth_flow_authority()
-        .consume(&state, &target, provider, redirect_uri)
+        .consume(
+            &state,
+            &target,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowCompletion::from(provider),
+            redirect_uri,
+        )
         .expect(
             "persistent runtime authority keeps active OAuth payloads across adapter recreation",
         );
@@ -1214,7 +1223,7 @@ fn persistent_oauth_flow_authority_survives_process_cache_restart_for_sqlite_sto
         .oauth_flow_authority()
         .start(
             target.clone(),
-            browser_provider,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowIdentity::from(browser_provider),
             redirect_uri.to_string(),
             "verifier".to_string(),
         )
@@ -1239,7 +1248,12 @@ fn persistent_oauth_flow_authority_survives_process_cache_restart_for_sqlite_sto
     let recovered = MeerkatMachine::persistent(restarted_store, memory_blob_store());
     let browser_flow = recovered
         .oauth_flow_authority()
-        .consume(&state, &target, browser_provider, redirect_uri)
+        .consume(
+            &state,
+            &target,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowCompletion::from(browser_provider),
+            redirect_uri,
+        )
         .expect("browser OAuth payload survives process cache restart");
     assert_eq!(browser_flow.pkce_verifier, "verifier");
 
@@ -1322,7 +1336,7 @@ fn persistent_oauth_authority_cache_rebinds_reopened_sqlite_store_after_drop() {
         .oauth_flow_authority()
         .start(
             target.clone(),
-            provider,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowIdentity::from(provider),
             redirect_uri.to_string(),
             "verifier".to_string(),
         )
@@ -1336,7 +1350,12 @@ fn persistent_oauth_authority_cache_rebinds_reopened_sqlite_store_after_drop() {
     let reopened = MeerkatMachine::persistent(Arc::clone(&reopened_store), memory_blob_store());
     let flow = reopened
         .oauth_flow_authority()
-        .consume(&state, &target, provider, redirect_uri)
+        .consume(
+            &state,
+            &target,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowCompletion::from(provider),
+            redirect_uri,
+        )
         .expect("cached durable authority consumes using the reopened store");
     assert_eq!(flow.pkce_verifier, "verifier");
     drop(reopened);
@@ -1350,7 +1369,12 @@ fn persistent_oauth_authority_cache_rebinds_reopened_sqlite_store_after_drop() {
     let final_machine = MeerkatMachine::persistent(final_store, memory_blob_store());
     let err = final_machine
         .oauth_flow_authority()
-        .consume(&state, &target, provider, redirect_uri)
+        .consume(
+            &state,
+            &target,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowCompletion::from(provider),
+            redirect_uri,
+        )
         .expect_err("consumed browser payload must not rehydrate after reopened-store consume");
     assert!(matches!(
         err,
@@ -1379,7 +1403,7 @@ fn persistent_oauth_authority_cache_rebinds_overlapping_reopened_sqlite_store() 
         .oauth_flow_authority()
         .start(
             target.clone(),
-            provider,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowIdentity::from(provider),
             redirect_uri.to_string(),
             "verifier".to_string(),
         )
@@ -1394,7 +1418,12 @@ fn persistent_oauth_authority_cache_rebinds_overlapping_reopened_sqlite_store() 
 
     reopened
         .oauth_flow_authority()
-        .consume(&state, &target, provider, redirect_uri)
+        .consume(
+            &state,
+            &target,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowCompletion::from(provider),
+            redirect_uri,
+        )
         .expect("cached durable authority should persist through the reopened store");
     drop(reopened);
     drop(reopened_store);
@@ -1407,7 +1436,12 @@ fn persistent_oauth_authority_cache_rebinds_overlapping_reopened_sqlite_store() 
     let final_machine = MeerkatMachine::persistent(final_store, memory_blob_store());
     let err = final_machine
         .oauth_flow_authority()
-        .consume(&state, &target, provider, redirect_uri)
+        .consume(
+            &state,
+            &target,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowCompletion::from(provider),
+            redirect_uri,
+        )
         .expect_err("consumed browser payload must not rehydrate after overlapping-store consume");
     assert!(matches!(
         err,
@@ -1437,7 +1471,7 @@ fn persistent_oauth_release_prunes_durable_payload_snapshot_for_sqlite_store() {
         .oauth_flow_authority()
         .start(
             target.clone(),
-            browser_provider,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowIdentity::from(browser_provider),
             redirect_uri.to_string(),
             "verifier".to_string(),
         )
@@ -1468,7 +1502,12 @@ fn persistent_oauth_release_prunes_durable_payload_snapshot_for_sqlite_store() {
     let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
     let browser_err = restarted
         .oauth_flow_authority()
-        .consume(&state, &target, browser_provider, redirect_uri)
+        .consume(
+            &state,
+            &target,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowCompletion::from(browser_provider),
+            redirect_uri,
+        )
         .expect_err("released browser payload must not rehydrate from durable snapshot");
     assert!(matches!(
         browser_err,
@@ -1545,7 +1584,9 @@ fn oauth_lifecycle_shares_auth_machine_release_authority() {
         .oauth_flow_authority()
         .start(
             target.clone(),
-            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowIdentity::from(
+                meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            ),
             redirect_uri.to_string(),
             "verifier".to_string(),
         )
@@ -1562,7 +1603,9 @@ fn oauth_lifecycle_shares_auth_machine_release_authority() {
         machine.oauth_flow_authority().consume(
             &state,
             &target,
-            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowCompletion::from(
+                meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt
+            ),
             redirect_uri,
         ),
         Err(
@@ -1586,7 +1629,9 @@ fn oauth_lifecycle_release_stays_paired_after_runtime_auth_handle_install() {
         .oauth_flow_authority()
         .start(
             target.clone(),
-            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowIdentity::from(
+                meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            ),
             redirect_uri.to_string(),
             "verifier".to_string(),
         )
@@ -1603,7 +1648,9 @@ fn oauth_lifecycle_release_stays_paired_after_runtime_auth_handle_install() {
         machine.oauth_flow_authority().consume(
             &state,
             &target,
-            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            meerkat_auth_core::oauth_flow::OAuthBrowserFlowCompletion::from(
+                meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt
+            ),
             redirect_uri,
         ),
         Err(

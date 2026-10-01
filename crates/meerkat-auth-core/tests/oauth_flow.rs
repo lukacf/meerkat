@@ -74,7 +74,7 @@ async fn loopback_surfaces_access_denied() {
     let client = Client::new();
     tokio::spawn(async move {
         let _ = client
-            .get(format!("{url}?error=access_denied"))
+            .get(format!("{url}?error=access_denied&state=state"))
             .send()
             .await;
     });
@@ -95,6 +95,96 @@ async fn loopback_times_out_if_no_callback_fires() {
         matches!(err, meerkat_auth_core::auth_oauth::OAuthError::Timeout),
         "got {err:?}"
     );
+}
+
+// Exercise the real callback route and always await its native owner before
+// inspecting the request or outcome. The timeout here only bounds test HTTP.
+async fn rejected_callback_for_query(
+    query: &[(&str, &str)],
+) -> (
+    reqwest::StatusCode,
+    String,
+    meerkat_auth_core::auth_oauth::OAuthError,
+) {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let handle = run_loopback_callback("state".into(), "/callback")
+        .await
+        .unwrap();
+    let response = async {
+        let response = client.get(&handle.redirect_url).query(query).send().await?;
+        let status = response.status();
+        let body = response.text().await?;
+        Ok::<_, reqwest::Error>((status, body))
+    }
+    .await;
+    let outcome = handle.wait(Duration::from_secs(5)).await;
+    let (status, body) = response.unwrap();
+    (status, body, outcome.unwrap_err())
+}
+
+#[tokio::test]
+async fn loopback_rejects_denial_without_state() {
+    let (status, _, error) = rejected_callback_for_query(&[("error", "access_denied")]).await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+    assert!(matches!(
+        error,
+        meerkat_auth_core::auth_oauth::OAuthError::CallbackParse(reason)
+            if reason == "invalid callback"
+    ));
+}
+
+#[tokio::test]
+async fn loopback_rejects_denial_with_mismatched_state() {
+    let (status, _, error) =
+        rejected_callback_for_query(&[("error", "access_denied"), ("state", "other-state")]).await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+    assert!(matches!(
+        error,
+        meerkat_auth_core::auth_oauth::OAuthError::StateMismatch
+    ));
+}
+
+#[tokio::test]
+async fn loopback_redacts_provider_error_and_preserves_error_precedence() {
+    let canaries = [
+        "private-code-canary",
+        "private-error-canary",
+        "private-description-canary",
+        "private-uri-canary",
+    ];
+    let (status, body, error) = rejected_callback_for_query(&[
+        ("state", "state"),
+        ("code", canaries[0]),
+        ("error", canaries[1]),
+        ("error_description", canaries[2]),
+        ("error_uri", canaries[3]),
+    ])
+    .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+    let diagnostic = format!("{error:?}");
+    assert!(matches!(
+        error,
+        meerkat_auth_core::auth_oauth::OAuthError::CallbackParse(reason)
+            if reason == "provider denied callback"
+    ));
+    for canary in canaries {
+        assert!(!body.contains(canary));
+        assert!(!diagnostic.contains(canary));
+    }
+}
+
+#[tokio::test]
+async fn loopback_surfaces_malformed_callback_explicitly() {
+    let (status, _, error) = rejected_callback_for_query(&[("state", "state")]).await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+    assert!(matches!(
+        error,
+        meerkat_auth_core::auth_oauth::OAuthError::CallbackParse(reason)
+            if reason == "invalid callback"
+    ));
 }
 
 // --- Token exchange ---------------------------------------------------

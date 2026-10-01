@@ -21,6 +21,8 @@ pub mod auth_store;
 pub mod authorizers;
 #[cfg(not(target_arch = "wasm32"))]
 mod browser_login;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod connector_oauth;
 pub mod github_copilot;
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(feature = "oauth")]
@@ -59,8 +61,8 @@ pub use browser_login::{
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(feature = "oauth")]
 pub use mcp_oauth::{
-    BrowserOpener, MCP_INTERACTIVE_LOGIN_TIMEOUT, McpAuthMode, McpOAuthAuthority, McpOAuthError,
-    McpServerIdentity,
+    BrowserOpener, MCP_INTERACTIVE_LOGIN_TIMEOUT, McpAuthMode, McpOAuthAccountStrategy,
+    McpOAuthAuthority, McpOAuthCeremonyContext, McpOAuthError, McpServerIdentity,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_core::auth::{

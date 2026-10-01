@@ -9517,7 +9517,7 @@ mod tests {
                 .oauth_flow_authority()
                 .start(
                     meerkat_core::AuthCredentialIdentity::from_auth_binding(&target),
-                    provider,
+                    meerkat_providers::oauth_flow::OAuthBrowserFlowIdentity::from(provider),
                     redirect_uri.to_string(),
                     "rest-persistent-verifier".to_string(),
                 )
@@ -9533,7 +9533,7 @@ mod tests {
             .consume(
                 &state_token,
                 &meerkat_core::AuthCredentialIdentity::from_auth_binding(&target),
-                provider,
+                meerkat_providers::oauth_flow::OAuthBrowserFlowCompletion::from(provider),
                 redirect_uri,
             )
             .expect("reopened REST state must preserve persistent OAuth authority");

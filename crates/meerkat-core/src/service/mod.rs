@@ -353,6 +353,43 @@ impl SessionError {
         )
     }
 
+    /// Structured-data `kind` of [`Self::runtime_teardown_in_progress`].
+    pub const RUNTIME_TEARDOWN_IN_PROGRESS_KIND: &'static str = "runtime_teardown_in_progress";
+
+    /// A runtime teardown (`teardown` names it: `"unregister"` or `"stop"`)
+    /// outlived the caller's bounded wait while its coordinator-owned saga
+    /// keeps running. Retryable: retrying joins the same saga, and the exact
+    /// teardown authority is retained. The structured data carries
+    /// `"code": "SESSION_BUSY"`, so surfaces answer the retryable busy class
+    /// instead of an internal error.
+    pub fn runtime_teardown_in_progress(
+        message: impl Into<String>,
+        runtime_id: impl Into<String>,
+        teardown: &'static str,
+    ) -> Self {
+        Self::FailedWithData {
+            message: message.into(),
+            data: serde_json::json!({
+                "kind": Self::RUNTIME_TEARDOWN_IN_PROGRESS_KIND,
+                "code": "SESSION_BUSY",
+                "teardown": teardown,
+                "runtime_id": runtime_id.into(),
+                "retryable": true,
+                "authority_retained": true,
+            }),
+        }
+    }
+
+    /// Whether this error is a [`Self::runtime_teardown_in_progress`].
+    pub fn is_runtime_teardown_in_progress(&self) -> bool {
+        matches!(
+            self,
+            Self::FailedWithData { data, .. }
+                if data.get("kind").and_then(serde_json::Value::as_str)
+                    == Some(Self::RUNTIME_TEARDOWN_IN_PROGRESS_KIND)
+        )
+    }
+
     /// Return a stable error code string for wire formats.
     pub fn code(&self) -> &'static str {
         match self {
@@ -3259,6 +3296,31 @@ impl dyn SessionService {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_teardown_in_progress_is_typed_and_retryable() {
+        let error = SessionError::runtime_teardown_in_progress(
+            "unregister teardown is still in progress",
+            "runtime-1",
+            "unregister",
+        );
+        assert!(error.is_runtime_teardown_in_progress());
+        let data = error.structured_data().expect("typed data");
+        assert_eq!(
+            data["kind"],
+            SessionError::RUNTIME_TEARDOWN_IN_PROGRESS_KIND
+        );
+        assert_eq!(data["code"], "SESSION_BUSY");
+        assert_eq!(data["retryable"], true);
+        assert_eq!(data["authority_retained"], true);
+        assert!(
+            !SessionError::FailedWithData {
+                message: "other".to_string(),
+                data: serde_json::json!({"kind": "something_else"}),
+            }
+            .is_runtime_teardown_in_progress()
+        );
+    }
 
     /// Held-for-recovery and quarantine are distinct, stable, and never
     /// classify as a service fault. A caller must reach both facts through

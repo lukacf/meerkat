@@ -1829,12 +1829,20 @@ fn session_error_to_runtime_driver(err: SessionError) -> RuntimeDriverError {
 }
 
 fn runtime_driver_error_to_session_error(err: RuntimeDriverError) -> SessionError {
+    if let Some(in_progress) = err.teardown_in_progress_session_error() {
+        return in_progress;
+    }
     SessionError::Agent(meerkat_core::error::AgentError::InternalError(
         err.to_string(),
     ))
 }
 
 fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
+    // A teardown that outlived its bounded wait is still running: answer the
+    // retryable busy class with its typed data, not an internal error.
+    if let Some(in_progress) = err.teardown_in_progress_session_error() {
+        return session_error_to_rpc(in_progress);
+    }
     match err {
         RuntimeDriverError::ValidationFailed { reason } => RpcError {
             code: error::INVALID_PARAMS,
@@ -11762,6 +11770,9 @@ pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
     let code = match &err {
         SessionError::NotFound { .. } => error::SESSION_NOT_FOUND,
         SessionError::Busy { .. } => error::SESSION_BUSY,
+        SessionError::FailedWithData { .. } if err.is_runtime_teardown_in_progress() => {
+            error::SESSION_BUSY
+        }
         SessionError::NotRunning { .. } => error::INTERNAL_ERROR,
         // A durable resume hold is not a service fault: the session exists,
         // its content is retained intact, and no runnable authority may be
@@ -28491,6 +28502,30 @@ mod tests {
         assert!(
             data.get("structured_output").is_none(),
             "finalization failure must not expose non-durable structured_output"
+        );
+    }
+
+    #[test]
+    fn runtime_teardown_in_progress_surfaces_as_retryable_session_busy() {
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::new("rpc-teardown");
+        let rpc_err = runtime_driver_error_to_rpc(RuntimeDriverError::UnregisterInProgress {
+            runtime_id: runtime_id.clone(),
+        });
+        assert_eq!(rpc_err.code, error::SESSION_BUSY);
+        let data = rpc_err.data.expect("typed retryable data");
+        assert_eq!(
+            data["kind"],
+            SessionError::RUNTIME_TEARDOWN_IN_PROGRESS_KIND
+        );
+        assert_eq!(data["retryable"], true);
+
+        let via_session = session_error_to_rpc(runtime_driver_error_to_session_error(
+            RuntimeDriverError::RuntimeStopInProgress { runtime_id },
+        ));
+        assert_eq!(via_session.code, error::SESSION_BUSY);
+        assert_eq!(
+            via_session.data.expect("typed retryable data")["teardown"],
+            "stop"
         );
     }
 

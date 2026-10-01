@@ -347,6 +347,39 @@ them.
   with `LifecycleOperationPending` when a turn took longer than 1 s to wind
   down (#1390); a turn that never ends reports a typed
   `LifecycleOperationProgressStalled` naming the member.
+- `meerkat_contracts::WireLiveAdapterStatus::Closed` is now a struct variant,
+  `Closed { reason: Option<WireLiveCloseReason>, reopen_recommended: bool }`:
+  patterns must become `Closed { .. }` (or use `is_closed()`), and
+  constructors use `WireLiveAdapterStatus::closed()`. The JSON of a plain
+  close is unchanged (`{"status":"closed"}`); `reason` and
+  `reopen_recommended` appear only for a typed close (a media fault).
+  `meerkat_runtime::meerkat_machine::LiveChannelStatusAuthority` gains the
+  public field `media_fault_reopen_recommended: Option<bool>` (struct
+  literals must name it). MeerkatMachine live media health: new inputs
+  `RequestLiveMediaHealth` and `ObserveLiveChannelMediaHealth`, new effects
+  `LiveMediaHealthRequested` and `LiveChannelMediaHealthJudged`,
+  `LiveChannelStatusResolved` gains `media_fault_reopen_recommended`, and
+  `MeerkatMachineState` (schema and runtime) and kernel `State` gain
+  `live_media_health_requested_output_by_channel`,
+  `live_media_health_judged_channels`,
+  `live_media_fault_reopen_recommended_by_channel` and
+  `live_media_fault_reopens_by_session`. New kernel transitions:
+  `RequestLiveMediaHealthIdle`, `RequestLiveMediaHealthAttached`,
+  `RequestLiveMediaHealthRunning`,
+  `ObserveLiveChannelMediaHealthAudibleIdle`,
+  `ObserveLiveChannelMediaHealthAudibleAttached`,
+  `ObserveLiveChannelMediaHealthAudibleRunning`,
+  `ObserveLiveChannelMediaHealthSilentReopenIdle`,
+  `ObserveLiveChannelMediaHealthSilentReopenAttached`,
+  `ObserveLiveChannelMediaHealthSilentReopenRunning`,
+  `ObserveLiveChannelMediaHealthSilentExhaustedIdle`,
+  `ObserveLiveChannelMediaHealthSilentExhaustedAttached` and
+  `ObserveLiveChannelMediaHealthSilentExhaustedRunning`; later discriminants
+  and ordering move in the generated `MeerkatMachineInput::*`,
+  `MeerkatMachineInputVariant::*`, `MeerkatMachineEffect::*`,
+  `MeerkatMachineEffectVariant::*` and kernel `Input::*`, `InputKind::*`,
+  `Effect::*`, `EffectKind::*`, `TransitionId::*`. Exhaustive matches must
+  handle the new variants.
 - `meerkat_contracts::wire::LiveStatusResult` gains the public field
   `provider_input_latency: Option<WireLiveProviderInputLatency>`; struct
   literals must set it (`None` when no measurement exists). The JSON shape is
@@ -578,6 +611,30 @@ them.
 - `meerkat_mob::MobError::is_retirement_in_progress` classifies the typed
   "retirement still in progress" answers (`RetirementInProgress`,
   `MemberRetirementInProgress`, also inside `SharedRetirementFailure`).
+- GPT Live media health (`live/media_health`): at the typed end of a public
+  Live WebRTC channel's first assistant output (unmeasured playback), the
+  runtime sends `live/media_health_requested { channel_id, output_id }`, and
+  the client answers `live/media_health { channel_id, output_id,
+  decoded_frames, audible_frames, max_rms }` with raw decoded-audio counters
+  from the channel's media start. The runtime judges them and returns
+  `LiveMediaHealthResult { verdict: audible | media_fault, reopen_recommended }`.
+  New wire types `LiveMediaHealthRequestedParams`, `LiveMediaHealthParams`,
+  `LiveMediaHealthResult`, `LiveMediaHealthVerdict` and
+  `WireLiveCloseReason`; the catalog now lists the
+  `live/assistant_output_available` and `live/media_health_requested`
+  notifications. SDKs: TypeScript `liveMediaHealth`, Python
+  `live_media_health`. Facade: `ServiceMemberLiveHost::report_experimental_live_media_health`,
+  `ExperimentalLiveMediaHealthError`, `ExperimentalLivePublicObservationKind`
+  (with `ExperimentalLivePublicObservation::kind()`), and runtime
+  `MeerkatMachine::request_live_media_health`,
+  `observe_live_media_health`, `live_media_health_requested_output` with
+  `LiveMediaHealthJudgement`.
+- `meerkat_core::AgentEvent::LiveChannelClosed { session_id, channel_id,
+  reason, reopen_recommended }` (with `LiveChannelCloseReason`), published on
+  the session event stream after the runtime closes a live channel for a
+  typed cause, so observers learn it without polling. Typed in the Python
+  (`LiveChannelClosed`) and TypeScript (`LiveChannelClosedEvent`) SDKs.
+  `AgentEvent` is `#[non_exhaustive]`.
 - `meerkat_mob::store::MobRunStore` gains
   `flow_authority_validation_boundary`, a `#[doc(hidden)]` method with a
   default body. Not a break: existing implementations compile unchanged. Its
@@ -749,6 +806,16 @@ them.
   subscription's own catch-up reads instead of the store-wide poll count. It
   failed 400/400 at 40 copies per core because the mob's remote-turn
   reconciler reads new events from the store on every structural append.
+- A GPT Live WebRTC session whose media track carries silence while the model
+  speaks (transcripts present, decoded audio silent; about 1 in 30-40 public
+  opens) no longer leaves the user in a silent call. The runtime judges the
+  channel's first assistant output from the client's decoded counters; a
+  silent output with a non-empty transcript closes the channel on a typed
+  media fault (ordinary close, retained summary custody included) and
+  recommends one reopen per session, so a broken media path never loops. The
+  Turbo S harness answers every request with real decoded counters (a media
+  fault on an audible channel fails the run) and retries an exchange only
+  after a journaled media-fault close and reopen.
 - Expired OAuth attempts now retire their private persisted payloads when the
   native owner prunes them, including late callbacks and cancelled MCP login.
   Cleanup preserves concurrent live attempts and their deadlines; a failed

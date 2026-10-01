@@ -13,15 +13,15 @@ use crate::{
     CommsTrustAuthorityProtocol, CommsTrustAuthoritySourceKind, CompositionDriver,
     CompositionDriverRustBinding, CompositionInvariant, CompositionInvariantKind,
     CompositionSchema, CompositionStateLimits, CompositionTransactionPlan, CompositionWitness,
-    CompositionWitnessField, CompositionWitnessInput, CompositionWitnessTransition,
-    CompositionWitnessTransitionOrder, DriverDispatchRoute, DriverRefusalClosure,
-    DriverRefusalFieldBinding, DriverRefusalFieldSource, DurableMarkerFieldBinding,
-    DurableMarkerProtocol, DurableMarkerRelationProtocol, EffectHandoffProtocol,
-    EffectTeardownClass, EntryInput, Expr, FeedbackFieldBinding, FeedbackFieldSource,
-    FeedbackInputRef, HandleBridgeFeedbackBinding, MachineInstance, ProtocolGenerationMode,
-    ProtocolHelperReturnShape, ProtocolRustBinding, Route, RouteBindingSource, RouteDelivery,
-    RouteFieldBinding, RouteTarget, RouteTargetKind, RouteVariantId, TeardownObligationClass,
-    WatchedEffect,
+    CompositionWitnessField, CompositionWitnessInput, CompositionWitnessState,
+    CompositionWitnessTransition, CompositionWitnessTransitionOrder, DriverDispatchRoute,
+    DriverRefusalClosure, DriverRefusalFieldBinding, DriverRefusalFieldSource,
+    DurableMarkerFieldBinding, DurableMarkerProtocol, DurableMarkerRelationProtocol,
+    EffectHandoffProtocol, EffectTeardownClass, EntryInput, Expr, FeedbackFieldBinding,
+    FeedbackFieldSource, FeedbackInputRef, HandleBridgeFeedbackBinding, MachineInstance,
+    ProtocolGenerationMode, ProtocolHelperReturnShape, ProtocolRustBinding, Route,
+    RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, RouteTargetKind,
+    RouteVariantId, TeardownObligationClass, WatchedEffect,
 };
 
 // Short-named typed-identity constructors used throughout this module.
@@ -229,7 +229,7 @@ pub fn schedule_bundle_composition() -> CompositionSchema {
         witnesses: vec![
             revision_supersede_route_witness(),
             occurrence_supersede_ack_route_witness(),
-            witness("pause_resume_without_revision", &[]),
+            pause_resume_without_revision_witness(),
         ],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
@@ -530,8 +530,6 @@ pub fn schedule_runtime_bundle_composition() -> CompositionSchema {
         scheduler_rules: vec![],
         invariants: vec![],
         witnesses: vec![
-            witness("runtime_delivery_feedback", &[]),
-            witness("runtime_lease_expiry", &[]),
             revision_supersede_route_witness(),
             occurrence_supersede_ack_route_witness(),
         ],
@@ -618,8 +616,6 @@ pub fn schedule_mob_bundle_composition() -> CompositionSchema {
         scheduler_rules: vec![],
         invariants: vec![],
         witnesses: vec![
-            witness("mob_delivery_feedback", &[]),
-            witness("materialization_failure_classification", &[]),
             revision_supersede_route_witness(),
             occurrence_supersede_ack_route_witness(),
         ],
@@ -2404,6 +2400,53 @@ fn revision_supersede_route_witness() -> CompositionWitness {
     }
 }
 
+/// Pause then Resume returns the schedule to Active without a revision bump,
+/// so neither step supersedes pending occurrences (no route fires).
+fn pause_resume_without_revision_witness() -> CompositionWitness {
+    CompositionWitness {
+        name: witness_id("pause_resume_without_revision"),
+        preload_inputs: vec![
+            witness_input(
+                "schedule",
+                "Pause",
+                vec![witness_field("at_utc_ms", Expr::U64(1))],
+            ),
+            witness_input(
+                "schedule",
+                "Resume",
+                vec![witness_field("at_utc_ms", Expr::U64(2))],
+            ),
+        ],
+        expected_routes: vec![],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![CompositionWitnessState {
+            machine: mi_id("schedule"),
+            phase: Some(phase_id("Active")),
+            fields: vec![witness_field("revision", Expr::U64(1))],
+        }],
+        expected_transitions: vec![
+            witness_transition("schedule", "PauseActiveOrPaused"),
+            witness_transition("schedule", "ResumeActiveOrPaused"),
+        ],
+        expected_transition_order: vec![witness_transition_order(
+            "schedule",
+            "PauseActiveOrPaused",
+            "schedule",
+            "ResumeActiveOrPaused",
+        )],
+        state_limits: CompositionStateLimits {
+            step_limit: 3,
+            pending_input_limit: 2,
+            pending_route_limit: 0,
+            delivered_route_limit: 0,
+            emitted_effect_limit: 2,
+            seq_limit: 0,
+            set_limit: 0,
+            map_limit: 0,
+        },
+    }
+}
+
 fn occurrence_supersede_ack_route_witness() -> CompositionWitness {
     CompositionWitness {
         name: witness_id("occurrence_supersede_ack_route"),
@@ -3893,8 +3936,6 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
             references_actors: vec![act_id("auth_machine_authority"), act_id("auth_lease_owner")],
         }],
         witnesses: vec![
-            witness("auth_lease_lifecycle_publication_round_trip", &[]),
-            witness("auth_release_oauth_flow_drain_round_trip", &[]),
         ],
         deep_domain_cardinality: 2,
         deep_domain_overrides: std::collections::BTreeMap::new(),

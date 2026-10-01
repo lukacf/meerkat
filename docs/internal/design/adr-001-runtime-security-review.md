@@ -265,3 +265,18 @@ Only documentation changed. No runtime security tests, live policy migration,
 credential exchange or cross-host enforcement have been executed by this work.
 The first implementation gate remains a production-owner tracer and one
 governed end-to-end vertical slice with actual sink and fault assertions.
+
+## Follow-on owner composition protocol
+
+All four requested bus reviewers subsequently accepted the revision 7
+[owner composition protocol](adr-001-implementation/owner-composition-proposal.md)
+and its [keyed-request amendment](adr-001-implementation/owner-composition-keyed-request-amendment.md).
+The [review record](adr-001-implementation/owner-composition-review.md) pins those
+exact bytes and verdicts separately from the original frozen ADR revision 6.
+The [operational addendum](adr-001-implementation/owner-composition-operational-addendum.md)
+records the accepted availability consequences, including witness outage
+blocking model invocation and honest unresolved destination outcomes.
+
+These are accepted protocol decisions. They do not establish runtime
+enforcement, current recovery authority or deployment acceptance. The original
+ADR and review snapshots remain unchanged.

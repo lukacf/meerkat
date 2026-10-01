@@ -19801,13 +19801,30 @@ mod tests {
                 )
                 .await
                 .expect("independent replacement generation begins");
-                let current = member_host
-                    .validate_experimental_live_channel_custody(
-                        reopened.channel_id(),
-                        reopened.pending_receipt(),
-                    )
-                    .await
-                    .unwrap();
+                // The producer entering its generation and the preparation job
+                // recording `Generating` are independent steps after the
+                // capture; the job records it without waiting on the producer.
+                let current = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        let current = member_host
+                            .validate_experimental_live_channel_custody(
+                                reopened.channel_id(),
+                                reopened.pending_receipt(),
+                            )
+                            .await
+                            .unwrap();
+                        if *current.context_preparation()
+                            != LiveContextPreparationStatus::Preparing(
+                                LiveContextPreparationStage::Capturing,
+                            )
+                        {
+                            return current;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the replacement preparation leaves capture");
                 assert!(matches!(
                     current.phase(),
                     crate::surface::ExperimentalLiveChannelPhaseStatus::Pending

@@ -2892,6 +2892,23 @@ mod tests {
     /// A late-summary open can still carry the newest turns verbatim: they
     /// are startup history under their own roles, and the availability
     /// notice says the earlier history is still being summarized.
+    /// Recent turns past either startup limit do not fit: the Late open then
+    /// carries only the plain pending notice.
+    #[test]
+    fn recent_turns_past_the_startup_limits_do_not_fit() {
+        let utterance = |text: String| Message::User(meerkat_core::types::UserMessage::text(text));
+        let many: Vec<Message> = (0..LIVE_STARTUP_INPUT_MAX_ITEMS)
+            .map(|turn| utterance(format!("turn {turn}")))
+            .collect();
+        assert!(!recent_history_fits(&many));
+        assert!(recent_history_fits(&many[1..]));
+        let long = vec![utterance(
+            "word ".repeat(LIVE_STARTUP_INPUT_TOKEN_BUDGET * 2),
+        )];
+        assert!(!recent_history_fits(&long));
+        assert!(recent_history_fits(&[]));
+    }
+
     #[test]
     fn pending_context_can_carry_the_most_recent_turns_verbatim() {
         let factory = PublicLiveBrokerFactory::try_from_target(realtime_target(

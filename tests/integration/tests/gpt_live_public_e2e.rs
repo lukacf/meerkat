@@ -6275,6 +6275,45 @@ async fn run_s104_handoff_voice_typed_voice(
         // "answered after the window".
         let answer_at_audio_end = answer_back;
         wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(60)).await?;
+        // A delegated answer is complete only when that delegation's result
+        // is delivered, which takes as long as its worker takes: the session
+        // is quiet while the worker runs, so 3 s of quiet can close the
+        // window before the result lands (a 3.4 s worker did, a795bb3f run
+        // 3). Wait for that exact delegation's typed delivery or typed
+        // non-delivery, then settle again.
+        let timeline_after_question = live.peer.timeline().await?;
+        if let Some(delegation_created_ms) =
+            timeline_find(&timeline_after_question, TimelineKind::DelegationCreated, back_start)
+                .map(|entry| entry.t_ms)
+        {
+            let seen_before = seen_executor_turns.clone();
+            wait_executor_turn(&mut live, &mut seen_executor_turns, started).await?;
+            let operation_id = seen_executor_turns
+                .difference(&seen_before)
+                .next()
+                .cloned()
+                .ok_or("the reopen answer's delegated worker turn was not recorded")?;
+            let delivered = wait_result_commentary(
+                &mut live,
+                "reopened channel (handoff_back)",
+                &operation_id,
+                delegation_created_ms,
+            )
+            .await;
+            println!(
+                "GPT_LIVE_S104_REOPEN_DELEGATION delegation_created_ms={delegation_created_ms} result_commentary_ms={:?} delegation_to_result_ms={:?} outcome={}",
+                delivered.as_ref().ok(),
+                delivered
+                    .as_ref()
+                    .ok()
+                    .map(|result_ms| result_ms.saturating_sub(delegation_created_ms)),
+                match &delivered {
+                    Ok(_) => "delivered".to_owned(),
+                    Err(error) => format!("not_delivered: {error}"),
+                }
+            );
+            wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(60)).await?;
+        }
         let events_settled = live.peer.events().await?;
         let answer_back = answer_transcript_text(&events_settled, events_before_back);
         let timeline_back = live.peer.timeline().await?;

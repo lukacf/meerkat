@@ -1184,13 +1184,15 @@ async fn discard_rest_runtime_pre_admission(
     }
 }
 
+/// Returns the detached cleanup task's handle; production callers detach it,
+/// tests await it.
 fn spawn_rest_runtime_pre_admission_rekey_and_cleanup(
     state: AppState,
     session_id: SessionId,
     from_input_id: meerkat_core::lifecycle::InputId,
     to_input_id: meerkat_core::lifecycle::InputId,
     handle: meerkat_runtime::completion::CompletionHandle,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         rekey_rest_runtime_pre_admission(
             &state.runtime_pre_admissions,
@@ -1257,7 +1259,7 @@ fn spawn_rest_runtime_pre_admission_rekey_and_cleanup(
                 );
             }
         }
-    });
+    })
 }
 
 fn wrap_rest_runtime_completion_cleanup(
@@ -3921,13 +3923,14 @@ async fn admit_runtime_input_via_webhook(
                             if let Some(registration) = pre_admission_registration.as_mut() {
                                 registration.track_input_id(accepted_input_id.clone());
                             }
-                            spawn_rest_runtime_pre_admission_rekey_and_cleanup(
+                            // Detached: the cleanup outlives this request.
+                            drop(spawn_rest_runtime_pre_admission_rekey_and_cleanup(
                                 state.clone(),
                                 session_id.clone(),
                                 input_id.clone(),
                                 accepted_input_id.clone(),
                                 handle,
-                            );
+                            ));
                             if let Some(registration) = pre_admission_registration.take() {
                                 registration.disarm();
                             }
@@ -9148,8 +9151,14 @@ mod tests {
             .await
             .expect("test machine should accept pending completion input");
         let handle = handle.expect("pending completion input should return a completion handle");
+        // Join the stop until terminal: the plain stop returns
+        // `RuntimeStopInProgress` once its caller grace elapses under load.
+        let registration = adapter
+            .current_session_registration_witness(session_id)
+            .await
+            .expect("the fixture registration is current");
         adapter
-            .stop_runtime_executor(session_id, reason)
+            .stop_runtime_executor_until_terminal_if_current(&registration, reason)
             .await
             .expect("test machine should resolve pending completion as runtime terminated");
         handle
@@ -9606,11 +9615,7 @@ mod tests {
                 .expect("check live absence")
         );
         assert!(state.runtime_adapter.contains_session(&session_id).await);
-        state
-            .runtime_adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("external owner unregisters after apply returns");
+        unregister_rest_runtime_until_terminal(&state.runtime_adapter, &session_id).await;
     }
 
     #[tokio::test]
@@ -9626,11 +9631,7 @@ mod tests {
             .discard_live_session(&session_id)
             .await
             .expect("discard live session");
-        state
-            .runtime_adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("remove runtime registration");
+        unregister_rest_runtime_until_terminal(&state.runtime_adapter, &session_id).await;
 
         let input_id = meerkat_core::lifecycle::InputId::new();
         let admission = state
@@ -10033,19 +10034,28 @@ mod tests {
         state: &AppState,
         session_id: &SessionId,
     ) {
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            loop {
-                match state.runtime_adapter.unregister_session(session_id).await {
-                    Ok(()) => return,
-                    Err(meerkat_runtime::RuntimeDriverError::UnregisterInProgress { .. }) => {
-                        tokio::task::yield_now().await;
-                    }
-                    Err(error) => panic!("runtime session unregister failed: {error}"),
-                }
-            }
-        })
-        .await
-        .expect("runtime session unregister must reach a terminal result");
+        unregister_rest_runtime_until_terminal(&state.runtime_adapter, session_id).await;
+    }
+
+    /// Unregister `session_id`'s exact current runtime registration and join
+    /// its teardown saga until terminal. A plain `unregister_session` returns
+    /// `UnregisterInProgress` once its 2 s caller grace elapses while the saga
+    /// keeps running (issue #1104), which a loaded threaded `cargo test` run
+    /// reaches; a test that needs the registration gone joins the saga.
+    async fn unregister_rest_runtime_until_terminal(
+        adapter: &meerkat_runtime::meerkat_machine::MeerkatMachine,
+        session_id: &SessionId,
+    ) {
+        let Some(registration) = adapter
+            .current_session_registration_witness(session_id)
+            .await
+        else {
+            return;
+        };
+        adapter
+            .unregister_session_registration_until_terminal_if_current(&registration)
+            .await
+            .expect("exact registration teardown reaches terminal completion");
     }
 
     #[cfg(feature = "comms")]
@@ -10691,11 +10701,7 @@ mod tests {
             .discard_live_session(&target_session_id)
             .await
             .expect("test cleanup should discard rebuilt live session");
-        state
-            .runtime_adapter
-            .unregister_session(&target_session_id)
-            .await
-            .expect("test cleanup should unregister rebuilt runtime");
+        unregister_rest_runtime_until_terminal(&state.runtime_adapter, &target_session_id).await;
         let replacement = try_create_deferred_rest_runtime_session(&state)
             .await
             .expect("post-rebuild cleanup should release active capacity");
@@ -11087,11 +11093,7 @@ mod tests {
             .discard_live_session(&session_id)
             .await
             .expect("discard completed live session before recovery");
-        state
-            .runtime_adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        unregister_rest_runtime_until_terminal(&state.runtime_adapter, &session_id).await;
 
         let input_id = meerkat_core::lifecycle::InputId::new();
         let admission = state
@@ -11170,11 +11172,7 @@ mod tests {
             "direct CoreExecutor apply helper must leave runtime retirement to the post-handoff machine saga"
         );
 
-        state
-            .runtime_adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("test cleanup should drive canonical unregister");
+        unregister_rest_runtime_until_terminal(&state.runtime_adapter, &session_id).await;
 
         try_create_deferred_rest_runtime_session(&state)
             .await
@@ -11300,11 +11298,7 @@ mod tests {
             )
             .await
             .expect("archive should retire through machine authority");
-        state
-            .runtime_adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("cold archived recovery starts without a runtime registration");
+        unregister_rest_runtime_until_terminal(&state.runtime_adapter, &session_id).await;
         assert!(
             !state.runtime_adapter.contains_session(&session_id).await,
             "test must remove the archived runtime registration before recovery"
@@ -14455,11 +14449,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             .discard_live_session(&session_id)
             .await
             .expect("discard live session");
-        state
-            .runtime_adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        unregister_rest_runtime_until_terminal(&state.runtime_adapter, &session_id).await;
         assert!(
             !state.runtime_adapter.contains_session(&session_id).await,
             "test starts with no live runtime registration"
@@ -14543,11 +14533,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             .await
             .expect("deferred session create should succeed");
         let session_id = created.session_id;
-        state
-            .runtime_adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        unregister_rest_runtime_until_terminal(&state.runtime_adapter, &session_id).await;
         assert!(
             !state.runtime_adapter.contains_session(&session_id).await,
             "test starts with no runtime registration"
@@ -14821,11 +14807,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             .await
             .expect("deferred session create should succeed");
         let session_id = created.session_id;
-        state
-            .runtime_adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        unregister_rest_runtime_until_terminal(&state.runtime_adapter, &session_id).await;
 
         let registration_lock = rest_runtime_registration_lock(&state, &session_id);
         let registration_guard = registration_lock.mutex().lock().await;
@@ -14875,7 +14857,9 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
 
         drop(registration_guard);
         drop(registration_lock);
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), continue_task)
+        // Awaiting the task is the signal; the deadline only bounds a broken
+        // run (a whole rebuild turn under a loaded threaded run can exceed 5 s).
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), continue_task)
             .await
             .expect("rebuild continue should finish after lock release")
             .expect("rebuild continue task should not panic");
@@ -14896,11 +14880,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         let mut state = load_rest_state_with_capacity(&temp, 1).await;
         state.llm_client_override = Some(Arc::new(MockLlmClient));
         let session_id = create_completed_rest_runtime_session(&state).await;
-        state
-            .runtime_adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        unregister_rest_runtime_until_terminal(&state.runtime_adapter, &session_id).await;
         let runtime_was_registered = state.runtime_adapter.contains_session(&session_id).await;
         state
             .runtime_adapter
@@ -14983,11 +14963,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             state.runtime_adapter.contains_session(&session_id).await,
             "REST external cleanup must not recursively unregister machine authority"
         );
-        state
-            .runtime_adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("machine-owned saga should remove the stopped REST runtime");
+        unregister_rest_runtime_until_terminal(&state.runtime_adapter, &session_id).await;
         assert!(!state.runtime_adapter.contains_session(&session_id).await);
 
         let handle = wrap_rest_runtime_completion_cleanup(state, session_id, handle);
@@ -15056,26 +15032,19 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             "runtime stopped during cleanup",
         )
         .await;
-        spawn_rest_runtime_pre_admission_rekey_and_cleanup(
+        let cleanup = spawn_rest_runtime_pre_admission_rekey_and_cleanup(
             state.clone(),
             session_id.clone(),
             input_id.clone(),
             input_id,
             handle,
         );
-
-        for _ in 0..200 {
-            if !state.runtime_adapter.contains_session(&session_id).await
-                && !state
-                    .runtime_pre_admissions
-                    .lock()
-                    .await
-                    .contains_key(&session_id)
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        // The cleanup task finishing is the signal; the deadline only bounds
+        // a broken run.
+        tokio::time::timeout(std::time::Duration::from_secs(30), cleanup)
+            .await
+            .expect("the background completion cleanup finishes")
+            .expect("the background completion cleanup task joins");
 
         assert!(
             !state.runtime_adapter.contains_session(&session_id).await,

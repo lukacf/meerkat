@@ -1057,7 +1057,15 @@ async fn unregister_rest_runtime_if_new_idle_locked(
     {
         return Ok(());
     }
-    state.runtime_adapter.unregister_session(session_id).await
+    // Join the new registration's teardown until terminal. The plain
+    // unregister's caller grace answers a saga still completing with
+    // `UnregisterInProgress`, which turned an accepted admission into an
+    // error and replaced an API error's class with Internal.
+    state
+        .runtime_adapter
+        .unregister_current_session_registration_until_terminal(session_id)
+        .await
+        .map(|_| ())
 }
 
 async fn unregister_rest_runtime_after_api_error_locked(
@@ -8015,20 +8023,15 @@ async fn cleanup_mcp_session(state: &AppState, session_id: &SessionId) {
     }
 }
 
+/// Archive cleanup joins the runtime teardown until terminal. The archive
+/// already committed; the plain unregister's caller grace answered a saga
+/// still completing with `UnregisterInProgress`, which failed the cleanup and
+/// skipped the MCP, bridge-mob and comms steps that follow it.
 async fn cleanup_archived_session_runtime(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<(), SessionError> {
-    match state.runtime_adapter.unregister_session(session_id).await {
-        Ok(())
-        | Err(
-            meerkat_runtime::RuntimeDriverError::NotFound { .. }
-            | meerkat_runtime::RuntimeDriverError::Destroyed
-            | meerkat_runtime::RuntimeDriverError::NotReady { .. },
-        ) => {}
-        Err(error) => return Err(runtime_driver_error_to_session_error(error)),
-    }
-    cleanup_rest_runtime_after_unregistered(state, session_id).await
+    cleanup_archived_session_runtime_until_terminal(state, session_id).await
 }
 
 /// [`cleanup_archived_session_runtime`] for a completed turn's cleanup: join
@@ -8122,8 +8125,14 @@ async fn cleanup_archived_session_surface_runtime(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<(), SessionError> {
-    match state.runtime_adapter.unregister_session(session_id).await {
-        Ok(())
+    // Joined until terminal for the same reason as
+    // `cleanup_archived_session_runtime`.
+    match state
+        .runtime_adapter
+        .unregister_current_session_registration_until_terminal(session_id)
+        .await
+    {
+        Ok(_)
         | Err(
             meerkat_runtime::RuntimeDriverError::NotFound { .. }
             | meerkat_runtime::RuntimeDriverError::Destroyed

@@ -226,9 +226,14 @@ mod context {
             ) {
                 Ok(request) => request,
                 Err(error) => {
+                    // Compensation joins the new registration's teardown
+                    // until terminal; the plain unregister's caller grace
+                    // would report a saga still completing as a failure.
                     if !runtime_was_registered
-                        && let Err(cleanup_error) =
-                            self.runtime_adapter.unregister_session(session_id).await
+                        && let Err(cleanup_error) = self
+                            .runtime_adapter
+                            .unregister_current_session_registration_until_terminal(session_id)
+                            .await
                     {
                         return Err(RecoveryError::BindingPreparation {
                             session_id: session_id.clone(),

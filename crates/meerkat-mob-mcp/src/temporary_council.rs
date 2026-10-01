@@ -3480,6 +3480,14 @@ async fn cleanup_council(
                     // Already gone: the association released with it.
                     released_participants.push(participant.order);
                 }
+                // The debt is the retry anchor either way; a retirement still
+                // running past its budget is reported as such, not as failed.
+                Ok(Err(error)) if error.is_retirement_in_progress() => {
+                    debts.push(TemporaryCouncilCleanupDebt {
+                        subject: format!("participant:{}", participant.order),
+                        detail: format!("retire still in progress: {error}"),
+                    });
+                }
                 Ok(Err(error)) => debts.push(TemporaryCouncilCleanupDebt {
                     subject: format!("participant:{}", participant.order),
                     detail: format!("retire failed: {error}"),

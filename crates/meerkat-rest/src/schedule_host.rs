@@ -207,13 +207,16 @@ impl RestScheduleContext {
         {
             Ok(result) => result,
             Err(error) => {
+                // Compensation joins the teardown until terminal; the plain
+                // unregister's caller grace would report a saga still
+                // completing as a failed cleanup.
                 let cleanup_result = self
                     .runtime
                     .runtime_adapter
-                    .unregister_session(&session_id)
+                    .unregister_current_session_registration_until_terminal(&session_id)
                     .await;
                 return Err(ScheduleDomainError::Internal(match cleanup_result {
-                    Ok(()) => error.to_string(),
+                    Ok(_) => error.to_string(),
                     Err(cleanup_error) => format!(
                         "{error}; additionally failed to unregister prepared runtime session: {cleanup_error}"
                     ),
@@ -239,7 +242,7 @@ impl RestScheduleContext {
             if let Err(cleanup_error) = self
                 .runtime
                 .runtime_adapter
-                .unregister_session(&result.session_id)
+                .unregister_current_session_registration_until_terminal(&result.session_id)
                 .await
             {
                 return Err(ScheduleDomainError::Internal(format!(

@@ -218,12 +218,17 @@ impl ArchiveRuntimeCleanup {
     /// archive: unregister from the runtime adapter, drop pending event
     /// streams, tear down MCP adapters, destroy mob state, abort comms
     /// drain.
+    ///
+    /// The archive already committed, so the runtime teardown is joined until
+    /// terminal. The plain unregister's caller grace answers a saga that is
+    /// still completing with `UnregisterInProgress`, which used to fail this
+    /// cleanup and skip every step after it.
     pub async fn run(
         &self,
         session_id: &SessionId,
     ) -> Result<(), meerkat_core::service::SessionError> {
         self.runtime_adapter
-            .unregister_session(session_id)
+            .unregister_current_session_registration_until_terminal(session_id)
             .await
             .map_err(Self::runtime_cleanup_error)?;
         self.run_after_runtime_unregistered(session_id).await

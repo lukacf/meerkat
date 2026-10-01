@@ -1666,6 +1666,19 @@ impl MobError {
         }
     }
 
+    /// Whether this is a typed "retirement still in progress" answer: the
+    /// caller's retirement budget elapsed while the process-owned saga keeps
+    /// running with its durable anchor retained. Not a failure; retrying the
+    /// retirement joins or resumes the same saga. Sees through
+    /// [`Self::SharedRetirementFailure`].
+    pub fn is_retirement_in_progress(&self) -> bool {
+        match self {
+            Self::SharedRetirementFailure(error) => error.is_retirement_in_progress(),
+            Self::RetirementInProgress { .. } | Self::MemberRetirementInProgress { .. } => true,
+            _ => false,
+        }
+    }
+
     /// Whether this error means the addressed target (mob, profile, member,
     /// flow, run, or work unit) does not exist.
     ///
@@ -1891,6 +1904,30 @@ impl crate::runtime::MobRespawnError {
 mod tests {
     use super::*;
     use crate::validate::{Diagnostic, DiagnosticCode, DiagnosticSeverity};
+
+    #[test]
+    fn retirement_in_progress_is_classified_through_shared_failures() {
+        let member = MobError::MemberRetirementInProgress {
+            member_id: AgentIdentity::from("member"),
+            stage: "actor_retirement_saga".to_string(),
+        };
+        assert!(member.is_retirement_in_progress());
+        let session = MobError::RetirementInProgress {
+            session_id: meerkat_core::SessionId::new(),
+            stage: "runtime_control_retire".to_string(),
+        };
+        assert!(session.is_retirement_in_progress());
+        assert!(MobError::SharedRetirementFailure(Arc::new(member)).is_retirement_in_progress());
+        assert!(
+            !MobError::MemberRetirementAdmissionPending {
+                member_id: AgentIdentity::from("member"),
+                stage: "actor_command_admission".to_string(),
+            }
+            .is_retirement_in_progress(),
+            "a retirement that was never admitted is not in progress"
+        );
+        assert!(!MobError::Internal("boom".to_string()).is_retirement_in_progress());
+    }
 
     #[test]
     fn test_profile_not_found_display() {

@@ -95,9 +95,10 @@ impl McpConnection {
         let service = match &config.transport {
             McpTransportConfig::Stdio(stdio) => {
                 let mut cmd = Command::new(&stdio.command);
-                // The child dies with its owner: dropping the connection or an
-                // aborted connect attempt sends SIGKILL synchronously, instead
-                // of relying on a kill task that a stopping runtime may never run.
+                // Fallback kill: rmcp kills the child from a spawned task when the
+                // transport is dropped, but a stopping runtime may never run that
+                // task. kill-on-drop makes dropping the child itself send SIGKILL,
+                // so the process still ends; its exit is asynchronous either way.
                 cmd.kill_on_drop(true);
                 cmd.args(&stdio.args);
                 for (key, value) in &stdio.env {

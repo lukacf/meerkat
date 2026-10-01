@@ -1181,6 +1181,44 @@ mod orchestrator {
         }
     }
 
+    /// The realtime open-projection admission owner for `service`.
+    ///
+    /// Production uses the one process-wide owner, which admits a single
+    /// worst-case projection at a time and refuses concurrent opens as
+    /// backpressured. The facade's unit tests run many independent services in
+    /// parallel in one process, so there each persistent service gets its own
+    /// owner (as meerkat-openai's test factories do): a test's opens contend
+    /// only with that test's own opens, never with an unrelated test's.
+    #[cfg(not(test))]
+    fn realtime_open_projection_admission<B: SessionAgentBuilder + 'static>(
+        _service: &Arc<PersistentSessionService<B>>,
+    ) -> RealtimeOpenProjectionAdmission {
+        RealtimeOpenProjectionAdmission::global().clone()
+    }
+
+    #[cfg(test)]
+    fn realtime_open_projection_admission<B: SessionAgentBuilder + 'static>(
+        service: &Arc<PersistentSessionService<B>>,
+    ) -> RealtimeOpenProjectionAdmission {
+        static OWNERS: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<usize, RealtimeOpenProjectionAdmission>>,
+        > = std::sync::OnceLock::new();
+        let key = Arc::as_ptr(service).cast::<()>() as usize;
+        OWNERS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(key)
+            .or_insert_with(|| {
+                RealtimeOpenProjectionAdmission::new(
+                    meerkat_core::image_content::REALTIME_OPEN_PROJECTION_MEMORY_BUDGET_BYTES,
+                    meerkat_core::image_content::REALTIME_OPEN_PROJECTION_MEMORY_BUDGET_BYTES,
+                )
+                .unwrap_or_else(|_| RealtimeOpenProjectionAdmission::global().clone())
+            })
+            .clone()
+    }
+
     impl<B: SessionAgentBuilder + 'static> LiveOrchestrator<'_, B> {
         fn recovery_context(&self) -> RecoveryContext<'_, B> {
             RecoveryContext {
@@ -1441,7 +1479,7 @@ mod orchestrator {
             // hydrate blob-backed image history. The take-once slot carried on
             // the returned config transfers this same lease through provider
             // seed acknowledgement; no payload-bearing waiter is queued.
-            let open_projection_lease = RealtimeOpenProjectionAdmission::global()
+            let open_projection_lease = realtime_open_projection_admission(self.service)
                 .try_acquire()
                 .map_err(|error| {
                     SessionError::Agent(AgentError::InternalError(error.to_string()))
@@ -1504,7 +1542,7 @@ mod orchestrator {
             turning_mode: meerkat_contracts::RealtimeTurningMode,
             policy: &super::live_summary::LiveContextSummaryPolicy,
         ) -> Result<RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError> {
-            let lease = RealtimeOpenProjectionAdmission::global()
+            let lease = realtime_open_projection_admission(self.service)
                 .try_acquire()
                 .map_err(|error| {
                     SessionError::Agent(AgentError::InternalError(error.to_string()))
@@ -1583,7 +1621,7 @@ mod orchestrator {
                     Arc::clone(self.service),
                 )),
             );
-            let lease = RealtimeOpenProjectionAdmission::global()
+            let lease = realtime_open_projection_admission(self.service)
                 .try_acquire()
                 .map_err(|error| {
                     SessionError::Agent(AgentError::InternalError(error.to_string()))

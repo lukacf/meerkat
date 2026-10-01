@@ -15565,8 +15565,13 @@ mod tests {
             #[cfg(feature = "comms")]
             {
                 let comms: Arc<dyn meerkat_core::agent::CommsRuntime> = Arc::new(
-                    meerkat_comms::CommsRuntime::inproc_only("gpt-live-pump-exit-test")
-                        .expect("inproc comms runtime"),
+                    // Unique per session: the in-process comms registry is
+                    // process-global, so a fixed name collides when tests run
+                    // in parallel in one process.
+                    meerkat_comms::CommsRuntime::inproc_only(&format!(
+                        "gpt-live-pump-exit-test-{session_id}"
+                    ))
+                    .expect("inproc comms runtime"),
                 );
                 runtime
                     .maybe_spawn_mob_comms_drain(

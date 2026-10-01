@@ -1,7 +1,7 @@
 // Generated raw event types for @rkat/web
 // Source: artifacts/schemas/events.json
 
-export type AgentErrorClass = "llm" | "store" | "tool" | "policy_indeterminate" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "skill" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
+export type AgentErrorClass = "llm" | "operation_refused" | "store" | "tool" | "policy_indeterminate" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "skill" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
 
 export type AgentErrorReason = {
   reason_type: "llm_rate_limited";
@@ -357,6 +357,10 @@ export type InterruptedToolRunDisposition = {
   kind: "unknown";
 };
 
+export type LiveBridgeEffectKind = "model_computation" | "read_only_memory_snapshot" | "tool_dispatch" | "durable_memory_mutation" | "comms" | "helper_spawn" | "external_io";
+
+export type LiveBridgeEffectOutcome = "committed" | "failed" | "unknown";
+
 export type LiveChannelId = string;
 
 export interface LiveContextObservationId {
@@ -365,7 +369,7 @@ export interface LiveContextObservationId {
   nonce: string;
 }
 
-export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "server_error" | "server_overloaded" | "connection_reset" | "unknown" | "stream_parse_error" | "incomplete_response" | "authorization_route_changed" | "request_too_large" | "quota_exhausted" | "policy_stop";
+export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "server_error" | "server_overloaded" | "connection_reset" | "unknown" | "stream_parse_error" | "incomplete_response" | "operation_refused" | "operation_observation_unavailable" | "operation_authorization_unavailable" | "authorization_route_changed" | "request_too_large" | "quota_exhausted" | "policy_stop";
 
 export type LlmProviderErrorRetryability = "retryable" | "non_retryable";
 
@@ -439,6 +443,10 @@ export type OpenAiReasoningMode = "standard" | "pro";
 
 export type OpenAiTextVerbosity = "low" | "medium" | "high";
 
+export type OperationId = string;
+
+export type OperationObservationPhase = "outcome";
+
 export type OutputSchema = {
   compat?: SchemaCompat;
   format?: SchemaFormat;
@@ -451,6 +459,7 @@ export type PeerId = string;
 
 export interface PendingCallbackToolCall {
   args: unknown;
+  settlement_failures?: ToolDispatchSettlementFailure[];
   tool_name: string;
   tool_use_id: string;
 }
@@ -836,6 +845,17 @@ export type ToolConfigChangedPayload = {
   target: string;
 };
 
+export type ToolDispatchAdmissionSource = "configured_gate" | "context_gate" | "authorization_audit";
+
+export interface ToolDispatchSettlementFailure {
+  admission_source: ToolDispatchAdmissionSource;
+  effect_kind: LiveBridgeEffectKind;
+  failure_kind: ToolDispatchTerminalErrorKind;
+  physical_outcome: LiveBridgeEffectOutcome;
+}
+
+export type ToolDispatchTerminalErrorKind = "not_found" | "unavailable" | "invalid_arguments" | "execution_failed" | "timeout" | "access_denied" | "authorization_refused" | "operation_observation_unavailable" | "operation_authorization_unavailable" | "policy_denied" | "policy_indeterminate" | "other" | "callback_pending";
+
 export type ToolName = string;
 
 export type ToolProcessCessation = {
@@ -1152,6 +1172,12 @@ export interface CompactionFailedEvent {
   type: "compaction_failed";
 }
 
+export interface OperationObservationFailedEvent {
+  operation_id: OperationId;
+  phase: OperationObservationPhase;
+  type: "operation_observation_failed";
+}
+
 export interface BudgetWarningEvent {
   budget_type: BudgetType;
   limit: number;
@@ -1330,6 +1356,7 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "compaction_completed",
   "compaction_failed",
   "budget_warning",
+  "operation_observation_failed",
   "retrying",
   "model_fallback_staged",
   "model_fallback_committed",
@@ -1379,6 +1406,7 @@ export type AgentEvent =
   CompactionStartedEvent |
   CompactionCompletedEvent |
   CompactionFailedEvent |
+  OperationObservationFailedEvent |
   BudgetWarningEvent |
   RetryingEvent |
   SkillsResolvedEvent |

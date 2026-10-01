@@ -123,6 +123,7 @@ export interface WireToolResult {
   tool_use_id: string;
   content: WireToolResultContent;
   is_error?: boolean;
+  settlement_failures?: ToolDispatchSettlementFailure[];
 }
 
 export interface WireSessionHistory {
@@ -162,6 +163,21 @@ export interface CommsParams {
 export interface SkillsParams {
   skills_enabled: boolean;
   skill_refs: Array<{ source_uuid: string; skill_name: string }>;
+}
+
+export type LiveBridgeEffectKind = "model_computation" | "read_only_memory_snapshot" | "tool_dispatch" | "durable_memory_mutation" | "comms" | "helper_spawn" | "external_io";
+
+export type LiveBridgeEffectOutcome = "committed" | "failed" | "unknown";
+
+export type ToolDispatchAdmissionSource = "configured_gate" | "context_gate" | "authorization_audit";
+
+export type ToolDispatchTerminalErrorKind = "not_found" | "unavailable" | "invalid_arguments" | "execution_failed" | "timeout" | "access_denied" | "authorization_refused" | "operation_observation_unavailable" | "operation_authorization_unavailable" | "policy_denied" | "policy_indeterminate" | "other" | "callback_pending";
+
+export interface ToolDispatchSettlementFailure {
+  admission_source: ToolDispatchAdmissionSource;
+  effect_kind: LiveBridgeEffectKind;
+  failure_kind: ToolDispatchTerminalErrorKind;
+  physical_outcome: LiveBridgeEffectOutcome;
 }
 
 export type PrincipalId = string;

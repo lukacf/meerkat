@@ -58,6 +58,7 @@ class WireToolResult:
     tool_use_id: str = ''
     content: Optional[WireToolResultContent] = None
     is_error: Optional[bool] = None
+    settlement_failures: list[ToolDispatchSettlementFailure] = field(default_factory=list)
 
 
 @dataclass
@@ -171,6 +172,34 @@ def _expect_wire_const(value: Any, expected: Any, context: str) -> Any:
         raise _wire_parse_error(context, f"expected constant `{expected}`")
     return value
 
+
+
+# Tool result companion contract for LiveBridgeEffectKind.
+LiveBridgeEffectKind = Literal['model_computation', 'read_only_memory_snapshot', 'tool_dispatch', 'durable_memory_mutation', 'comms', 'helper_spawn', 'external_io']
+
+# Terminal observation for one consumed live bridge effect authority.
+#
+# `Unknown` means dispatch began but its physical outcome cannot be proven.
+# It is terminal and must never be retried or relabeled as committed.
+LiveBridgeEffectOutcome = Literal['committed', 'failed', 'unknown']
+
+# Which configured admission reported a settlement failure.
+ToolDispatchAdmissionSource = Literal['configured_gate', 'context_gate', 'authorization_audit']
+
+# Tool result companion contract for ToolDispatchTerminalErrorKind.
+ToolDispatchTerminalErrorKind = Literal['not_found', 'unavailable', 'invalid_arguments', 'execution_failed', 'timeout', 'access_denied', 'authorization_refused', 'operation_observation_unavailable', 'operation_authorization_unavailable', 'policy_denied', 'policy_indeterminate', 'other', 'callback_pending']
+
+@dataclass
+class ToolDispatchSettlementFailure:
+    """A diagnostic that accompanies, and never replaces, the physical result.
+
+This contains no error text, tool arguments, credentials or execution
+authority. The admission owner retains any exact internal failure and the
+selected physical outcome until its generated settlement succeeds."""
+    admission_source: ToolDispatchAdmissionSource
+    effect_kind: LiveBridgeEffectKind
+    failure_kind: ToolDispatchTerminalErrorKind
+    physical_outcome: LiveBridgeEffectOutcome
 
 
 # Stable, caller-visible principal id.

@@ -22,10 +22,13 @@ import type {
   GeminiImageMetadata,
   InterruptedInputKind,
   InterruptedToolRunDisposition,
+  LiveBridgeEffectKind,
+  LiveBridgeEffectOutcome,
   LiveChannelId,
   LiveContextObservationId,
   MeerkatSchema,
   OpenAiImageMetadata,
+  OperationId,
   OutputSchema,
   PeerId,
   ProfileId,
@@ -53,6 +56,9 @@ import type {
   ToolConfigChangeOperation,
   ToolConfigChangeStatus,
   ToolConfigChangedPayload,
+  ToolDispatchAdmissionSource,
+  ToolDispatchSettlementFailure,
+  ToolDispatchTerminalErrorKind,
   ToolName,
   ToolProcessCessation,
   ToolProcessSpawner,
@@ -61,7 +67,7 @@ import type {
   TranscriptRewriteSelection,
 } from './types.js';
 
-export type AgentErrorClass = "llm" | "store" | "tool" | "policy_indeterminate" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "skill" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
+export type AgentErrorClass = "llm" | "operation_refused" | "store" | "tool" | "policy_indeterminate" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "skill" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
 
 /**
  * Stable identifier for a configured hook.
@@ -78,7 +84,7 @@ export type HookPoint = "run_started" | "run_completed" | "run_failed" | "pre_ll
  */
 export type HookReasonCode = "policy_violation" | "safety_violation" | "schema_violation" | "timeout" | "runtime_error";
 
-export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "server_error" | "server_overloaded" | "connection_reset" | "unknown" | "stream_parse_error" | "incomplete_response" | "authorization_route_changed" | "request_too_large" | "quota_exhausted" | "policy_stop";
+export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "server_error" | "server_overloaded" | "connection_reset" | "unknown" | "stream_parse_error" | "incomplete_response" | "operation_refused" | "operation_observation_unavailable" | "operation_authorization_unavailable" | "authorization_route_changed" | "request_too_large" | "quota_exhausted" | "policy_stop";
 
 export type LlmProviderErrorRetryability = "retryable" | "non_retryable";
 
@@ -891,11 +897,18 @@ export type ModelFallbackSkippedTarget = {
 };
 
 /**
+ * Stage whose observation could not be retained after the real operation.
+ * A diagnostic never changes the operation's returned result or permits retry.
+ */
+export type OperationObservationPhase = "outcome";
+
+/**
  * One externally routed callback tool call inside a suspended assistant
  * tool-use batch.
  */
 export interface PendingCallbackToolCall {
   args: unknown;
+  settlement_failures?: ToolDispatchSettlementFailure[];
   tool_name: string;
   tool_use_id: string;
 }
@@ -1360,6 +1373,10 @@ export type AgentEvent = {
 } | {
   reason: CompactionFailureReason;
   type: "compaction_failed";
+} | {
+  operation_id: OperationId;
+  phase: OperationObservationPhase;
+  type: "operation_observation_failed";
 } | {
   budget_type: BudgetType;
   limit: number;

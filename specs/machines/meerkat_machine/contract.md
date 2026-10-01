@@ -129,6 +129,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `turn_tool_overlay_allow_active`: `Bool`
 - `turn_tool_overlay_allow_names`: `Set<ToolName>`
 - `turn_tool_overlay_deny_names`: `Set<ToolName>`
+- `input_authority_bindings`: `Map<String, String>`
+- `input_authority_batch_keys`: `Map<String, String>`
+- `authority_staged_run`: `Option<RunId>`
+- `authority_staged_batch`: `Option<String>`
 - `input_phases`: `Map<String, InputPhase>`
 - `input_terminal_kind`: `Map<String, InputTerminalKind>`
 - `input_superseded_by`: `Map<String, String>`
@@ -497,6 +501,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
 - `AcceptWithoutWake`(input_id: InputId)
+- `BindInputAuthority`(input_id: String, authority_binding: String, authority_batch_key: String)
 - `Recycle`
 - `RequestDeferredTools`(authorities: Map<ToolName, ToolVisibilityWitness>)
 
@@ -571,7 +576,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveBoundaryUnavailable`(input_id: String)
 - `JoinLiveBoundaryDurableAppend`(run_id: RunId, input_id: String)
 - `ResolveLiveBoundaryDurableAppendJoin`(run_id: RunId, input_id: String, lane: InputLane, observation: LiveBoundaryJoinObservation)
-- `ResolveAdmissionPlan`(input_id: String, input_kind: AdmissionInputKind, requested_lane: Option<InputLane>, continuation_kind: AdmissionContinuationKind, turn_append_shape: AdmissionTurnAppendShape, silent_intent_match: Bool, existing_superseded_input_id: Option<String>, runtime_running: Bool, active_turn_boundary_available: Bool, without_wake: Bool)
+- `ResolveAdmissionPlan`(input_id: String, authority_binding: Option<String>, authority_batch_key: Option<String>, input_kind: AdmissionInputKind, requested_lane: Option<InputLane>, continuation_kind: AdmissionContinuationKind, turn_append_shape: AdmissionTurnAppendShape, silent_intent_match: Bool, existing_superseded_input_id: Option<String>, runtime_running: Bool, active_turn_boundary_available: Bool, without_wake: Bool)
 - `ResolveAdmissionValidation`(input_id: String, input_kind: AdmissionInputKind, input_origin: AdmissionInputOriginKind, durability: InputDurabilityKind, peer_handling_mode_valid: Bool, peer_response_terminal_structurally_valid: Bool, peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus)
 - `ResolveAdmissionIdempotency`(input_id: String, idempotency_key: Option<String>)
 - `RegisterAcceptedIdempotency`(input_id: String, idempotency_key: String)
@@ -1157,39 +1162,39 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Source Inputs: `ResolveAdmissionPlan`, `QueueAccepted`, `SteerAccepted`
 - Transitions: `ResolveAdmissionPlanRequestedTerminalQueueIdle`, `ResolveAdmissionPlanRequestedTerminalQueueAttached`, `ResolveAdmissionPlanRequestedTerminalQueueRunning`, `ResolveAdmissionPlanRequestedTerminalSteerIdle`, `ResolveAdmissionPlanRequestedTerminalSteerAttached`, `ResolveAdmissionPlanRequestedTerminalSteerRunning`, `ResolveAdmissionPlanRequestedQueueIdle`, `ResolveAdmissionPlanRequestedQueueAttached`, `ResolveAdmissionPlanRequestedQueueRunning`, `ResolveAdmissionPlanRequestedSteerIdle`, `ResolveAdmissionPlanRequestedSteerAttached`, `ResolveAdmissionPlanRequestedSteerRunning`, `ResolveAdmissionPlanDefaultQueueKindIdle`, `ResolveAdmissionPlanDefaultQueueKindAttached`, `ResolveAdmissionPlanDefaultQueueKindRunning`, `ResolveAdmissionPlanDefaultPeerMessageOrRequestIdle`, `ResolveAdmissionPlanDefaultPeerMessageOrRequestAttached`, `ResolveAdmissionPlanDefaultPeerMessageOrRequestRunning`, `ResolveAdmissionPlanPeerResponseProgressIdle`, `ResolveAdmissionPlanPeerResponseProgressAttached`, `ResolveAdmissionPlanPeerResponseProgressRunning`, `ResolveAdmissionPlanDefaultPeerResponseTerminalIdle`, `ResolveAdmissionPlanDefaultPeerResponseTerminalAttached`, `ResolveAdmissionPlanDefaultPeerResponseTerminalRunning`, `ResolveAdmissionPlanDefaultContinuationIdle`, `ResolveAdmissionPlanDefaultContinuationAttached`, `ResolveAdmissionPlanDefaultContinuationRunning`, `ResolveAdmissionPlanWorkgraphAttentionContinuationIdle`, `ResolveAdmissionPlanWorkgraphAttentionContinuationAttached`, `ResolveAdmissionPlanWorkgraphAttentionContinuationRunning`, `ResolveAdmissionPlanOperationIdle`, `ResolveAdmissionPlanOperationAttached`, `ResolveAdmissionPlanOperationRunning`, `QueueAcceptedIdle`, `QueueAcceptedAttached`, `QueueAcceptedRunning`, `QueueAcceptedRetired`, `QueueAcceptedStopped`, `SteerAcceptedIdle`, `SteerAcceptedAttached`, `SteerAcceptedRunning`, `SteerAcceptedRetired`, `SteerAcceptedStopped`
 - Guard Expansion:
-  - `ResolveAdmissionPlanRequestedTerminalQueueIdle`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `terminal_queue_override`
-  - `ResolveAdmissionPlanRequestedTerminalQueueAttached`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `terminal_queue_override`
-  - `ResolveAdmissionPlanRequestedTerminalQueueRunning`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `terminal_queue_override`
-  - `ResolveAdmissionPlanRequestedTerminalSteerIdle`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `terminal_steer_override`
-  - `ResolveAdmissionPlanRequestedTerminalSteerAttached`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `terminal_steer_override`
-  - `ResolveAdmissionPlanRequestedTerminalSteerRunning`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `terminal_steer_override`
-  - `ResolveAdmissionPlanRequestedQueueIdle`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `queue_override`
-  - `ResolveAdmissionPlanRequestedQueueAttached`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `queue_override`
-  - `ResolveAdmissionPlanRequestedQueueRunning`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `queue_override`
-  - `ResolveAdmissionPlanRequestedSteerIdle`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `steer_override`
-  - `ResolveAdmissionPlanRequestedSteerAttached`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `steer_override`
-  - `ResolveAdmissionPlanRequestedSteerRunning`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `steer_override`
-  - `ResolveAdmissionPlanDefaultQueueKindIdle`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_queue_kind`
-  - `ResolveAdmissionPlanDefaultQueueKindAttached`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_queue_kind`
-  - `ResolveAdmissionPlanDefaultQueueKindRunning`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_queue_kind`
-  - `ResolveAdmissionPlanDefaultPeerMessageOrRequestIdle`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_peer_message_or_request`
-  - `ResolveAdmissionPlanDefaultPeerMessageOrRequestAttached`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_peer_message_or_request`
-  - `ResolveAdmissionPlanDefaultPeerMessageOrRequestRunning`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_peer_message_or_request`
-  - `ResolveAdmissionPlanPeerResponseProgressIdle`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `peer_response_progress`, `coalesce_target_tracked_if_present`
-  - `ResolveAdmissionPlanPeerResponseProgressAttached`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `peer_response_progress`, `coalesce_target_tracked_if_present`
-  - `ResolveAdmissionPlanPeerResponseProgressRunning`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `peer_response_progress`, `coalesce_target_tracked_if_present`
-  - `ResolveAdmissionPlanDefaultPeerResponseTerminalIdle`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_peer_response_terminal`
-  - `ResolveAdmissionPlanDefaultPeerResponseTerminalAttached`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_peer_response_terminal`
-  - `ResolveAdmissionPlanDefaultPeerResponseTerminalRunning`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_peer_response_terminal`
-  - `ResolveAdmissionPlanDefaultContinuationIdle`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_continuation`
-  - `ResolveAdmissionPlanDefaultContinuationAttached`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_continuation`
-  - `ResolveAdmissionPlanDefaultContinuationRunning`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_continuation`
-  - `ResolveAdmissionPlanWorkgraphAttentionContinuationIdle`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `workgraph_attention_continuation`
-  - `ResolveAdmissionPlanWorkgraphAttentionContinuationAttached`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `workgraph_attention_continuation`
-  - `ResolveAdmissionPlanWorkgraphAttentionContinuationRunning`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `workgraph_attention_continuation`
-  - `ResolveAdmissionPlanOperationIdle`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `operation`
-  - `ResolveAdmissionPlanOperationAttached`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `operation`
-  - `ResolveAdmissionPlanOperationRunning`: `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `operation`
+  - `ResolveAdmissionPlanRequestedTerminalQueueIdle`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `terminal_queue_override`
+  - `ResolveAdmissionPlanRequestedTerminalQueueAttached`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `terminal_queue_override`
+  - `ResolveAdmissionPlanRequestedTerminalQueueRunning`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `terminal_queue_override`
+  - `ResolveAdmissionPlanRequestedTerminalSteerIdle`: `exact_input_authority_binding`, `same_authority_supersession`, `governed_live_steer_unavailable`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `terminal_steer_override`
+  - `ResolveAdmissionPlanRequestedTerminalSteerAttached`: `exact_input_authority_binding`, `same_authority_supersession`, `governed_live_steer_unavailable`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `terminal_steer_override`
+  - `ResolveAdmissionPlanRequestedTerminalSteerRunning`: `exact_input_authority_binding`, `same_authority_supersession`, `governed_live_steer_unavailable`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `terminal_steer_override`
+  - `ResolveAdmissionPlanRequestedQueueIdle`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `queue_override`
+  - `ResolveAdmissionPlanRequestedQueueAttached`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `queue_override`
+  - `ResolveAdmissionPlanRequestedQueueRunning`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `queue_override`
+  - `ResolveAdmissionPlanRequestedSteerIdle`: `exact_input_authority_binding`, `same_authority_supersession`, `governed_live_steer_unavailable`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `steer_override`
+  - `ResolveAdmissionPlanRequestedSteerAttached`: `exact_input_authority_binding`, `same_authority_supersession`, `governed_live_steer_unavailable`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `steer_override`
+  - `ResolveAdmissionPlanRequestedSteerRunning`: `exact_input_authority_binding`, `same_authority_supersession`, `governed_live_steer_unavailable`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `steer_override`
+  - `ResolveAdmissionPlanDefaultQueueKindIdle`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_queue_kind`
+  - `ResolveAdmissionPlanDefaultQueueKindAttached`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_queue_kind`
+  - `ResolveAdmissionPlanDefaultQueueKindRunning`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_queue_kind`
+  - `ResolveAdmissionPlanDefaultPeerMessageOrRequestIdle`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_peer_message_or_request`
+  - `ResolveAdmissionPlanDefaultPeerMessageOrRequestAttached`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_peer_message_or_request`
+  - `ResolveAdmissionPlanDefaultPeerMessageOrRequestRunning`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_peer_message_or_request`
+  - `ResolveAdmissionPlanPeerResponseProgressIdle`: `exact_input_authority_binding`, `same_authority_supersession`, `governed_live_steer_unavailable`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `peer_response_progress`, `coalesce_target_tracked_if_present`
+  - `ResolveAdmissionPlanPeerResponseProgressAttached`: `exact_input_authority_binding`, `same_authority_supersession`, `governed_live_steer_unavailable`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `peer_response_progress`, `coalesce_target_tracked_if_present`
+  - `ResolveAdmissionPlanPeerResponseProgressRunning`: `exact_input_authority_binding`, `same_authority_supersession`, `governed_live_steer_unavailable`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `peer_response_progress`, `coalesce_target_tracked_if_present`
+  - `ResolveAdmissionPlanDefaultPeerResponseTerminalIdle`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_peer_response_terminal`
+  - `ResolveAdmissionPlanDefaultPeerResponseTerminalAttached`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_peer_response_terminal`
+  - `ResolveAdmissionPlanDefaultPeerResponseTerminalRunning`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_peer_response_terminal`
+  - `ResolveAdmissionPlanDefaultContinuationIdle`: `exact_input_authority_binding`, `same_authority_supersession`, `governed_live_steer_unavailable`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_continuation`
+  - `ResolveAdmissionPlanDefaultContinuationAttached`: `exact_input_authority_binding`, `same_authority_supersession`, `governed_live_steer_unavailable`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_continuation`
+  - `ResolveAdmissionPlanDefaultContinuationRunning`: `exact_input_authority_binding`, `same_authority_supersession`, `governed_live_steer_unavailable`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `default_continuation`
+  - `ResolveAdmissionPlanWorkgraphAttentionContinuationIdle`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `workgraph_attention_continuation`
+  - `ResolveAdmissionPlanWorkgraphAttentionContinuationAttached`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `workgraph_attention_continuation`
+  - `ResolveAdmissionPlanWorkgraphAttentionContinuationRunning`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `workgraph_attention_continuation`
+  - `ResolveAdmissionPlanOperationIdle`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `operation`
+  - `ResolveAdmissionPlanOperationAttached`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `operation`
+  - `ResolveAdmissionPlanOperationRunning`: `exact_input_authority_binding`, `same_authority_supersession`, `runtime_running_matches_phase`, `turn_append_shape_matches_kind`, `operation`
   - `QueueAcceptedIdle`: `not_already_tracked`, `live_admission_authorized_queue_lane`
   - `QueueAcceptedAttached`: `not_already_tracked`, `live_admission_authorized_queue_lane`
   - `QueueAcceptedRunning`: `not_already_tracked`, `live_admission_authorized_queue_lane`
@@ -1231,11 +1236,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Source Inputs: `StageForRun`
 - Transitions: `StageForRunIdle`, `StageForRunAttached`, `StageForRunRunning`, `StageForRunRetired`, `StageForRunStopped`
 - Guard Expansion:
-  - `StageForRunIdle`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`
-  - `StageForRunAttached`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`
-  - `StageForRunRunning`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`
-  - `StageForRunRetired`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`
-  - `StageForRunStopped`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`
+  - `StageForRunIdle`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`
+  - `StageForRunAttached`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`
+  - `StageForRunRunning`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`
+  - `StageForRunRetired`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`
+  - `StageForRunStopped`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`
 - Emitted By Transitions: `RecordRunAssociation`
 
 ### `AuthorizedRuntimeLoopRunCommit`
@@ -1409,6 +1414,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `unregister_drain_obligations_require_draining`
 - `current_run_only_while_running_or_retired`
 - `current_run_has_pre_run_phase`
+- `input_authority_bindings_have_native_owner`
 - `staged_inputs_are_not_queued`
 - `staged_inputs_have_run_association`
 - `live_boundary_delivery_only_for_queued_steer`
@@ -8876,10 +8882,62 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `InputLifecycleNotice`
 - To: `Stopped`
 
+### `BindInputAuthorityIdle`
+- From: `Idle`
+- On: `BindInputAuthority`(input_id, authority_binding, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_authority_binding`
+  - `immutable_binding`
+  - `immutable_batch_key`
+- To: `Idle`
+
+### `BindInputAuthorityAttached`
+- From: `Attached`
+- On: `BindInputAuthority`(input_id, authority_binding, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_authority_binding`
+  - `immutable_binding`
+  - `immutable_batch_key`
+- To: `Attached`
+
+### `BindInputAuthorityRunning`
+- From: `Running`
+- On: `BindInputAuthority`(input_id, authority_binding, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_authority_binding`
+  - `immutable_binding`
+  - `immutable_batch_key`
+- To: `Running`
+
+### `BindInputAuthorityRetired`
+- From: `Retired`
+- On: `BindInputAuthority`(input_id, authority_binding, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_authority_binding`
+  - `immutable_binding`
+  - `immutable_batch_key`
+- To: `Retired`
+
+### `BindInputAuthorityStopped`
+- From: `Stopped`
+- On: `BindInputAuthority`(input_id, authority_binding, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_authority_binding`
+  - `immutable_binding`
+  - `immutable_batch_key`
+- To: `Stopped`
+
 ### `ResolveAdmissionPlanRequestedTerminalQueueIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `terminal_queue_override`
@@ -8888,8 +8946,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedTerminalQueueAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `terminal_queue_override`
@@ -8898,8 +8958,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedTerminalQueueRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `terminal_queue_override`
@@ -8908,8 +8970,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedTerminalSteerIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
+  - `governed_live_steer_unavailable`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `terminal_steer_override`
@@ -8918,8 +8983,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedTerminalSteerAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
+  - `governed_live_steer_unavailable`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `terminal_steer_override`
@@ -8928,8 +8996,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedTerminalSteerRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
+  - `governed_live_steer_unavailable`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `terminal_steer_override`
@@ -8938,8 +9009,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedQueueIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `queue_override`
@@ -8948,8 +9021,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedQueueAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `queue_override`
@@ -8958,8 +9033,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedQueueRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `queue_override`
@@ -8968,8 +9045,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedSteerIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
+  - `governed_live_steer_unavailable`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `steer_override`
@@ -8978,8 +9058,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedSteerAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
+  - `governed_live_steer_unavailable`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `steer_override`
@@ -8988,8 +9071,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedSteerRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
+  - `governed_live_steer_unavailable`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `steer_override`
@@ -8998,8 +9084,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultQueueKindIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `default_queue_kind`
@@ -9008,8 +9096,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultQueueKindAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `default_queue_kind`
@@ -9018,8 +9108,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultQueueKindRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `default_queue_kind`
@@ -9028,8 +9120,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultPeerMessageOrRequestIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `default_peer_message_or_request`
@@ -9038,8 +9132,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultPeerMessageOrRequestAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `default_peer_message_or_request`
@@ -9048,8 +9144,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultPeerMessageOrRequestRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `default_peer_message_or_request`
@@ -9058,8 +9156,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanPeerResponseProgressIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
+  - `governed_live_steer_unavailable`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `peer_response_progress`
@@ -9069,8 +9170,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanPeerResponseProgressAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
+  - `governed_live_steer_unavailable`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `peer_response_progress`
@@ -9080,8 +9184,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanPeerResponseProgressRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
+  - `governed_live_steer_unavailable`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `peer_response_progress`
@@ -9091,8 +9198,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultPeerResponseTerminalIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `default_peer_response_terminal`
@@ -9101,8 +9210,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultPeerResponseTerminalAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `default_peer_response_terminal`
@@ -9111,8 +9222,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultPeerResponseTerminalRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `default_peer_response_terminal`
@@ -9121,8 +9234,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultContinuationIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
+  - `governed_live_steer_unavailable`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `default_continuation`
@@ -9131,8 +9247,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultContinuationAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
+  - `governed_live_steer_unavailable`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `default_continuation`
@@ -9141,8 +9260,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultContinuationRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
+  - `governed_live_steer_unavailable`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `default_continuation`
@@ -9151,8 +9273,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanWorkgraphAttentionContinuationIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `workgraph_attention_continuation`
@@ -9161,8 +9285,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanWorkgraphAttentionContinuationAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `workgraph_attention_continuation`
@@ -9171,8 +9297,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanWorkgraphAttentionContinuationRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `workgraph_attention_continuation`
@@ -9181,8 +9309,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanOperationIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `operation`
@@ -9191,8 +9321,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanOperationAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `operation`
@@ -9201,8 +9333,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanOperationRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake)
 - Guards:
+  - `exact_input_authority_binding`
+  - `same_authority_supersession`
   - `runtime_running_matches_phase`
   - `turn_append_shape_matches_kind`
   - `operation`
@@ -11394,6 +11528,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_sequence_bound`
   - `input_recovery_lane_bound`
   - `current_run_matches`
+  - `homogeneous_run_authority`
 - Emits: `RecordRunAssociation`
 - To: `Idle`
 
@@ -11406,6 +11541,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_sequence_bound`
   - `input_recovery_lane_bound`
   - `current_run_matches`
+  - `homogeneous_run_authority`
 - Emits: `RecordRunAssociation`
 - To: `Attached`
 
@@ -11418,6 +11554,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_sequence_bound`
   - `input_recovery_lane_bound`
   - `current_run_matches`
+  - `homogeneous_run_authority`
 - Emits: `RecordRunAssociation`
 - To: `Running`
 
@@ -11430,6 +11567,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_sequence_bound`
   - `input_recovery_lane_bound`
   - `current_run_matches`
+  - `homogeneous_run_authority`
 - Emits: `RecordRunAssociation`
 - To: `Retired`
 
@@ -11442,6 +11580,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_sequence_bound`
   - `input_recovery_lane_bound`
   - `current_run_matches`
+  - `homogeneous_run_authority`
 - Emits: `RecordRunAssociation`
 - To: `Stopped`
 
@@ -12000,6 +12139,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `JoinLiveBoundaryDurableAppend`(run_id, input_id)
 - Guards:
   - `current_run_matches`
+  - `live_join_input_is_ungoverned`
+  - `live_join_run_is_ungoverned`
   - `turn_at_model_boundary`
   - `no_cancel_after_boundary`
   - `run_not_stopped`
@@ -12215,6 +12356,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_tracked`
   - `input_not_live_boundary_joined`
   - `live_admission_authorized_supersede_target`
+  - `same_input_authority`
 - Emits: `RecordTerminalOutcome`
 - To: `Idle`
 
@@ -12225,6 +12367,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_tracked`
   - `input_not_live_boundary_joined`
   - `live_admission_authorized_supersede_target`
+  - `same_input_authority`
 - Emits: `RecordTerminalOutcome`
 - To: `Attached`
 
@@ -12235,6 +12378,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_tracked`
   - `input_not_live_boundary_joined`
   - `live_admission_authorized_supersede_target`
+  - `same_input_authority`
 - Emits: `RecordTerminalOutcome`
 - To: `Running`
 
@@ -12245,6 +12389,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_tracked`
   - `input_not_live_boundary_joined`
   - `live_admission_authorized_supersede_target`
+  - `same_input_authority`
 - Emits: `RecordTerminalOutcome`
 - To: `Retired`
 
@@ -12255,6 +12400,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_tracked`
   - `input_not_live_boundary_joined`
   - `live_admission_authorized_supersede_target`
+  - `same_input_authority`
 - Emits: `RecordTerminalOutcome`
 - To: `Stopped`
 
@@ -12265,6 +12411,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_tracked`
   - `input_not_live_boundary_joined`
   - `live_admission_authorized_coalesce_target`
+  - `same_input_authority`
 - Emits: `RecordTerminalOutcome`
 - To: `Idle`
 
@@ -12275,6 +12422,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_tracked`
   - `input_not_live_boundary_joined`
   - `live_admission_authorized_coalesce_target`
+  - `same_input_authority`
 - Emits: `RecordTerminalOutcome`
 - To: `Attached`
 
@@ -12285,6 +12433,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_tracked`
   - `input_not_live_boundary_joined`
   - `live_admission_authorized_coalesce_target`
+  - `same_input_authority`
 - Emits: `RecordTerminalOutcome`
 - To: `Running`
 
@@ -12295,6 +12444,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_tracked`
   - `input_not_live_boundary_joined`
   - `live_admission_authorized_coalesce_target`
+  - `same_input_authority`
 - Emits: `RecordTerminalOutcome`
 - To: `Retired`
 
@@ -12305,6 +12455,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_tracked`
   - `input_not_live_boundary_joined`
   - `live_admission_authorized_coalesce_target`
+  - `same_input_authority`
 - Emits: `RecordTerminalOutcome`
 - To: `Stopped`
 
@@ -12370,6 +12521,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `archive_exact_admission_sequence`
   - `archive_exact_idempotency_binding`
   - `archive_not_live_in_lane`
+  - `archive_governed_run_settled`
 - Emits: `InputLifecycleNotice`
 - To: `Idle`
 
@@ -12390,6 +12542,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `archive_exact_admission_sequence`
   - `archive_exact_idempotency_binding`
   - `archive_not_live_in_lane`
+  - `archive_governed_run_settled`
 - Emits: `InputLifecycleNotice`
 - To: `Attached`
 
@@ -12410,6 +12563,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `archive_exact_admission_sequence`
   - `archive_exact_idempotency_binding`
   - `archive_not_live_in_lane`
+  - `archive_governed_run_settled`
 - Emits: `InputLifecycleNotice`
 - To: `Running`
 
@@ -12430,6 +12584,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `archive_exact_admission_sequence`
   - `archive_exact_idempotency_binding`
   - `archive_not_live_in_lane`
+  - `archive_governed_run_settled`
 - Emits: `InputLifecycleNotice`
 - To: `Retired`
 
@@ -12450,6 +12605,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `archive_exact_admission_sequence`
   - `archive_exact_idempotency_binding`
   - `archive_not_live_in_lane`
+  - `archive_governed_run_settled`
 - Emits: `InputLifecycleNotice`
 - To: `Stopped`
 
@@ -12470,6 +12626,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `archive_exact_admission_sequence`
   - `archive_exact_idempotency_binding`
   - `archive_not_live_in_lane`
+  - `archive_governed_run_settled`
 - Emits: `InputLifecycleNotice`
 - To: `Destroyed`
 

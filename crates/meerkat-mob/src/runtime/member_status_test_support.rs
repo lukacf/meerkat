@@ -157,6 +157,14 @@ impl SessionServiceHistoryExt for DelayedStatusService {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl MobSessionService for DelayedStatusService {
+    async fn subscribe_session_activity(
+        &self,
+        _session_id: &meerkat_core::SessionId,
+    ) -> Result<crate::MemberSessionActivity, meerkat_core::service::SessionError> {
+        // This fixture's sessions never report an active turn.
+        Ok(crate::MemberSessionActivity::inactive())
+    }
+
     async fn execution_snapshot(
         &self,
         _session_id: &SessionId,

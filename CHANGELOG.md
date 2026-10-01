@@ -57,6 +57,20 @@ them.
   - The error code itself is unchanged in meaning ("busy, retry"). It now
     also covers a teardown that is still completing, which used to surface
     as `INTERNAL_ERROR` / HTTP 500.
+- `meerkat_mob::MobSessionService` gains the required method
+  `subscribe_session_activity(&self, &SessionId) -> Result<MemberSessionActivity, SessionError>`,
+  with the new `meerkat_mob::MemberSessionActivity`. Every implementor must
+  provide it: a mob Stop or Shutdown awaits it to learn that an interrupted
+  member's turn has ended. Delegating wrappers forward it to the wrapped
+  service; services whose sessions never report an active turn return
+  `MemberSessionActivity::inactive()`. `meerkat_session` adds
+  `SessionActivityWatch` and `session_activity_watch` on
+  `EphemeralSessionService` and `PersistentSessionService` for the real
+  services. Behaviour: Stop and Shutdown now wait for every interrupted
+  member's turn to end concurrently, off the actor loop, instead of failing
+  with `LifecycleOperationPending` when a turn took longer than 1 s to wind
+  down (#1390); a turn that never ends reports a typed
+  `LifecycleOperationProgressStalled` naming the member.
 - `meerkat_contracts::wire::LiveStatusResult` gains the public field
   `provider_input_latency: Option<WireLiveProviderInputLatency>`; struct
   literals must set it (`None` when no measurement exists). The JSON shape is

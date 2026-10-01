@@ -9907,6 +9907,9 @@ impl MobBuilder {
                 autonomous_initial_turns: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
                 autonomous_stop_interrupts: BTreeMap::new(),
                 autonomous_stop_interrupted: BTreeMap::new(),
+                pending_autonomous_stop: None,
+                next_autonomous_stop_ticket: 0,
+                pending_autonomous_stop_controls: VecDeque::new(),
                 autonomous_stop_interrupt_cursor: 0,
                 next_spawn_ticket: 0,
                 // ADJ-8 (multi-host fence reseed): the shell fence counter must

@@ -4363,6 +4363,13 @@ mod tests {
         ) -> Result<Option<bool>, MobError> {
             Ok(None)
         }
+
+        async fn subscribe_member_activity(
+            &self,
+            _member_ref: &MemberRef,
+        ) -> Result<Option<crate::runtime::MemberSessionActivity>, MobError> {
+            Ok(None)
+        }
         async fn prepare_member_session_for_explicit_resume(
             &self,
             _session_id: &SessionId,

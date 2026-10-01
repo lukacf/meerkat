@@ -41,7 +41,8 @@ pub use ephemeral::{
     EphemeralSessionService, LiveActorEventSubscription, LiveBridgePreparedSessionOperation,
     LiveBridgeSessionOperationRequest, LiveBridgeSessionOperationTerminalReceiver,
     LiveSessionActorRegistry, LiveSessionActorWitness, LiveSessionActorWitnessSlot,
-    RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder, SessionSnapshot,
+    RuntimeContextAdmissionGuard, SessionActivityWatch, SessionAgent, SessionAgentBuilder,
+    SessionSnapshot,
 };
 pub use live_durable_source::LiveDurableSourceObservation;
 pub use live_transcript_authority::LiveAssistantPlaybackObservationResult;

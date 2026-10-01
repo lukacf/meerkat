@@ -3662,6 +3662,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MobSessionService for BoundarySessionService {
+        async fn subscribe_session_activity(
+            &self,
+            _session_id: &meerkat_core::SessionId,
+        ) -> Result<crate::MemberSessionActivity, meerkat_core::service::SessionError> {
+            // This fixture's sessions never report an active turn.
+            Ok(crate::MemberSessionActivity::inactive())
+        }
+
         async fn observe_member_status_view(
             &self,
             session_id: &SessionId,

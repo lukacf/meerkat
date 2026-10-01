@@ -2101,11 +2101,14 @@ struct MockSessionService {
     /// turn execution (Admitted/Running/Completing), not session presence.
     /// A created-but-idle session is not active. Tests that exercise
     /// in-flight-turn semantics can flip this via
-    /// [`Self::mark_session_active`]. Without this, the disposal-time poll
-    /// loop in [`stop_autonomous_member`] spins the full 40×25ms=1s grace
-    /// window on every retire/complete/reset because the mock was reporting
-    /// an always-`true` flag that the real service never would.
+    /// [`Self::set_session_active`], which also publishes the change to
+    /// every activity subscription a stop holds.
     active_sessions: RwLock<HashSet<SessionId>>,
+    /// Per-session activity flags handed to `subscribe_session_activity`.
+    activity_flags: std::sync::Mutex<HashMap<SessionId, tokio::sync::watch::Sender<bool>>>,
+    /// Sessions whose turn keeps winding down after an interrupt: their
+    /// active flag survives `interrupt` until the test clears it.
+    wind_down_held_sessions: RwLock<HashSet<SessionId>>,
     runtime_boundary_acknowledgements: RwLock<Vec<RuntimeBoundaryAcknowledgement>>,
 }
 
@@ -2247,6 +2250,8 @@ impl MockSessionService {
             session_event_subscribe_barriers: RwLock::new(HashMap::new()),
             session_event_subscribe_started: tokio::sync::Notify::new(),
             active_sessions: RwLock::new(HashSet::new()),
+            activity_flags: std::sync::Mutex::new(HashMap::new()),
+            wind_down_held_sessions: RwLock::new(HashSet::new()),
             runtime_boundary_acknowledgements: RwLock::new(Vec::new()),
         }
     }
@@ -2658,6 +2663,38 @@ impl MockSessionService {
     fn set_fail_inject(&self, enabled: bool) {
         self.fail_inject
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Mark `session_id`'s turn active or ended, as the real service's
+    /// turn-admission projection would, and publish it to every activity
+    /// subscription.
+    async fn set_session_active(&self, session_id: &SessionId, active: bool) {
+        {
+            let mut sessions = self.active_sessions.write().await;
+            if active {
+                sessions.insert(session_id.clone());
+            } else {
+                sessions.remove(session_id);
+            }
+        }
+        if let Some(flag) = self
+            .activity_flags
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+        {
+            flag.send_replace(active);
+        }
+    }
+
+    /// Keep `session_id`'s turn active through an interrupt, modelling a turn
+    /// that is slow to wind down; the test ends it with
+    /// [`Self::set_session_active`].
+    async fn hold_wind_down_after_interrupt(&self, session_id: &SessionId) {
+        self.wind_down_held_sessions
+            .write()
+            .await
+            .insert(session_id.clone());
     }
 
     /// Whether the mock has entered `start_turn` for `session_id`: the
@@ -3999,9 +4036,10 @@ impl SessionService for MockSessionService {
             notifier.notify_waiters();
         }
         // Real SessionService flips is_active to false once the turn/keep-alive
-        // loop unwinds after interrupt. Mirror that here so the disposal-time
-        // poll loop in `stop_autonomous_member` doesn't spin to its 1s cap.
-        self.active_sessions.write().await.remove(id);
+        // loop unwinds after interrupt, unless the test holds the wind-down.
+        if !self.wind_down_held_sessions.read().await.contains(id) {
+            self.set_session_active(id, false).await;
+        }
         Ok(())
     }
 
@@ -4506,6 +4544,24 @@ impl SessionServiceControlExt for MockSessionService {
 
 #[async_trait]
 impl MobSessionService for MockSessionService {
+    async fn subscribe_session_activity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::MemberSessionActivity, SessionError> {
+        let active = self.active_sessions.read().await.contains(session_id);
+        let mut flags = self
+            .activity_flags
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let flag = flags
+            .entry(session_id.clone())
+            .or_insert_with(|| tokio::sync::watch::channel(active).0);
+        flag.send_replace(active);
+        Ok(crate::MemberSessionActivity::from_active_flag(
+            flag.subscribe(),
+        ))
+    }
+
     async fn observe_member_status_view(
         &self,
         session_id: &SessionId,
@@ -12235,6 +12291,13 @@ impl SessionServiceControlExt for PersistedListingSessionService {
 
 #[async_trait]
 impl MobSessionService for PersistedListingSessionService {
+    async fn subscribe_session_activity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::MemberSessionActivity, SessionError> {
+        self.inner.subscribe_session_activity(session_id).await
+    }
+
     async fn observe_member_status_view(
         &self,
         session_id: &SessionId,
@@ -12658,6 +12721,14 @@ impl SessionServiceControlExt for InactiveReadSessionService {
 
 #[async_trait]
 impl MobSessionService for InactiveReadSessionService {
+    async fn subscribe_session_activity(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<crate::MemberSessionActivity, SessionError> {
+        // This fixture's `read` never reports an active turn.
+        Ok(crate::MemberSessionActivity::inactive())
+    }
+
     async fn observe_member_status_view(
         &self,
         session_id: &SessionId,
@@ -57179,6 +57250,14 @@ impl SessionServiceControlExt for RealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RealCommsSessionService {
+    async fn subscribe_session_activity(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<crate::MemberSessionActivity, SessionError> {
+        // This fixture's `read` never reports an active turn.
+        Ok(crate::MemberSessionActivity::inactive())
+    }
+
     async fn observe_member_status_view(
         &self,
         session_id: &SessionId,
@@ -58533,6 +58612,14 @@ impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RuntimeBackedRealCommsSessionService {
+    async fn subscribe_session_activity(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<crate::MemberSessionActivity, SessionError> {
+        // This fixture's `read` never reports an active turn.
+        Ok(crate::MemberSessionActivity::inactive())
+    }
+
     async fn observe_member_status_view(
         &self,
         session_id: &SessionId,
@@ -65930,11 +66017,7 @@ async fn test_member_status_session_read_does_not_close_actor_tool_dependency_cy
         .spawn(ProfileName::from("worker"), observer_identity.clone(), None)
         .await
         .expect("spawn observer member");
-    service
-        .active_sessions
-        .write()
-        .await
-        .insert(blocked_session_id.clone());
+    service.set_session_active(&blocked_session_id, true).await;
     let session_read_barrier = service
         .install_session_read_barrier(blocked_session_id.clone())
         .await;
@@ -66016,11 +66099,7 @@ async fn test_member_status_session_read_does_not_close_actor_tool_dependency_cy
         .expect("blocking status reply channel")
         .expect("off-actor session read should complete after turn release");
 
-    service
-        .active_sessions
-        .write()
-        .await
-        .remove(&blocked_session_id);
+    service.set_session_active(&blocked_session_id, false).await;
     handle.shutdown().await.expect("shutdown test mob");
 }
 
@@ -84516,6 +84595,10 @@ mod retirement_isolation;
 /// declined instead of touching its successor.
 mod spawn_activation_isolation;
 mod spawn_rollback;
+/// #1390: stop and shutdown await interrupted members' end of turn as typed
+/// signals, concurrently and off the actor loop.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod stop_member_idle;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod submit_work_pump;
 /// #1105 wiring effect isolation: parked trust installs and peer-lifecycle

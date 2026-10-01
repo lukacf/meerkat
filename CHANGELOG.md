@@ -274,6 +274,21 @@ them.
 
 ### Fixed
 
+- The canonical TLC lane (`make machine-verify`, also the machine pre-push
+  hook) runs its independent TLC jobs concurrently instead of one after
+  another: `xtask machine-verify` schedules every machine sweep, composition
+  sweep and witness within one total worker budget (TLC_WORKERS or the core
+  count), and the lane script runs the two meerkat_machine audits alongside it
+  when the budget allows. Workers are split so their sum never exceeds the
+  total, concurrent JVMs get GC threads proportional to their workers and an
+  equal heap share (at least 16 GiB, the largest generated models need it;
+  TLC_HEAP_BUDGET_MB overrides half of RAM), outputs and failures are reported
+  in the fixed lane order, a failing job does not cancel the others, and every
+  job keeps its 900 s cap. A lone TLC JVM now gets the whole heap budget
+  rather than the JVM default, which ran the meerkat_mob_seam witnesses out of
+  memory on 32 GiB machines. TLC metadirs are unique per run. State counts are
+  identical to the sequential lane; on a 192-core host the lane takes 267 s
+  instead of 889 s, and 634 s with TLC_WORKERS=8.
 - Expired OAuth attempts now retire their private persisted payloads when the
   native owner prunes them, including late callbacks and cancelled MCP login.
   Cleanup preserves concurrent live attempts and their deadlines; a failed

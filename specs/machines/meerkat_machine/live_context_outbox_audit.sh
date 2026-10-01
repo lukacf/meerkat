@@ -47,7 +47,7 @@ replace_exact_line "SPECIFICATION Spec" "SPECIFICATION AuditSpec" "${audit_cfg}"
 replace_exact_line "  SessionIdValues = {}" '  SessionIdValues = {"sessionid_1"}' "${audit_cfg}"
 replace_exact_line "  AgentRuntimeIdValues = {}" '  AgentRuntimeIdValues = {"runtime_1"}' "${audit_cfg}"
 replace_exact_line "  SessionLlmIdentityValues = {}" '  SessionLlmIdentityValues = {"identity_1"}' "${audit_cfg}"
-replace_exact_line "  StringValues = {}" '  StringValues = {"", "channel_a", "channel_b", "profile_1", "pending_a", "pending_b", "owner_1", "ready_1", "activation_a", "activation_b", "append_1", "append_2", "digest_1", "commit_1"}' "${audit_cfg}"
+replace_exact_line "  StringValues = {}" '  StringValues = {"", "channel_a", "channel_b", "profile_1", "pending_a", "pending_b", "owner_1", "ready_1", "activation_a", "activation_b", "channel_c", "pending_c", "activation_c", "append_1", "append_2", "digest_1", "commit_1"}' "${audit_cfg}"
 replace_exact_line "CONSTANTS" "CONSTANTS
   AuditMaxSteps = ${max_steps}" "${audit_cfg}"
 replace_exact_line "  CiStateConstraint" "  AuditStateConstraint" "${audit_cfg}"
@@ -93,7 +93,8 @@ fi
 for goal in \
   "PROPERTY AuditNeverCloseEndsALeftover" \
   "PROPERTY AuditNeverRecoveryEndsCarriedRows" \
-  "INVARIANT AuditReplacementNeverReceivesALaterRow"; do
+  "INVARIANT AuditReplacementNeverReceivesALaterRow" \
+  "INVARIANT AuditNeverReopensAfterFailedRealization"; do
   kind="${goal%% *}"
   name="${goal#* }"
   goal_cfg="${work_dir}/${name}.cfg"
@@ -106,4 +107,4 @@ for goal in \
     exit 1
   fi
 done
-echo "live-context outbox audit passed at model_step_count <= ${max_steps} (3 goals reached)"
+echo "live-context outbox audit passed at model_step_count <= ${max_steps} (4 goals reached)"

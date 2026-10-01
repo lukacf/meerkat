@@ -5036,6 +5036,36 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveLiveContextAppendAmbiguousRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `CancelLiveContextRecoveryObligationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveContextRecoveryObligationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveContextRecoveryObligationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveContextRecoveryObligationRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveContextRecoveryObligationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveDelegationResultRecoveryObligationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveDelegationResultRecoveryObligationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveDelegationResultRecoveryObligationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveDelegationResultRecoveryObligationRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveDelegationResultRecoveryObligationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BindLiveContextRecoveryChannelIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8030,6 +8060,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveContextAmbiguityRecoveryAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveRecoveryObligationCancelled`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveContextRecoveryChannelBound`

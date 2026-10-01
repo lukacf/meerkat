@@ -748,6 +748,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EnqueueLiveContextRow`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_cursor: u64, content_digest: String, commit_authority_token: String, disposition: LiveContextRowDisposition, payload_availability: LiveContextPayloadAvailability, row_source: LiveContextRowSource, row_author: LiveContextRowAuthor, observation_id: Option<String>)
 - `AdvanceLiveContextCanonicalCoverage`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, disposition: LiveContextRowDisposition)
 - `ResolveLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, replacement_channel_id: String, canonical_seed_cursor: u64, observation: LiveContextAppendObservation)
+- `CancelLiveRecoveryObligation`(session_id: String, closing_channel_id: String, replacement_channel_id: String, retained_sessions: Map<String, String>, retained_cursors: Map<String, u64>, retained_digests: Map<String, String>, retained_commits: Map<String, String>, retained_dispositions: Map<String, LiveContextRowDisposition>, retained_append_by_cursor: Map<u64, String>)
 - `BindLiveContextRecoveryChannel`(activation_receipt: String, session_id: String, closing_channel_id: String, replacement_channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_seed_cursor: u64)
 - `AbandonLiveOpenAdmission`(session_id: String, channel_id: String)
 - `RecordLiveRefreshQueued`(channel_id: String, queue_acceptance_sequence: u64)
@@ -1053,6 +1054,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveContextCanonicalCoverageAdvanced`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64, disposition: LiveContextRowDisposition)
 - `LiveContextAppendResolved`(channel_id: String, append_id: String, cursor: u64, observation: LiveContextAppendObservation, retry_allowed: Bool)
 - `LiveContextAmbiguityRecoveryAuthorized`(session_id: String, closing_channel_id: String, replacement_channel_id: String, append_id: String, canonical_seed_cursor: u64, llm_identity: SessionLlmIdentity, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `LiveRecoveryObligationCancelled`(session_id: String, closing_channel_id: String, replacement_channel_id: String)
 - `LiveContextRecoveryChannelBound`(activation_receipt: String, session_id: String, closing_channel_id: String, replacement_channel_id: String, append_id: String, canonical_seed_cursor: u64, status: LiveWebrtcAnswerPublicStatus, answered: Bool, sequence: u64, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `SessionEventStreamOpenResolved`(stream_id: String, session_id: String, opened: Bool, sequence: u64)
 - `SessionEventStreamTerminalResolved`(stream_id: String, session_id: String, reason: RpcEventStreamTerminalReason, error_code: Option<RpcEventStreamTerminalErrorCode>, detail: Option<String>, sequence: u64)
@@ -18083,6 +18085,96 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `seed_is_exact_known_canonical_high_watermark`
 - Emits: `LiveContextAmbiguityRecoveryAuthorized`
 - To: `Running`
+
+### `CancelLiveContextRecoveryObligationIdle`
+- From: `Idle`
+- On: `CancelLiveRecoveryObligation`(session_id, closing_channel_id, replacement_channel_id, retained_sessions, retained_cursors, retained_digests, retained_commits, retained_dispositions, retained_append_by_cursor)
+- Guards:
+  - `unrealized_live_obligation`
+  - `retained_outbox_is_exact_complement`
+- Emits: `LiveRecoveryObligationCancelled`
+- To: `Idle`
+
+### `CancelLiveContextRecoveryObligationAttached`
+- From: `Attached`
+- On: `CancelLiveRecoveryObligation`(session_id, closing_channel_id, replacement_channel_id, retained_sessions, retained_cursors, retained_digests, retained_commits, retained_dispositions, retained_append_by_cursor)
+- Guards:
+  - `unrealized_live_obligation`
+  - `retained_outbox_is_exact_complement`
+- Emits: `LiveRecoveryObligationCancelled`
+- To: `Attached`
+
+### `CancelLiveContextRecoveryObligationRunning`
+- From: `Running`
+- On: `CancelLiveRecoveryObligation`(session_id, closing_channel_id, replacement_channel_id, retained_sessions, retained_cursors, retained_digests, retained_commits, retained_dispositions, retained_append_by_cursor)
+- Guards:
+  - `unrealized_live_obligation`
+  - `retained_outbox_is_exact_complement`
+- Emits: `LiveRecoveryObligationCancelled`
+- To: `Running`
+
+### `CancelLiveContextRecoveryObligationRetired`
+- From: `Retired`
+- On: `CancelLiveRecoveryObligation`(session_id, closing_channel_id, replacement_channel_id, retained_sessions, retained_cursors, retained_digests, retained_commits, retained_dispositions, retained_append_by_cursor)
+- Guards:
+  - `unrealized_live_obligation`
+  - `retained_outbox_is_exact_complement`
+- Emits: `LiveRecoveryObligationCancelled`
+- To: `Retired`
+
+### `CancelLiveContextRecoveryObligationStopped`
+- From: `Stopped`
+- On: `CancelLiveRecoveryObligation`(session_id, closing_channel_id, replacement_channel_id, retained_sessions, retained_cursors, retained_digests, retained_commits, retained_dispositions, retained_append_by_cursor)
+- Guards:
+  - `unrealized_live_obligation`
+  - `retained_outbox_is_exact_complement`
+- Emits: `LiveRecoveryObligationCancelled`
+- To: `Stopped`
+
+### `CancelLiveDelegationResultRecoveryObligationIdle`
+- From: `Idle`
+- On: `CancelLiveRecoveryObligation`(session_id, closing_channel_id, replacement_channel_id, retained_sessions, retained_cursors, retained_digests, retained_commits, retained_dispositions, retained_append_by_cursor)
+- Guards:
+  - `unrealized_live_obligation`
+  - `retained_outbox_is_exact_complement`
+- Emits: `LiveRecoveryObligationCancelled`
+- To: `Idle`
+
+### `CancelLiveDelegationResultRecoveryObligationAttached`
+- From: `Attached`
+- On: `CancelLiveRecoveryObligation`(session_id, closing_channel_id, replacement_channel_id, retained_sessions, retained_cursors, retained_digests, retained_commits, retained_dispositions, retained_append_by_cursor)
+- Guards:
+  - `unrealized_live_obligation`
+  - `retained_outbox_is_exact_complement`
+- Emits: `LiveRecoveryObligationCancelled`
+- To: `Attached`
+
+### `CancelLiveDelegationResultRecoveryObligationRunning`
+- From: `Running`
+- On: `CancelLiveRecoveryObligation`(session_id, closing_channel_id, replacement_channel_id, retained_sessions, retained_cursors, retained_digests, retained_commits, retained_dispositions, retained_append_by_cursor)
+- Guards:
+  - `unrealized_live_obligation`
+  - `retained_outbox_is_exact_complement`
+- Emits: `LiveRecoveryObligationCancelled`
+- To: `Running`
+
+### `CancelLiveDelegationResultRecoveryObligationRetired`
+- From: `Retired`
+- On: `CancelLiveRecoveryObligation`(session_id, closing_channel_id, replacement_channel_id, retained_sessions, retained_cursors, retained_digests, retained_commits, retained_dispositions, retained_append_by_cursor)
+- Guards:
+  - `unrealized_live_obligation`
+  - `retained_outbox_is_exact_complement`
+- Emits: `LiveRecoveryObligationCancelled`
+- To: `Retired`
+
+### `CancelLiveDelegationResultRecoveryObligationStopped`
+- From: `Stopped`
+- On: `CancelLiveRecoveryObligation`(session_id, closing_channel_id, replacement_channel_id, retained_sessions, retained_cursors, retained_digests, retained_commits, retained_dispositions, retained_append_by_cursor)
+- Guards:
+  - `unrealized_live_obligation`
+  - `retained_outbox_is_exact_complement`
+- Emits: `LiveRecoveryObligationCancelled`
+- To: `Stopped`
 
 ### `BindLiveContextRecoveryChannelIdle`
 - From: `Idle`

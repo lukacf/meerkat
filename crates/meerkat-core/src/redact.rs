@@ -3,11 +3,13 @@
 //! Config types carrying env values, header values, command arguments or URLs
 //! implement `Debug` by hand with these views, so a `{:?}` in a log line or
 //! error never prints credentials. Names stay visible; values do not.
+//! [`REDACTED`] and [`RedactedUrl`] are public so other crates' credential
+//! types print the same marker and URL shape.
 
 use std::fmt;
 
 /// Marker printed in place of a secret value.
-pub(crate) const REDACTED: &str = "<redacted>";
+pub const REDACTED: &str = "<redacted>";
 
 /// A secret-bearing map's keys in sorted order, each value shown as
 /// [`REDACTED`].
@@ -42,7 +44,7 @@ impl fmt::Debug for RedactedList {
 
 /// A URL with scheme, host and path kept; userinfo, query and fragment
 /// replaced by [`REDACTED`].
-pub(crate) struct RedactedUrl<'a>(pub(crate) &'a str);
+pub struct RedactedUrl<'a>(pub &'a str);
 
 impl fmt::Debug for RedactedUrl<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

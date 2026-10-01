@@ -966,8 +966,10 @@ pub enum LiveInputChunk {
 /// creates an SDP offer, then calls the returned JSON-RPC answer method
 /// with `{ channel_id, token, offer_sdp }`. Meerkat answers and binds the
 /// resulting media/data channels to the already-open live channel.
+///
+/// `Debug` redacts the bearer token and the URL query, which can carry it.
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "transport", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LiveTransportBootstrap {
@@ -981,6 +983,29 @@ pub enum LiveTransportBootstrap {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         http_url: Option<String>,
     },
+}
+
+impl std::fmt::Debug for LiveTransportBootstrap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::redact::{REDACTED, RedactedUrl};
+        match self {
+            Self::Websocket { url, .. } => f
+                .debug_struct("Websocket")
+                .field("url", &RedactedUrl(url))
+                .field("token", &REDACTED)
+                .finish(),
+            Self::Webrtc {
+                answer_method,
+                http_url,
+                ..
+            } => f
+                .debug_struct("Webrtc")
+                .field("token", &REDACTED)
+                .field("answer_method", answer_method)
+                .field("http_url", &http_url.as_deref().map(RedactedUrl))
+                .finish(),
+        }
+    }
 }
 
 /// Capabilities advertised when a live channel opens.
@@ -1184,6 +1209,31 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 
     use crate::types::{StopReason, Usage};
+
+    #[test]
+    fn live_transport_bootstrap_debug_redacts_token_and_url_query() {
+        const SECRET: &str = "live-bootstrap-secret";
+        let bootstraps = [
+            LiveTransportBootstrap::Websocket {
+                url: format!("ws://127.0.0.1:9000/live/ws?token={SECRET}&channel=c1"),
+                token: SECRET.into(),
+            },
+            LiveTransportBootstrap::Webrtc {
+                token: SECRET.into(),
+                answer_method: "live/webrtc/answer".into(),
+                http_url: Some(format!("https://host.example/live/webrtc?token={SECRET}")),
+            },
+        ];
+        let rendered = format!("{bootstraps:?} {bootstraps:#?}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        for kept in [
+            "ws://127.0.0.1:9000/live/ws?<redacted>",
+            "live/webrtc/answer",
+            "https://host.example/live/webrtc?<redacted>",
+        ] {
+            assert!(rendered.contains(kept), "missing {kept}: {rendered}");
+        }
+    }
 
     // -- Status lifecycle invariants --
 

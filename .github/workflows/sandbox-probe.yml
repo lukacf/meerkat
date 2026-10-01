@@ -1,0 +1,86 @@
+name: Sandbox capability probe (throwaway)
+
+# Throwaway: prints kernel, Landlock ABI, unprivileged user namespace and
+# seccomp support on the GitHub-hosted runner, directly and inside a Docker
+# container. The PR that adds this file is closed after one run.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/sandbox-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe (${{ matrix.where }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        where: [host, docker]
+    steps:
+      - name: Write probe
+        run: |
+          cat > /tmp/probe.py <<'PY'
+          import ctypes, ctypes.util, os, platform, subprocess, struct
+          libc = ctypes.CDLL(None, use_errno=True)
+          libc.syscall.restype = ctypes.c_long
+          def sysctl(name):
+              try:
+                  return open("/proc/sys/" + name.replace(".", "/")).read().strip()
+              except Exception as e:
+                  return f"n/a ({type(e).__name__})"
+          print("PROBE kernel", platform.release())
+          try:
+              print("PROBE os", open("/etc/os-release").read().split("PRETTY_NAME=")[1].split("\n")[0])
+          except Exception:
+              pass
+          try:
+              print("PROBE lsm", open("/sys/kernel/security/lsm").read().strip())
+          except Exception as e:
+              print("PROBE lsm n/a", type(e).__name__)
+          # landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION) on x86_64 is syscall 444
+          r = libc.syscall(444, None, ctypes.c_size_t(0), ctypes.c_uint32(1))
+          err = ctypes.get_errno()
+          print("PROBE landlock_abi", r if r >= 0 else f"error errno={err} ({os.strerror(err)})")
+          for k in ["kernel.unprivileged_userns_clone", "user.max_user_namespaces",
+                    "kernel.apparmor_restrict_unprivileged_userns", "kernel.apparmor_restrict_unprivileged_unconfined"]:
+              print("PROBE sysctl", k, sysctl(k))
+          for cmd in (["unshare", "-Ur", "true"], ["unshare", "-Urn", "true"], ["unshare", "-Urpf", "--mount-proc", "true"]):
+              p = subprocess.run(cmd, capture_output=True, text=True)
+              print("PROBE userns", " ".join(cmd), "rc=%d" % p.returncode, p.stderr.strip()[:120])
+          p = subprocess.run(["sh", "-c", "command -v bwrap && bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all true; echo rc=$?"], capture_output=True, text=True)
+          print("PROBE bwrap", (p.stdout + p.stderr).strip().replace("\n", " | ")[:200])
+          status = open("/proc/self/status").read()
+          print("PROBE status", " ".join(l for l in status.splitlines() if l.startswith(("Seccomp", "NoNewPrivs", "CapEff"))))
+          import sys; sys.stdout.flush()
+          pid = os.fork()
+          if pid == 0:
+              PR_SET_NO_NEW_PRIVS, PR_SET_SECCOMP, SECCOMP_MODE_FILTER = 38, 22, 2
+              rc1 = libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+              e1 = ctypes.get_errno()
+              insn = struct.pack("HBBI", 0x06, 0, 0, 0x7fff0000)  # BPF_RET|BPF_K, SECCOMP_RET_ALLOW
+              buf = ctypes.create_string_buffer(insn)
+              class Prog(ctypes.Structure):
+                  _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.c_void_p)]
+              prog = Prog(1, ctypes.cast(buf, ctypes.c_void_p))
+              rc2 = libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(prog), 0, 0)
+              e2 = ctypes.get_errno()
+              st = [l for l in open("/proc/self/status").read().splitlines() if l.startswith(("Seccomp", "NoNewPrivs"))]
+              print("PROBE seccomp no_new_privs rc=%d errno=%d filter rc=%d errno=%d after: %s" % (rc1, e1, rc2, e2, " ".join(st)), flush=True)
+              os._exit(0)
+          os.waitpid(pid, 0)
+          PY
+
+      - name: Probe on the runner host
+        if: ${{ matrix.where == 'host' }}
+        run: |
+          sudo apt-get install -y -qq bubblewrap >/dev/null 2>&1 || true
+          python3 /tmp/probe.py
+
+      - name: Probe inside a default Docker container
+        if: ${{ matrix.where == 'docker' }}
+        run: |
+          docker run --rm -v /tmp/probe.py:/probe.py:ro debian:12 sh -c 'apt-get update -qq >/dev/null && apt-get install -y -qq python3 util-linux bubblewrap >/dev/null 2>&1; python3 /probe.py'

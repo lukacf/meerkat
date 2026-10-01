@@ -644,6 +644,12 @@ them.
 
 ### Changed
 
+- The e2e lane runner prints a scenario command's output on a passing run as
+  well as on a failing one (`e2e scenario output (<run>):`). Passing Turbo S
+  runs now keep their journaled timings and verdict lines (`GPT_LIVE_*`
+  records, startup seed shapes, delegation-to-result durations), so flake
+  rates and timing distributions can be read from any invocation.
+
 - PR CI runs xtask's unit tests and its `xtask[machine-authority]` feature
   suite when `crates/xtask` changes (and machine-dsl-tests' when it changes).
   The classifier deferred every crate whose dependency closure reached

@@ -27,6 +27,7 @@ pub mod meerkat_machine;
 pub mod mob_machine;
 pub mod occurrence_lifecycle;
 pub mod schedule_lifecycle;
+pub mod seq_helper_slice;
 #[cfg(test)]
 mod tests;
 

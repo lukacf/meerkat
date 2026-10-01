@@ -484,6 +484,7 @@ fn decompile_mcp_servers(
                 args,
                 required_env_keys,
                 connect_timeout_secs,
+                tool_names,
             } => {
                 // Values never travel (A10): declared stdio env keys are
                 // satisfied from the HOST's own process environment; a
@@ -505,6 +506,7 @@ fn decompile_mcp_servers(
                     args.clone(),
                     env,
                 );
+                server.tool_names = tool_names.clone();
                 if let Some(secs) = connect_timeout_secs {
                     server.connect_timeout_secs = Some(u32::try_from(*secs).map_err(|_| {
                         MaterializeDecompileError::McpTimeoutOutOfRange {
@@ -520,6 +522,7 @@ fn decompile_mcp_servers(
                 oauth_account,
                 required_header_names,
                 connect_timeout_secs,
+                tool_names,
             } => {
                 // v1 compiles header names empty (spec-compiler rule); a
                 // non-empty set has no host-side value source — fail closed,
@@ -539,6 +542,7 @@ fn decompile_mcp_servers(
                             oauth_account: oauth_account.clone(),
                         },
                     ),
+                    tool_names: tool_names.clone(),
                     connect_timeout_secs: connect_timeout_secs
                         .map(|seconds| {
                             u32::try_from(seconds).map_err(|_| {
@@ -3377,6 +3381,7 @@ mod tests {
                 oauth_account: None,
                 required_header_names: vec!["authorization".to_string()],
                 connect_timeout_secs: None,
+                tool_names: BTreeMap::new(),
             },
         );
         assert!(matches!(
@@ -3396,6 +3401,7 @@ mod tests {
                 oauth_account: None,
                 required_header_names: Vec::new(),
                 connect_timeout_secs: Some(23),
+                tool_names: BTreeMap::new(),
             },
         );
 
@@ -3415,6 +3421,37 @@ mod tests {
     }
 
     #[test]
+    fn decompile_preserves_explicit_tool_names_for_both_transports() {
+        let names = BTreeMap::from([("search".into(), "home_search".into())]);
+        let decls = BTreeMap::from([
+            (
+                "local".into(),
+                PortableMcpDecl::Stdio {
+                    command: "echo".into(),
+                    args: vec![],
+                    required_env_keys: vec![],
+                    connect_timeout_secs: None,
+                    tool_names: names.clone(),
+                },
+            ),
+            (
+                "remote".into(),
+                PortableMcpDecl::Http {
+                    url: "https://example.invalid/mcp".into(),
+                    http_transport: None,
+                    oauth_account: None,
+                    required_header_names: vec![],
+                    connect_timeout_secs: None,
+                    tool_names: names.clone(),
+                },
+            ),
+        ]);
+        let servers = decompile_mcp_servers(&decls, &|_| None).expect("names are portable");
+        assert_eq!(servers.len(), 2);
+        assert!(servers.iter().all(|server| server.tool_names == names));
+    }
+
+    #[test]
     fn decompile_preserves_selected_oauth_account() {
         let mut spec = sample_spec();
         spec.profile.tools.mcp_servers.insert(
@@ -3425,6 +3462,7 @@ mod tests {
                 oauth_account: Some("provider-subject-42".to_string()),
                 required_header_names: Vec::new(),
                 connect_timeout_secs: None,
+                tool_names: BTreeMap::new(),
             },
         );
 

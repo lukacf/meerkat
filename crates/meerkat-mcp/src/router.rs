@@ -915,11 +915,52 @@ fn lifecycle_operation_from_effects(
     })
 }
 
+/// Exact connection and raw provider operation behind a projected tool name.
+/// Uses the configured server name; it does not derive names from OAuth accounts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpToolRoute {
+    pub server_name: String,
+    pub raw_operation: String,
+}
+
+/// Every raw route excluded by one exposed-name collision.
+///
+/// Select distinct names using [`McpServerConfig::tool_names`] and reload the
+/// affected configuration. This is a projection diagnostic, not an instruction
+/// to rename or retry automatically. Divergent definitions of the same raw
+/// operation are separately excluded and cannot be repaired by an alias.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpToolNameCollision {
+    pub exposed_name: String,
+    pub routes: Vec<McpToolRoute>,
+}
+
+impl std::fmt::Display for McpToolNameCollision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MCP exposed name {:?} collides between ",
+            self.exposed_name
+        )?;
+        for (index, route) in self.routes.iter().enumerate() {
+            if index > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "({:?}, {:?})", route.server_name, route.raw_operation)?;
+        }
+        write!(
+            f,
+            "; select distinct exposed names with McpServerConfig.tool_names"
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RouterProjectionSnapshot {
     #[allow(dead_code)]
     epoch: u64,
-    tool_to_server: HashMap<String, String>,
+    tool_routes: HashMap<String, McpToolRoute>,
+    name_collisions: Arc<[McpToolNameCollision]>,
     catalog_entries: Arc<[ToolCatalogEntry]>,
     visible_tools: Arc<[Arc<ToolDef>]>,
 }
@@ -928,7 +969,8 @@ impl Default for RouterProjectionSnapshot {
     fn default() -> Self {
         Self {
             epoch: 0,
-            tool_to_server: HashMap::new(),
+            tool_routes: HashMap::new(),
+            name_collisions: Arc::from([]),
             catalog_entries: Arc::from([]),
             visible_tools: Arc::from([]),
         }
@@ -1224,6 +1266,7 @@ impl McpRouter {
 
     /// Stage a server add for the next boundary apply.
     pub fn stage_add(&mut self, config: McpServerConfig) -> Result<(), McpError> {
+        Self::validate_tool_names(&config)?;
         let server_name = config.name.clone();
         let sid = SurfaceId::from(server_name.as_str());
         match self
@@ -1276,7 +1319,10 @@ impl McpRouter {
     pub fn stage_reload<T: Into<McpReloadTarget>>(&mut self, target: T) -> Result<(), McpError> {
         let (server_name, requested_payload) = match target.into() {
             McpReloadTarget::ServerName(server_name) => (server_name, None),
-            McpReloadTarget::Config(config) => (config.name.clone(), Some(config)),
+            McpReloadTarget::Config(config) => {
+                Self::validate_tool_names(&config)?;
+                (config.name.clone(), Some(config))
+            }
         };
         let sid = SurfaceId::from(server_name.as_str());
         match self
@@ -1809,6 +1855,7 @@ impl McpRouter {
     /// Backward-compatible immediate install path. Bypasses staged/boundary
     /// flow and directly drives the surface owner through Stage -> Apply -> Success.
     async fn install_active_server(&mut self, config: McpServerConfig) -> Result<(), McpError> {
+        Self::validate_tool_names(&config)?;
         let server_name = config.name.clone();
         let sid = SurfaceId::from(server_name.as_str());
 
@@ -2014,6 +2061,34 @@ impl McpRouter {
         }
     }
 
+    fn validate_tool_names(config: &McpServerConfig) -> Result<(), McpError> {
+        use meerkat_core::tool_catalog::{TOOL_CATALOG_LOAD_NAME, TOOL_CATALOG_SEARCH_NAME};
+        for (raw_operation, exposed) in &config.tool_names {
+            let reason = if raw_operation.is_empty() {
+                Some("raw operation must not be empty")
+            } else if exposed.is_empty()
+                || exposed.len() > 64
+                || !exposed
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+            {
+                Some("exposed name must contain 1-64 ASCII letters, digits, underscores or hyphens")
+            } else if exposed == TOOL_CATALOG_SEARCH_NAME || exposed == TOOL_CATALOG_LOAD_NAME {
+                Some("exposed name is reserved for the catalog control plane")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                return Err(McpError::InvalidToolNameMapping {
+                    server: config.name.clone(),
+                    raw_operation: raw_operation.clone(),
+                    reason,
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn tool_definitions_equivalent(left: &ToolDef, right: &ToolDef) -> bool {
         left.description == right.description
             && left.input_schema == right.input_schema
@@ -2029,8 +2104,9 @@ impl McpRouter {
             .map(|sid| sid.0)
             .collect();
 
-        let mut tool_to_server = HashMap::new();
+        let mut tool_routes: HashMap<String, McpToolRoute> = HashMap::new();
         let mut canonical_tools: BTreeMap<String, Arc<ToolDef>> = BTreeMap::new();
+        let mut collision_routes: BTreeMap<String, Vec<McpToolRoute>> = BTreeMap::new();
         let mut collided: BTreeSet<String> = BTreeSet::new();
         let mut complete = true;
 
@@ -2065,34 +2141,63 @@ impl McpRouter {
 
             for name in &same_server_divergent {
                 server_tools.remove(name);
-                collided.insert(name.clone());
+                let exposed = entry.config.tool_names.get(name).unwrap_or(name);
+                collided.insert(exposed.clone());
             }
 
-            for tool in server_tools.values() {
-                // Fail closed by exclusion: a tool name owned by two different
-                // servers is ambiguous, so it must be dispatchable from NEITHER.
-                if let Some(existing_owner) = tool_to_server.get(tool.name.as_str())
-                    && existing_owner != &server_name
-                {
-                    tracing::warn!(
-                        tool = %tool.name,
-                        existing_owner = %existing_owner,
-                        colliding_owner = %server_name,
-                        "MCP projection tool name owned by two servers; excluding it from the published catalog (ambiguous => denied)"
-                    );
-                    collided.insert(tool.name.to_string());
+            for (raw_operation, tool) in server_tools {
+                let exposed = entry
+                    .config
+                    .tool_names
+                    .get(&raw_operation)
+                    .unwrap_or(&raw_operation)
+                    .clone();
+                // Discovery owns provenance. Renaming must never repair or
+                // reinterpret a conflicting source identity.
+                if tool.provenance.as_ref().is_some_and(|source| {
+                    source.kind != meerkat_core::types::ToolSourceKind::Mcp
+                        || source.source_id.as_str() != server_name
+                }) {
+                    collided.insert(exposed.clone());
                     complete = false;
                     continue;
                 }
-                tool_to_server.insert(tool.name.to_string(), server_name.clone());
-                canonical_tools.insert(tool.name.to_string(), Arc::clone(tool));
+                let route = McpToolRoute {
+                    server_name: server_name.clone(),
+                    raw_operation,
+                };
+                // Distinct raw operations from the SAME server can collide too.
+                if let Some(existing) = tool_routes.get(&exposed) {
+                    collision_routes
+                        .entry(exposed.clone())
+                        .or_insert_with(|| vec![existing.clone()])
+                        .push(route);
+                    tracing::warn!(
+                        tool = %exposed,
+                        existing_server = %existing.server_name,
+                        server = %server_name,
+                        "MCP exposure name has multiple raw routes; excluding every colliding owner"
+                    );
+                    collided.insert(exposed.clone());
+                    complete = false;
+                    continue;
+                }
+                let projected = if exposed == tool.name.as_str() {
+                    tool
+                } else {
+                    let mut projected = (*tool).clone();
+                    projected.name = exposed.clone().into();
+                    Arc::new(projected)
+                };
+                tool_routes.insert(exposed.clone(), route);
+                canonical_tools.insert(exposed, projected);
             }
         }
 
         // Remove every collided name so a tool exposed by two servers is
         // routable from neither (the first writer is also dropped here).
         for name in &collided {
-            tool_to_server.remove(name);
+            tool_routes.remove(name);
             canonical_tools.remove(name);
         }
 
@@ -2113,13 +2218,28 @@ impl McpRouter {
             .collect::<Vec<_>>()
             .into();
 
+        let name_collisions: Arc<[McpToolNameCollision]> = collision_routes
+            .into_iter()
+            .map(|(exposed_name, routes)| McpToolNameCollision {
+                exposed_name,
+                routes,
+            })
+            .collect::<Vec<_>>()
+            .into();
         self.projection = Arc::new(RouterProjectionSnapshot {
             epoch,
-            tool_to_server,
+            tool_routes,
+            name_collisions,
             catalog_entries,
             visible_tools,
         });
         complete
+    }
+
+    /// Current exposed-name collisions from the same published routing snapshot.
+    /// Every listed route is excluded until explicit configuration resolves it.
+    pub fn tool_name_collisions(&self) -> Arc<[McpToolNameCollision]> {
+        Arc::clone(&self.projection.name_collisions)
     }
 
     fn projection_tools(&self) -> Arc<[Arc<ToolDef>]> {
@@ -2200,15 +2320,16 @@ impl McpRouter {
     /// Call a tool by name, returning multimodal content blocks.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
         let snapshot = Arc::clone(&self.projection);
-        let server_name = snapshot
-            .tool_to_server
+        let route = snapshot
+            .tool_routes
             .get(name)
             .cloned()
             .ok_or_else(|| McpError::ToolNotFound(name.to_string()))?;
+        let server_name = &route.server_name;
 
         let entry = self
             .servers
-            .get(&server_name)
+            .get(server_name)
             .ok_or_else(|| McpError::ServerNotFound(server_name.clone()))?;
 
         let sid = SurfaceId::from(server_name.as_str());
@@ -2241,7 +2362,7 @@ impl McpRouter {
             .ok_or_else(|| McpError::ServerNotFound(server_name.clone()))?;
 
         let _guard = InflightCallGuard::new(&entry.active_calls);
-        let result = conn.call_tool(name, args).await;
+        let result = conn.call_tool(&route.raw_operation, args).await;
 
         // Fail closed (matching CallStarted): a rejected CallFinished is
         // authoritative divergence, not a benign no-op. Surface the tool
@@ -3303,11 +3424,33 @@ mod tests {
             "a tool-name collision is an incomplete projection (fail closed)"
         );
 
+        let collisions = router.tool_name_collisions();
+        assert_eq!(
+            collisions.as_ref(),
+            &[McpToolNameCollision {
+                exposed_name: "shared".into(),
+                routes: vec![
+                    McpToolRoute {
+                        server_name: "server-a".into(),
+                        raw_operation: "shared".into()
+                    },
+                    McpToolRoute {
+                        server_name: "server-b".into(),
+                        raw_operation: "shared".into()
+                    },
+                ],
+            }]
+        );
+        assert!(
+            collisions[0]
+                .to_string()
+                .contains("McpServerConfig.tool_names")
+        );
         let projection = Arc::clone(&router.projection);
 
         // The colliding name is absent from routing and the catalog.
         assert!(
-            !projection.tool_to_server.contains_key("shared"),
+            !projection.tool_routes.contains_key("shared"),
             "collided tool name must not be routable from any server"
         );
         assert!(
@@ -3320,11 +3463,17 @@ mod tests {
 
         // Non-colliding tools from each server remain routable.
         assert_eq!(
-            projection.tool_to_server.get("only_a").map(String::as_str),
+            projection
+                .tool_routes
+                .get("only_a")
+                .map(|route| route.server_name.as_str()),
             Some("server-a")
         );
         assert_eq!(
-            projection.tool_to_server.get("only_b").map(String::as_str),
+            projection
+                .tool_routes
+                .get("only_b")
+                .map(|route| route.server_name.as_str()),
             Some("server-b")
         );
         assert!(
@@ -3351,6 +3500,211 @@ mod tests {
         );
     }
 
+    fn map_names(router: &mut McpRouter, server: &str, names: &[(&str, &str)]) {
+        router
+            .servers
+            .get_mut(server)
+            .expect("test server")
+            .config
+            .tool_names = names
+            .iter()
+            .map(|(raw, exposed)| ((*raw).into(), (*exposed).into()))
+            .collect();
+    }
+
+    #[test]
+    fn explicit_tool_names_keep_raw_route_and_source_provenance() {
+        let mut router = generated_handle_owner_router();
+        for (server, exposed) in [("a", "home_search"), ("b", "work_search")] {
+            complete_add(&mut router, server);
+            let mut tool = ToolDef::new(
+                "search",
+                "provider description",
+                serde_json::json!({"type":"object"}),
+            );
+            tool.provenance = Some(meerkat_core::ToolProvenance {
+                kind: meerkat_core::ToolSourceKind::Mcp,
+                source_id: server.into(),
+            });
+            insert_entry_with_tool_defs(&mut router, server, vec![tool.clone(), tool]);
+            map_names(
+                &mut router,
+                server,
+                &[("search", exposed), ("unlisted", "no_phantom")],
+            );
+        }
+        assert!(router.publish_projection_snapshot());
+        assert_eq!(router.projection.tool_routes.len(), 2);
+        for (server, exposed) in [("a", "home_search"), ("b", "work_search")] {
+            assert_eq!(
+                router.projection.tool_routes.get(exposed),
+                Some(&McpToolRoute {
+                    server_name: server.into(),
+                    raw_operation: "search".into(),
+                })
+            );
+            let tool = router
+                .list_tools()
+                .iter()
+                .find(|tool| tool.name == exposed)
+                .unwrap();
+            assert_eq!(tool.provenance.as_ref().unwrap().source_id.as_str(), server);
+            assert_eq!(
+                tool.provenance.as_ref().unwrap().kind,
+                meerkat_core::ToolSourceKind::Mcp
+            );
+            assert_eq!(tool.description, "provider description");
+            assert_eq!(router.servers[server].tools[0].name, "search");
+        }
+        assert!(!router.projection.tool_routes.contains_key("search"));
+        assert!(!router.projection.tool_routes.contains_key("no_phantom"));
+    }
+
+    #[test]
+    fn exposed_collisions_exclude_all_routes_within_and_across_servers() {
+        let mut router = generated_handle_owner_router();
+        complete_add(&mut router, "a");
+        complete_add(&mut router, "b");
+        insert_entry_with_tools(&mut router, "a", &["first", "second", "untouched"]);
+        insert_entry_with_tools(&mut router, "b", &["third"]);
+        map_names(
+            &mut router,
+            "a",
+            &[("first", "collision"), ("second", "collision")],
+        );
+        map_names(&mut router, "b", &[("third", "collision")]);
+        assert!(!router.publish_projection_snapshot());
+        assert_eq!(router.projection.tool_routes.len(), 1);
+        assert!(router.projection.tool_routes.contains_key("untouched"));
+        assert_eq!(router.list_tools().len(), 1);
+        assert_eq!(
+            router.tool_name_collisions().as_ref(),
+            &[McpToolNameCollision {
+                exposed_name: "collision".into(),
+                routes: vec![
+                    McpToolRoute {
+                        server_name: "a".into(),
+                        raw_operation: "first".into()
+                    },
+                    McpToolRoute {
+                        server_name: "a".into(),
+                        raw_operation: "second".into()
+                    },
+                    McpToolRoute {
+                        server_name: "b".into(),
+                        raw_operation: "third".into()
+                    },
+                ],
+            }]
+        );
+
+        // A configured alias can collide with an unmapped operation too.
+        map_names(
+            &mut router,
+            "a",
+            &[("first", "untouched"), ("second", "safe")],
+        );
+        map_names(&mut router, "b", &[("third", "safe")]);
+        assert!(!router.publish_projection_snapshot());
+        assert!(router.projection.tool_routes.is_empty());
+        assert!(router.list_tools().is_empty());
+        assert_eq!(router.tool_name_collisions().len(), 2);
+        map_names(
+            &mut router,
+            "a",
+            &[("first", "a_first"), ("second", "a_second")],
+        );
+        map_names(&mut router, "b", &[("third", "b_third")]);
+        assert!(router.publish_projection_snapshot());
+        assert_eq!(router.list_tools().len(), 4);
+        assert!(router.tool_name_collisions().is_empty());
+    }
+
+    #[test]
+    fn divergent_raw_definitions_cannot_be_repaired_by_an_alias() {
+        let mut router = generated_handle_owner_router();
+        complete_add(&mut router, "a");
+        insert_entry_with_tool_defs(
+            &mut router,
+            "a",
+            vec![
+                ToolDef::new("search", "first", serde_json::json!({"type":"object"})),
+                ToolDef::new("search", "second", serde_json::json!({"type":"object"})),
+            ],
+        );
+        map_names(&mut router, "a", &[("search", "home_search")]);
+        assert!(!router.publish_projection_snapshot());
+        assert!(router.list_tools().is_empty());
+        assert!(router.projection.tool_routes.is_empty());
+    }
+
+    #[test]
+    fn exposure_does_not_repair_mismatched_provenance() {
+        for (kind, source) in [
+            (meerkat_core::ToolSourceKind::Builtin, "a"),
+            (meerkat_core::ToolSourceKind::Mcp, "other-server"),
+        ] {
+            let mut router = generated_handle_owner_router();
+            complete_add(&mut router, "a");
+            let mut tool = ToolDef::new("search", "provider", serde_json::json!({"type":"object"}));
+            tool.provenance = Some(meerkat_core::ToolProvenance {
+                kind,
+                source_id: source.into(),
+            });
+            insert_entry_with_tool_defs(&mut router, "a", vec![tool]);
+            map_names(&mut router, "a", &[("search", "home_search")]);
+            assert!(!router.publish_projection_snapshot());
+            assert!(router.list_tools().is_empty());
+            assert!(router.projection.tool_routes.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_tool_names_refuse_before_staging_or_connection() {
+        use meerkat_core::tool_catalog::{TOOL_CATALOG_LOAD_NAME, TOOL_CATALOG_SEARCH_NAME};
+        let mut router = generated_handle_owner_router();
+        let before = router.external_tool_surface_snapshot();
+        for exposed in [
+            "",
+            "has space",
+            "has.dot",
+            "path/name",
+            "nonascii_å",
+            TOOL_CATALOG_SEARCH_NAME,
+            TOOL_CATALOG_LOAD_NAME,
+            &"x".repeat(65),
+        ] {
+            let mut config =
+                McpServerConfig::stdio("invalid", "never-execute", vec![], HashMap::new());
+            config.tool_names.insert("search".into(), exposed.into());
+            assert!(matches!(
+                router.stage_add(config.clone()),
+                Err(McpError::InvalidToolNameMapping { .. })
+            ));
+            assert!(matches!(
+                router.stage_reload(config.clone()),
+                Err(McpError::InvalidToolNameMapping { .. })
+            ));
+            assert!(matches!(
+                router.add_server(config).await,
+                Err(McpError::InvalidToolNameMapping { .. })
+            ));
+            assert_eq!(router.external_tool_surface_snapshot(), before);
+            assert!(router.staged_payloads.is_empty());
+            assert!(router.servers.is_empty());
+        }
+        let mut config = McpServerConfig::stdio("valid", "never-execute", vec![], HashMap::new());
+        config
+            .tool_names
+            .insert("provider.operation".into(), "x".repeat(64));
+        assert!(McpRouter::validate_tool_names(&config).is_ok());
+        config.tool_names.insert("".into(), "valid_exposure".into());
+        assert!(matches!(
+            McpRouter::validate_tool_names(&config),
+            Err(McpError::InvalidToolNameMapping { .. })
+        ));
+    }
+
     /// Same-name-same-server re-entry with identical definitions is NOT a
     /// collision; the tool stays routable and the projection complete.
     #[test]
@@ -3367,7 +3721,10 @@ mod tests {
 
         let projection = Arc::clone(&router.projection);
         assert_eq!(
-            projection.tool_to_server.get("dup").map(String::as_str),
+            projection
+                .tool_routes
+                .get("dup")
+                .map(|route| route.server_name.as_str()),
             Some("solo"),
             "same-server duplicate tool name remains routable"
         );
@@ -3381,7 +3738,10 @@ mod tests {
             "identical same-server duplicates collapse to one exact catalog entry"
         );
         assert_eq!(
-            projection.tool_to_server.get("unique").map(String::as_str),
+            projection
+                .tool_routes
+                .get("unique")
+                .map(|route| route.server_name.as_str()),
             Some("solo")
         );
     }
@@ -3416,7 +3776,7 @@ mod tests {
 
         let projection = Arc::clone(&router.projection);
         assert!(
-            !projection.tool_to_server.contains_key("dup"),
+            !projection.tool_routes.contains_key("dup"),
             "divergent same-server duplicate must not be routable"
         );
         assert!(
@@ -3434,7 +3794,10 @@ mod tests {
             "divergent same-server duplicate must be excluded from visible tools"
         );
         assert_eq!(
-            projection.tool_to_server.get("unique").map(String::as_str),
+            projection
+                .tool_routes
+                .get("unique")
+                .map(|route| route.server_name.as_str()),
             Some("solo"),
             "non-ambiguous tools from the same server remain routable"
         );
@@ -3478,7 +3841,7 @@ mod tests {
 
         let projection = Arc::clone(&router.projection);
         assert!(
-            !projection.tool_to_server.contains_key("dup"),
+            !projection.tool_routes.contains_key("dup"),
             "description-divergent duplicate must not be routable"
         );
         assert!(

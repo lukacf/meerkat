@@ -10,9 +10,9 @@
 use fs4::fs_std::FileExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap};
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs::{File, OpenOptions};
 #[cfg(not(target_arch = "wasm32"))]
@@ -137,6 +137,14 @@ pub struct McpServerConfig {
     /// Defaults to 10 seconds when not specified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connect_timeout_secs: Option<u32>,
+    /// Explicit raw MCP operation -> exposed tool name selected by configuration.
+    /// Unmapped operations keep their raw names. Names are never derived from
+    /// credentials or the current set of sibling servers. Explicit exposed
+    /// names are 1-64 ASCII letters, digits, underscores or hyphens; the router
+    /// rejects reserved catalog-control names before staging. An unlisted raw
+    /// operation in the map does not create a tool.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_names: BTreeMap<String, String>,
 }
 
 impl McpServerConfig {
@@ -154,6 +162,7 @@ impl McpServerConfig {
                 env,
             }),
             connect_timeout_secs: None,
+            tool_names: BTreeMap::new(),
         }
     }
 
@@ -171,6 +180,7 @@ impl McpServerConfig {
                 oauth_account: None,
             }),
             connect_timeout_secs: None,
+            tool_names: BTreeMap::new(),
         }
     }
 
@@ -188,6 +198,7 @@ impl McpServerConfig {
                 oauth_account: None,
             }),
             connect_timeout_secs: None,
+            tool_names: BTreeMap::new(),
         }
     }
 
@@ -898,6 +909,13 @@ fn server_table(server: &McpServerConfig) -> Table {
             }
         }
     }
+    if !server.tool_names.is_empty() {
+        let mut names = toml_edit::InlineTable::new();
+        for (raw, exposed) in &server.tool_names {
+            names.insert(raw, exposed.as_str().into());
+        }
+        table["tool_names"] = toml_edit::value(names);
+    }
     if let Some(timeout) = server.connect_timeout_secs {
         table["connect_timeout_secs"] = toml_edit::value(i64::from(timeout));
     }
@@ -1040,6 +1058,7 @@ where
         name: server.name,
         transport,
         connect_timeout_secs: server.connect_timeout_secs,
+        tool_names: server.tool_names,
     })
 }
 
@@ -1650,6 +1669,48 @@ command = "echo"
             user.resolved_path().unwrap(),
             user_root.join(".rkat/mcp.toml")
         );
+    }
+
+    #[tokio::test]
+    async fn tool_names_round_trip_persistence_without_environment_expansion() {
+        let temp = TempDir::new().unwrap();
+        let authority = McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
+        let mut server = McpServerConfig::stdio("mapped", "echo", vec![], HashMap::new());
+        server.tool_names = BTreeMap::from([
+            ("provider.operation".into(), "home_search".into()),
+            ("${RAW_OPERATION}".into(), "work_search".into()),
+        ]);
+        let expected = server.clone();
+        let rollback = McpConfig::persist_add_with_rollback(&authority, server)
+            .await
+            .unwrap();
+        let path = temp.path().join(".rkat/mcp.toml");
+        let loaded = McpConfig::load_from_paths(None, Some(&path)).await.unwrap();
+        assert_eq!(loaded.servers, vec![expected.clone()]);
+        let json = serde_json::to_value(&expected).unwrap();
+        assert_eq!(json["tool_names"]["provider.operation"], "home_search");
+        assert_eq!(
+            serde_json::from_value::<McpServerConfig>(json).unwrap(),
+            expected
+        );
+        rollback.rollback().await.unwrap();
+    }
+
+    #[test]
+    fn omitted_tool_names_preserves_legacy_serialization_for_both_transports() {
+        for json in [
+            serde_json::json!({"name":"stdio", "command":"echo"}),
+            serde_json::json!({"name":"http", "url":"https://example.invalid/mcp"}),
+        ] {
+            let server: McpServerConfig = serde_json::from_value(json).unwrap();
+            assert!(server.tool_names.is_empty());
+            assert!(
+                serde_json::to_value(server)
+                    .unwrap()
+                    .get("tool_names")
+                    .is_none()
+            );
+        }
     }
 
     #[tokio::test]

@@ -16,8 +16,9 @@ use std::sync::{Arc, RwLock};
 
 use crate::schema::schema_for;
 
-const SEARCH_TOOL_NAME: &str = "tool_catalog_search";
-const LOAD_TOOL_NAME: &str = "tool_catalog_load";
+use meerkat_core::tool_catalog::{
+    TOOL_CATALOG_LOAD_NAME as LOAD_TOOL_NAME, TOOL_CATALOG_SEARCH_NAME as SEARCH_TOOL_NAME,
+};
 const CONTROL_SOURCE_ID: &str = "control_plane";
 
 /// Typed refusal raised when the deferred tool-load control plane has no

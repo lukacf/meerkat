@@ -15,6 +15,17 @@ pub enum McpError {
     #[error("Server not found: {0}")]
     ServerNotFound(String),
 
+    /// An explicit exposure map is invalid. No lifecycle or transport effect
+    /// has been admitted for this requested configuration.
+    #[error(
+        "Invalid tool name mapping for server '{server}', operation '{raw_operation}': {reason}"
+    )]
+    InvalidToolNameMapping {
+        server: String,
+        raw_operation: String,
+        reason: &'static str,
+    },
+
     #[error("Tool not found: {0}")]
     ToolNotFound(String),
 

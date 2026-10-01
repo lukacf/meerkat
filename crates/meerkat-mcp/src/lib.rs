@@ -21,7 +21,7 @@ pub use meerkat_core::{ExternalToolDelta, ExternalToolDeltaPhase};
 pub use protocol::McpProtocol;
 pub use router::{
     McpApplyDelta, McpApplyResult, McpBoundaryRejection, McpLifecycleAction, McpLifecyclePhase,
-    McpReloadTarget, McpRouter, McpServerLifecycleState,
+    McpReloadTarget, McpRouter, McpServerLifecycleState, McpToolNameCollision, McpToolRoute,
 };
 
 // Capability registration

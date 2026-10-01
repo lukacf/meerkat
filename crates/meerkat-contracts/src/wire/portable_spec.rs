@@ -169,6 +169,9 @@ pub enum PortableMcpDecl {
         required_env_keys: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         connect_timeout_secs: Option<u64>,
+        /// Explicit raw operation -> exposed name, with no credential values.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        tool_names: BTreeMap<String, String>,
     },
     Http {
         url: String,
@@ -184,6 +187,9 @@ pub enum PortableMcpDecl {
         required_header_names: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         connect_timeout_secs: Option<u64>,
+        /// Explicit raw operation -> exposed name, with no credential values.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        tool_names: BTreeMap<String, String>,
     },
 }
 
@@ -195,12 +201,14 @@ impl std::fmt::Debug for PortableMcpDecl {
                 args,
                 required_env_keys,
                 connect_timeout_secs,
+                tool_names,
             } => f
                 .debug_struct("Stdio")
                 .field("command", command)
                 .field("args", args)
                 .field("required_env_keys", required_env_keys)
                 .field("connect_timeout_secs", connect_timeout_secs)
+                .field("tool_names", tool_names)
                 .finish(),
             Self::Http {
                 url,
@@ -208,6 +216,7 @@ impl std::fmt::Debug for PortableMcpDecl {
                 oauth_account,
                 required_header_names,
                 connect_timeout_secs,
+                tool_names,
             } => f
                 .debug_struct("Http")
                 .field("url", url)
@@ -218,6 +227,7 @@ impl std::fmt::Debug for PortableMcpDecl {
                 )
                 .field("required_header_names", required_header_names)
                 .field("connect_timeout_secs", connect_timeout_secs)
+                .field("tool_names", tool_names)
                 .finish(),
         }
     }
@@ -450,6 +460,7 @@ pub(crate) fn sample_portable_member_spec() -> PortableMemberSpec {
                         args: vec!["--stdio".to_string()],
                         required_env_keys: vec!["DOCS_TOKEN".to_string()],
                         connect_timeout_secs: Some(10),
+                        tool_names: BTreeMap::new(),
                     },
                 )]),
                 non_portable_disabled: vec![WireNonPortableResourceKind::RustBundles],
@@ -522,6 +533,30 @@ pub(crate) fn sample_portable_member_spec() -> PortableMemberSpec {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn portable_tool_names_round_trip_and_legacy_omission() {
+        for mut value in [
+            serde_json::json!({"transport":"stdio", "command":"echo"}),
+            serde_json::json!({"transport":"http", "url":"https://example.invalid/mcp"}),
+        ] {
+            let legacy: PortableMcpDecl =
+                serde_json::from_value(value.clone()).expect("valid portable declaration");
+            assert!(
+                serde_json::to_value(legacy)
+                    .expect("valid portable declaration")
+                    .get("tool_names")
+                    .is_none()
+            );
+            value["tool_names"] = serde_json::json!({"provider.search":"home_search"});
+            let selected: PortableMcpDecl =
+                serde_json::from_value(value.clone()).expect("valid portable declaration");
+            assert_eq!(
+                serde_json::to_value(selected).expect("valid portable declaration"),
+                value
+            );
+        }
+    }
 
     #[test]
     fn portable_member_spec_full_fixture_round_trips() {
@@ -644,6 +679,7 @@ mod tests {
                 oauth_account: None,
                 required_header_names: vec!["authorization".to_string()],
                 connect_timeout_secs: Some(23),
+                tool_names: BTreeMap::new(),
             }
         );
 
@@ -660,6 +696,7 @@ mod tests {
                 oauth_account: None,
                 required_header_names: Vec::new(),
                 connect_timeout_secs: None,
+                tool_names: BTreeMap::new(),
             }
         );
     }

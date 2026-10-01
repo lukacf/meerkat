@@ -178,8 +178,8 @@ export interface McpHttpConfig {
 }
 
 export type McpServerConfig =
-  | ({ name: string; connect_timeout_secs?: number } & McpStdioConfig)
-  | ({ name: string; connect_timeout_secs?: number } & McpHttpConfig);
+  | ({ name: string; connect_timeout_secs?: number; tool_names?: Record<string, string> } & McpStdioConfig)
+  | ({ name: string; connect_timeout_secs?: number; tool_names?: Record<string, string> } & McpHttpConfig);
 
 export interface McpAddParams {
   persisted?: boolean;
@@ -3731,6 +3731,7 @@ export interface PortableMcpDeclStdio {
   command: string;
   connect_timeout_secs?: number | null;
   required_env_keys?: string[];
+  tool_names?: Record<string, string>;
   transport: "stdio";
 }
 
@@ -3739,6 +3740,7 @@ export interface PortableMcpDeclHttp {
   http_transport?: McpHttpTransport | null;
   oauth_account?: string | null;
   required_header_names?: string[];
+  tool_names?: Record<string, string>;
   transport: "http";
   url: string;
 }

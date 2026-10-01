@@ -12576,6 +12576,13 @@
                 },
                 "type": "array"
               },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
+              },
               "transport": {
                 "const": "stdio",
                 "type": "string"
@@ -12621,6 +12628,13 @@
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
               },
               "transport": {
                 "const": "http",
@@ -20632,6 +20646,13 @@
                 },
                 "type": "array"
               },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
+              },
               "transport": {
                 "const": "stdio",
                 "type": "string"
@@ -20677,6 +20698,13 @@
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
               },
               "transport": {
                 "const": "http",
@@ -58459,6 +58487,13 @@
                 },
                 "type": "array"
               },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
+              },
               "transport": {
                 "const": "stdio",
                 "type": "string"
@@ -58504,6 +58539,13 @@
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
               },
               "transport": {
                 "const": "http",
@@ -68411,6 +68453,13 @@
                 },
                 "type": "array"
               },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
+              },
               "transport": {
                 "const": "stdio",
                 "type": "string"
@@ -68456,6 +68505,13 @@
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
               },
               "transport": {
                 "const": "http",
@@ -102661,6 +102717,13 @@
                 },
                 "type": "array"
               },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
+              },
               "transport": {
                 "const": "stdio",
                 "type": "string"
@@ -102706,6 +102769,13 @@
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
               },
               "transport": {
                 "const": "http",
@@ -119714,6 +119784,13 @@
             },
             "type": "array"
           },
+          "tool_names": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Explicit raw operation -> exposed name, with no credential values.",
+            "type": "object"
+          },
           "transport": {
             "const": "stdio",
             "type": "string"
@@ -119759,6 +119836,13 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "tool_names": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Explicit raw operation -> exposed name, with no credential values.",
+            "type": "object"
           },
           "transport": {
             "const": "http",
@@ -120242,6 +120326,13 @@
                 },
                 "type": "array"
               },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
+              },
               "transport": {
                 "const": "stdio",
                 "type": "string"
@@ -120287,6 +120378,13 @@
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
               },
               "transport": {
                 "const": "http",
@@ -122051,6 +122149,13 @@
                 },
                 "type": "array"
               },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
+              },
               "transport": {
                 "const": "stdio",
                 "type": "string"
@@ -122096,6 +122201,13 @@
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
               },
               "transport": {
                 "const": "http",
@@ -123800,6 +123912,13 @@
                 },
                 "type": "array"
               },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
+              },
               "transport": {
                 "const": "stdio",
                 "type": "string"
@@ -123845,6 +123964,13 @@
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
               },
               "transport": {
                 "const": "http",

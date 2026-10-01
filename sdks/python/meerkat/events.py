@@ -695,6 +695,21 @@ class BackgroundJobCompleted(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class LiveChannelClosed(Event):
+    """The runtime closed one of the session's live channels for a typed cause.
+
+    `reason` is `"media_fault"` when the channel's first assistant output had a
+    transcript but no audible audio. `reopen_recommended` says whether the
+    session may reopen the channel with its retained context.
+    """
+
+    session_id: str
+    channel_id: str
+    reason: str
+    reopen_recommended: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class TranscriptRewriteCommitted(Event):
     """A same-session transcript rewrite was durably committed."""
 
@@ -747,6 +762,8 @@ _STOP_REASONS = frozenset({
 })
 
 _TOOL_CONFIG_OPERATIONS = frozenset({"add", "remove", "reload"})
+_LIVE_CHANNEL_CLOSE_REASONS = frozenset({"media_fault"})
+
 _BACKGROUND_JOB_TERMINAL_STATUSES = frozenset({
     "completed",
     "failed",
@@ -787,6 +804,7 @@ _EVENT_MAP: dict[str, type[Event]] = {
     "stream_truncated": StreamTruncated,
     "tool_config_changed": ToolConfigChanged,
     "background_job_completed": BackgroundJobCompleted,
+    "live_channel_closed": LiveChannelClosed,
     "transcript_rewrite_committed": TranscriptRewriteCommitted,
 }
 
@@ -1452,6 +1470,14 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         if terminal_status not in _BACKGROUND_JOB_TERMINAL_STATUSES:
             raise ValueError("terminal_status must be a background job terminal status")
         _require_str(raw, "detail")
+        return
+    if event_type == "live_channel_closed":
+        _require_str(raw, "session_id")
+        _require_str(raw, "channel_id")
+        if raw.get("reason") not in _LIVE_CHANNEL_CLOSE_REASONS:
+            raise ValueError("reason must be a live channel close reason")
+        if not isinstance(raw.get("reopen_recommended", False), bool):
+            raise ValueError("reopen_recommended must be boolean")
         return
     if event_type == "transcript_rewrite_committed":
         _require_str(raw, "session_id")

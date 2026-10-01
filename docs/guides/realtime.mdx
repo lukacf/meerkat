@@ -862,7 +862,12 @@ output, in `ProviderManagedUnmeasured` mode:
    context. A second fault on the same session closes without the
    recommendation, so a broken media path never loops.
 
-`live/status` then reports
+Observers that did not send the report (a UI, the owning agent, other SDK
+consumers) learn the close from the session event stream: after the close
+commits, the runtime publishes
+`{"type": "live_channel_closed", "session_id": ..., "channel_id": ...,
+"reason": "media_fault", "reopen_recommended": true}` (`AgentEvent::LiveChannelClosed`).
+No one needs to poll. `live/status` also reports
 `{"status": "closed", "reason": "media_fault", "reopen_recommended": true}`.
 A plain close still reports `{"status": "closed"}`. The request is made once
 per channel. A report for an output the runtime did not request, a repeated

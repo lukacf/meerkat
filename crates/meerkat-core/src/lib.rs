@@ -221,7 +221,7 @@ pub use event::{
     AgentErrorClass, AgentErrorReport, AgentEvent, AssistantImageEvent, BudgetType,
     CompactionFailureReason, CompactionFitByteEvidence, CompactionFitTokenEvidence,
     CompactionPreservedHistoryFit, EventEnvelope, EventSourceIdentity, ExternalToolDelta,
-    ExternalToolDeltaPhase, InteractionFailureReason, ScopedAgentEvent,
+    ExternalToolDeltaPhase, InteractionFailureReason, LiveChannelCloseReason, ScopedAgentEvent,
     SkillResolutionFailureReason, StreamScopeFrame, StreamTruncationReason, StructuredOutputOrigin,
     ToolCallArguments, ToolCallArgumentsError, ToolConfigChangeOperation, ToolConfigChangeStatus,
     ToolConfigChangedPayload, TurnErrorMetadata, VerboseEventConfig, agent_event_type,

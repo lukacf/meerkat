@@ -14644,6 +14644,22 @@ impl std::fmt::Debug for State {
                 &self.live_abandoned_interactions,
             )
             .field(
+                "live_delegation_steer_operation_by_continuation",
+                &self.live_delegation_steer_operation_by_continuation,
+            )
+            .field(
+                "live_delegation_steer_digest_by_continuation",
+                &self.live_delegation_steer_digest_by_continuation,
+            )
+            .field(
+                "live_delegation_steer_reconciliation_by_continuation",
+                &self.live_delegation_steer_reconciliation_by_continuation,
+            )
+            .field(
+                "live_delegation_steer_delivered_by_continuation",
+                &self.live_delegation_steer_delivered_by_continuation,
+            )
+            .field(
                 "live_delegation_operation_by_interaction",
                 &self.live_delegation_operation_by_interaction,
             )

@@ -65,14 +65,20 @@ pub(super) enum RuntimeStopCallerWait {
 }
 
 enum RuntimeStopCleanupWork {
-    Request {
-        reason: String,
-    },
+    Request { reason: String },
     CleanupOnly,
-    /// A stop request against a registration whose generated lifecycle is
-    /// already Stopped. The machine has no StopRuntimeExecutor edge out of
-    /// Stopped, so the request is satisfied by the reached terminal: nothing
-    /// is staged, and only the cleanup still owed runs (idempotently).
+}
+
+/// How the owned stop coordinator's request was settled by the generated
+/// authority.
+enum RuntimeStopRequestDispatch {
+    /// The machine accepted StopRuntimeExecutor; the receiver (if a live loop
+    /// took the effect) acknowledges the loop's stop cleanup.
+    Dispatched(Option<crate::tokio::sync::oneshot::Receiver<Result<(), RuntimeDriverError>>>),
+    /// The machine refused StopRuntimeExecutor because the registration's
+    /// lifecycle is already the Stopped terminal (its typed guard refusal
+    /// from that phase). The request is satisfied by the reached terminal;
+    /// only the cleanup still owed runs.
     AlreadyTerminal,
 }
 
@@ -7189,18 +7195,6 @@ impl MeerkatMachine {
                         }
                     }
                     None => {
-                        // Read under the gate that installs the coordinator:
-                        // a generated Stopped here is the stop terminal itself
-                        // (a loop-owned stop or the executor-exit observation
-                        // reached it without a coordinator), so no
-                        // StopRuntimeExecutor is staged.
-                        let already_terminal = entry
-                            .dsl_authority
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .state()
-                            .lifecycle_phase
-                            == crate::meerkat_machine::dsl::MeerkatPhase::Stopped;
                         let epoch_id = entry.epoch_id.clone();
                         let coordinator_id = uuid::Uuid::new_v4();
                         let (result_tx, result_rx) = crate::tokio::sync::watch::channel(None);
@@ -7218,9 +7212,6 @@ impl MeerkatMachine {
                             result_rx,
                             teardown_slot: entry.runtime_loop_teardown.clone(),
                             work: match initial_reason {
-                                Some(_) if already_terminal => {
-                                    RuntimeStopCleanupWork::AlreadyTerminal
-                                }
                                 Some(reason) => RuntimeStopCleanupWork::Request { reason },
                                 None => RuntimeStopCleanupWork::CleanupOnly,
                             },
@@ -7425,10 +7416,15 @@ impl MeerkatMachine {
     ) -> Result<(), RuntimeDriverError> {
         let stop_completion = match work {
             RuntimeStopCleanupWork::Request { reason } => {
-                self.dispatch_owned_runtime_stop_request(session_id, epoch_id, reason)
+                match self
+                    .dispatch_owned_runtime_stop_request(session_id, epoch_id, reason)
                     .await?
+                {
+                    RuntimeStopRequestDispatch::Dispatched(stop_completion) => stop_completion,
+                    RuntimeStopRequestDispatch::AlreadyTerminal => None,
+                }
             }
-            RuntimeStopCleanupWork::CleanupOnly | RuntimeStopCleanupWork::AlreadyTerminal => None,
+            RuntimeStopCleanupWork::CleanupOnly => None,
         };
 
         let (driver, completions, publication_handle) = {
@@ -7496,10 +7492,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
         epoch_id: &meerkat_core::RuntimeEpochId,
         reason: String,
-    ) -> Result<
-        Option<crate::tokio::sync::oneshot::Receiver<Result<(), RuntimeDriverError>>>,
-        RuntimeDriverError,
-    > {
+    ) -> Result<RuntimeStopRequestDispatch, RuntimeDriverError> {
         let Some(gate) = self.session_mutation_gate(session_id).await else {
             return Err(RuntimeDriverError::NotReady {
                 state: RuntimeState::Destroyed,
@@ -7507,7 +7500,7 @@ impl MeerkatMachine {
         };
         let gate_guard = Arc::clone(&gate).lock_owned().await;
         let staged = match self
-            .stage_session_dsl_transition(
+            .stage_session_dsl_transition_typed(
                 session_id,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor { reason },
                 "StopRuntimeExecutor",
@@ -7515,9 +7508,24 @@ impl MeerkatMachine {
             .await
         {
             Ok(staged) => staged,
-            Err(reason) => {
+            // The generated authority decided: it has no StopRuntimeExecutor
+            // edge out of the Stopped terminal and refuses on that phase.
+            // Classify exactly that typed refusal as the already-reached
+            // terminal; every other refusal stays a failure.
+            Err(super::dsl_effects::SessionDslStageError::Refused {
+                error:
+                    crate::meerkat_machine::dsl::MeerkatMachineTransitionError::GuardRejected {
+                        phase: crate::meerkat_machine::dsl::MeerkatPhase::Stopped,
+                        trigger:
+                            crate::meerkat_machine::dsl::MeerkatMachineTransitionTrigger::Input(
+                                crate::meerkat_machine::dsl::MeerkatMachineInputVariant::StopRuntimeExecutor,
+                            ),
+                    },
+                ..
+            }) => return Ok(RuntimeStopRequestDispatch::AlreadyTerminal),
+            Err(error) => {
                 return Err(self
-                    .classify_session_dsl_rejection(session_id, reason)
+                    .classify_session_dsl_rejection(session_id, error.into_reason())
                     .await);
             }
         };
@@ -7545,12 +7553,14 @@ impl MeerkatMachine {
             .with_stop_completion(stop_completion_tx)?;
         drop(gate_guard);
         let Some(effect_tx) = effect_tx else {
-            return Ok(None);
+            return Ok(RuntimeStopRequestDispatch::Dispatched(None));
         };
         if effect_tx.send(effect).await.is_err() {
-            return Ok(None);
+            return Ok(RuntimeStopRequestDispatch::Dispatched(None));
         }
-        Ok(Some(stop_completion_rx))
+        Ok(RuntimeStopRequestDispatch::Dispatched(Some(
+            stop_completion_rx,
+        )))
     }
 
     async fn join_or_start_unregister_teardown(

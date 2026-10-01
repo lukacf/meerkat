@@ -16544,9 +16544,10 @@ mod stop_teardown_coordinator_class {
 
     /// The same contract when the registration reached Stopped through a
     /// loop-owned stop and no stop-cleanup coordinator was ever installed.
-    /// The machine has no StopRuntimeExecutor edge out of Stopped, so the
-    /// stop must not stage one: it finishes the cleanup that is still owed,
-    /// reports the reached terminal, and leaves no failed coordinator result
+    /// The machine has no StopRuntimeExecutor edge out of Stopped and refuses
+    /// the staged request with its typed guard refusal from that phase; the
+    /// stop classifies exactly that refusal as the reached terminal, finishes
+    /// the cleanup that is still owed, and leaves no failed coordinator result
     /// behind to poison the next binding preparation.
     #[tokio::test(flavor = "multi_thread")]
     async fn stop_until_terminal_after_loop_owned_stop_reports_the_reached_terminal() {

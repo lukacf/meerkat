@@ -108,11 +108,13 @@ them.
   joined digest and appends none, and fails closed on any mismatch.
 - A runtime stop on a registration that already reached the generated
   `Stopped` terminal through a loop-owned stop (for example a host
-  crash-stop) is idempotent: it reports the reached terminal and runs the
-  executor cleanup still owed instead of staging a `StopRuntimeExecutor` the
-  machine has no edge for. Before, the refused stop was retained as a failed
-  stop-cleanup result, and the next binding preparation for that session
-  failed with `guard rejected transition from Stopped`.
+  crash-stop) is idempotent. The generated authority still decides: its
+  typed refusal of `StopRuntimeExecutor` from `Stopped` is classified as the
+  already-reached terminal, the executor cleanup still owed runs, and the
+  stop reports that terminal; any other refusal stays a failure. Before, the
+  refusal was retained as a failed stop-cleanup result, and the next binding
+  preparation for that session failed with `guard rejected transition from
+  Stopped`.
 - The `meerkat_schedule_create` and `meerkat_schedule_update` tool schemas
   advertise the existing `host_runnable` target (`target_kind`
   `"host_runnable"`, a required non-empty `runnable` name and optional opaque

@@ -3236,6 +3236,7 @@ async fn failed_executor_continues_processing_backlog() {
     struct FailThenSucceedExecutor {
         calls: Arc<AtomicUsize>,
         first_apply_started: Arc<tokio::sync::Notify>,
+        release_first: Arc<tokio::sync::Notify>,
     }
 
     #[async_trait::async_trait]
@@ -3247,10 +3248,10 @@ async fn failed_executor_continues_processing_backlog() {
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             if call == 0 {
+                // Hold the failing run until the backlog input is queued
+                // behind it.
                 self.first_apply_started.notify_one();
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            if call == 0 {
+                self.release_first.notified().await;
                 return Err(CoreExecutorError::apply_failed_runtime_turn(
                     "first run fails",
                 ));
@@ -3287,18 +3288,32 @@ async fn failed_executor_continues_processing_backlog() {
     let sid = SessionId::new();
     let calls = Arc::new(AtomicUsize::new(0));
     let first_apply_started = Arc::new(tokio::sync::Notify::new());
+    let release_first = Arc::new(tokio::sync::Notify::new());
     adapter
         .register_session_with_executor(
             sid.clone(),
             Box::new(FailThenSucceedExecutor {
                 calls: Arc::clone(&calls),
                 first_apply_started: Arc::clone(&first_apply_started),
+                release_first: Arc::clone(&release_first),
             }),
         )
         .await
         .expect("runtime executor registration should succeed");
 
-    let first = make_prompt("first");
+    // The failed head rolls back to the queue and is retried AFTER the backlog
+    // behind it: the runs are first (fails), second, first again. So "second
+    // is Consumed and the runtime is Attached" does not mean the head has
+    // settled: the runtime is Attached between the backlog's run and the
+    // head's retry, and the retry can stage the head right after that read.
+    // The head's own completion waiter resolves on the failed attempt, so the
+    // test joins the retry through an idempotent duplicate instead, which
+    // returns a waiter for the in-flight input or none once it is terminal.
+    let head_key = meerkat_runtime::identifiers::IdempotencyKey::new("failed-head");
+    let mut first = make_prompt("first");
+    if let Input::Prompt(ref mut prompt) = first {
+        prompt.header.idempotency_key = Some(head_key.clone());
+    }
     let first_id = first.id().clone();
     let second = make_prompt("second");
     let second_id = second.id().clone();
@@ -3306,17 +3321,66 @@ async fn failed_executor_continues_processing_backlog() {
     tokio::time::timeout(Duration::from_secs(1), first_apply_started.notified())
         .await
         .expect("first apply should start before the backlog input is queued");
-    adapter.accept_input(&sid, second).await.unwrap();
+    let (second_outcome, second_completion) = adapter
+        .accept_input_with_completion(&sid, second)
+        .await
+        .unwrap();
+    assert!(second_outcome.is_accepted());
+    release_first.notify_one();
 
-    let second_state = wait_for_input_state(
-        &adapter,
-        &sid,
-        &second_id,
-        "runtime loop should keep draining queued backlog after a failed run",
-        |state| state.seed.phase == InputLifecycleState::Consumed,
+    let second_result = tokio::time::timeout(
+        Duration::from_secs(10),
+        second_completion
+            .expect("the queued backlog input carries a completion waiter")
+            .wait(),
     )
-    .await;
+    .await
+    .expect("runtime loop should keep draining queued backlog after a failed run")
+    .expect("the backlog completion waiter resolves");
+    assert!(
+        matches!(
+            second_result,
+            meerkat_runtime::completion::CompletionOutcome::Completed(_)
+                | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
+        ),
+        "the backlog input completes, got {second_result:?}"
+    );
+    let second_state = adapter
+        .input_state(&sid, &second_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(second_state.seed.phase, InputLifecycleState::Consumed);
+
+    let mut head_duplicate = make_prompt("first, joined");
+    if let Input::Prompt(ref mut prompt) = head_duplicate {
+        prompt.header.idempotency_key = Some(head_key);
+    }
+    let (head_outcome, head_retry) = adapter
+        .accept_input_with_completion(&sid, head_duplicate)
+        .await
+        .unwrap();
+    assert!(
+        head_outcome.is_deduplicated(),
+        "the duplicate joins the failed head instead of queueing new work"
+    );
+    if let Some(head_retry) = head_retry {
+        tokio::time::timeout(Duration::from_secs(10), head_retry.wait())
+            .await
+            .expect("the failed head's retry should settle")
+            .expect("the head's retry completion waiter resolves");
+    }
+    let first_state = adapter.input_state(&sid, &first_id).await.unwrap().unwrap();
+    assert_eq!(
+        first_state.seed.phase,
+        InputLifecycleState::Consumed,
+        "the initially failed input is retried after the backlog drained and succeeds"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "the head fails once, the backlog runs once, then the head's retry runs once"
+    );
     let runtime_state = wait_for_runtime_state(
         &adapter,
         &sid,
@@ -3325,18 +3389,6 @@ async fn failed_executor_continues_processing_backlog() {
     )
     .await;
     assert_eq!(runtime_state, RuntimeState::Attached);
-    assert!(
-        calls.load(Ordering::SeqCst) >= 2,
-        "the runtime loop should keep draining queued backlog after a failed run"
-    );
-    let first_state = adapter.input_state(&sid, &first_id).await.unwrap().unwrap();
-    assert!(
-        matches!(
-            first_state.seed.phase,
-            InputLifecycleState::Queued | InputLifecycleState::Consumed
-        ),
-        "the initially failed input should have been safely rolled back or retried after the backlog drained"
-    );
 }
 
 #[tokio::test]

@@ -800,6 +800,7 @@ async fn materialize_preflight_matrix_rejects_typed() {
             args: Vec::new(),
             required_env_keys: Vec::new(),
             connect_timeout_secs: None,
+            tool_names: Default::default(),
         },
     );
     let reply = send(sample_materialize_payload(

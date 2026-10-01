@@ -3590,7 +3590,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    command: Required[str]\n"
     types_content += "    args: NotRequired[list[str]]\n"
     types_content += "    env: NotRequired[dict[str, str]]\n"
-    types_content += "    connect_timeout_secs: NotRequired[int]\n\n"
+    types_content += "    connect_timeout_secs: NotRequired[int]\n"
+    types_content += "    tool_names: NotRequired[dict[str, str]]\n\n"
     types_content += "\nclass McpHttpServerConfig(TypedDict, total=False):\n"
     types_content += '    """Typed HTTP variant for MCP server configuration."""\n'
     types_content += "    name: Required[str]\n"
@@ -3598,7 +3599,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    headers: NotRequired[dict[str, str]]\n"
     types_content += "    transport: NotRequired[McpHttpTransport]\n"
     types_content += "    oauth_account: NotRequired[Optional[str]]\n"
-    types_content += "    connect_timeout_secs: NotRequired[int]\n\n"
+    types_content += "    connect_timeout_secs: NotRequired[int]\n"
+    types_content += "    tool_names: NotRequired[dict[str, str]]\n\n"
     types_content += "\nMcpServerConfig = McpStdioServerConfig | McpHttpServerConfig\n"
     for name in MCP_LIVE_CONTRACT_TYPES:
         append_python_contract_dataclass(name)
@@ -4372,8 +4374,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         append_typescript_contract_interface(name)
     types_content += (
         "\nexport type McpServerConfig =\n"
-        "  | ({ name: string; connect_timeout_secs?: number } & McpStdioConfig)\n"
-        "  | ({ name: string; connect_timeout_secs?: number } & McpHttpConfig);\n"
+        "  | ({ name: string; connect_timeout_secs?: number; tool_names?: Record<string, string> } & McpStdioConfig)\n"
+        "  | ({ name: string; connect_timeout_secs?: number; tool_names?: Record<string, string> } & McpHttpConfig);\n"
     )
     for name in MCP_LIVE_CONTRACT_TYPES:
         append_typescript_contract_interface(name)

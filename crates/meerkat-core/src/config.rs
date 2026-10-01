@@ -3464,6 +3464,7 @@ model = "custom-model"
                 },
             ),
             connect_timeout_secs: None,
+            tool_names: Default::default(),
         }
     }
 

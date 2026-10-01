@@ -12922,6 +12922,7 @@ mod tests {
                 args: Vec::new(),
                 required_env_keys: vec![missing_key.clone()],
                 connect_timeout_secs: None,
+                tool_names: Default::default(),
             },
         );
         let records = boot_preparation_records(spec);
@@ -12981,6 +12982,7 @@ mod tests {
                 args: Vec::new(),
                 required_env_keys: vec![missing_key],
                 connect_timeout_secs: Some(u64::MAX),
+                tool_names: Default::default(),
             },
         );
         let records = boot_preparation_records(spec);

@@ -81,6 +81,22 @@ them.
   `ProviderInputLatency`; exhaustive matches must handle them.
 - `meerkat_core::mcp_config::McpHttpConfig` and the HTTP variant of
   `meerkat_contracts::wire::PortableMcpDecl` gain `oauth_account: Option<String>`.
+- `meerkat_core::mcp_config::McpServerConfig` and both variants of
+  `meerkat_contracts::wire::PortableMcpDecl` gain
+  `tool_names: BTreeMap<String, String>`. Rust literals must supply the field;
+  serialized configurations may omit it, and constructors select an empty map.
+  It maps exact raw MCP operations to explicit exposed names. Unmapped names
+  are unchanged; removing a sibling server does not rename surviving tools.
+- `meerkat_mcp::McpError` gains `InvalidToolNameMapping`. Explicit aliases must
+  be 1-64 ASCII letters, digits, underscores or hyphens and cannot use the
+  canonical catalog-control names. Invalid maps refuse before lifecycle or
+  transport effects. Distinct raw routes sharing an exposed name are all
+  excluded, including two operations on one server. Alias changes use the
+  existing reload boundary and invalidate previously resolved execution plans.
+  `McpRouter::tool_name_collisions` and `McpRouterAdapter::tool_name_collisions`
+  expose typed `McpToolNameCollision` diagnostics with every colliding
+  `McpToolRoute` pair and the explicit `tool_names` configuration remedy.
+
 - `meerkat_core::mcp_config::McpHttpConfig` and
   `meerkat_contracts::wire::PortableMcpDecl::Http` gain `oauth_account: Option<String>`.
   Rust struct/variant literals must supply the field; serialized configurations

@@ -52,6 +52,7 @@ pub(crate) fn project_portable_profile(
                     args: stdio.args.clone(),
                     required_env_keys: Vec::new(),
                     connect_timeout_secs: server.connect_timeout_secs.map(u64::from),
+                    tool_names: server.tool_names.clone(),
                 }
             }
             meerkat_core::mcp_config::McpTransportConfig::Http(http) => {
@@ -67,6 +68,7 @@ pub(crate) fn project_portable_profile(
                     oauth_account: http.oauth_account.clone(),
                     required_header_names: Vec::new(),
                     connect_timeout_secs: server.connect_timeout_secs.map(u64::from),
+                    tool_names: server.tool_names.clone(),
                 }
             }
         };
@@ -133,6 +135,7 @@ pub(crate) fn rehydrate_portable_profile(portable: &PortableProfile) -> Result<P
                 args,
                 required_env_keys,
                 connect_timeout_secs,
+                tool_names,
             } => {
                 if !required_env_keys.is_empty() {
                     return Err(format!(
@@ -145,6 +148,7 @@ pub(crate) fn rehydrate_portable_profile(portable: &PortableProfile) -> Result<P
                     args.clone(),
                     HashMap::new(),
                 );
+                server.tool_names = tool_names.clone();
                 server.connect_timeout_secs = connect_timeout_secs
                     .map(|seconds| {
                         u32::try_from(seconds).map_err(|_| {
@@ -160,6 +164,7 @@ pub(crate) fn rehydrate_portable_profile(portable: &PortableProfile) -> Result<P
                 oauth_account,
                 required_header_names,
                 connect_timeout_secs,
+                tool_names,
             } => {
                 if !required_header_names.is_empty() {
                     return Err(format!(
@@ -176,6 +181,7 @@ pub(crate) fn rehydrate_portable_profile(portable: &PortableProfile) -> Result<P
                             oauth_account: oauth_account.clone(),
                         },
                     ),
+                    tool_names: tool_names.clone(),
                     connect_timeout_secs: connect_timeout_secs
                         .map(|seconds| {
                             u32::try_from(seconds).map_err(|_| {
@@ -284,6 +290,9 @@ mod tests {
             HashMap::new(),
         );
         stdio.connect_timeout_secs = Some(7);
+        stdio
+            .tool_names
+            .insert("raw_stdio".into(), "home_stdio".into());
         let mut sse = meerkat_core::mcp_config::McpServerConfig::sse(
             "events",
             "https://mcp.example.invalid/events",
@@ -295,6 +304,9 @@ mod tests {
             "https://mcp.example.invalid/mcp",
             HashMap::new(),
         );
+        selected
+            .tool_names
+            .insert("search".into(), "home_search".into());
         if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut selected.transport {
             http.oauth_account = Some("provider-subject-42".into());
         }
@@ -359,10 +371,18 @@ mod tests {
                 oauth_account: None,
                 required_header_names: Vec::new(),
                 connect_timeout_secs: Some(23),
+                tool_names: BTreeMap::new(),
             })
         );
         let rehydrated = rehydrate_portable_profile(&portable).expect("reverse projection");
         assert_eq!(rehydrated.provider, Some(meerkat_core::Provider::Anthropic));
+        for expected in &profile.tools.mcp_servers {
+            assert!(rehydrated.tools.mcp_servers.contains(expected));
+        }
+        assert_eq!(
+            rehydrated.tools.mcp_servers.len(),
+            profile.tools.mcp_servers.len()
+        );
         assert_eq!(rehydrated.backend, None);
         assert!(rehydrated.tools.mcp.is_empty());
         assert!(rehydrated.tools.rust_bundles.is_empty());
@@ -385,6 +405,7 @@ mod tests {
                 oauth_account: Some("provider-subject-42".into()),
                 required_header_names: Vec::new(),
                 connect_timeout_secs: None,
+                tool_names: selected.tool_names.clone(),
             })
         );
         assert_eq!(
@@ -443,6 +464,7 @@ mod tests {
                 oauth_account: None,
                 required_header_names: vec!["authorization".to_string()],
                 connect_timeout_secs: None,
+                tool_names: BTreeMap::new(),
             },
         );
         assert!(rehydrate_portable_profile(&portable).is_err());

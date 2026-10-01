@@ -527,6 +527,19 @@ impl McpRouterAdapter {
         self.set_surface_snapshot_cache(None);
     }
 
+    /// Read collision diagnostics from the router's current projection owner.
+    /// No separate adapter cache or naming authority is maintained.
+    pub async fn tool_name_collisions(
+        &self,
+    ) -> Result<Arc<[crate::McpToolNameCollision]>, crate::McpError> {
+        self.router
+            .read()
+            .await
+            .as_ref()
+            .map(McpRouter::tool_name_collisions)
+            .ok_or(crate::McpError::RouterShutDown)
+    }
+
     /// Stage an MCP server add operation.
     pub async fn stage_add(&self, config: McpServerConfig) -> Result<(), String> {
         let mut router = self.router.write().await;

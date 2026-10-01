@@ -3,6 +3,10 @@ use crate::types::{ToolDef, ToolProvenance, ToolSourceKind};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Canonical names of the catalog control plane, never MCP exposure aliases.
+pub const TOOL_CATALOG_SEARCH_NAME: &str = "tool_catalog_search";
+pub const TOOL_CATALOG_LOAD_NAME: &str = "tool_catalog_load";
+
 pub const DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD: usize = 2;
 pub const DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD: usize = 160;
 

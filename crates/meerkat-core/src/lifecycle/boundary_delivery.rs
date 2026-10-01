@@ -28,6 +28,12 @@ pub enum TurnBoundaryDelivery {
     RequestOnly(Vec<TurnRequestContext>),
     /// Typed conversation appends written into the running turn's Session.
     DurableAppends(DurableTurnBoundaryAppends),
+    /// Request-local context for the active run's next model request. Unlike
+    /// [`Self::RequestOnly`] it does not need the window open right now: it
+    /// waits across a closed window for the run's next boundary, exactly like
+    /// a durable delivery, and is withdrawn (`Unavailable`) if the run ends
+    /// first. It is never Session state.
+    RequestOnlyAtNextBoundary(Vec<TurnRequestContext>),
 }
 
 impl TurnBoundaryDelivery {

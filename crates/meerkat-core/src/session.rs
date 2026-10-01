@@ -2077,6 +2077,9 @@ struct TransientTurnContextBoundaryLifecycle {
     window: TransientTurnContextBoundaryWindow,
     /// One durable delivery waiting for the next boundary of `active_run`.
     next_boundary_durable: Option<RegisteredBoundaryRequest>,
+    /// One request-only delivery waiting for the next boundary of
+    /// `active_run` ([`crate::lifecycle::TurnBoundaryDelivery::RequestOnlyAtNextBoundary`]).
+    next_boundary_request_only: Option<RegisteredBoundaryRequest>,
     /// Durable delivery witnesses registered during the most recent run. They
     /// outlive the run's close so the owning session service can report that
     /// the image carrying an applied append was discarded.
@@ -2163,6 +2166,7 @@ impl Default for TransientTurnContextBoundaryCoordinator {
                 active_run: None,
                 window: TransientTurnContextBoundaryWindow::Closed,
                 next_boundary_durable: None,
+                next_boundary_request_only: None,
                 run_durable_witnesses: None,
                 durable_apply_ordinal: 0,
             }),
@@ -2215,6 +2219,15 @@ impl TransientTurnContextBoundaryLifecycle {
             .as_ref()
             .is_some_and(|request| owns(&request.run_id))
             && let Some(request) = self.next_boundary_durable.take()
+        {
+            request.payload.withdraw();
+            changed = true;
+        }
+        if self
+            .next_boundary_request_only
+            .as_ref()
+            .is_some_and(|request| owns(&request.run_id))
+            && let Some(request) = self.next_boundary_request_only.take()
         {
             request.payload.withdraw();
             changed = true;
@@ -2290,6 +2303,16 @@ impl TransientTurnContextBoundaryCoordinator {
                 .as_ref()
                 .is_some_and(|request| request.request_id == request_id)
             && let Some(request) = lifecycle.next_boundary_durable.take()
+        {
+            request.payload.withdraw();
+            found = true;
+        }
+        if !found
+            && lifecycle
+                .next_boundary_request_only
+                .as_ref()
+                .is_some_and(|request| request.request_id == request_id)
+            && let Some(request) = lifecycle.next_boundary_request_only.take()
         {
             request.payload.withdraw();
             found = true;
@@ -2611,10 +2634,20 @@ impl TransientTurnContextStateHandle {
         } else {
             None
         };
+        // Likewise a request-only delivery that waited for this boundary.
+        let request_only = if lifecycle
+            .next_boundary_request_only
+            .as_ref()
+            .is_some_and(|request| &request.run_id == run_id)
+        {
+            lifecycle.next_boundary_request_only.take()
+        } else {
+            None
+        };
         lifecycle.window = TransientTurnContextBoundaryWindow::Open {
             run_id: run_id.clone(),
             generation,
-            request_only: None,
+            request_only,
             durable,
         };
         drop(lifecycle);
@@ -2634,7 +2667,8 @@ impl TransientTurnContextStateHandle {
         expected_run_id: &RunId,
         delivery: crate::lifecycle::TurnBoundaryDelivery,
     ) -> Result<PreparedTransientTurnContextBoundary, CoreBoundaryStageError> {
-        if let crate::lifecycle::TurnBoundaryDelivery::RequestOnly(contexts) = &delivery
+        if let crate::lifecycle::TurnBoundaryDelivery::RequestOnly(contexts)
+        | crate::lifecycle::TurnBoundaryDelivery::RequestOnlyAtNextBoundary(contexts) = &delivery
             && contexts.is_empty()
         {
             return Err(CoreBoundaryStageError::fault(
@@ -2691,6 +2725,44 @@ impl TransientTurnContextStateHandle {
                         run_id: expected_run_id.clone(),
                         payload: BoundaryPayload::RequestOnly(contexts),
                     });
+                    lifecycle.next_request_id = request_id;
+                    (request_id, BoundarySlot::RequestOnly, None)
+                }
+                crate::lifecycle::TurnBoundaryDelivery::RequestOnlyAtNextBoundary(contexts) => {
+                    if let TransientTurnContextBoundaryWindow::Open { run_id, .. }
+                    | TransientTurnContextBoundaryWindow::Parked { run_id, .. } =
+                        &lifecycle.window
+                        && run_id != expected_run_id
+                    {
+                        return Err(CoreBoundaryStageError::stale(format!(
+                            "boundary belongs to run {run_id}, not {expected_run_id}"
+                        )));
+                    }
+                    if lifecycle.active_run.as_ref() != Some(expected_run_id) {
+                        return Err(CoreBoundaryStageError::unavailable(format!(
+                            "run {expected_run_id} is not the actor's active run"
+                        )));
+                    }
+                    let request = RegisteredBoundaryRequest {
+                        request_id,
+                        run_id: expected_run_id.clone(),
+                        payload: BoundaryPayload::RequestOnly(contexts),
+                    };
+                    match &mut lifecycle.window {
+                        TransientTurnContextBoundaryWindow::Open { request_only, .. }
+                            if request_only.is_none() =>
+                        {
+                            *request_only = Some(request);
+                        }
+                        _ => {
+                            if lifecycle.next_boundary_request_only.is_some() {
+                                return Err(CoreBoundaryStageError::unavailable(format!(
+                                    "a request-only delivery already waits for the next boundary of run {expected_run_id}"
+                                )));
+                            }
+                            lifecycle.next_boundary_request_only = Some(request);
+                        }
+                    }
                     lifecycle.next_request_id = request_id;
                     (request_id, BoundarySlot::RequestOnly, None)
                 }
@@ -2789,7 +2861,11 @@ impl TransientTurnContextStateHandle {
                             durable,
                             ..
                         } if registered(request_only) || registered(durable) => Ok(None),
-                        _ if registered(&lifecycle.next_boundary_durable) => Ok(None),
+                        _ if registered(&lifecycle.next_boundary_durable)
+                            || registered(&lifecycle.next_boundary_request_only) =>
+                        {
+                            Ok(None)
+                        }
                         _ => Err(CoreBoundaryStageError::unavailable(format!(
                             "run {expected_run_id} ended or refused boundary request {request_id} before it parked"
                         ))),
@@ -3113,6 +3189,7 @@ impl TransientTurnContextStateHandle {
     pub fn has_waiting_delivery_for_test(&self) -> bool {
         let lifecycle = self.boundary.lock();
         lifecycle.next_boundary_durable.is_some()
+            || lifecycle.next_boundary_request_only.is_some()
             || matches!(
                 &lifecycle.window,
                 TransientTurnContextBoundaryWindow::Open { request_only, durable, .. }
@@ -9355,6 +9432,132 @@ mod tests {
             witness.outcome(),
             crate::lifecycle::CoreBoundaryDeliveryOutcome::Withdrawn
         );
+    }
+
+    fn request_only_at_next_boundary(
+        contexts: Vec<TurnRequestContext>,
+    ) -> crate::lifecycle::TurnBoundaryDelivery {
+        crate::lifecycle::TurnBoundaryDelivery::RequestOnlyAtNextBoundary(contexts)
+    }
+
+    async fn wait_for_next_boundary_request_only(handle: &TransientTurnContextStateHandle) {
+        wait_for_boundary_window(
+            handle,
+            |lifecycle| lifecycle.next_boundary_request_only.is_some(),
+            "request-only next-boundary registration",
+        )
+        .await;
+    }
+
+    /// A request-only delivery that must wait for the run's next boundary:
+    /// unlike plain request-only, a closed window does not refuse it; it
+    /// attaches when the next boundary opens and reaches exactly that model
+    /// request.
+    #[tokio::test]
+    async fn awaited_request_only_waits_across_a_closed_window_for_the_next_boundary() {
+        let state = TransientTurnContextStateHandle::new();
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        state
+            .take_pending_at_exact_boundary(&run_id, BOTH)
+            .await
+            .expect("consume first boundary");
+        // Plain request-only is refused on the closed window.
+        let refused = state
+            .prepare_active_turn_boundary(&run_id, request_only(vec![transient_context("now")]))
+            .await
+            .expect_err("closed window");
+        assert!(refused.is_unavailable());
+
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(
+                    &prepare_run_id,
+                    request_only_at_next_boundary(vec![transient_context("into notes.md")]),
+                )
+                .await
+        });
+        wait_for_next_boundary_request_only(&state).await;
+        assert!(!prepare.is_finished(), "it waits, it does not fail");
+        // A second awaited request for the same boundary is refused.
+        let second = state
+            .prepare_active_turn_boundary(
+                &run_id,
+                request_only_at_next_boundary(vec![transient_context("again")]),
+            )
+            .await
+            .expect_err("one waiting request-only delivery per boundary");
+        assert!(second.is_unavailable());
+
+        state
+            .open_next_boundary(&run_id)
+            .expect("open post-tool boundary");
+        let runner_state = state.clone();
+        let runner_run_id = run_id.clone();
+        let runner = tokio::spawn(async move {
+            runner_state
+                .take_pending_at_exact_boundary(&runner_run_id, BOTH)
+                .await
+        });
+        prepare
+            .await
+            .expect("prepare task")
+            .expect("parked at the next boundary")
+            .into_stage_output(None)
+            .commit()
+            .expect("publish request context");
+        let taken = runner.await.expect("runner task").expect("runner consume");
+        assert_eq!(taken.request_only.len(), 1);
+        assert!(taken.durable.is_none(), "never Session state");
+    }
+
+    #[tokio::test]
+    async fn awaited_request_only_is_withdrawn_when_the_run_ends_first() {
+        let state = TransientTurnContextStateHandle::new();
+        let run_id = RunId::new();
+        let guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        state
+            .take_pending_at_exact_boundary(&run_id, BOTH)
+            .await
+            .expect("consume first boundary");
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(
+                    &prepare_run_id,
+                    request_only_at_next_boundary(vec![transient_context("too late")]),
+                )
+                .await
+        });
+        wait_for_next_boundary_request_only(&state).await;
+        // The model returned final text: the run ends without another boundary.
+        drop(guard);
+        let error = prepare
+            .await
+            .expect("prepare task")
+            .expect_err("run ended before a boundary opened");
+        assert!(error.is_unavailable());
+        assert!(!state.has_waiting_delivery_for_test());
+    }
+
+    #[tokio::test]
+    async fn awaited_request_only_without_an_active_run_is_unavailable() {
+        let state = TransientTurnContextStateHandle::new();
+        let error = state
+            .prepare_active_turn_boundary(
+                &RunId::new(),
+                request_only_at_next_boundary(vec![transient_context("nobody")]),
+            )
+            .await
+            .expect_err("no active run");
+        assert!(error.is_unavailable());
     }
 
     #[tokio::test]

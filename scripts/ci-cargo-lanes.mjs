@@ -585,10 +585,36 @@ function plan(args) {
   const model = { lines: lineCounts, closures };
   // Crates whose unit lane compiles meerkat-mob (mob itself and everything
   // that depends on it) run their unit tests on push to main, not in the
-  // pull-request lane.
+  // pull-request lane. "Compiles" is the unit lane's real build graph: the
+  // package's own dependencies of every kind (its dev-dependencies build its
+  // lib-test), then only normal and build dependencies below that, since
+  // Cargo never builds a dependency's dev-dependencies. The cost-model
+  // closure above follows every kind at every level; using it here put xtask
+  // and machine-dsl-tests in the chain through meerkat-machine-codegen's
+  // dev-dependency on meerkat-mob, so a pull request that changed crates/xtask
+  // merged without its unit tests (#1362 turned main red that way).
+  const buildClosure = (pkg) => {
+    const seen = new Set();
+    const queue = [];
+    const visit = (dep) => {
+      if (dep.source !== null) return;
+      const depPkg = byName.get(dep.name);
+      if (depPkg && !seen.has(depPkg.name)) {
+        seen.add(depPkg.name);
+        queue.push(depPkg);
+      }
+    };
+    for (const dep of pkg.dependencies) visit(dep);
+    while (queue.length) {
+      for (const dep of queue.pop().dependencies) {
+        if (dep.kind !== "dev") visit(dep);
+      }
+    }
+    return seen;
+  };
   const heavyChain = new Set(
     packages
-      .filter((pkg) => pkg.name === HEAVY_ANCHOR || closures.get(pkg.name).has(HEAVY_ANCHOR))
+      .filter((pkg) => pkg.name === HEAVY_ANCHOR || buildClosure(pkg).has(HEAVY_ANCHOR))
       .map((pkg) => pkg.name),
   );
   result.unit_deferred_chain = [...heavyChain].sort();

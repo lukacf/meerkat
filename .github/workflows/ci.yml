@@ -48,10 +48,12 @@ name: CI
 # Push to main only (no wall-clock budget):
 #   main-unit (xN)  - nextest --lib --bins over the whole workspace in eight
 #                     cost-packed shards (this is where the meerkat-mob chain's
-#                     unit tests run: mob, mob-mcp, mob-pack, rpc, rest,
-#                     mcp-server, rkat, web-runtime, integration-tests,
-#                     machine-codegen, machine-dsl-tests, xtask; their lanes
-#                     compile mob's 442k lines and cannot fit the budget),
+#                     unit tests run: mob, mob-adaptive, mob-mcp, mob-pack,
+#                     rpc, rest, mcp-server, rkat, web-runtime,
+#                     integration-tests, machine-codegen; their lanes
+#                     compile mob's 442k lines and cannot fit the budget;
+#                     xtask and machine-dsl-tests do not build mob and run
+#                     in the pull request),
 #                     plus one lane per feature-gated suite: the default
 #                     feature lanes cannot reach a test behind a non-default
 #                     feature (FEATURE_UNIT_SUITES in ci-cargo-lanes.mjs)

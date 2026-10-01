@@ -529,6 +529,17 @@ them.
 
 ### Changed
 
+- PR CI runs xtask's unit tests and its `xtask[machine-authority]` feature
+  suite when `crates/xtask` changes (and machine-dsl-tests' when it changes).
+  The classifier deferred every crate whose dependency closure reached
+  meerkat-mob to the push-to-main run, but that closure followed
+  dependencies' dev-dependencies, which Cargo never builds: xtask reached
+  mob only through meerkat-machine-codegen's dev-dependency, so #1362
+  changed xtask and turned main red with no PR lane running its tests. The
+  meerkat-mob chain is now each unit lane's real build graph. Measured on 4
+  cores: xtask's lane 249 s (about 245 s of it one workflow test), the
+  machine-authority suite 149 s; on main the suite's hosted job took 467 s.
+
 - CI on `main`: a newer main commit now supersedes (cancels) the
   still-running first attempt of an older one, so a merge burst no longer
   fills the account's 40 concurrent hosted jobs with main runs (35-50 jobs

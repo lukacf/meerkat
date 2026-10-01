@@ -12360,7 +12360,11 @@ mod tests {
         let state = MobMcpState::new_in_memory();
         let sid = SessionId::new().to_string();
 
-        let manual = explicit_definition("manual-owner-index");
+        // Mob ids are unique per test: a mob's supervisor registers
+        // `<mob_id>/__mob_supervisor__` in the process-global in-process
+        // comms registry, so two concurrently running tests that reuse one id
+        // collide with `ParticipantNameOccupied`.
+        let manual = explicit_definition("manual-owner-index-destroy");
         let manual_id = state
             .mob_create_definition(manual)
             .await
@@ -12464,7 +12468,9 @@ mod tests {
             .unwrap();
 
         // Also create an unowned explicit mob that should survive scavenging.
-        let manual = explicit_definition("manual-owner-index");
+        // Its id is unique to this test (see
+        // `test_destroy_bridge_session_mobs_uses_generated_cleanup_authority`).
+        let manual = explicit_definition("manual-owner-index-scavenge");
         let manual_id = state
             .mob_create_definition(manual)
             .await

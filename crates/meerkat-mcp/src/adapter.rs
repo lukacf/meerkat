@@ -1956,8 +1956,10 @@ mod tests {
         adapter.shutdown().await;
     }
 
-    /// Shutdown owns in-flight connects: a stdio server still connecting when
-    /// the adapter shuts down must not outlive it. (Fails-old: shutdown never
+    /// Shutdown owns in-flight connects: shutting down the adapter while a
+    /// stdio server is still connecting must kill that server's child, which
+    /// then exits shortly after (asserted below within a bounded backstop;
+    /// a zombie awaiting reaping counts as exited). (Fails-old: shutdown never
     /// joined the spawned connect task, which kept the child alive until the
     /// connect timeout; a stopping test runtime then skipped the deferred kill
     /// entirely and left the child holding the test's stderr.)

@@ -1030,8 +1030,10 @@ pub struct McpRouter {
     pending_obligations: HashMap<String, SurfaceCompletionObligation>,
     /// Background connect-and-enumerate tasks this router spawned. The router
     /// owns them: `shutdown` aborts and joins every one still running, so no
-    /// connect attempt (or the stdio child process it owns) outlives the
-    /// router. Finished tasks are reaped as new ones are spawned.
+    /// connect attempt outlives the router, and dropping an attempt triggers
+    /// the kill of the stdio child it owns. The child's exit then follows
+    /// asynchronously; shutdown does not wait for it. Finished tasks are
+    /// reaped as new ones are spawned.
     connect_tasks: tokio::task::JoinSet<()>,
     pending_snapshot_alignment: Option<SurfaceSnapshotAlignmentObligation>,
     /// Queued canonical lifecycle deltas for async completions.
@@ -2396,8 +2398,10 @@ impl McpRouter {
         let old_pending_tx = std::mem::replace(&mut self.pending_tx, replacement_tx);
         drop(old_pending_tx);
         // Abort and join every connect task still running. Dropping an
-        // aborted task's future drops its connection attempt, and with it the
-        // stdio child (spawned kill-on-drop), before shutdown returns.
+        // aborted task's future drops its connection attempt, which triggers
+        // the stdio child's kill: rmcp hands the child to its own async kill
+        // task, and kill-on-drop covers the case where that task never runs.
+        // The child exits shortly after; shutdown does not await its exit.
         self.connect_tasks.abort_all();
         while let Some(joined) = self.connect_tasks.join_next().await {
             if let Err(error) = joined

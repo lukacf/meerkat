@@ -47,7 +47,8 @@ name: Nightly
 #   2. then five sequential chains: each job `needs` the previous one and
 #      runs under !cancelled(), so a red job never skips the rest:
 #        release-packaging (140 min) > mobkit-docs-lag
-#        e2e-system (100) > sdk-web (24) > audit
+#        e2e-system (100) > sdk-web (24) > audit > machine-verify-deep
+#          (new, up to its 90-minute timeout)
 #        feature-matrix (89) > workspace-int (46)
 #        release-stack-budget (55) > minimal-and-modularity (42) > e2e-fast
 #          (18) > sdk-host (14)
@@ -271,6 +272,8 @@ jobs:
 
   machine-verify-deep:
     name: Deep TLC composition verification
+    needs: audit
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:

@@ -170,13 +170,16 @@ impl MeerkatMachine {
     /// finalization. A wake carries nothing; the receipt
     /// is re-read. Dropping the future unregisters both registrations.
     ///
-    /// Directed (peer-request) batches finalize their receipt before the
-    /// batch's interaction terminals are published, and resolve their
-    /// completion waiters only once publication succeeds. Finalizing the
-    /// receipt also wakes the receipt observers, so this wait resolves at
-    /// finalization, while a transient publication failure may still be
-    /// retried, exactly when [`Self::input_terminal_receipt`] starts reading
-    /// the finalized receipt.
+    /// `Resolved` means the input's receipt is finalized (or it reached a
+    /// receipt-less terminal). It says nothing about interaction-terminal
+    /// publication. Directed (peer-request) batches finalize their receipt
+    /// before the batch's interaction terminals are published, and resolve
+    /// their completion waiters only once publication succeeds. Finalizing
+    /// the receipt wakes the receipt observers, so this wait resolves at
+    /// finalization, exactly when [`Self::input_terminal_receipt`] starts
+    /// reading the finalized receipt, even while a transient publication
+    /// failure is still being retried. A caller that needs the published
+    /// terminal waits on the input's completion instead.
     pub async fn wait_input_terminal_receipt(
         &self,
         session_id: &SessionId,

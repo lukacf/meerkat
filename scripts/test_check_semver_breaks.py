@@ -722,15 +722,127 @@ class CrateScopeTests(unittest.TestCase):
 
     def test_real_full_workspace_report_covers_exactly_the_checkable_crates(self) -> None:
         # The strongest coverage evidence available: a complete real
-        # `cargo semver-checks check-release --workspace` run. Every crate the
-        # classifier calls checkable produced a `Finished` line, and every crate
-        # it excludes produced nothing at all.
+        # `cargo semver-checks check-release --workspace` run, recorded at
+        # 0.8.23. Every crate the classifier calls checkable that existed then
+        # produced a `Finished` line, and every crate it excludes produced
+        # nothing at all.
+        #
+        # Crates published for the first time after the fixture have no line in
+        # it. They are derived here, not hard-coded, named in the test output,
+        # and at release time take the gate's first-publication path ("new
+        # crate, no baseline", see FirstPublicationTests). Where the fixture's
+        # tag is available locally, each must also be absent from it.
         parsed = gate.parse_report(WORKSPACE_REPORT)
-        self.assertEqual(sorted(parsed.finished_crates), sorted(self.scope.checkable))
-        self.assertEqual(gate.check_measured(parsed, 0, self.scope), [])
+        recorded = set(parsed.finished_crates)
+        checkable = set(self.scope.checkable)
+        newer = sorted(checkable - recorded)
+        # A crate the fixture reached that is still published must still be
+        # checkable: dropping it would be a classifier regression, not a new crate.
+        reclassified = sorted(name for name in recorded - checkable if name in self.release_crates)
+        self.assertEqual(reclassified, [], "published crates the fixture checked are no longer checkable")
+        if newer:
+            print(f"\nnote: crates newer than the 0.8.23 fixture (first publication at release): {', '.join(newer)}")
+            tag = subprocess.run(
+                ["git", "-C", str(self.root), "rev-parse", "-q", "--verify", "refs/tags/v0.8.23^{commit}"],
+                capture_output=True,
+                text=True,
+            )
+            if tag.returncode == 0:
+                manifests = gate.workspace_manifests(self.root)
+                for name in newer:
+                    rel = Path(manifests[name]["__dir__"]).resolve().relative_to(self.root.resolve())
+                    probe = subprocess.run(
+                        ["git", "-C", str(self.root), "cat-file", "-e", f"v0.8.23:{rel.as_posix()}/Cargo.toml"],
+                        capture_output=True,
+                    )
+                    self.assertNotEqual(probe.returncode, 0, f"{name} existed at v0.8.23 but the fixture never reached it")
+        scope = gate.CrateScope(
+            checkable=sorted(checkable & recorded),
+            proc_macro=self.scope.proc_macro,
+            no_lib_target=self.scope.no_lib_target,
+            missing_manifest=self.scope.missing_manifest,
+        )
+        self.assertEqual(sorted(parsed.finished_crates), scope.checkable)
+        self.assertEqual(gate.check_measured(parsed, 0, scope), [])
         for name in self.scope.proc_macro + self.scope.no_lib_target:
             self.assertNotIn(name, parsed.finished_crates)
             self.assertNotIn(name, parsed.checked_crates)
+
+
+class FirstPublicationTests(unittest.TestCase):
+    """A crate the baseline release did not publish: reported, not failed, not dropped.
+
+    A synthetic workspace holds the two crates of the clean report plus a new
+    library crate the report never reached. Declared as a first publication
+    (what semver_changed_crates.py classifies for a crate absent from the
+    baseline tag) the run passes and names it; undeclared, it fails closed.
+    """
+
+    NEW = "meerkat-synthetic-new"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        root = Path(cls.tmp.name) / "repo"
+        for name in ("meerkat", "meerkat-agent-build-authority", cls.NEW):
+            crate = root / "crates" / name
+            (crate / "src").mkdir(parents=True)
+            (crate / "Cargo.toml").write_text(f'[package]\nname = "{name}"\nversion = "0.8.23"\n')
+            (crate / "src" / "lib.rs").write_text("pub fn f() {}\n")
+        (root / "Cargo.toml").write_text(
+            '[workspace]\nmembers = ["crates/*"]\n\n[workspace.package]\nversion = "0.8.23"\n'
+        )
+        cls.root = root
+        start = REPO_CHANGELOG.index("## [0.8.23]")
+        end = REPO_CHANGELOG.index("## [0.8.22]")
+        changelog = (
+            "# Changelog\n\npolicy blurb\n\n"
+            + REPO_CHANGELOG[start:end]
+            + "## [0.8.22] - 2026-08-09\n\n- old\n\n"
+            "[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.22...HEAD\n"
+            "[0.8.22]: https://github.com/lukacf/meerkat/compare/v0.8.21...v0.8.22\n"
+        )
+        cls.changelog = Path(cls.tmp.name) / "CHANGELOG.md"
+        cls.changelog.write_text(changelog, encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.tmp.cleanup()
+
+    def run_gate(self, *extra: str) -> subprocess.CompletedProcess[str]:
+        args = [
+            sys.executable,
+            str(SCRIPT),
+            "--report",
+            str(FIXTURES / "report-clean-two-crates.txt"),
+            "--changelog",
+            str(self.changelog),
+            "--version",
+            "0.8.23",
+            "--tool-exit-code",
+            "0",
+            "--repo-root",
+            str(self.root),
+            "--baseline-tag",
+            "v0.8.22",
+        ]
+        for name in ("meerkat", "meerkat-agent-build-authority", self.NEW):
+            args += ["--release-crate", name]
+        return subprocess.run(args + list(extra), capture_output=True, text=True, check=False)
+
+    def test_declared_new_crate_is_reported_and_passes(self) -> None:
+        result = self.run_gate("--first-publish-crate", self.NEW)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            f"new crate, no baseline in v0.8.22 (first publication, not measured, not a failure): {self.NEW}",
+            result.stdout,
+        )
+
+    def test_undeclared_new_crate_fails_closed(self) -> None:
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("never reached these publishable crates", result.stderr)
+        self.assertIn(self.NEW, result.stderr)
 
 
 class CliAcceptanceTests(unittest.TestCase):

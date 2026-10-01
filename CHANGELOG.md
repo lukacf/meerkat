@@ -360,6 +360,15 @@ them.
 
 ### Fixed
 
+- `make semver-breaks` no longer fails its own self-test when the release adds
+  a publishable crate. The self-test compared a recorded 0.8.23 workspace
+  report with the live checkable-crate set, so any new crate failed it before
+  anything was measured. It now derives the crates newer than the fixture,
+  names them, and checks that every crate the fixture reached is still
+  checkable. At release time a crate the baseline did not publish is reported
+  as "new crate, no baseline in vX (first publication, not measured, not a
+  failure)" on every run; an undeclared one still fails closed.
+
 - Shutting down an MCP router no longer leaves a still-connecting stdio
   server process behind. `McpRouter::shutdown` now aborts and joins the
   connect-and-enumerate tasks it spawned instead of letting them run until the

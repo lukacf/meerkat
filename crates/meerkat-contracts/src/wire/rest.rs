@@ -269,7 +269,7 @@ pub enum RestPatchConfigRequest {
 }
 
 /// `POST /auth/profiles` — store binding-scoped credentials.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RestAuthProfileCreateRequest {
     pub realm_id: RealmId,
@@ -279,6 +279,20 @@ pub struct RestAuthProfileCreateRequest {
     pub provider: String,
     pub auth_method: String,
     pub secret: String,
+}
+
+/// Redacts the secret.
+impl std::fmt::Debug for RestAuthProfileCreateRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RestAuthProfileCreateRequest")
+            .field("realm_id", &self.realm_id)
+            .field("binding_id", &self.binding_id)
+            .field("profile_id", &self.profile_id)
+            .field("provider", &self.provider)
+            .field("auth_method", &self.auth_method)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 /// `POST /auth/bindings/{binding_id}/test` — test a binding resolve path.
@@ -416,6 +430,23 @@ pub struct RestSessionDetailsResponse {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_profile_create_request_debug_redacts_secret() {
+        const SECRET: &str = "sk-live-secret-value";
+        let request: RestAuthProfileCreateRequest = serde_json::from_value(serde_json::json!({
+            "realm_id": "realm-visible",
+            "binding_id": "binding-visible",
+            "provider": "anthropic",
+            "auth_method": "api_key",
+            "secret": SECRET,
+        }))
+        .expect("valid request");
+        let rendered = format!("{request:?} {request:#?}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        assert!(rendered.contains("realm-visible"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
 
     #[test]
     fn create_session_request_carries_enable_web_search() {

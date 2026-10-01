@@ -149,6 +149,26 @@ them.
   a composition are reported together. The canonical TLC lane runs the bounded
   adaptive witness through the new `xtask machine-verify-witness` command, which
   applies the same completion proof instead of trusting a bare `tlc` exit code.
+- `Debug` output of MCP server configuration no longer exposes credentials.
+  `McpStdioConfig` keeps the command and env names but redacts argument and env
+  values; `McpHttpConfig` keeps header names but redacts header values and URL
+  userinfo, query and fragment. This also covers `McpServerConfig`, `McpConfig`
+  and `McpAddParams`, which embed them, and the internal SSE and streamable HTTP
+- `Debug` output of MCP, skill-repository and hook configuration no longer
+  exposes credentials. Names stay visible; argument values, env values, header
+  values and URL userinfo, query and fragment print as `"<redacted>"`. Covered:
+  `McpStdioConfig` and `McpHttpConfig` (and so `McpServerConfig`, `McpConfig`
+  and `McpAddParams`), `SkillRepoTransport`, the hook `CommandRuntimeConfig`
+  and `HttpRuntimeConfig`, and the internal MCP SSE and streamable HTTP
+  clients' header maps. `Serialize` and equality are unchanged.
+- `Debug` output of credential-carrying auth types no longer exposes secrets:
+  `CredentialSourceSpec` (inline secret, command argument and env values),
+  `ResolvedAuthEnvelope` (secret, header values), `PersistedTokens` (primary
+  secret, refresh and id tokens), `OAuthTokenResult`, `CommandCredentialSpec`,
+  `AzureClientCredentials`, the stored MCP OAuth client secret, the
+  `CreateProfileParams`, `ProvisionApiKeyParams` and
+  `RestAuthProfileCreateRequest` wire requests, the OpenAI live and realtime
+  text clients' API keys, and `WebhookAuth`.
 - WorkGraph observations, including execution recovery, distinguish an
   unavailable backing store from an absent record and preserve one read-only
   snapshot across schema validation and data queries. Ordinary writes also

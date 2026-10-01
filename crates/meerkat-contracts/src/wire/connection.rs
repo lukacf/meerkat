@@ -132,7 +132,7 @@ pub struct BindingIdParams {
 }
 
 /// Request payload for `auth/profile/create`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CreateProfileParams {
     pub realm_id: String,
@@ -141,6 +141,19 @@ pub struct CreateProfileParams {
     pub profile_id: Option<String>,
     pub auth_method: String,
     pub secret: String,
+}
+
+/// Redacts the secret.
+impl std::fmt::Debug for CreateProfileParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateProfileParams")
+            .field("realm_id", &self.realm_id)
+            .field("binding_id", &self.binding_id)
+            .field("profile_id", &self.profile_id)
+            .field("auth_method", &self.auth_method)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Request payload for `auth/login/start`.
@@ -193,7 +206,7 @@ pub struct DeviceCompleteParams {
 }
 
 /// Request payload for `auth/login/provision_api_key`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProvisionApiKeyParams {
     /// Access token acquired from a prior Console-OAuth flow.
@@ -204,6 +217,18 @@ pub struct ProvisionApiKeyParams {
     pub binding_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
+}
+
+/// Redacts the access token.
+impl std::fmt::Debug for ProvisionApiKeyParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProvisionApiKeyParams")
+            .field("access_token", &"<redacted>")
+            .field("realm_id", &self.realm_id)
+            .field("binding_id", &self.binding_id)
+            .field("profile_id", &self.profile_id)
+            .finish()
+    }
 }
 
 /// Wire projection of [`meerkat_core::BackendProfile`].
@@ -602,6 +627,28 @@ pub struct WireAuthStatusDetail {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_params_debug_redacts_secret_and_access_token() {
+        const SECRET: &str = "sk-live-secret-value";
+        let create = CreateProfileParams {
+            realm_id: "realm-visible".into(),
+            binding_id: "binding-visible".into(),
+            profile_id: None,
+            auth_method: "api_key".into(),
+            secret: SECRET.into(),
+        };
+        let provision = ProvisionApiKeyParams {
+            access_token: SECRET.into(),
+            realm_id: Some("realm-visible".into()),
+            binding_id: None,
+            profile_id: None,
+        };
+        let rendered = format!("{create:?} {create:#?} {provision:?} {provision:#?}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        assert!(rendered.contains("realm-visible"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
 
     #[test]
     fn oauth_provider_aliases_serialize_canonically() {

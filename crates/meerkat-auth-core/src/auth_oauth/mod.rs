@@ -122,14 +122,29 @@ impl OAuthEndpoints {
     }
 }
 
-/// Successful OAuth token exchange result.
-#[derive(Debug, Clone)]
+/// Successful OAuth token exchange result. `Debug` redacts the tokens.
+#[derive(Clone)]
 pub struct OAuthTokenResult {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
     pub expires_in_secs: Option<u64>,
     pub scope: Option<String>,
+}
+
+impl std::fmt::Debug for OAuthTokenResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthTokenResult")
+            .field("access_token", &"<redacted>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("id_token", &self.id_token.as_ref().map(|_| "<redacted>"))
+            .field("expires_in_secs", &self.expires_in_secs)
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 impl OAuthTokenResult {
@@ -228,6 +243,22 @@ pub fn oauth_refresh_error(error: OAuthError) -> RefreshError {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_token_result_debug_redacts_tokens() {
+        const SECRET: &str = "sk-live-secret-value";
+        let result = OAuthTokenResult {
+            access_token: format!("access-{SECRET}"),
+            refresh_token: Some(format!("refresh-{SECRET}")),
+            id_token: Some(format!("id-{SECRET}")),
+            expires_in_secs: Some(3600),
+            scope: Some("openid".into()),
+        };
+        let rendered = format!("{result:?} {result:#?}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        assert!(rendered.contains("openid"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
 
     #[test]
     fn authorize_url_includes_pkce_and_state() {

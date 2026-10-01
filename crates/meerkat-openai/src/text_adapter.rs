@@ -91,9 +91,17 @@ fn resolve_realtime_temperature(temperature: Option<f32>) -> Result<Option<Tempe
 }
 
 /// LlmClient implementation that serves text turns via OpenAI Realtime WS.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiRealtimeTextAdapter {
     api_key: String,
+}
+
+impl std::fmt::Debug for OpenAiRealtimeTextAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiRealtimeTextAdapter")
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
 }
 
 fn project_realtime_replay_messages(messages: &[Message]) -> Result<Vec<Message>, LlmError> {
@@ -565,6 +573,14 @@ mod structured_output_tests;
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn realtime_text_adapter_debug_redacts_api_key() {
+        const SECRET: &str = "sk-live-secret-value";
+        let rendered = format!("{:?}", OpenAiRealtimeTextAdapter::new(SECRET));
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
     use meerkat_core::{
         AssistantImageId, BlobId, BlobRef, BlockAssistantMessage, ImageData, MediaType,
         ProviderImageMetadata, RevisedPromptDisposition, ServerToolKind, SystemMessage,

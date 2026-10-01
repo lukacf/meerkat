@@ -2661,7 +2661,7 @@ impl std::fmt::Display for HookRuntimeKind {
 }
 
 /// Typed payload for a [`HookRuntimeKind::Command`] adapter.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CommandRuntimeConfig {
     pub command: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2675,13 +2675,39 @@ fn default_http_method() -> String {
 }
 
 /// Typed payload for a [`HookRuntimeKind::Http`] adapter.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct HttpRuntimeConfig {
     pub url: String,
     #[serde(default = "default_http_method")]
     pub method: String,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub headers: HashMap<String, String>,
+}
+
+/// Keeps the command and env names but redacts argument and env values.
+impl std::fmt::Debug for CommandRuntimeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommandRuntimeConfig")
+            .field("command", &self.command)
+            .field("args", &crate::redact::RedactedList(self.args.len()))
+            .field("env", &crate::redact::RedactedValues::of(self.env.keys()))
+            .finish()
+    }
+}
+
+/// Keeps the method, header names and URL location but redacts header values
+/// and URL userinfo, query and fragment.
+impl std::fmt::Debug for HttpRuntimeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpRuntimeConfig")
+            .field("url", &crate::redact::RedactedUrl(&self.url))
+            .field("method", &self.method)
+            .field(
+                "headers",
+                &crate::redact::RedactedValues::of(self.headers.keys()),
+            )
+            .finish()
+    }
 }
 
 /// Closed, typed set of hook runtime adapters the engine can dispatch to.
@@ -3142,6 +3168,34 @@ mod optional_duration_serde {
 mod tests {
     use super::*;
     use crate::Provider;
+
+    #[test]
+    fn hook_runtime_configs_debug_redact_env_args_and_headers() {
+        const SECRET: &str = "sk-live-secret-value";
+        let adapters = [
+            HookAdapterConfig::command(
+                "hook-cmd",
+                vec!["--token".into(), SECRET.into()],
+                HashMap::from([("HOOK_TOKEN".to_string(), SECRET.to_string())]),
+            ),
+            HookAdapterConfig::http(
+                format!("https://hooks.example.com/run?sig={SECRET}"),
+                "POST",
+                HashMap::from([("Authorization".to_string(), format!("Bearer {SECRET}"))]),
+            ),
+        ];
+        let rendered = format!("{adapters:?} {adapters:#?}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        for kept in [
+            "hook-cmd",
+            "HOOK_TOKEN",
+            "Authorization",
+            "POST",
+            "https://hooks.example.com/run?<redacted>",
+        ] {
+            assert!(rendered.contains(kept), "missing {kept}: {rendered}");
+        }
+    }
 
     #[test]
     fn mob_host_config_toml_roundtrip() {

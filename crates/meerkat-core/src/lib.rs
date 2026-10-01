@@ -84,6 +84,7 @@ pub mod provider_matrix;
 pub mod realtime_transcript;
 pub mod realtime_transcript_revision;
 pub mod realtime_transcript_sidecar;
+pub(crate) mod redact;
 pub mod retry;
 pub mod runtime_bootstrap;
 pub mod runtime_epoch;

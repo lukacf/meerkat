@@ -668,7 +668,7 @@ impl From<&str> for ExternalResolverId {
 }
 
 /// Where credentials come from.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CredentialSourceSpec {
@@ -719,6 +719,51 @@ pub enum CredentialSourceSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope_override: Option<String>,
     },
+}
+
+/// Redacts the inline secret and the command's argument and env values.
+impl std::fmt::Debug for CredentialSourceSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::redact::{REDACTED, RedactedList, RedactedValues};
+        match self {
+            Self::InlineSecret { .. } => f
+                .debug_struct("InlineSecret")
+                .field("secret", &REDACTED)
+                .finish(),
+            Self::ManagedStore => f.write_str("ManagedStore"),
+            Self::Env { env, fallback } => f
+                .debug_struct("Env")
+                .field("env", env)
+                .field("fallback", fallback)
+                .finish(),
+            Self::ExternalResolver { handle } => f
+                .debug_struct("ExternalResolver")
+                .field("handle", handle)
+                .finish(),
+            Self::PlatformDefault => f.write_str("PlatformDefault"),
+            Self::Command {
+                program,
+                args,
+                cwd,
+                env,
+                timeout_ms,
+                refresh_interval_ms,
+            } => f
+                .debug_struct("Command")
+                .field("program", program)
+                .field("args", &RedactedList(args.len()))
+                .field("cwd", cwd)
+                .field("env", &RedactedValues::of(env.keys()))
+                .field("timeout_ms", timeout_ms)
+                .field("refresh_interval_ms", refresh_interval_ms)
+                .finish(),
+            Self::FileDescriptor { fd, scope_override } => f
+                .debug_struct("FileDescriptor")
+                .field("fd", fd)
+                .field("scope_override", scope_override)
+                .finish(),
+        }
+    }
 }
 
 impl CredentialSourceSpec {
@@ -2352,6 +2397,38 @@ impl ProviderBindingConfig {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    #[test]
+    fn credential_source_spec_debug_redacts_inline_secret_and_command_values() {
+        const SECRET: &str = "sk-live-secret-value";
+        let specs = [
+            CredentialSourceSpec::InlineSecret {
+                secret: SECRET.into(),
+            },
+            CredentialSourceSpec::Command {
+                program: PathBuf::from("print-token"),
+                args: vec!["--key".into(), SECRET.into()],
+                cwd: None,
+                env: BTreeMap::from([("TOKEN_SEED".to_string(), SECRET.to_string())]),
+                timeout_ms: 1_000,
+                refresh_interval_ms: None,
+            },
+            CredentialSourceSpec::Env {
+                env: "ANTHROPIC_API_KEY".into(),
+                fallback: vec![],
+            },
+        ];
+        let rendered = format!("{specs:?} {specs:#?}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        for kept in [
+            "print-token",
+            "TOKEN_SEED",
+            "ANTHROPIC_API_KEY",
+            "<redacted>",
+        ] {
+            assert!(rendered.contains(kept), "missing {kept}: {rendered}");
+        }
+    }
 
     // ---- Realm inheritance RCTs (parent chain + reserved global) ----------
 

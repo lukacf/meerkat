@@ -73,7 +73,7 @@ impl std::fmt::Debug for ResolvedAuthKind {
 /// external resolver handles (WASM, desktop bridges) where shipping a full
 /// trait object is not practical. Serde-roundtrippable so WASM/RPC bridges
 /// can cross the process boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResolvedAuthEnvelope {
@@ -105,6 +105,46 @@ pub enum ResolvedAuthEnvelope {
     None {
         metadata: AuthMetadata,
     },
+}
+
+/// Redacts the secret and header values.
+impl std::fmt::Debug for ResolvedAuthEnvelope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InlineSecret {
+                metadata,
+                expires_at,
+                ..
+            } => f
+                .debug_struct("InlineSecret")
+                .field("secret", &crate::redact::REDACTED)
+                .field("metadata", metadata)
+                .field("expires_at", expires_at)
+                .finish(),
+            Self::StaticHeaders {
+                headers,
+                metadata,
+                expires_at,
+            } => f
+                .debug_struct("StaticHeaders")
+                .field(
+                    "headers",
+                    &crate::redact::RedactedValues::of(headers.iter().map(|(name, _)| name)),
+                )
+                .field("metadata", metadata)
+                .field("expires_at", expires_at)
+                .finish(),
+            Self::DynamicAuthorizer {
+                metadata,
+                expires_at,
+            } => f
+                .debug_struct("DynamicAuthorizer")
+                .field("metadata", metadata)
+                .field("expires_at", expires_at)
+                .finish(),
+            Self::None { metadata } => f.debug_struct("None").field("metadata", metadata).finish(),
+        }
+    }
 }
 
 /// Minimal request view passed to a dynamic authorizer.
@@ -256,6 +296,27 @@ fn default_true() -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolved_auth_envelope_debug_redacts_secret_and_header_values() {
+        const SECRET: &str = "sk-live-secret-value";
+        let envelopes = [
+            ResolvedAuthEnvelope::InlineSecret {
+                secret: SECRET.into(),
+                metadata: AuthMetadata::default(),
+                expires_at: None,
+            },
+            ResolvedAuthEnvelope::StaticHeaders {
+                headers: vec![("x-api-key".into(), SECRET.into())],
+                metadata: AuthMetadata::default(),
+                expires_at: None,
+            },
+        ];
+        let rendered = format!("{envelopes:?} {envelopes:#?}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        assert!(rendered.contains("x-api-key"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
 
     #[test]
     fn refresh_reason_roundtrip() {

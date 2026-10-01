@@ -558,9 +558,9 @@ export type InteractionFailureReason = {
 export type InteractionId = string;
 
 /**
- * Typed cause of a runtime-initiated live channel close.
+ * Typed cause of a committed live channel close.
  */
-export type LiveChannelCloseReason = "media_fault";
+export type LiveChannelCloseReason = "client_requested" | "client_disconnected" | "provider_closed" | "error" | "media_fault" | "replaced" | "open_abandoned";
 
 /**
  * Closed classifier for recoverable LLM failures.

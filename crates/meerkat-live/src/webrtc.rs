@@ -1849,6 +1849,7 @@ async fn cleanup_peer_after_disconnect(context: PeerDisconnectContext) {
                 context.host.as_ref(),
                 context.close_feedback.as_ref(),
                 &context.channel_id,
+                meerkat_core::LiveChannelCloseReason::ClientDisconnected,
             ),
         )
         .await;
@@ -2274,6 +2275,7 @@ async fn pump_observations_to_data_channel(
                 host.as_ref(),
                 close_feedback.as_ref(),
                 &channel_id,
+                crate::transport::close_reason_for_observation(&observation),
             )
             .await
             {
@@ -2489,6 +2491,7 @@ async fn close_channel_with_generated_feedback(
     host: &LiveAdapterHost,
     close_feedback: &dyn LiveChannelCloseFeedback,
     channel_id: &LiveChannelId,
+    reason: meerkat_core::LiveChannelCloseReason,
 ) -> bool {
     // Runtime-initiated terminal paths can commit generated close authority
     // before the WebRTC pump drains the staged terminal observation. In that
@@ -2509,7 +2512,10 @@ async fn close_channel_with_generated_feedback(
         }
     }
 
-    let observation = match host.reserve_channel_close_observation(channel_id).await {
+    let observation = match host
+        .reserve_channel_close_observation(channel_id, reason)
+        .await
+    {
         Ok(observation) => observation,
         Err(LiveAdapterHostError::ChannelNotFound(_)) => return false,
         Err(err) => {
@@ -2570,7 +2576,13 @@ async fn signal_output_audio_degraded_or_close(
             dropped_output_audio_packets = dropped,
             "failed to lower WebRTC output-audio degradation into the host signal seam; closing channel"
         );
-        let _ = close_channel_with_generated_feedback(host, close_feedback, channel_id).await;
+        let _ = close_channel_with_generated_feedback(
+            host,
+            close_feedback,
+            channel_id,
+            meerkat_core::LiveChannelCloseReason::Error,
+        )
+        .await;
         return false;
     }
     true

@@ -864,7 +864,11 @@ impl LiveWsState {
         &self.host
     }
 
-    async fn close_channel_with_generated_feedback(&self, channel_id: &LiveChannelId) -> bool {
+    async fn close_channel_with_generated_feedback(
+        &self,
+        channel_id: &LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
+    ) -> bool {
         // Runtime-initiated terminal paths can commit generated close authority
         // before the WS pump drains the staged terminal observation. In that
         // case the committed host status is the generated close handoff result;
@@ -886,7 +890,7 @@ impl LiveWsState {
 
         let observation = match self
             .host
-            .reserve_channel_close_observation(channel_id)
+            .reserve_channel_close_observation(channel_id, reason)
             .await
         {
             Ok(observation) => observation,
@@ -1146,6 +1150,19 @@ async fn close_with(socket: &mut WebSocket, code: u16, reason: &str) {
         .await;
 }
 
+/// The typed close reason for a terminal adapter observation: a terminal
+/// status is the provider ending the session; anything else is an error.
+pub(crate) fn close_reason_for_observation(
+    observation: &LiveAdapterObservation,
+) -> meerkat_core::LiveChannelCloseReason {
+    match observation {
+        LiveAdapterObservation::StatusChanged { .. } => {
+            meerkat_core::LiveChannelCloseReason::ProviderClosed
+        }
+        _ => meerkat_core::LiveChannelCloseReason::Error,
+    }
+}
+
 fn observation_requires_generated_close(observation: &LiveAdapterObservation) -> bool {
     match observation {
         LiveAdapterObservation::Error { .. } => true,
@@ -1353,7 +1370,7 @@ async fn handle_live_socket(
                                 }
                             }
                             None => {
-                                if !state.close_channel_with_generated_feedback(&channel_id).await {
+                                if !state.close_channel_with_generated_feedback(&channel_id, meerkat_core::LiveChannelCloseReason::Error).await {
                                     break;
                                 }
                                 close_feedback_recorded = true;
@@ -1367,7 +1384,7 @@ async fn handle_live_socket(
                                 channel = %channel_id,
                                 "binary frame received before format negotiation; closing"
                             );
-                            if !state.close_channel_with_generated_feedback(&channel_id).await {
+                            if !state.close_channel_with_generated_feedback(&channel_id, meerkat_core::LiveChannelCloseReason::Error).await {
                                 break;
                             }
                             close_feedback_recorded = true;
@@ -1431,7 +1448,7 @@ async fn handle_live_socket(
                             kind = ?std::mem::discriminant(&other),
                             "unsupported WS frame; closing"
                         );
-                        if !state.close_channel_with_generated_feedback(&channel_id).await {
+                        if !state.close_channel_with_generated_feedback(&channel_id, meerkat_core::LiveChannelCloseReason::Error).await {
                             break;
                         }
                         close_feedback_recorded = true;
@@ -1470,7 +1487,7 @@ async fn handle_live_socket(
                         let publish_observation = should_publish_observation(&obs);
 
                         if close_observation {
-                            if !state.close_channel_with_generated_feedback(&channel_id).await {
+                            if !state.close_channel_with_generated_feedback(&channel_id, close_reason_for_observation(&obs)).await {
                                 break;
                             }
                             close_feedback_recorded = true;
@@ -1580,7 +1597,10 @@ async fn handle_live_socket(
     tracing::info!(channel = %channel_id, "live WebSocket disconnected");
     if !close_feedback_recorded {
         state
-            .close_channel_with_generated_feedback(&channel_id)
+            .close_channel_with_generated_feedback(
+                &channel_id,
+                meerkat_core::LiveChannelCloseReason::ClientDisconnected,
+            )
             .await;
     }
 }
@@ -1606,6 +1626,25 @@ pub async fn serve_live_ws_listener(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// A terminal provider status closes a channel as the provider's close;
+    /// a terminal error closes it as an error.
+    #[test]
+    fn terminal_observations_name_their_close_reason() {
+        assert_eq!(
+            close_reason_for_observation(&LiveAdapterObservation::StatusChanged {
+                status: meerkat_core::live_adapter::LiveAdapterStatus::Closed,
+            }),
+            meerkat_core::LiveChannelCloseReason::ProviderClosed
+        );
+        assert_eq!(
+            close_reason_for_observation(&LiveAdapterObservation::Error {
+                code: meerkat_core::live_adapter::LiveAdapterErrorCode::InternalError,
+                message: "provider stream failed".to_string(),
+            }),
+            meerkat_core::LiveChannelCloseReason::Error
+        );
+    }
 
     #[test]
     fn live_token_debug_redacts_value() {

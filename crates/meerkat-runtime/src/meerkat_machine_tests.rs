@@ -35311,7 +35311,10 @@ async fn live_status_session_lookup_uses_generated_close_history() {
     );
 
     let close_observation = host
-        .reserve_channel_close_observation(&channel_id)
+        .reserve_channel_close_observation(
+            &channel_id,
+            meerkat_core::LiveChannelCloseReason::ClientRequested,
+        )
         .await
         .expect("host should mint typed close observation");
     host.prepare_channel_physical_close(&close_observation)
@@ -49281,4 +49284,124 @@ async fn run_input_read_refuses_a_driver_replaced_or_removed_while_it_waited() {
         matches!(removed, Err(RuntimeDriverError::NotReady { .. })),
         "a removed session is not held: {removed:?}"
     );
+}
+
+#[cfg(feature = "live")]
+#[derive(Default)]
+struct CapturingLiveChannelClosePublisher {
+    closes: std::sync::Mutex<
+        Vec<(
+            SessionId,
+            meerkat_core::LiveChannelId,
+            meerkat_core::LiveChannelCloseReason,
+            bool,
+        )>,
+    >,
+}
+
+#[cfg(feature = "live")]
+#[async_trait::async_trait]
+impl crate::live_execution::LiveChannelCloseEventPublisher for CapturingLiveChannelClosePublisher {
+    async fn publish_live_channel_closed(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
+        reopen_recommended: bool,
+    ) {
+        self.closes.lock().unwrap().push((
+            session_id.clone(),
+            channel_id.clone(),
+            reason,
+            reopen_recommended,
+        ));
+    }
+}
+
+/// Open one live channel, close it with `reason` through generated close
+/// authority, and return what the close publisher received.
+#[cfg(feature = "live")]
+async fn committed_close_publishes(
+    reason: meerkat_core::LiveChannelCloseReason,
+) -> Vec<(
+    SessionId,
+    meerkat_core::LiveChannelId,
+    meerkat_core::LiveChannelCloseReason,
+    bool,
+)> {
+    let machine = MeerkatMachine::ephemeral();
+    let publisher = Arc::new(CapturingLiveChannelClosePublisher::default());
+    machine.set_live_channel_close_publisher(publisher.clone());
+    let host = meerkat_live::LiveAdapterHost::new(Arc::new(meerkat_live::NoOpProjectionSink));
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let channel_id = meerkat_live::LiveChannelId::new("live-close-published");
+    let open_authority = machine
+        .resolve_live_open_admission(
+            &session_id,
+            &channel_id,
+            &domain_live_identity("gpt-realtime-2"),
+        )
+        .await
+        .expect("generated live open admission");
+    host.open_channel_with_authority(
+        open_authority
+            .channel_open_authority()
+            .expect("generated open handoff"),
+    )
+    .await
+    .expect("host open");
+    assert!(
+        publisher.closes.lock().unwrap().is_empty(),
+        "an open publishes no close"
+    );
+    let close_observation = host
+        .reserve_channel_close_observation(&channel_id, reason)
+        .await
+        .expect("typed close observation");
+    host.prepare_channel_physical_close(&close_observation)
+        .await
+        .expect("physical close");
+    machine
+        .resolve_live_close_result(&session_id, &close_observation)
+        .await
+        .expect("generated live close result");
+    let closes = publisher.closes.lock().unwrap().clone();
+    assert!(
+        closes
+            .iter()
+            .all(|(session, channel, _, _)| *session == session_id && *channel == channel_id)
+    );
+    closes
+}
+
+/// A client's close reports exactly one `LiveChannelClosed` with its reason.
+#[cfg(feature = "live")]
+#[tokio::test]
+async fn a_client_close_publishes_one_typed_live_channel_closed() {
+    let closes =
+        committed_close_publishes(meerkat_core::LiveChannelCloseReason::ClientRequested).await;
+    assert_eq!(closes.len(), 1);
+    assert_eq!(
+        closes[0].2,
+        meerkat_core::LiveChannelCloseReason::ClientRequested
+    );
+    assert!(!closes[0].3, "only a media fault recommends a reopen");
+}
+
+/// A provider-side close reports its own reason, not the client's.
+#[cfg(feature = "live")]
+#[tokio::test]
+async fn a_provider_close_publishes_one_typed_live_channel_closed() {
+    let closes =
+        committed_close_publishes(meerkat_core::LiveChannelCloseReason::ProviderClosed).await;
+    assert_eq!(closes.len(), 1);
+    assert_eq!(
+        closes[0].2,
+        meerkat_core::LiveChannelCloseReason::ProviderClosed
+    );
+    assert!(!closes[0].3);
 }

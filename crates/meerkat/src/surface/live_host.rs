@@ -445,33 +445,43 @@ pub enum ExperimentalLiveChannelCloseError {
     Semantic(#[from] LiveChannelVerbError),
 }
 
-/// Publish the typed closed fact on the session event stream once the
-/// media-fault close committed: observers that did not send the report learn
-/// the cause and the reopen recommendation without polling. The session stream
-/// is not under the closed channel's binding, so it is still current. A
-/// session with no running actor has no stream observers; the fact stays
-/// readable from `live/status`.
-pub(crate) async fn publish_live_channel_closed_on_media_fault<B: SessionAgentBuilder + 'static>(
-    service: &PersistentSessionService<B>,
-    session_id: &SessionId,
-    channel_id: &LiveChannelId,
-    reopen_recommended: bool,
-) {
-    if let Err(error) = service
-        .publish_live_channel_closed(
-            session_id,
-            channel_id.clone(),
-            meerkat_core::LiveChannelCloseReason::MediaFault,
-            reopen_recommended,
-        )
-        .await
-    {
-        tracing::warn!(
-            %session_id,
-            channel = %channel_id,
-            %error,
-            "the media-fault close committed but its session event was not published"
-        );
+/// Session event publication for every committed live channel close: the
+/// runtime reports each close here, and the owning session's actor publishes
+/// `AgentEvent::LiveChannelClosed` on its event stream. That stream is not
+/// under the closed channel's binding, so it is never stale. A session with no
+/// running actor has no stream observers.
+struct ServiceLiveChannelClosePublisher<B: SessionAgentBuilder + 'static> {
+    service: std::sync::Weak<PersistentSessionService<B>>,
+}
+
+#[async_trait::async_trait]
+impl<B: SessionAgentBuilder + 'static>
+    meerkat_runtime::live_execution::LiveChannelCloseEventPublisher
+    for ServiceLiveChannelClosePublisher<B>
+{
+    async fn publish_live_channel_closed(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
+        reopen_recommended: bool,
+    ) {
+        let Some(service) = self.service.upgrade() else {
+            return;
+        };
+        match service
+            .publish_live_channel_closed(session_id, channel_id.clone(), reason, reopen_recommended)
+            .await
+        {
+            Ok(()) | Err(meerkat_core::service::SessionError::NotFound { .. }) => {}
+            Err(error) => tracing::warn!(
+                %session_id,
+                channel = %channel_id,
+                ?reason,
+                %error,
+                "a committed live channel close was not published on the session event stream"
+            ),
+        }
     }
 }
 
@@ -1140,7 +1150,11 @@ impl<B: SessionAgentBuilder + 'static>
     ) -> Result<(), crate::experimental_gpt_live::ExperimentalLivePumpRetirementError> {
         let close = self
             .member_host
-            .close_live_channel(Some(self.open_authority.as_ref()), binding.channel_id())
+            .close_live_channel_for(
+                Some(self.open_authority.as_ref()),
+                binding.channel_id(),
+                meerkat_core::LiveChannelCloseReason::ProviderClosed,
+            )
             .await;
         match close {
             Ok(_) => {}
@@ -1361,6 +1375,14 @@ impl<B: SessionAgentBuilder + 'static> meerkat_runtime::live_context_mirror::Liv
 impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     #[must_use]
     pub fn new(config: ServiceMemberLiveHostConfig<B>) -> Self {
+        // Every committed live channel close reports on the owning session's
+        // event stream (`AgentEvent::LiveChannelClosed`). Held weakly: the
+        // runtime outlives no service it reports to.
+        config
+            .runtime_adapter
+            .set_live_channel_close_publisher(Arc::new(ServiceLiveChannelClosePublisher {
+                service: Arc::downgrade(&config.service),
+            }));
         Self {
             service: config.service,
             staged_sessions: Arc::new(StagedSessionRegistry::new()),
@@ -2275,10 +2297,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                     .await;
                 if let Err(cleanup) = self
                     .orchestrator()
-                    .close_live_channel(
+                    .close_live_channel_for(
                         &self.host,
                         &replacement_channel_id,
                         Some(recovery.session_id()),
+                        meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                     )
                     .await
                 {
@@ -2307,10 +2330,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 .await
         {
             self.orchestrator()
-                .close_live_channel(
+                .close_live_channel_for(
                     &self.host,
                     &replacement_channel_id,
                     Some(recovery.session_id()),
+                    meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                 )
                 .await
                 .map_err(ExperimentalLiveChannelCloseError::from)?;
@@ -2326,10 +2350,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 .await;
             if let Err(cleanup) = self
                 .orchestrator()
-                .close_live_channel(
+                .close_live_channel_for(
                     &self.host,
                     &replacement_channel_id,
                     Some(recovery.session_id()),
+                    meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                 )
                 .await
             {
@@ -2346,10 +2371,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 .await;
             let cleanup = self
                 .orchestrator()
-                .close_live_channel(
+                .close_live_channel_for(
                     &self.host,
                     &replacement_channel_id,
                     Some(recovery.session_id()),
+                    meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                 )
                 .await
                 .map(|_| ())
@@ -2454,10 +2480,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                     .await;
                 if let Err(cleanup) = self
                     .orchestrator()
-                    .close_live_channel(
+                    .close_live_channel_for(
                         &self.host,
                         &replacement_channel_id,
                         Some(recovery.session_id()),
+                        meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                     )
                     .await
                 {
@@ -2486,10 +2513,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 .await
         {
             self.orchestrator()
-                .close_live_channel(
+                .close_live_channel_for(
                     &self.host,
                     &replacement_channel_id,
                     Some(recovery.session_id()),
+                    meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                 )
                 .await
                 .map_err(ExperimentalLiveChannelCloseError::from)?;
@@ -2505,10 +2533,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 .await;
             if let Err(cleanup) = self
                 .orchestrator()
-                .close_live_channel(
+                .close_live_channel_for(
                     &self.host,
                     &replacement_channel_id,
                     Some(recovery.session_id()),
+                    meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                 )
                 .await
             {
@@ -2525,10 +2554,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 .await;
             let cleanup = self
                 .orchestrator()
-                .close_live_channel(
+                .close_live_channel_for(
                     &self.host,
                     &replacement_channel_id,
                     Some(recovery.session_id()),
+                    meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                 )
                 .await
                 .map(|_| ())
@@ -2570,12 +2600,28 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         authority: Option<&dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider>,
         channel: &LiveChannelId,
     ) -> Result<LiveCloseStatus, ExperimentalLiveChannelCloseError> {
+        self.close_live_channel_for(
+            authority,
+            channel,
+            meerkat_core::LiveChannelCloseReason::ClientRequested,
+        )
+        .await
+    }
+
+    /// [`Self::close_live_channel`] naming why the channel closes (carried
+    /// to the committed close's `AgentEvent::LiveChannelClosed`).
+    pub async fn close_live_channel_for(
+        &self,
+        authority: Option<&dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider>,
+        channel: &LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
+    ) -> Result<LiveCloseStatus, ExperimentalLiveChannelCloseError> {
         if let Some(authority) = authority
             && let Some(result) = meerkat_live::traced_live_close_step(
                 Some(channel),
                 "close_experimental",
                 self.orchestrator()
-                    .close_experimental_live_channel(&self.host, authority, channel),
+                    .close_experimental_live_channel_for(&self.host, authority, channel, reason),
             )
             .await?
         {
@@ -2709,15 +2755,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             reopen_recommended = judgement.reopen_recommended(),
             "the channel's first assistant output decoded silent; closing it on a media fault"
         );
+        // The committed close reports `LiveChannelClosed` (reason
+        // `media_fault`) on the session event stream through the runtime's
+        // close publisher.
         self.close_experimental_live_active_channel(authority, channel_id, activation_receipt)
             .await?;
-        publish_live_channel_closed_on_media_fault(
-            &self.service,
-            &session_id,
-            channel_id,
-            judgement.reopen_recommended(),
-        )
-        .await;
         Ok(meerkat_contracts::LiveMediaHealthResult {
             verdict: meerkat_contracts::LiveMediaHealthVerdict::MediaFault,
             reopen_recommended: judgement.reopen_recommended(),

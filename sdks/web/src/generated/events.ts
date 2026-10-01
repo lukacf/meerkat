@@ -357,7 +357,7 @@ export type InterruptedToolRunDisposition = {
   kind: "unknown";
 };
 
-export type LiveChannelCloseReason = "media_fault";
+export type LiveChannelCloseReason = "client_requested" | "client_disconnected" | "provider_closed" | "error" | "media_fault" | "replaced" | "open_abandoned";
 
 export type LiveChannelId = string;
 

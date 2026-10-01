@@ -13718,12 +13718,53 @@ impl MeerkatMachine {
                 {
                     host.retire_closed_channel(session_id, commit).await;
                 }
+                self.publish_live_channel_closed(session_id, observation)
+                    .await;
                 Ok(authority)
             }
             None => Err(RuntimeDriverError::Internal(format!(
                 "RecordLiveCloseClosed for channel '{channel_id}' emitted no LiveCloseResultResolved effect"
             ))),
         }
+    }
+
+    /// Report one committed close on the session event stream. A media fault
+    /// recorded by the generated media-health edge names the reason (with its
+    /// reopen recommendation); otherwise the closing path's reason stands.
+    #[cfg(feature = "live")]
+    async fn publish_live_channel_closed(
+        &self,
+        session_id: &SessionId,
+        observation: &meerkat_live::LiveChannelCloseObservation,
+    ) {
+        let Some(publisher) = self.live_channel_close_publisher() else {
+            return;
+        };
+        let media_fault = self
+            .session_dsl_state(session_id)
+            .await
+            .ok()
+            .and_then(|state| {
+                state
+                    .live_media_fault_reopen_recommended_by_channel
+                    .get(observation.channel_id())
+                    .copied()
+            });
+        let (reason, reopen_recommended) = match media_fault {
+            Some(reopen_recommended) => (
+                meerkat_core::LiveChannelCloseReason::MediaFault,
+                reopen_recommended,
+            ),
+            None => (observation.reason(), false),
+        };
+        publisher
+            .publish_live_channel_closed(
+                session_id,
+                &meerkat_live::LiveChannelId::new(observation.channel_id()),
+                reason,
+                reopen_recommended,
+            )
+            .await;
     }
 
     /// Consume the exact one-use rollback capability from an atomic accepted

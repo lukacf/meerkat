@@ -674,17 +674,26 @@ export interface BackgroundJobCompletedEvent {
   readonly detail: string;
 }
 
+/** Why a live channel closed (`LiveChannelClosedEvent.reason`). */
+export type LiveChannelCloseReason =
+  | "client_requested"
+  | "client_disconnected"
+  | "provider_closed"
+  | "error"
+  | "media_fault"
+  | "replaced"
+  | "open_abandoned";
+
 /**
- * The runtime closed one of the session's live channels for a typed cause.
- * `reason` is `"media_fault"` when the channel's first assistant output had a
- * transcript but no audible audio; `reopenRecommended` says whether the
- * session may reopen the channel with its retained context.
+ * One of the session's live channels closed (every committed close).
+ * `reopenRecommended` is true only for a `media_fault` whose session may still
+ * reopen the channel with its retained context.
  */
 export interface LiveChannelClosedEvent {
   readonly type: "live_channel_closed";
   readonly sessionId: string;
   readonly channelId: string;
-  readonly reason: "media_fault";
+  readonly reason: LiveChannelCloseReason;
   readonly reopenRecommended: boolean;
 }
 
@@ -1797,7 +1806,15 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         reason: requireOneOf(
           requireStringField(raw, "reason"),
           "reason",
-          ["media_fault"] as const,
+          [
+            "client_requested",
+            "client_disconnected",
+            "provider_closed",
+            "error",
+            "media_fault",
+            "replaced",
+            "open_abandoned",
+          ] as const,
         ),
         reopenRecommended: reopen === true,
       };

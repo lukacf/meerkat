@@ -9277,7 +9277,8 @@ mod tests {
     struct MockLlmClient;
 
     struct BlockingMockLlmClient {
-        calls: Arc<AtomicUsize>,
+        /// LLM calls that started, published before each call blocks.
+        calls: Arc<tokio::sync::watch::Sender<usize>>,
         release: Arc<tokio::sync::Semaphore>,
     }
 
@@ -9353,7 +9354,7 @@ mod tests {
             let calls = Arc::clone(&self.calls);
             let release = Arc::clone(&self.release);
             Box::pin(async_stream::stream! {
-                calls.fetch_add(1, AtomicOrdering::SeqCst);
+                calls.send_modify(|calls| *calls += 1);
                 let permit = release
                     .acquire()
                     .await
@@ -9851,7 +9852,13 @@ mod tests {
         meerkat_mob::MobId,
         Arc<meerkat_mob::store::InMemoryMobEventStore>,
     ) {
-        let mob_id = meerkat_mob::MobId::from("rest-session-archive-partial-destroy");
+        // Unique per owner session: two tests share this helper, and a mob's
+        // supervisor registers `<mob_id>/__mob_supervisor__` in the
+        // process-global in-process comms registry, so a shared id collides
+        // (`ParticipantNameOccupied`) when threaded `cargo test` overlaps them.
+        let mob_id = meerkat_mob::MobId::from(format!(
+            "rest-session-archive-partial-destroy-{owner_session_id}"
+        ));
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
@@ -10098,28 +10105,22 @@ mod tests {
         completed.session_id
     }
 
-    async fn wait_for_rest_llm_calls(calls: &AtomicUsize, expected: usize, description: &str) {
-        for _ in 0..200 {
-            if calls.load(AtomicOrdering::SeqCst) >= expected {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        panic!("{description}: expected at least {expected} LLM calls");
-    }
-
-    async fn wait_for_rest_runtime_running(state: &AppState, session_id: &SessionId) {
-        for _ in 0..200 {
-            if matches!(
-                state.runtime_adapter.runtime_state(session_id).await,
-                Ok(meerkat_runtime::RuntimeState::Running)
-            ) {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let state = state.runtime_adapter.runtime_state(session_id).await;
-        panic!("runtime did not enter Running state: {state:?}");
+    /// Wait until the blocking mock has started `expected` LLM calls. The
+    /// count is published before each call blocks, so this is a typed signal;
+    /// the deadline is only a failure backstop.
+    async fn wait_for_rest_llm_calls(
+        calls: &tokio::sync::watch::Sender<usize>,
+        expected: usize,
+        description: &str,
+    ) {
+        let mut started = calls.subscribe();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            started.wait_for(|started| *started >= expected),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{description}: expected at least {expected} LLM calls"))
+        .expect("the blocking mock's call counter outlives the test");
     }
 
     async fn wait_for_rest_runtime_pre_admission(state: &AppState, session_id: &SessionId) {
@@ -10200,7 +10201,7 @@ mod tests {
     async fn rest_peer_terminal_webhook_allows_running_target_when_capacity_full() {
         let temp = TempDir::new().unwrap();
         let mut state = load_rest_state_with_capacity(&temp, 2).await;
-        let calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(tokio::sync::watch::channel(0).0);
         let release = Arc::new(tokio::sync::Semaphore::new(0));
         state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
             calls: Arc::clone(&calls),
@@ -10243,7 +10244,17 @@ mod tests {
         });
 
         wait_for_rest_llm_calls(&calls, 1, "running target turn should reach LLM").await;
-        wait_for_rest_runtime_running(&state, &target_session_id).await;
+        // The run that called the LLM is open, so the runtime is Running.
+        assert!(
+            matches!(
+                state
+                    .runtime_adapter
+                    .runtime_state(&target_session_id)
+                    .await,
+                Ok(meerkat_runtime::RuntimeState::Running)
+            ),
+            "the target runtime is Running while its turn is inside the LLM call"
+        );
 
         let mut filler_sessions = Vec::new();
         loop {
@@ -10477,7 +10488,7 @@ mod tests {
     async fn rest_continue_dropped_waiter_cleans_pre_admission_after_completion() {
         let temp = TempDir::new().unwrap();
         let mut state = load_rest_state_with_capacity(&temp, 1).await;
-        let calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(tokio::sync::watch::channel(0).0);
         let release = Arc::new(tokio::sync::Semaphore::new(0));
         state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
             calls: Arc::clone(&calls),
@@ -10715,7 +10726,7 @@ mod tests {
             "test requires rebuild to prepare a new runtime registration"
         );
 
-        let calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(tokio::sync::watch::channel(0).0);
         let release = Arc::new(tokio::sync::Semaphore::new(0));
         state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
             calls: Arc::clone(&calls),
@@ -10758,18 +10769,16 @@ mod tests {
             .await
         });
 
+        let mut started = calls.subscribe();
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            loop {
-                if calls.load(AtomicOrdering::SeqCst) >= 1 {
-                    break;
+            tokio::select! {
+                reached = started.wait_for(|started| *started >= 1) => {
+                    reached.expect("the blocking mock's call counter outlives the test");
                 }
-                tokio::select! {
-                    result = &mut continue_task => {
-                        panic!(
-                            "rebuild continue completed before reaching the blocking LLM: {result:?}"
-                        );
-                    }
-                    () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                result = &mut continue_task => {
+                    panic!(
+                        "rebuild continue completed before reaching the blocking LLM: {result:?}"
+                    );
                 }
             }
         })
@@ -15481,8 +15490,10 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         let state = AppState::load_from(temp.path().to_path_buf())
             .await
             .unwrap();
+        // Mob ids are unique per test (see
+        // `insert_rest_archive_partial_destroy_mob_with_events`).
         let definition = meerkat_mob::MobDefinition::from_toml(
-            "[mob]\nid = \"test_mob\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n\n[profiles.worker.tools]\ncomms = true\n",
+            "[mob]\nid = \"test_mob_kickoff_snapshots\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n\n[profiles.worker.tools]\ncomms = true\n",
         )
         .expect("minimal mob definition");
         let mob_id = state
@@ -15523,7 +15534,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             .await
             .unwrap();
         let definition = meerkat_mob::MobDefinition::from_toml(
-            "[mob]\nid = \"test_mob\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n\n[profiles.worker.tools]\ncomms = true\n",
+            "[mob]\nid = \"test_mob_kickoff_filter\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n\n[profiles.worker.tools]\ncomms = true\n",
         )
         .expect("minimal mob definition");
         let mob_id = state
@@ -15575,7 +15586,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             .with_default_llm_client(Some(mock_client)),
         );
         let mut definition =
-            meerkat_mob::MobDefinition::explicit(meerkat_mob::MobId::from("test_mob"));
+            meerkat_mob::MobDefinition::explicit(meerkat_mob::MobId::from("test_mob_wire_batch"));
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
@@ -15713,7 +15724,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             .unwrap();
         state.llm_client_override = Some(Arc::new(MockLlmClient));
         let definition = meerkat_mob::MobDefinition::from_toml(
-            "[mob]\nid = \"test_mob\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n\n[profiles.worker.tools]\nbuiltins = true\ncomms = true\n",
+            "[mob]\nid = \"test_mob_spawn_helper\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n\n[profiles.worker.tools]\nbuiltins = true\ncomms = true\n",
         )
         .expect("minimal mob definition");
         let mob_id = state

@@ -57,6 +57,15 @@ them.
   rejects results containing `structuredContent` instead of silently
   discarding it. Public signatures are unchanged; `McpConnection::call_tool_text`
   includes the derived JSON text.
+- Behaviour-only (not measured by the gate): `McpConnection::call_tool` and
+  `McpProtocol::call_tool` return the server's `structuredContent` as one
+  additional trailing `ContentBlock::Structured` (since #1335), and a text
+  block whose content parses to JSON equal to that value is no longer returned
+  alongside it: spec-following servers mirror `structuredContent` into text,
+  and the model received the same value twice. Text that differs from the
+  structured value, or is not JSON, is kept. `McpConnection::call_tool_text`
+  and a failing result's `ToolCallFailed` reason therefore carry that JSON
+  once.
 
 ### Added
 

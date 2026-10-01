@@ -43,7 +43,9 @@ impl McpProtocol {
     /// variants; resource, audio, and resource-link content the agent loop does
     /// not model are preserved verbatim as [`ContentBlock::Structured`] rather
     /// than silently dropped. The server's optional `structuredContent` JSON
-    /// value is appended as one additional Structured block.
+    /// value is appended as one additional Structured block; a text block whose
+    /// content parses to the same JSON value is its serialization and is not
+    /// repeated.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
         let request = match args.as_object().cloned() {
             Some(arguments) => {
@@ -150,7 +152,8 @@ pub(crate) async fn list_all_tools(
 }
 
 /// Preserve the server's ordered content, followed by its optional structured
-/// JSON value. Both public MCP wrappers use this conversion. Error results keep
+/// JSON value, which replaces any text block that serializes the same value.
+/// Both public MCP wrappers use this conversion. Error results keep
 /// their existing failure contract and project all supplied detail into it.
 pub(crate) fn convert_tool_result(
     result: CallToolResult,
@@ -158,6 +161,12 @@ pub(crate) fn convert_tool_result(
 ) -> Result<Vec<ContentBlock>, McpError> {
     let mut blocks = extract_content_blocks(result.content);
     if let Some(data) = result.structured_content {
+        // MCP asks servers that return structuredContent to also serialize it
+        // into a text block for older clients. A text block that parses to
+        // the same JSON value is that serialization, not further content, so
+        // only the typed Structured block carries it. Text that differs or is
+        // not JSON stays.
+        blocks.retain(|block| !is_text_serialization_of(block, &data));
         let block = ContentBlock::structured(&data).map_err(|error| McpError::ProtocolError {
             message: format!("Tool '{name}' returned invalid structured content: {error}"),
         })?;
@@ -170,6 +179,15 @@ pub(crate) fn convert_tool_result(
         });
     }
     Ok(blocks)
+}
+
+/// True when `block` is text whose content parses to JSON equal to `data`.
+fn is_text_serialization_of(block: &ContentBlock, data: &Value) -> bool {
+    matches!(
+        block,
+        ContentBlock::Text { text }
+            if serde_json::from_str::<Value>(text).is_ok_and(|parsed| parsed == *data)
+    )
 }
 
 /// The public failure type carries derived text, not a typed MCP envelope.

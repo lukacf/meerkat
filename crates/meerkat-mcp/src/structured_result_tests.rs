@@ -204,26 +204,90 @@ async fn structured_result_only_preserves_nested_json_over_both_surfaces() {
 }
 
 #[tokio::test]
-async fn structured_result_mixed_appends_without_reordering_or_deduplicating() {
+async fn structured_result_replaces_a_text_block_that_serializes_the_same_value() {
     for surface in SURFACES {
+        // Spec-following servers mirror structuredContent into text; the
+        // mirror is matched by JSON value, not by string, so a pretty-printed
+        // serialization is the same value.
+        let pretty = serde_json::to_string_pretty(&nested()).unwrap();
+        for mirror in [nested().to_string(), pretty] {
+            let mut content = mixed();
+            content
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"type": "text", "text": mirror}));
+            let blocks = invoke(surface, reply(content, Some(nested()), false), false)
+                .await
+                .expect("successful mixed tool result")
+                .blocks();
+            assert_eq!(blocks.len(), 5, "{surface:?}: {blocks:?}");
+            assert_mixed_prefix(&blocks);
+            assert_eq!(structured_value(&blocks[4]), nested());
+
+            let only = invoke(
+                surface,
+                reply(
+                    json!([{"type": "text", "text": mirror}]),
+                    Some(nested()),
+                    false,
+                ),
+                false,
+            )
+            .await
+            .expect("mirrored-only tool result")
+            .blocks();
+            assert_eq!(only.len(), 1, "{surface:?}: {only:?}");
+            assert_eq!(structured_value(&only[0]), nested());
+
+            // A failing result carries the detail once, not twice.
+            let failed = invoke(
+                surface,
+                reply(
+                    json!([{"type": "text", "text": mirror}]),
+                    Some(nested()),
+                    true,
+                ),
+                false,
+            )
+            .await;
+            let Err(McpError::ToolCallFailed { reason, .. }) = failed else {
+                panic!("isError must remain failure: {surface:?}");
+            };
+            assert_eq!(
+                serde_json::from_str::<Value>(&reason).expect("one structured detail"),
+                nested()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn structured_result_keeps_text_that_differs_or_is_not_json() {
+    for surface in SURFACES {
+        let different = json!({"records": [], "empty": {}, "list": []}).to_string();
         let mut content = mixed();
-        content
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"type": "text", "text": nested().to_string()}));
+        let entries = content.as_array_mut().unwrap();
+        entries.push(json!({"type": "text", "text": different}));
+        entries.push(json!({"type": "text", "text": "not json {"}));
         let blocks = invoke(surface, reply(content, Some(nested()), false), false)
             .await
             .expect("successful mixed tool result")
             .blocks();
-        assert_eq!(blocks.len(), 6, "{surface:?}");
+        assert_eq!(blocks.len(), 7, "{surface:?}: {blocks:?}");
         assert_mixed_prefix(&blocks);
         assert_eq!(
             blocks[4],
             ContentBlock::Text {
-                text: nested().to_string()
+                text: different.clone()
             }
         );
-        assert_eq!(structured_value(&blocks[5]), nested());
+        assert_eq!(
+            blocks[5],
+            ContentBlock::Text {
+                text: "not json {".into()
+            }
+        );
+        assert_eq!(structured_value(&blocks[6]), nested());
     }
 }
 

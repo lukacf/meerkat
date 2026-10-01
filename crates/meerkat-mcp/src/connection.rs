@@ -390,7 +390,9 @@ impl McpConnection {
     /// resource, audio, and resource-link content the agent loop does not model
     /// are preserved verbatim as [`ContentBlock::Structured`] rather than
     /// silently dropped. Optional `structuredContent` is appended as one
-    /// additional Structured block containing that JSON value.
+    /// additional Structured block containing that JSON value; a text block
+    /// whose content parses to the same JSON value is its serialization and
+    /// is not repeated.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
         let request = match args.as_object().cloned() {
             Some(arguments) => {

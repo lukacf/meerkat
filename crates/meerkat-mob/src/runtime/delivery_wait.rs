@@ -500,12 +500,6 @@ mod observe {
     /// admission signal.
     const POLL_START: Duration = Duration::from_millis(10);
     const POLL_MAX: Duration = Duration::from_millis(250);
-    /// While armed on the runtime's waiter, re-read at least this often.
-    /// Every terminal transition wakes that waiter; this bounded re-read is
-    /// defense in depth for a wake that lags receipt finalization (the
-    /// runtime resolves waiters after finalizing, and a directed terminal can
-    /// finalize before its publication succeeds).
-    const REREAD_INTERVAL: Duration = Duration::from_secs(1);
 
     /// When the call must return: the caller's deadline, or one evidence
     /// floor from now for a deadline that has passed or is closer than that.
@@ -712,13 +706,16 @@ mod observe {
                 break;
             }
             if let Some(armed_on) = armed_on {
+                // The runtime wakes this wait on every terminal fact of the
+                // input, including a directed receipt's finalization before
+                // its publication, so it is awaited for the whole budget.
                 match tokio::time::timeout(
-                    remaining.min(REREAD_INTERVAL),
+                    remaining,
                     runtime.wait_input_terminal_receipt(session_id, &armed_on),
                 )
                 .await
                 {
-                    // Re-read on expiry; the loop re-arms if still pending.
+                    // The deadline came first; the loop ends at the top.
                     Err(_elapsed) => continue,
                     Ok(Ok(Some(InputTerminalReceiptWait::Resolved(read)))) => {
                         if let Observation::Terminal(record) = observer.classify(read)? {

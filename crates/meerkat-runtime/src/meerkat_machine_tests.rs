@@ -4344,6 +4344,131 @@ async fn aborted_directed_candidate_checkpoint_recovers_exact_completed_terminal
     drop(runtime_bindings);
 }
 
+/// A directed batch finalizes its receipt before publishing its interaction
+/// terminals, and resolves completion waiters only after publication. A
+/// receipt wait armed while the input was pending must resolve at the
+/// finalization, not park until publication (which a transient failure can
+/// delay): finalization wakes the receipt observers. The mob delivery wait
+/// used to re-read every second to cover that window.
+#[tokio::test]
+async fn receipt_wait_resolves_at_directed_finalization_while_publication_is_parked() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let machine = Arc::new(MeerkatMachine::persistent(
+        inner as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let checkpoint_entered = Arc::new(Notify::new());
+    let release_checkpoint = Arc::new(Notify::new());
+    let first_publish_entered = Arc::new(Notify::new());
+    let release_first_publish = Arc::new(Notify::new());
+    let publisher = Arc::new(RuntimeRecoveryTerminalPublisher::blocking_first_publish(
+        Arc::clone(&first_publish_entered),
+        Arc::clone(&release_first_publish),
+    ));
+    machine
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare runtime bindings");
+    machine
+        .ensure_session_with_executor(
+            session_id.clone(),
+            Box::new(RuntimeRecoveryExecutor {
+                session: runtime_recovery_session(&session_id, "directed receipt wake"),
+                result_text: "directed receipt wake".to_string(),
+                publisher: Some(Arc::clone(&publisher)),
+                first_reconcile_gate: None,
+                first_checkpoint_gate: Some((
+                    Arc::clone(&checkpoint_entered),
+                    Arc::clone(&release_checkpoint),
+                )),
+                target_checkpoint_calls: Arc::new(AtomicUsize::new(0)),
+                expected_compaction_intents: Vec::new(),
+                projection_order: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }),
+        )
+        .await
+        .expect("install executor");
+
+    let interaction_uuid = meerkat_core::time_compat::new_uuid_v7();
+    let input = crate::mob_adapter::create_tracked_flow_step_input(
+        "directed-receipt-wake-step",
+        meerkat_core::types::ContentInput::Text("directed receipt wake".to_string()),
+        "directed-receipt-wake-flow",
+        None,
+        &interaction_uuid.to_string(),
+    )
+    .expect("construct directed input");
+    let input_id = input.id().clone();
+    let (_outcome, completion) = machine
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .expect("accept directed input");
+    let completion = completion.expect("accepted directed input has a completion waiter");
+
+    // Held at the committed-boundary checkpoint, before receipt finalization.
+    tokio::time::timeout(Duration::from_secs(5), checkpoint_entered.notified())
+        .await
+        .expect("the run reaches the committed-boundary checkpoint");
+    let pending = machine
+        .input_terminal_receipt(
+            &session_id,
+            crate::terminal_status::InteractionSelector::InputId(input_id.clone()),
+        )
+        .await
+        .expect("read receipt")
+        .expect("the input is held live");
+    assert!(
+        !pending.report.is_resolved(),
+        "the receipt is not finalized before the checkpoint returns: {:?}",
+        pending.report
+    );
+    let waiter = {
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        let input_id = input_id.clone();
+        tokio::spawn(async move {
+            machine
+                .wait_input_terminal_receipt(&session_id, &input_id)
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "the waiter parks on the pending input"
+    );
+
+    release_checkpoint.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), first_publish_entered.notified())
+        .await
+        .expect("publication begins after the receipt is finalized");
+    // Publication is parked; the receipt wait resolves anyway. The deadline
+    // only bounds a broken run.
+    let resolved = tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("receipt finalization wakes the receipt wait while publication is parked")
+        .expect("waiter task")
+        .expect("receipt wait runs")
+        .expect("the input is known");
+    match resolved {
+        crate::terminal_status::InputTerminalReceiptWait::Resolved(read) => {
+            assert!(read.report.is_resolved(), "{:?}", read.report);
+        }
+        other => panic!("expected a resolved receipt, got {other:?}"),
+    }
+    assert_eq!(publisher.calls(), 1, "publication is still parked");
+
+    release_first_publish.notify_one();
+    match tokio::time::timeout(Duration::from_secs(5), completion.wait_authorized())
+        .await
+        .expect("completion resolves after publication")
+    {
+        CompletionOutcome::Completed(result) => assert_eq!(result.text, "directed receipt wake"),
+        other => panic!("expected a completed directed terminal, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn aborted_finalized_directed_publication_replays_once_and_preserves_completed() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());

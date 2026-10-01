@@ -731,11 +731,11 @@ async fn relink_owned_child(
             && delivered.retires_child()
             && let Err(error) = handle.retire_with_descendants(child.clone()).await
         {
-            tracing::warn!(
-                mob_id = %mob_id,
-                child = %child,
-                error = %error,
-                "fork_off re-link could not retire a child whose delivered outcome retires it"
+            report_child_retirement_incomplete(
+                mob_id,
+                child,
+                &error,
+                "fork_off re-link: the child whose delivered outcome retires it",
             );
         }
         return ForkRelinkAction::AlreadyDelivered;
@@ -1584,15 +1584,15 @@ async fn fence_by_retirement(
     reason: Option<RestartInterruptedReason>,
 ) -> ForkRelinkAction {
     if let Err(error) = handle.retire_with_descendants(child.clone()).await {
-        tracing::warn!(
-            mob_id = %mob_id,
-            child = %child,
-            error = %error,
-            "fork_off re-link could not retire the child whose job input it could not \
-             settle; the job stays owed"
+        report_child_retirement_incomplete(
+            mob_id,
+            child,
+            &error,
+            "fork_off re-link: the child whose job input it could not settle (the job stays owed)",
         );
         return ForkRelinkAction::Failed(format!(
-            "the job turn's input could not be settled, and retiring its child failed: {error}"
+            "the job turn's input could not be settled, and its child {}: {error}",
+            child_retirement_incomplete(&error)
         ));
     }
     // The retired member's runtime no longer runs anything; a terminal it
@@ -1714,11 +1714,11 @@ async fn deliver_receipt(
     if retires_after_delivery(&action, service, mob_id, child, job).await
         && let Err(error) = handle.retire_with_descendants(child.clone()).await
     {
-        tracing::warn!(
-            mob_id = %mob_id,
-            child = %child,
-            error = %error,
-            "fork_off re-link delivered a failed job but could not retire its child"
+        report_child_retirement_incomplete(
+            mob_id,
+            child,
+            &error,
+            "fork_off re-link delivered a failed job; its child",
         );
     }
     action
@@ -1802,15 +1802,43 @@ async fn limit_elapsed(
     if retires_after_delivery(&action, service, mob_id, child, job).await
         && let Err(error) = handle.retire_with_descendants(child.clone()).await
     {
-        tracing::warn!(
-            mob_id = %mob_id,
-            child = %child,
-            error = %error,
-            "fork_off re-link delivered max_run_elapsed but could not retire the child; \
-             it stays seated, cancelled, for its forker"
+        report_child_retirement_incomplete(
+            mob_id,
+            child,
+            &error,
+            "fork_off re-link delivered max_run_elapsed; its child (seated, cancelled, for its forker)",
         );
     }
     action
+}
+
+/// How a re-link describes a child retirement that did not complete. A typed
+/// retirement-in-progress answer ([`MobError::is_retirement_in_progress`]) is
+/// not a failure: another owner is already retiring the child, and that
+/// retirement completes on its own.
+fn child_retirement_incomplete(error: &MobError) -> &'static str {
+    if error.is_retirement_in_progress() {
+        "is already being retired"
+    } else {
+        "could not be retired"
+    }
+}
+
+/// Log a child retirement that did not complete, at the level its cause
+/// warrants: a retirement already in progress is expected, anything else is
+/// a failure.
+fn report_child_retirement_incomplete(
+    mob_id: &MobId,
+    child: &AgentIdentity,
+    error: &MobError,
+    subject: &'static str,
+) {
+    let outcome = child_retirement_incomplete(error);
+    if error.is_retirement_in_progress() {
+        tracing::info!(mob_id = %mob_id, child = %child, error = %error, "{subject} {outcome}");
+    } else {
+        tracing::warn!(mob_id = %mob_id, child = %child, error = %error, "{subject} {outcome}");
+    }
 }
 
 /// Whether the child is retired after delivering it an outcome that retires
@@ -2822,5 +2850,26 @@ mod tests {
         assert!(untyped(BackgroundJobTerminalStatus::Terminated).retires_child());
         assert!(!untyped(BackgroundJobTerminalStatus::Failed).retires_child());
         assert!(!untyped(BackgroundJobTerminalStatus::Completed).retires_child());
+    }
+}
+
+#[cfg(test)]
+mod child_retirement_wording_tests {
+    use super::*;
+
+    #[test]
+    fn a_retirement_already_in_progress_is_not_reported_as_a_failure() {
+        let in_progress = MobError::MemberRetirementInProgress {
+            member_id: AgentIdentity::from("child"),
+            stage: "archive".to_string(),
+        };
+        assert_eq!(
+            child_retirement_incomplete(&in_progress),
+            "is already being retired"
+        );
+        assert_eq!(
+            child_retirement_incomplete(&MobError::Internal("store unavailable".to_string())),
+            "could not be retired"
+        );
     }
 }

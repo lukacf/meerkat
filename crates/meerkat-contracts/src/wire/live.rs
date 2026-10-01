@@ -685,8 +685,8 @@ pub struct LiveMediaHealthParams {
 pub enum LiveMediaHealthVerdict {
     /// The output was audible; the channel stays open.
     Audible,
-    /// The output had a transcript but no audible audio: the runtime closes
-    /// the channel with reason `media_fault`.
+    /// The output had a transcript but no audible audio: the runtime closed
+    /// the channel with reason `media_fault` before answering.
     MediaFault,
 }
 
@@ -697,17 +697,6 @@ pub struct LiveMediaHealthResult {
     pub verdict: LiveMediaHealthVerdict,
     /// For a media fault: whether the session may reopen the channel with its
     /// retained context (one media-fault reopen per session).
-    #[serde(default, skip_serializing_if = "bool_is_false")]
-    pub reopen_recommended: bool,
-}
-
-/// Runtime notification `live/channel_closed`: the runtime closed a channel
-/// for a typed cause.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct LiveChannelClosedParams {
-    pub channel_id: String,
-    pub reason: WireLiveCloseReason,
     #[serde(default, skip_serializing_if = "bool_is_false")]
     pub reopen_recommended: bool,
 }

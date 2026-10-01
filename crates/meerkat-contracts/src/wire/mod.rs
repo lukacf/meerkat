@@ -114,7 +114,7 @@ pub use jobs::*;
 pub use live::{
     LIVE_CLIENT_CONTEXT_V1_CAPABILITY, LIVE_EXECUTION_IDENTITY_V1_CAPABILITY,
     LIVE_FUNCTION_BRIDGE_V1_CAPABILITY, LiveAssistantOutputAvailableParams,
-    LiveChannelClosedParams, LiveChannelParams, LiveCloseResult, LiveCloseStatus,
+    LiveChannelParams, LiveCloseResult, LiveCloseStatus,
     LiveCommitInputParams, LiveCommitInputResult, LiveCommitInputStatus, LiveInputChunkWire,
     LiveInterruptResult, LiveInterruptStatus, LiveMediaHealthParams,
     LiveMediaHealthRequestedParams, LiveMediaHealthResult, LiveMediaHealthVerdict, LiveOpenParams,

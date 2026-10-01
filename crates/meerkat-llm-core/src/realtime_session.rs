@@ -339,6 +339,37 @@ impl RealtimeSessionOpenConfig {
         ))
     }
 
+    /// Construct a projection that seeds only `following_messages`, the
+    /// committed rows after a prefix the caller covers by other means (a
+    /// retained summary of it), while the canonical cursor names the whole
+    /// committed document. The prefix is never read, so, like a body-free
+    /// open, the projection carries no canonical System drift witness.
+    #[doc(hidden)]
+    pub fn for_open_after_covered_prefix(
+        turning_mode: RealtimeTurningMode,
+        llm_identity: SessionLlmIdentity,
+        visible_tools: Vec<ToolDef>,
+        following_messages: Vec<Message>,
+        canonical_message_cursor: u64,
+    ) -> Result<Self, LlmError> {
+        if following_messages.len() as u64 > canonical_message_cursor {
+            return Err(LlmError::InvalidRequest {
+                message: "rows after a covered prefix cannot exceed the canonical cursor"
+                    .to_string(),
+            });
+        }
+        let seed_messages =
+            meerkat_core::types::materialize_latest_system_prompt_versions(&following_messages);
+        Ok(Self::new_with_projection(
+            turning_mode,
+            llm_identity,
+            visible_tools,
+            seed_messages,
+            Vec::new(),
+            canonical_message_cursor,
+        ))
+    }
+
     fn new_with_projection(
         turning_mode: RealtimeTurningMode,
         llm_identity: SessionLlmIdentity,

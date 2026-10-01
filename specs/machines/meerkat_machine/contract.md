@@ -494,6 +494,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
 - `AcceptWithoutWake`(input_id: InputId)
 - `Recycle`
+- `AdvanceLiveExperimentalStagedSeed`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, previous_seed_cursor: u64, next_seed_cursor: u64)
 - `RequestDeferredTools`(authorities: Map<ToolName, ToolVisibilityWitness>)
 
 ## Surface-only Inputs
@@ -14455,6 +14456,39 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `execution_not_bound`
   - `experimental_stage_absent`
 - Emits: `ExperimentalLiveExecutionStaged`
+- To: `Running`
+
+### `AdvanceLiveExperimentalStagedSeedIdle`
+- From: `Idle`
+- On: `AdvanceLiveExperimentalStagedSeed`(session_id, channel_id, runtime_id, fence_token, generation, previous_seed_cursor, next_seed_cursor)
+- Guards:
+  - `channel_binding_matches`
+  - `experimental_stage_matches`
+  - `execution_not_bound`
+  - `seed_advances_one_row`
+  - `channel_has_no_pending_append`
+- To: `Idle`
+
+### `AdvanceLiveExperimentalStagedSeedAttached`
+- From: `Attached`
+- On: `AdvanceLiveExperimentalStagedSeed`(session_id, channel_id, runtime_id, fence_token, generation, previous_seed_cursor, next_seed_cursor)
+- Guards:
+  - `channel_binding_matches`
+  - `experimental_stage_matches`
+  - `execution_not_bound`
+  - `seed_advances_one_row`
+  - `channel_has_no_pending_append`
+- To: `Attached`
+
+### `AdvanceLiveExperimentalStagedSeedRunning`
+- From: `Running`
+- On: `AdvanceLiveExperimentalStagedSeed`(session_id, channel_id, runtime_id, fence_token, generation, previous_seed_cursor, next_seed_cursor)
+- Guards:
+  - `channel_binding_matches`
+  - `experimental_stage_matches`
+  - `execution_not_bound`
+  - `seed_advances_one_row`
+  - `channel_has_no_pending_append`
 - To: `Running`
 
 ### `RegisterLivePlaybackOwnerIdle`

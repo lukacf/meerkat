@@ -6743,6 +6743,95 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
     }
 
+    /// The body-free committed boundary plus exactly the committed rows from
+    /// `from` to its message count: the O(tail) read a live channel reopen
+    /// seeds from.
+    ///
+    /// HeadCanonical serves the head row and a head-trusted range read of its
+    /// strand, never the prefix before `from`. Like
+    /// [`Self::observe_live_context_committed_boundary`] it takes no
+    /// mutation/recovery/turn-finalization guard and sends no actor command.
+    /// The rows are not proved here: the caller must prove prefix and rows
+    /// against the returned boundary's digest (for instance by extending a
+    /// transcript digest midstate it holds at `from`). WholeBlob has no
+    /// body-free head and decodes its committed snapshot.
+    #[doc(hidden)]
+    pub async fn observe_live_context_committed_tail(
+        &self,
+        id: &SessionId,
+        from: u64,
+    ) -> Result<(LiveContextCommittedBoundary, Vec<meerkat_core::Message>), SessionError> {
+        let past_head = |count: u64| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "live context tail from row {from} requested past the committed head of session {id} ({count} rows)"
+            )))
+        };
+        match self.runtime_store.session_persistence_profile() {
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                let incremental = self.incremental.as_ref().ok_or_else(|| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "live context tail for session {id} needs an incremental session store"
+                    )))
+                })?;
+                let authority = self
+                    .observe_persisted_session_authority(id)
+                    .await?
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                if self.session_archived_by_runtime_store_authority(id).await? {
+                    return Err(SessionError::NotFound { id: id.clone() });
+                }
+                let head = authority
+                    .head_canonical()
+                    .ok_or_else(|| {
+                        SessionError::Agent(AgentError::InternalError(format!(
+                            "live context tail loaded non-HeadCanonical authority for session {id}"
+                        )))
+                    })?
+                    .boundary_head();
+                if from > head.message_count {
+                    return Err(past_head(head.message_count));
+                }
+                let rows = incremental
+                    .load_messages(id, &head.strand, from..head.message_count)
+                    .await
+                    .map_err(|error| {
+                        SessionError::Agent(AgentError::InternalError(format!(
+                            "live context tail rows of session {id} unreadable: {error}"
+                        )))
+                    })?;
+                if rows.len() as u64 != head.message_count - from {
+                    return Err(SessionError::Agent(AgentError::InternalError(format!(
+                        "live context tail of session {id} served {} rows for {from}..{}",
+                        rows.len(),
+                        head.message_count
+                    ))));
+                }
+                Ok((
+                    LiveContextCommittedBoundary {
+                        message_count: head.message_count,
+                        transcript_revision: head.head_revision.clone(),
+                        rewrite_generation: head.rewrite_count,
+                    },
+                    rows,
+                ))
+            }
+            RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                let (session, _authority) = self.load_live_context_committed_source(id).await?;
+                let boundary = LiveContextCommittedBoundary::from_committed_session(&session)?;
+                let start = usize::try_from(from).map_err(|_| past_head(boundary.message_count))?;
+                let rows = session
+                    .messages()
+                    .get(start..)
+                    .ok_or_else(|| past_head(boundary.message_count))?
+                    .to_vec();
+                Ok((boundary, rows))
+            }
+            profile => Err(SessionError::Agent(AgentError::InternalError(format!(
+                "unsupported runtime session persistence profile {profile} while reading the live context tail for session {id}"
+            )))),
+        }
+    }
+
     /// Load the committed live-context source: the current store-issued
     /// authority and the exact body it names.
     ///

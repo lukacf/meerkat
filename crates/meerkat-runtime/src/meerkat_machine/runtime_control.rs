@@ -1948,64 +1948,380 @@ mod live_context_mirror_tests {
             .expect("bind experimental live execution");
     }
 
-    /// Runtime work output queued before the conversation waits for it, and
-    /// the user's turn start itself requests the drain that replays it on
-    /// the quiet lane during that turn (no later commit or turn end needed).
-    #[tokio::test]
-    async fn a_started_user_turn_drains_replayed_runtime_work_held_for_the_conversation() {
-        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
-        let host = Arc::new(RecordingMirrorHost::default());
-        machine.set_live_context_mirror_host(host.clone());
+    fn merge_turn_commit(
+        session_id: &SessionId,
+        reply_text: &str,
+    ) -> meerkat_core::lifecycle::core_executor::BoundSessionCommit {
         let mut session = meerkat_core::Session::with_id(session_id.clone());
         let mut merged = meerkat_core::UserMessage::text("Result of the voice request");
         merged.transcript_role = meerkat_core::types::TranscriptUserRole::InjectedContext;
         session.push(meerkat_core::Message::User(merged));
         let mut reply = meerkat_core::types::BlockAssistantMessage::snapshot(vec![
             meerkat_core::AssistantBlock::Text {
-                text: "Done, the file is written.".into(),
+                text: reply_text.into(),
                 meta: None,
             },
         ]);
         reply.identity.turn_input = Some(meerkat_core::types::TranscriptTurnInput::RuntimeAuthored);
         session.push(meerkat_core::Message::BlockAssistant(reply));
-        let committed =
-            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
-                .expect("seal the merge turn");
+        meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+            .expect("seal the merge turn")
+    }
+
+    /// On a channel seeded at open, runtime work output committed after the
+    /// provider session was created is never appended into silence (it was
+    /// read aloud over the user's first question) nor mid-utterance: queued
+    /// before the conversation it waits, the user's first turn starting does
+    /// not release it, and the finished turn does.
+    #[tokio::test]
+    async fn a_seeded_channel_holds_runtime_work_through_the_first_user_turn() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let host = Arc::new(RecordingMirrorHost::default());
+        machine.set_live_context_mirror_host(host.clone());
         machine
-            .enqueue_committed_parent_session_boundary(&session_id, &committed, "store-commit")
+            .enqueue_committed_parent_session_boundary(
+                &session_id,
+                &merge_turn_commit(&session_id, "Done, the file is written."),
+                "store-commit",
+            )
             .await
             .expect("enqueue the merge turn");
         machine
             .drain_live_context_outbox_for_channel(&session_id, &channel_id)
             .await
-            .expect("drain before the conversation");
+            .expect("drain while quiet");
         assert!(
             host.appends.lock().expect("appends").is_empty(),
-            "runtime work output is held until the conversation starts"
+            "never appended into silence"
         );
         let key = (session_id.clone(), channel_id.clone());
-        let before = machine
+        let (provider_binding, turn) = first_user_turn(&machine, &session_id, &channel_id).await;
+        machine
+            .observe_live_provider_turn_started(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding.clone(),
+                meerkat_live::LiveSidebandObservationKind::TurnStarted {
+                    turn: turn.clone(),
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ))
+            .await
+            .expect("the user's first turn starts");
+        let started = machine
             .shared
             .live_context_drain_tasks
             .lock()
             .expect("drain tasks")
             .get(&key)
-            .cloned();
-        let queued = machine
+            .cloned()
+            .expect("the turn start requested a drain");
+        started
+            .wait()
+            .await
+            .expect("the turn-start drain completes");
+        assert!(
+            host.appends.lock().expect("appends").is_empty(),
+            "held while the user's turn is open"
+        );
+        machine
+            .observe_live_provider_turn_finished(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding,
+                meerkat_live::LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: "what happened while I was gone".into(),
+                },
+            ))
+            .await
+            .expect("the user's first turn finishes");
+        let finished = machine
             .shared
-            .live_context_queued_rows
+            .live_context_drain_tasks
             .lock()
-            .expect("queued")
-            .get(&(session_id.clone(), 2))
-            .expect("the held reply stays queued")
-            .clone();
-        assert!(queued.is_runtime_work_replay());
-        let binding = queued.binding();
+            .expect("drain tasks")
+            .get(&key)
+            .cloned()
+            .expect("the turn finish requested a drain");
+        finished
+            .wait()
+            .await
+            .expect("the turn-finish drain completes");
+        let appends = host.appends.lock().expect("appends");
+        assert_eq!(appends.len(), 1, "{appends:?}");
+        assert_eq!(
+            host.append_kinds.lock().expect("kinds").as_slice(),
+            &[crate::live_execution::LiveContextAppendKind::RuntimeWorkReplay],
+        );
+    }
+
+    async fn first_user_turn(
+        machine: &crate::MeerkatMachine,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> (
+        meerkat_live::ProviderWebrtcBinding,
+        meerkat_live::LiveSidebandTurnRef,
+    ) {
+        let state = machine
+            .session_dsl_state(session_id)
+            .await
+            .expect("read the bound runtime identity");
         let provider_binding = meerkat_live::ProviderWebrtcBinding::new(
             channel_id.clone(),
             session_id.clone(),
-            meerkat_live::LiveRuntimeBindingGeneration::new(binding.generation()),
-            meerkat_live::LiveRuntimeBindingFence::new(binding.fence_token()),
+            meerkat_live::LiveRuntimeBindingGeneration::new(
+                state
+                    .live_execution_generation_by_channel
+                    .get(&channel_id.to_string())
+                    .map(|generation| generation.0)
+                    .expect("bound generation"),
+            ),
+            meerkat_live::LiveRuntimeBindingFence::new(
+                state
+                    .live_execution_fence_by_channel
+                    .get(&channel_id.to_string())
+                    .map(|fence| fence.0)
+                    .expect("bound fence"),
+            ),
+        );
+        let turn = meerkat_live::LiveSidebandTurnRef::__from_provider_observation(
+            channel_id,
+            "first-user-turn".into(),
+            "private-first-user-turn".into(),
+        )
+        .expect("turn");
+        (provider_binding, turn)
+    }
+
+    fn advance_staged_seed(
+        state: &crate::meerkat_machine::dsl::MeerkatMachineState,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+        previous_seed_cursor: u64,
+    ) -> crate::meerkat_machine::dsl::MeerkatMachineInput {
+        crate::meerkat_machine::dsl::MeerkatMachineInput::AdvanceLiveExperimentalStagedSeed {
+            session_id: session_id.to_string(),
+            channel_id: channel_id.to_string(),
+            runtime_id: state.active_runtime_id.clone().expect("active runtime"),
+            fence_token: state.active_fence_token.expect("active fence"),
+            generation: state.active_runtime_generation.expect("active generation"),
+            previous_seed_cursor,
+            next_seed_cursor: previous_seed_cursor + 1,
+        }
+    }
+
+    /// A row queued for a channel that then closes stays in the session's
+    /// outbox (close does not clear queued rows). On the next channel, staged
+    /// and bound at a seed cursor that covers that row, neither the drain nor
+    /// the authorize edge can ever select it: authorization keys on the new
+    /// channel's context cursor, which starts past it.
+    #[tokio::test]
+    async fn a_row_queued_for_a_closed_channel_is_unreachable_from_the_next_channel() {
+        let (machine, session_id, first) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &first, 0).await;
+        bind_experimental_live_machine(&machine, &session_id, &first, 0).await;
+        // Held on the first channel: the conversation never started there.
+        machine
+            .enqueue_committed_parent_session_boundary(
+                &session_id,
+                &merge_turn_commit(&session_id, "Stale reply from the first call."),
+                "store-commit",
+            )
+            .await
+            .expect("queue on the first channel");
+        let state = machine.session_dsl_state(&session_id).await.expect("state");
+        let stale: Vec<(u64, String)> = state
+            .live_context_queued_append_by_cursor
+            .iter()
+            .map(|(cursor, append)| (*cursor, append.clone()))
+            .collect();
+        assert!(
+            !stale.is_empty(),
+            "the merge turn is queued on the first channel"
+        );
+        // A real open stages at the committed boundary, which every row
+        // queued before it is at or below.
+        let stale_cursor = stale
+            .iter()
+            .map(|(cursor, _)| *cursor)
+            .max()
+            .expect("cursor");
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveCloseClosed {
+                    session_id: session_id.to_string(),
+                    channel_id: first.to_string(),
+                    close_observation_sequence: 1,
+                },
+                "test:RecordLiveCloseClosed",
+            )
+            .await
+            .expect("close the first channel");
+        let state = machine.session_dsl_state(&session_id).await.expect("state");
+        assert!(
+            state
+                .live_context_queued_append_by_cursor
+                .contains_key(&stale_cursor),
+            "close leaves the queued row behind (the leak this test pins)"
+        );
+
+        let second = meerkat_live::LiveChannelId::new("bound-experimental-live-second");
+        machine
+            .resolve_live_open_admission(
+                &session_id,
+                &second,
+                &meerkat_core::SessionLlmIdentity {
+                    model: "experimental-realtime-model".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+            )
+            .await
+            .expect("admit the second channel");
+        stage_experimental_live_machine(&machine, &session_id, &second, stale_cursor).await;
+        bind_experimental_live_machine(&machine, &session_id, &second, stale_cursor).await;
+        let host = Arc::new(RecordingMirrorHost::default());
+        machine.set_live_context_mirror_host(host.clone());
+
+        // The authorize edge, driven directly with the second channel's
+        // exact binding at each stale row's edge, is refused.
+        let state = machine.session_dsl_state(&session_id).await.expect("state");
+        for (cursor, append_id) in &stale {
+            let authorize = machine
+                .apply_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::AuthorizeLiveContextAppend {
+                        channel_id: second.to_string(),
+                        runtime_id: state.active_runtime_id.clone().expect("runtime"),
+                        fence_token: state.active_fence_token.expect("fence"),
+                        generation: state.active_runtime_generation.expect("generation"),
+                        append_id: append_id.clone(),
+                        previous_cursor: cursor - 1,
+                        next_cursor: *cursor,
+                    },
+                    "test:AuthorizeStaleRow",
+                )
+                .await;
+            assert!(
+                authorize.is_err(),
+                "the stale row at {cursor} is behind the second channel's cursor: {authorize:?}"
+            );
+        }
+
+        // The drain, through the whole conversation, never selects it.
+        let (provider_binding, turn) = first_user_turn(&machine, &session_id, &second).await;
+        machine
+            .observe_live_provider_turn_started(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding.clone(),
+                meerkat_live::LiveSidebandObservationKind::TurnStarted {
+                    turn: turn.clone(),
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ))
+            .await
+            .expect("the user speaks on the second channel");
+        machine
+            .observe_live_provider_turn_finished(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding,
+                meerkat_live::LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: "anything new".into(),
+                },
+            ))
+            .await
+            .expect("the user's turn finishes");
+        machine
+            .drain_live_context_outbox_for_channel(&session_id, &second)
+            .await
+            .expect("drain the second channel");
+        assert!(
+            host.appends.lock().expect("appends").is_empty(),
+            "the stale row is never appended on the second channel"
+        );
+    }
+
+    /// The edge moves only an unbound stage, one row at a time, from exactly
+    /// its current cursor.
+    #[tokio::test]
+    async fn a_staged_seed_advance_refuses_a_stale_step_and_a_bound_channel() {
+        let (machine, session_id, channel_id) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &channel_id, 3).await;
+        let state = machine.session_dsl_state(&session_id).await.expect("state");
+        let mut skipping = advance_staged_seed(&state, &session_id, &channel_id, 3);
+        if let crate::meerkat_machine::dsl::MeerkatMachineInput::AdvanceLiveExperimentalStagedSeed {
+            next_seed_cursor,
+            ..
+        } = &mut skipping
+        {
+            *next_seed_cursor = 5;
+        }
+        assert!(
+            machine
+                .apply_session_dsl_input(&session_id, skipping, "test:skip")
+                .await
+                .is_err(),
+            "one row at a time"
+        );
+        assert!(
+            machine
+                .apply_session_dsl_input(
+                    &session_id,
+                    advance_staged_seed(&state, &session_id, &channel_id, 2),
+                    "test:stale",
+                )
+                .await
+                .is_err(),
+            "only from the current staged cursor"
+        );
+        bind_experimental_live_machine(&machine, &session_id, &channel_id, 3).await;
+        let state = machine.session_dsl_state(&session_id).await.expect("state");
+        assert!(
+            machine
+                .apply_session_dsl_input(
+                    &session_id,
+                    advance_staged_seed(&state, &session_id, &channel_id, 3),
+                    "test:bound",
+                )
+                .await
+                .is_err(),
+            "a bound channel's seed is final"
+        );
+    }
+
+    /// On a channel seeded at open, runtime work output committed while a user
+    /// turn is open (first input delta through the finished turn) is held, a
+    /// thinking append mid-utterance makes the model speak over the user, and
+    /// the finished user turn itself requests the drain that replays it.
+    #[tokio::test]
+    async fn a_seeded_channel_holds_runtime_work_while_a_user_turn_is_open() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let host = Arc::new(RecordingMirrorHost::default());
+        machine.set_live_context_mirror_host(host.clone());
+        let key = (session_id.clone(), channel_id.clone());
+        let state = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read the bound runtime identity");
+        let provider_binding = meerkat_live::ProviderWebrtcBinding::new(
+            channel_id.clone(),
+            session_id.clone(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(
+                state
+                    .live_execution_generation_by_channel
+                    .get(&channel_id.to_string())
+                    .map(|generation| generation.0)
+                    .expect("bound generation"),
+            ),
+            meerkat_live::LiveRuntimeBindingFence::new(
+                state
+                    .live_execution_fence_by_channel
+                    .get(&channel_id.to_string())
+                    .map(|fence| fence.0)
+                    .expect("bound fence"),
+            ),
         );
         let turn = meerkat_live::LiveSidebandTurnRef::__from_provider_observation(
             &channel_id,
@@ -2015,39 +2331,59 @@ mod live_context_mirror_tests {
         .expect("turn");
         machine
             .observe_live_provider_turn_started(&meerkat_live::LiveSidebandObservation::new(
-                provider_binding,
+                provider_binding.clone(),
                 meerkat_live::LiveSidebandObservationKind::TurnStarted {
-                    turn,
+                    turn: turn.clone(),
                     role: meerkat_live::LiveSidebandTurnRole::User,
                 },
             ))
             .await
             .expect("the user's first turn starts");
-        let requested = machine
+        machine
+            .enqueue_committed_parent_session_boundary(
+                &session_id,
+                &merge_turn_commit(&session_id, "Done, the file is written."),
+                "store-commit",
+            )
+            .await
+            .expect("enqueue the merge turn mid-utterance");
+        machine
+            .drain_live_context_outbox_for_channel(&session_id, &channel_id)
+            .await
+            .expect("drain while the user turn is open");
+        assert!(
+            host.appends.lock().expect("appends").is_empty(),
+            "held while the user turn is open: never appended mid-utterance"
+        );
+        machine
+            .observe_live_provider_turn_finished(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding,
+                meerkat_live::LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: "what happened while I was gone".into(),
+                },
+            ))
+            .await
+            .expect("the user's first turn finishes");
+        let finished = machine
             .shared
             .live_context_drain_tasks
             .lock()
             .expect("drain tasks")
             .get(&key)
             .cloned()
-            .expect("the turn start requested a drain");
-        assert!(
-            before
-                .as_ref()
-                .is_none_or(|before| !Arc::ptr_eq(before, &requested)),
-            "a fresh drain, not the completed pre-conversation one"
-        );
-        requested
+            .expect("the turn finish requested a drain");
+        finished
             .wait()
             .await
-            .expect("the turn-start drain completes");
+            .expect("the turn-finish drain completes");
         let appends = host.appends.lock().expect("appends");
         assert_eq!(appends.len(), 1, "{appends:?}");
         assert!(appends[0].1.contains("Done, the file is written."));
         assert_eq!(
             host.append_kinds.lock().expect("kinds").as_slice(),
             &[crate::live_execution::LiveContextAppendKind::RuntimeWorkReplay],
-            "replayed on the quiet lane during the user's turn"
         );
     }
 
@@ -8409,6 +8745,11 @@ impl MeerkatMachine {
                             .to_string(),
                     )
                 })?;
+            // A finished user turn is the boundary rows held behind it wait
+            // for (guard `safe_provider_turn_boundary`), including runtime
+            // work output committed after a seeded channel's seed: this
+            // transition, never an input delta, releases them.
+            self.request_live_context_drain(session_id, channel_id);
             return Ok(LiveProviderTurnFinishedAuthority {
                 binding: runtime_binding,
                 interaction_id,
@@ -8418,6 +8759,40 @@ impl MeerkatMachine {
         Err(RuntimeDriverError::Internal(
             "generated provider turn finish emitted no matching authority".to_string(),
         ))
+    }
+
+    /// Test observation of live-context outbox custody for `session_id`:
+    /// the generated queued cursors, the runtime-held queued cursors, and the
+    /// channel's bound context cursor.
+    #[cfg(all(feature = "test-support", feature = "live"))]
+    #[doc(hidden)]
+    pub async fn __test_live_context_outbox_custody(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> Option<(Vec<u64>, Vec<u64>, Option<u64>)> {
+        let state = self.session_dsl_state(session_id).await.ok()?;
+        let mut generated: Vec<u64> = state
+            .live_context_queued_append_by_cursor
+            .keys()
+            .copied()
+            .collect();
+        generated.sort_unstable();
+        let mut runtime: Vec<u64> = self
+            .shared
+            .live_context_queued_rows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .filter(|(row_session, _)| row_session == session_id)
+            .map(|(_, cursor)| *cursor)
+            .collect();
+        runtime.sort_unstable();
+        let cursor = state
+            .live_context_cursor_by_channel
+            .get(&channel_id.to_string())
+            .copied();
+        Some((generated, runtime, cursor))
     }
 
     /// Admit the interaction and its exact actionable delegation join.
@@ -13037,6 +13412,41 @@ impl MeerkatMachine {
                 ),
             })?;
         let channel = channel_id.to_string();
+        // The provider session may start with rows committed after staging
+        // (sealed at its creation): advance the staged seed to exactly that
+        // cursor through the generated edge, one row at a time, before the
+        // bind admits it. A seed behind the staging stays for the bind's
+        // guard to refuse.
+        if let Some(staged) = state
+            .live_experimental_staged_seed_cursor_by_channel
+            .get(&channel)
+            .copied()
+        {
+            for previous_seed_cursor in staged..canonical_seed_cursor {
+                self.apply_session_dsl_input(
+                    session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::AdvanceLiveExperimentalStagedSeed {
+                        session_id: session_id.to_string(),
+                        channel_id: channel.clone(),
+                        runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(&runtime_id),
+                        fence_token: crate::meerkat_machine::dsl::FenceToken::from_domain(fence_token),
+                        generation: crate::meerkat_machine::dsl::Generation::from_domain(generation),
+                        previous_seed_cursor,
+                        next_seed_cursor: previous_seed_cursor + 1,
+                    },
+                    "AdvanceLiveExperimentalStagedSeed",
+                )
+                .await
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                // The generated edge removed a row queued at this cursor; its
+                // runtime custody goes with it.
+                self.shared
+                    .live_context_queued_rows
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&(session_id.clone(), previous_seed_cursor + 1));
+            }
+        }
         let activation_receipt = uuid::Uuid::new_v4().to_string();
         let (_, effects) = self
             .apply_session_dsl_input(

@@ -27,7 +27,7 @@ use meerkat::experimental_gpt_live::{
     ExperimentalGptLiveOpenAuthority, ExperimentalGptLiveWebrtcTransport,
     ExperimentalLiveOpenAuthorityProvider, ExperimentalLivePublicObservation,
     ExperimentalLivePublicObservationDeliveryError, ExperimentalLivePublicObservationPublisher,
-    GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID, GPT_LIVE_PUBLIC_MODEL,
+    GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID, GPT_LIVE_PUBLIC_MODEL, LIVE_RUNTIME_WORK_PREFIX,
     PublicGptLiveOpenAuthorityConfig, PublicGptLivePlaybackPolicy,
 };
 use meerkat::session_runtime::live_summary::{
@@ -2499,6 +2499,21 @@ fn s99_recalls_phrase(text: &str, phrase: &str) -> bool {
         })
 }
 
+/// S99 measures the gated late summary on every channel it opens. A reopen
+/// would otherwise seed the summary an earlier channel had plus the rows
+/// since it (no generation, so no gate and no late delivery); forgetting it
+/// keeps each reopen on the late path this scenario exists to qualify.
+fn s99_forget_retained_summary(
+    live: &mut PublicLiveHarness,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let session_id = live.session_id.clone();
+    live.shared()?
+        .0
+        .member_host
+        .forget_live_context_summary(&session_id);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_99_gpt_live_public_concurrent_context()
@@ -2705,6 +2720,8 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // A closed channel's late summary must neither acknowledge nor populate
     // a replacement channel, even when both belong to the same session.
     live.close_exact().await?;
+    // S99 asserts a fresh summarizer capture on each reopen.
+    s99_forget_retained_summary(&mut live)?;
     live.reopen().await?;
     let obsolete = next_summary_capture(&mut captured).await?;
     s99_assert_pending(&mut live, &obsolete).await?;
@@ -2723,6 +2740,8 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
             "closing pending preparation must expose typed failure, not phantom acknowledgement"
         );
     }
+    // S99 asserts a fresh summarizer capture on each reopen.
+    s99_forget_retained_summary(&mut live)?;
     live.reopen().await?;
     let replacement = next_summary_capture(&mut captured).await?;
     s99_assert_pending(&mut live, &replacement).await?;
@@ -3299,13 +3318,24 @@ use meerkat::experimental_gpt_live::LIVE_LATE_SUMMARY_PREFIX as LATE_SUMMARY_PRE
 /// `LIVE_STARTUP_RECENT_TURNS`).
 const LIVE_STARTUP_RECENT_TURNS: usize = 4;
 
-/// Which way one open with summary went. The host waits at most the
-/// pre-open bound for the summarizer, so the real summarizer decides per run
-/// whether the summary rides the create body or follows late.
+/// Provider limit on startup history items, the developer item included
+/// (`meerkat_openai::public_live::LIVE_STARTUP_INPUT_MAX_ITEMS`): a retained
+/// summary seeds at most this many.
+const LIVE_STARTUP_INPUT_MAX_ITEMS: usize = 128;
+
+/// Which way one open with summary went. A reopen of a session whose earlier
+/// channel had a summary seeds that summary and the rows since without
+/// generating one; otherwise the host waits at most the pre-open bound for
+/// the summarizer, so the real summarizer decides per run whether the summary
+/// rides the create body or follows late.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SeedCase {
     /// The summary rode `session.input` as a developer item.
     Seeded,
+    /// A summary retained from an earlier channel of the session rode
+    /// `session.input` as a developer item, followed by every row committed
+    /// since it, verbatim; no summary was generated for this open.
+    SeededRetained,
     /// The summarizer missed the bound; the summary follows on the thinking
     /// lane after the channel's first user utterance.
     Late,
@@ -3313,9 +3343,10 @@ enum SeedCase {
 
 /// Reads the host-side seed of one open with summary (the browser never sees
 /// the create body) and validates its shape: seeded is exactly one developer
-/// item plus at most `LIVE_STARTUP_RECENT_TURNS` recent turns, late is an
-/// empty create body; the startup instructions frame the history in both
-/// cases. Journals the case and returns it with any shape failure.
+/// item plus at most `LIVE_STARTUP_RECENT_TURNS` recent turns, seeded retained
+/// is one retained-summary developer item plus every verbatim row since, late
+/// is an empty create body; the startup instructions frame the history in
+/// every case. Journals the case and returns it with any shape failure.
 fn classify_summary_open(
     evidence: &Journal,
     scenario: &str,
@@ -3335,14 +3366,21 @@ fn classify_summary_open(
         ));
     };
     let mut problems = Vec::new();
-    let case = match (seed.developer_items, seed.input_items) {
-        (1, items) if (1..=1 + LIVE_STARTUP_RECENT_TURNS).contains(&items) => {
+    let case = match (
+        seed.developer_items,
+        seed.input_items,
+        seed.preceding_history_summary,
+    ) {
+        (1, items, true) if (1..=LIVE_STARTUP_INPUT_MAX_ITEMS).contains(&items) => {
+            Some(SeedCase::SeededRetained)
+        }
+        (1, items, false) if (1..=1 + LIVE_STARTUP_RECENT_TURNS).contains(&items) => {
             Some(SeedCase::Seeded)
         }
-        (0, 0) => Some(SeedCase::Late),
-        (developer, items) => {
+        (0, 0, false) => Some(SeedCase::Late),
+        (developer, items, retained) => {
             problems.push(format!(
-                "expected one developer item among 1..={} input items (seeded) or an empty create body (late), got {developer} developer items among {items}",
+                "expected one developer item among 1..={} input items (seeded), one retained-summary developer item among 1..={LIVE_STARTUP_INPUT_MAX_ITEMS} (seeded retained) or an empty create body (late), got {developer} developer items among {items} (retained summary: {retained})",
                 1 + LIVE_STARTUP_RECENT_TURNS
             ));
             None
@@ -5826,6 +5864,9 @@ const S104_REOPEN_BOUND: Duration = Duration::from_secs(30);
 const S104_SEED_TOKEN: &str = "Bartleby";
 /// Silence hold after each (re)open with summary: no greeting allowed.
 const S104_SILENCE_HOLD_MS: u64 = 4000;
+/// Text of the post-close merge row (the job result merged into the member
+/// after the first call ended), present in a startup seed that carries it.
+const S104_MERGE_MARKER: &str = "which finished after the voice call ended";
 
 /// Delegation policy for S104: the production DurableFork policy by
 /// default (the job runs on an owned fork, so the source member stays free
@@ -5893,7 +5934,7 @@ async fn run_s104_handoff_voice_typed_voice(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug,meerkat::session_runtime::live_orchestration=info",
         )
         .with_test_writer()
         .try_init();
@@ -6193,9 +6234,86 @@ async fn run_s104_handoff_voice_typed_voice(
             format!("token={S104_TYPED_TOKEN:?} answer={:?}", answer_back.trim()),
             &mut tolerant_failures,
         )?;
+        // The reopen's contract: every row committed before the voice
+        // session was created rides its startup input (the retained seed is
+        // sealed at provider-session creation), so a question about it is
+        // answered natively. A row committed after creation reaches the
+        // channel through the live-context owner (runtime work is replayed
+        // once the user's turn ends) and may be answered through the
+        // executor. The job result's merge turn commits about 2.7 s into the
+        // open, racing the session's creation, so which side of the contract
+        // applies is read from the trace: the seed carries the merge row, or
+        // the result was replayed after the seed. Either way the evidence
+        // must be present.
         let events = live.peer.events().await?;
-        if events[events_before_back..].iter().any(is_client_delegation) {
-            deterministic_failures.push("the post-reopen question must be answered natively, not delegated".to_owned());
+        let delegated = events[events_before_back..].iter().any(is_client_delegation);
+        let result_in_seed = evidence
+            .session_input_texts(channel2)?
+            .iter()
+            .any(|text| text.contains(S104_MERGE_MARKER));
+        let result_after_creation = evidence
+            .owned_thinking_appends(channel2)?
+            .iter()
+            .any(|text| text.starts_with(LIVE_RUNTIME_WORK_PREFIX));
+        println!(
+            "GPT_LIVE_S104_RESULT_SEEDING in_seed={result_in_seed} after_creation={result_after_creation} delegated={delegated} answer_has_token={}",
+            lower.contains(S104_RESULT_TOKEN)
+        );
+        match (result_in_seed, result_after_creation) {
+            (true, false) if delegated => deterministic_failures.push(
+                "the job result rode the reopen's startup input, so the question must be answered natively, not delegated".to_owned(),
+            ),
+            (true, false) => {}
+            (false, true) if delegated && !lower.contains(S104_RESULT_TOKEN) => {
+                deterministic_failures.push(format!(
+                    "the job result committed after the voice session was created; the delegated answer must carry it ({S104_RESULT_TOKEN:?}), got {:?}",
+                    answer_back.trim()
+                ));
+            }
+            (false, true) => {}
+            (true, true) => deterministic_failures.push(
+                "the job result both rode the startup input and was replayed after it".to_owned(),
+            ),
+            (false, false) => deterministic_failures.push(
+                "no evidence whether the job result rode the startup input or arrived after the voice session was created".to_owned(),
+            ),
+        }
+        if reopen_case != Some(SeedCase::SeededRetained) {
+            deterministic_failures.push(format!(
+                "the reopen must seed the retained summary (SeededRetained), got {reopen_case:?}"
+            ));
+        }
+        // No output while the user is still asking: nothing between the
+        // question's start and the end of its speech. (An input final can
+        // arrive after the answer started, when the provider finalizes the
+        // last word late; the speech itself had ended.)
+        let question_speech_end = timeline_back
+            .iter()
+            .find(|entry| entry.kind == TimelineKind::FixtureStart && entry.t_ms >= back_start)
+            .and_then(|entry| entry.detail_u64("speech_ms"))
+            .map(|speech_ms| back_start + speech_ms);
+        match question_speech_end {
+            Some(speech_end) => {
+                let over: Vec<u64> = timeline_back
+                    .iter()
+                    .filter(|entry| {
+                        matches!(
+                            entry.kind,
+                            TimelineKind::AssistantAudioStart | TimelineKind::ResponseEnd
+                        ) && entry.t_ms > back_start
+                            && entry.t_ms < speech_end
+                    })
+                    .map(|entry| entry.t_ms)
+                    .collect();
+                if !over.is_empty() {
+                    deterministic_failures.push(format!(
+                        "the assistant spoke over the reopened question (output at {over:?} ms before its speech ended at {speech_end} ms)"
+                    ));
+                }
+            }
+            None => deterministic_failures.push(
+                "the reopened question's speech span is missing from the timeline".to_owned(),
+            ),
         }
 
         evidence.stage(EvidenceStage::Closing)?;
@@ -6484,7 +6602,7 @@ async fn e2e_scenario_106_gpt_live_public_long_haul() -> Result<(), Box<dyn std:
 async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug,meerkat::session_runtime::live_orchestration=info",
         )
         .with_test_writer()
         .try_init();

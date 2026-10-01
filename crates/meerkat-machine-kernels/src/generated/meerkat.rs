@@ -15285,6 +15285,16 @@ pub mod inputs {
         pub pending_receipt: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdvanceLiveExperimentalStagedSeed {
+        pub session_id: String,
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub previous_seed_cursor: u64,
+        pub next_seed_cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveLiveExecutionModeAdmission {
         pub session_id: String,
         pub channel_id: String,
@@ -16716,6 +16726,7 @@ pub enum Input {
     ResolveLiveOpenAdmission(inputs::ResolveLiveOpenAdmission),
     BindLiveExecutionChannel(inputs::BindLiveExecutionChannel),
     StageExperimentalLiveExecution(inputs::StageExperimentalLiveExecution),
+    AdvanceLiveExperimentalStagedSeed(inputs::AdvanceLiveExperimentalStagedSeed),
     ResolveLiveExecutionModeAdmission(inputs::ResolveLiveExecutionModeAdmission),
     RegisterLivePlaybackOwner(inputs::RegisterLivePlaybackOwner),
     AuthorizeLiveActiveChannelControl(inputs::AuthorizeLiveActiveChannelControl),
@@ -17180,6 +17191,9 @@ impl Input {
             Self::ResolveLiveOpenAdmission(_) => InputKind::ResolveLiveOpenAdmission,
             Self::BindLiveExecutionChannel(_) => InputKind::BindLiveExecutionChannel,
             Self::StageExperimentalLiveExecution(_) => InputKind::StageExperimentalLiveExecution,
+            Self::AdvanceLiveExperimentalStagedSeed(_) => {
+                InputKind::AdvanceLiveExperimentalStagedSeed
+            }
             Self::ResolveLiveExecutionModeAdmission(_) => {
                 InputKind::ResolveLiveExecutionModeAdmission
             }
@@ -17673,6 +17687,7 @@ pub enum InputKind {
     ResolveLiveOpenAdmission,
     BindLiveExecutionChannel,
     StageExperimentalLiveExecution,
+    AdvanceLiveExperimentalStagedSeed,
     ResolveLiveExecutionModeAdmission,
     RegisterLivePlaybackOwner,
     AuthorizeLiveActiveChannelControl,
@@ -21679,6 +21694,9 @@ pub enum TransitionId {
     StageExperimentalLiveExecutionIdle,
     StageExperimentalLiveExecutionAttached,
     StageExperimentalLiveExecutionRunning,
+    AdvanceLiveExperimentalStagedSeedIdle,
+    AdvanceLiveExperimentalStagedSeedAttached,
+    AdvanceLiveExperimentalStagedSeedRunning,
     RegisterLivePlaybackOwnerIdle,
     RegisterLivePlaybackOwnerAttached,
     RegisterLivePlaybackOwnerRunning,

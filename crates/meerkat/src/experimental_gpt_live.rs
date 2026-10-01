@@ -108,6 +108,18 @@ pub trait ExperimentalLivePendingOpen: Send {
         Err(crate::session_runtime::live_summary::LiveContextSummaryError::Unsupported)
     }
 
+    /// Whether the provider can seed `summary`, a summary of everything
+    /// before `following`, together with every message of `following`
+    /// verbatim within its startup limits. Factories without that seed
+    /// shape never accept one, and the open generates a fresh summary.
+    fn accepts_preceding_history_summary(
+        &self,
+        _summary: &str,
+        _following: &[meerkat_core::types::Message],
+    ) -> bool {
+        false
+    }
+
     /// Opt in to an explicitly unseeded native session. Historical delivery
     /// remains a separate generated obligation, not opening seed coverage.
     fn enable_concurrent_context(
@@ -640,7 +652,11 @@ This call continues that conversation: do not greet or introduce yourself; wait 
 /// Most recent canonical turns seeded verbatim next to a ready summary, the
 /// shape the provider itself hands a replacement voice engine (recent
 /// messages plus a summary of older ones). Older turns are covered by the
-/// summary; the startup input budget drops the oldest of these first.
+/// summary; the startup input budget drops the oldest of these first. A
+/// retained summary seeds at most this many rows since it verbatim: a longer
+/// verbatim startup history correlated with the provider stopping input
+/// transcription after a long answer (see the `meerkat_openai::public_live`
+/// module notes).
 pub const LIVE_STARTUP_RECENT_TURNS: usize = 4;
 
 /// Prefix of a summary delivered on the quiet thinking lane after the first
@@ -2317,8 +2333,9 @@ struct ExperimentalGptLiveInitialSeed {
 enum GptLiveSeedContext {
     Canonical(Vec<meerkat_core::types::Message>),
     Concurrent,
-    /// A ready summary plus the most recent canonical turns it also covers,
-    /// seeded verbatim within the startup input budget.
+    /// A ready summary plus canonical turns seeded verbatim after it: the
+    /// most recent turns it also covers, within the startup input budget, or
+    /// for a retained summary every turn committed since it.
     Summary {
         summary: crate::session_runtime::live_summary::LiveContextSummary,
         recent: Vec<meerkat_core::types::Message>,
@@ -2561,6 +2578,15 @@ trait GptLiveBrokerOpen: Send + Sync {
         false
     }
 
+    /// See [`ExperimentalLivePendingOpen::accepts_preceding_history_summary`].
+    fn preceding_history_summary_fits(
+        &self,
+        _summary: &str,
+        _following: &[meerkat_core::types::Message],
+    ) -> bool {
+        false
+    }
+
     fn supports_snapshot_playback_cuts(&self) -> bool {
         false
     }
@@ -2617,6 +2643,14 @@ impl GptLiveBrokerOpen for PublicLiveBrokerFactory {
         true
     }
 
+    fn preceding_history_summary_fits(
+        &self,
+        summary: &str,
+        following: &[meerkat_core::types::Message],
+    ) -> bool {
+        meerkat_openai::public_live::preceding_history_summary_fits(summary, following)
+    }
+
     fn supports_snapshot_playback_cuts(&self) -> bool {
         true
     }
@@ -2633,6 +2667,54 @@ impl GptLiveBrokerOpen for PublicLiveBrokerFactory {
             return Err(GptLiveBrokerError::InvalidResponsesProfile);
         }
         let config = PublicLiveOpenConfig::new(offer_sdp, voice)?;
+        // A retained seed is sealed at provider-session creation: the rows
+        // committed since the open staged it (a job result that committed
+        // while the open ran) join its verbatim rows, when the seed still
+        // fits the recent-turns window and the startup limits, and the
+        // channel binds at that cursor. Every row committed before this
+        // session exists is then in its startup input, so the model answers
+        // about it natively; a row committed later reaches the channel
+        // through the live-context owner, held while a user turn is open,
+        // and a question about it may be answered through the executor.
+        // The reseal is an optimization: when it cannot apply, the seed opens
+        // at its staged cursor (a stale seed is refused by the provider-source
+        // validation below, exactly as without the reseal).
+        if let GptLiveSeedContext::Summary { summary, recent } = &mut seed.context
+            && summary.summarizes_preceding_history()
+        {
+            use crate::session_runtime::live_summary::{
+                LiveContextSummaryError, SeedResealSkip, conversation_turns,
+            };
+            let skipped = match summary.resealed_at_committed_head().await {
+                Ok(Some(resealed)) => {
+                    let following = resealed.following_history().unwrap_or_default();
+                    if conversation_turns(&following) > LIVE_STARTUP_RECENT_TURNS {
+                        Some(SeedResealSkip::WindowExceeded)
+                    } else if !meerkat_openai::public_live::preceding_history_summary_fits(
+                        resealed.text(),
+                        &following,
+                    ) {
+                        Some(SeedResealSkip::OverStartupLimits)
+                    } else {
+                        seed.canonical_seed_cursor = resealed.canonical_message_cursor();
+                        *summary = resealed;
+                        *recent = following;
+                        None
+                    }
+                }
+                Ok(None) | Err(LiveContextSummaryError::StaleSnapshot) => None,
+                Err(error) => {
+                    tracing::warn!(%error, "retained live seed tail unreadable at provider-session creation");
+                    Some(SeedResealSkip::SourceUnavailable)
+                }
+            };
+            if let Some(reason) = skipped {
+                tracing::info!(
+                    ?reason,
+                    "retained live seed not resealed at provider-session creation; opening at its staged cursor"
+                );
+            }
+        }
         // History is startup data. A ready summary rides the startup
         // `input` as a developer item together with the most recent canonical
         // turns, and the continuing-conversation clause goes once into the
@@ -2647,12 +2729,17 @@ impl GptLiveBrokerOpen for PublicLiveBrokerFactory {
                         class: GptLiveBrokerTerminalClass::Protocol,
                     }
                 })?;
-                (
+                // A retained summary covers only the history before the
+                // rows committed since it; those ride verbatim after it and
+                // are never dropped.
+                let config = if summary.summarizes_preceding_history() {
+                    config.with_preceding_history_summary(summary.text(), recent)
+                } else {
                     config
                         .with_history(recent)
-                        .with_context_summary(summary.text()),
-                    true,
-                )
+                        .with_context_summary(summary.text())
+                };
+                (config, true)
             }
             _ => (
                 config.with_history(seed.context.canonical_messages()?),
@@ -3188,6 +3275,9 @@ pub struct ExperimentalGptLivePendingChannel {
     execution_profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
     context_summary: Option<crate::session_runtime::live_summary::LiveContextSummary>,
     supports_context_summary: bool,
+    /// The provider's startup-seed rules, consulted before a retained
+    /// summary is chosen over a fresh one.
+    provider_seed: Arc<dyn GptLiveBrokerOpen>,
     concurrent_context: bool,
 }
 
@@ -3214,6 +3304,7 @@ impl ExperimentalGptLivePendingChannel {
         let initial_seed = Arc::new(Mutex::new(None));
         let snapshot_cuts = provider_factory.supports_snapshot_playback_cuts();
         let supports_context_summary = provider_factory.supports_context_summary();
+        let provider_seed = Arc::clone(&provider_factory);
         let broker = ExperimentalGptLiveWebrtcBroker::new(
             provider_factory,
             voice,
@@ -3240,6 +3331,7 @@ impl ExperimentalGptLivePendingChannel {
             execution_profile,
             context_summary: None,
             supports_context_summary,
+            provider_seed,
             concurrent_context: false,
         })
     }
@@ -3498,13 +3590,15 @@ impl RealtimeSessionFactory for ExperimentalGptLivePendingChannel {
         let context = match (&self.context_summary, self.concurrent_context) {
             (Some(summary), false) => GptLiveSeedContext::Summary {
                 summary: summary.clone(),
-                recent: conversation_messages
-                    .iter()
-                    .rev()
-                    .take(LIVE_STARTUP_RECENT_TURNS)
-                    .rev()
-                    .cloned()
-                    .collect(),
+                recent: summary.following_history().unwrap_or_else(|| {
+                    conversation_messages
+                        .iter()
+                        .rev()
+                        .take(LIVE_STARTUP_RECENT_TURNS)
+                        .rev()
+                        .cloned()
+                        .collect()
+                }),
             },
             (None, true) => GptLiveSeedContext::Concurrent,
             (None, false) => GptLiveSeedContext::Canonical(conversation_messages),
@@ -4966,6 +5060,19 @@ impl ExperimentalLivePendingOpen for ExperimentalGptLivePreparedOpen {
         }
         self.pending.context_summary = Some(summary);
         Ok(())
+    }
+
+    fn accepts_preceding_history_summary(
+        &self,
+        summary: &str,
+        following: &[meerkat_core::types::Message],
+    ) -> bool {
+        self.pending.supports_context_summary
+            && !self.pending.concurrent_context
+            && self
+                .pending
+                .provider_seed
+                .preceding_history_summary_fits(summary, following)
     }
 
     fn enable_concurrent_context(
@@ -8540,6 +8647,39 @@ mod tests {
     }
 
     use super::*;
+
+    /// The public Live startup-seed rules without a provider transport: test
+    /// pending channels answer retained-summary fit exactly like production.
+    struct PublicSeedRules;
+
+    #[async_trait]
+    impl GptLiveBrokerOpen for PublicSeedRules {
+        fn supports_context_summary(&self) -> bool {
+            true
+        }
+
+        fn preceding_history_summary_fits(
+            &self,
+            summary: &str,
+            following: &[meerkat_core::types::Message],
+        ) -> bool {
+            meerkat_openai::public_live::preceding_history_summary_fits(summary, following)
+        }
+
+        async fn open(
+            &self,
+            _offer_sdp: &str,
+            _voice: &str,
+            _execution_mode: meerkat_core::LiveExecutionMode,
+            _session_instructions: Option<String>,
+            _seed: &mut ExperimentalGptLiveInitialSeed,
+        ) -> Result<(String, Arc<dyn ExperimentalGptLiveBrokerSession>), GptLiveBrokerError>
+        {
+            Err(GptLiveBrokerError::Transport {
+                class: GptLiveBrokerTerminalClass::Protocol,
+            })
+        }
+    }
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -9844,6 +9984,7 @@ mod tests {
                 execution_profile: self.execution_profile.clone(),
                 context_summary: None,
                 supports_context_summary: true,
+                provider_seed: Arc::new(PublicSeedRules),
                 concurrent_context: false,
             };
             Ok(Box::new(ExperimentalGptLivePreparedOpen::new(
@@ -11316,13 +11457,30 @@ mod tests {
     #[cfg(feature = "test-realtime-fixtures")]
     #[tokio::test]
     async fn public_broker_answers_offer_and_lowers_public_events_end_to_end() {
-        run_public_broker_seed_end_to_end(false, false).await;
+        run_public_broker_seed_end_to_end(PublicSeedCase::Canonical, false).await;
     }
 
     #[cfg(feature = "test-realtime-fixtures")]
     #[tokio::test]
     async fn public_broker_seeds_generated_summary_with_exact_canonical_cursor_end_to_end() {
-        run_public_broker_seed_end_to_end(true, false).await;
+        run_public_broker_seed_end_to_end(PublicSeedCase::Summarized, false).await;
+    }
+
+    /// A reopen seeded from a retained summary: the create body carries the
+    /// summary framed as covering only what precedes the verbatim rows, then
+    /// every row committed since it; the rows it summarizes are not replayed.
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[tokio::test]
+    async fn public_broker_seeds_a_retained_summary_and_the_rows_since_end_to_end() {
+        run_public_broker_seed_end_to_end(PublicSeedCase::Retained, false).await;
+    }
+
+    /// A reseal that cannot read the committed tail never fails the open: the
+    /// provider session starts from the staged seed at its staged cursor.
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[tokio::test]
+    async fn public_broker_opens_at_the_staged_seed_when_the_reseal_cannot_read_the_tail() {
+        run_public_broker_seed_end_to_end(PublicSeedCase::RetainedResealUnavailable, false).await;
     }
 
     /// A transcript delta the transcriber delivers after the delegation join
@@ -11331,8 +11489,69 @@ mod tests {
     #[cfg(feature = "test-realtime-fixtures")]
     #[tokio::test]
     async fn public_broker_lowers_a_late_utterance_tail_as_a_new_user_turn() {
-        run_public_broker_seed_end_to_end(false, true).await;
+        run_public_broker_seed_end_to_end(PublicSeedCase::Canonical, true).await;
     }
+
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum PublicSeedCase {
+        /// The canonical history verbatim.
+        Canonical,
+        /// A summary generated for this open plus the recent turns.
+        Summarized,
+        /// A summary retained from an earlier open plus the rows since.
+        Retained,
+        /// Retained, with the committed tail unreadable at provider-session
+        /// creation: the seed opens at its staged cursor.
+        RetainedResealUnavailable,
+    }
+
+    /// Refuses its first committed-tail read (the reseal at provider-session
+    /// creation), then reads like the wrapped source.
+    #[cfg(feature = "test-realtime-fixtures")]
+    struct FirstTailReadFails {
+        inner: PublicSeedSummarySource,
+        failed: AtomicBool,
+    }
+
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[async_trait]
+    impl crate::session_runtime::live_summary::LiveSummarySource for FirstTailReadFails {
+        async fn read(
+            &self,
+            id: &meerkat_core::SessionId,
+        ) -> Result<
+            (crate::Session, meerkat_core::SessionLlmIdentity),
+            crate::session_runtime::live_summary::LiveContextSummaryError,
+        > {
+            self.inner.read(id).await
+        }
+
+        async fn read_committed_tail(
+            &self,
+            id: &meerkat_core::SessionId,
+            from: u64,
+        ) -> Result<
+            crate::session_runtime::live_summary::CommittedTail,
+            crate::session_runtime::live_summary::LiveContextSummaryError,
+        > {
+            if !self.failed.swap(true, Ordering::AcqRel) {
+                return Err(
+                    crate::session_runtime::live_summary::LiveContextSummaryError::Producer(
+                        "committed tail temporarily unavailable".into(),
+                    ),
+                );
+            }
+            self.inner.read_committed_tail(id, from).await
+        }
+    }
+
+    #[cfg(feature = "test-realtime-fixtures")]
+    const RETAINED_ROW_SINCE: &str = "Typed while the call was closed: book the hotel.";
+
+    #[cfg(feature = "test-realtime-fixtures")]
+    const RETAINED_ROW_AFTER_STAGING: &str =
+        "Result of the voice request: the coffee ode is written.";
 
     #[cfg(feature = "test-realtime-fixtures")]
     struct PublicSeedSummarySource(crate::Session, meerkat_core::SessionLlmIdentity);
@@ -11349,6 +11568,33 @@ mod tests {
         > {
             assert_eq!(id, self.0.id());
             Ok((self.0.clone(), self.1.clone()))
+        }
+
+        async fn read_committed_tail(
+            &self,
+            id: &meerkat_core::SessionId,
+            from: u64,
+        ) -> Result<
+            crate::session_runtime::live_summary::CommittedTail,
+            crate::session_runtime::live_summary::LiveContextSummaryError,
+        > {
+            assert_eq!(id, self.0.id());
+            Ok(public_seed_committed_tail(&self.0, from, self.1.clone()))
+        }
+    }
+
+    #[cfg(feature = "test-realtime-fixtures")]
+    fn public_seed_committed_tail(
+        session: &crate::Session,
+        from: u64,
+        identity: meerkat_core::SessionLlmIdentity,
+    ) -> crate::session_runtime::live_summary::CommittedTail {
+        crate::session_runtime::live_summary::CommittedTail {
+            message_count: session.messages().len() as u64,
+            transcript_revision: session.transcript_revision().unwrap(),
+            rewrite_generation: session.transcript_rewrite_generation().unwrap(),
+            rows: session.messages()[from as usize..].to_vec(),
+            identity,
         }
     }
 
@@ -11491,7 +11737,8 @@ mod tests {
     }
 
     #[cfg(feature = "test-realtime-fixtures")]
-    async fn run_public_broker_seed_end_to_end(summarized: bool, late_tail: bool) {
+    async fn run_public_broker_seed_end_to_end(seed_case: PublicSeedCase, late_tail: bool) {
+        let summarized = seed_case != PublicSeedCase::Canonical;
         let (base_url, capture, server) = public_wire::local_server_with(late_tail).await;
         let realm = meerkat_core::RealmId::parse("voice").expect("realm");
         let target = public_fixture_target(&realm);
@@ -11525,28 +11772,88 @@ mod tests {
         let user = meerkat_core::types::Message::User(meerkat_core::types::UserMessage::text(
             history_text.clone(),
         ));
-        let open_config = seed_open_config(identity, vec![user.clone()]);
+        let row_since = meerkat_core::types::Message::User(meerkat_core::types::UserMessage::text(
+            RETAINED_ROW_SINCE,
+        ));
+        let first_open_config = seed_open_config(identity.clone(), vec![user.clone()]);
+        let retained_case = matches!(
+            seed_case,
+            PublicSeedCase::Retained | PublicSeedCase::RetainedResealUnavailable
+        );
+        let open_config = if retained_case {
+            // The rows after the retained prefix only, at the head's cursor.
+            RealtimeSessionOpenConfig::for_open_after_covered_prefix(
+                RealtimeTurningMode::ProviderManaged,
+                identity,
+                Vec::new(),
+                vec![row_since.clone()],
+                2,
+            )
+            .expect("covered-prefix projection")
+            .with_open_projection_lease(
+                meerkat_core::RealtimeOpenProjectionAdmission::new(1, 1)
+                    .expect("isolated seed projection admission")
+                    .try_acquire()
+                    .expect("fixture projection lease"),
+            )
+        } else {
+            seed_open_config(identity, vec![user.clone()])
+        };
         if summarized {
             let mut source = crate::Session::with_id(session_id.clone());
             source.push(user.clone());
             let source_reader = Arc::new(PublicSeedSummarySource(
                 source.clone(),
-                open_config.llm_identity.clone(),
+                first_open_config.llm_identity.clone(),
             ));
-            pending.context_summary = Some(
-                crate::session_runtime::live_summary::LiveContextSummaryPolicy::new(
-                    Arc::new(PublicSeedSummarizer),
-                    128 * 1024,
-                    1024,
-                    std::time::Duration::from_secs(1),
-                )
-                .unwrap()
-                .summarize(source, &open_config, source_reader)
-                .await
-                .unwrap(),
-            );
+            let summary = crate::session_runtime::live_summary::LiveContextSummaryPolicy::new(
+                Arc::new(PublicSeedSummarizer),
+                128 * 1024,
+                1024,
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap()
+            .summarize(source.clone(), &first_open_config, source_reader)
+            .await
+            .unwrap();
+            pending.context_summary = Some(if retained_case {
+                // The earlier open's summary, reopened after one more row;
+                // the job result then commits while the open runs, before
+                // the provider session exists, so the broker reseals the
+                // seed over it.
+                source.push(row_since.clone());
+                let mut committed_later = source.clone();
+                committed_later.push(meerkat_core::types::Message::User(
+                    meerkat_core::types::UserMessage::text(RETAINED_ROW_AFTER_STAGING),
+                ));
+                let later =
+                    PublicSeedSummarySource(committed_later, open_config.llm_identity.clone());
+                let reader: Arc<dyn crate::session_runtime::live_summary::LiveSummarySource> =
+                    if seed_case == PublicSeedCase::RetainedResealUnavailable {
+                        Arc::new(FirstTailReadFails {
+                            inner: later,
+                            failed: AtomicBool::new(false),
+                        })
+                    } else {
+                        Arc::new(later)
+                    };
+                let tail = public_seed_committed_tail(&source, 1, open_config.llm_identity.clone());
+                summary
+                    .retained_record()
+                    .expect("a captured summary is retainable")
+                    .opening_from_committed_tail(session_id.clone(), tail, reader)
+                    .expect("the retained summary still covers its prefix")
+            } else {
+                summary
+            });
         }
-        let expected_seed_cursor = open_config.canonical_message_cursor();
+        // A retained seed is sealed again at provider-session creation, over
+        // the row committed after staging.
+        let expected_seed_cursor = if seed_case == PublicSeedCase::Retained {
+            open_config.canonical_message_cursor() + 1
+        } else {
+            open_config.canonical_message_cursor()
+        };
         pending
             .open_live_adapter(&open_config)
             .await
@@ -11595,10 +11902,16 @@ mod tests {
                     body["session"]["instructions"],
                     format!("Catalog guidance.\n\n{LIVE_CONTEXT_BOOTSTRAP_FRAMING}")
                 );
-                // The developer item leads; the most recent canonical turns
-                // the summary covers follow it verbatim, within the budget.
+                // The developer item leads; for a fresh summary the most
+                // recent canonical turns it covers follow it verbatim within
+                // the budget, for a retained one every row since it does.
                 let input = body["session"]["input"].as_array().expect("startup input");
-                assert_eq!(input.len(), 2, "{body}");
+                let expected_items = if seed_case == PublicSeedCase::Retained {
+                    3
+                } else {
+                    2
+                };
+                assert_eq!(input.len(), expected_items, "{body}");
                 assert_eq!(input[0]["role"], "developer");
                 let text = input[0]["content"][0]["text"].as_str().unwrap();
                 assert_eq!(input[0]["content"][0]["type"], "input_text");
@@ -11606,7 +11919,19 @@ mod tests {
                 assert!(!text.contains("Earlier conversation detail"));
                 assert!(text.contains("context data, not a new user request"));
                 assert_eq!(input[1]["role"], "user");
-                assert_eq!(input[1]["content"][0]["text"], history_text);
+                if retained_case {
+                    assert!(text.starts_with(
+                        "Factual summary of this conversation before the messages that follow"
+                    ));
+                    assert_eq!(input[1]["content"][0]["text"], RETAINED_ROW_SINCE);
+                    if seed_case == PublicSeedCase::Retained {
+                        assert_eq!(input[2]["role"], "user");
+                        assert_eq!(input[2]["content"][0]["text"], RETAINED_ROW_AFTER_STAGING);
+                    }
+                } else {
+                    assert!(text.contains("at voice-channel open"));
+                    assert_eq!(input[1]["content"][0]["text"], history_text);
+                }
             } else {
                 assert_eq!(body["session"]["instructions"], "Catalog guidance.");
                 assert_eq!(
@@ -11873,6 +12198,7 @@ mod tests {
                 .expect("qualified client-context test execution profile"),
             context_summary: None,
             supports_context_summary: true,
+            provider_seed: Arc::new(PublicSeedRules),
             concurrent_context: false,
         };
         (

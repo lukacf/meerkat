@@ -87,6 +87,66 @@ impl Midstate {
     }
 }
 
+/// Exact, append-extendable state of a transcript digest: the SHA-256
+/// midstate over the identity byte stream of the first [`Self::covered`]
+/// messages. [`Self::digest`] equals
+/// [`transcript_messages_digest`](super::transcript_messages_digest) of those
+/// messages, and [`Self::extended`] folds appended messages in O(appended),
+/// so a holder of the midstate at one boundary can prove a later committed
+/// head digest from the appended rows alone, without the prefix. In-memory
+/// only: the midstate is not serializable.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct TranscriptDigestMidstate {
+    stream: Midstate,
+}
+
+impl std::fmt::Debug for TranscriptDigestMidstate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TranscriptDigestMidstate")
+            .field("covered", &self.stream.covered)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TranscriptDigestMidstate {
+    /// The midstate over exactly `messages`.
+    pub fn of_messages(messages: &[Message]) -> Result<Self, serde_json::Error> {
+        let mut stream = Midstate {
+            hasher: Sha256::new(),
+            covered: 0,
+        };
+        stream.hasher.update(b"[");
+        crate::digest_observability::record_content_digest_computation();
+        for message in messages {
+            stream.absorb(message)?;
+        }
+        Ok(Self { stream })
+    }
+
+    /// The midstate after appending `appended` to the covered messages.
+    pub fn extended(&self, appended: &[Message]) -> Result<Self, serde_json::Error> {
+        let mut stream = self.stream.clone();
+        for message in appended {
+            stream.absorb(message)?;
+        }
+        Ok(Self { stream })
+    }
+
+    /// Number of messages the midstate covers.
+    #[must_use]
+    pub fn covered(&self) -> usize {
+        self.stream.covered
+    }
+
+    /// The transcript digest of the covered messages.
+    #[must_use]
+    pub fn digest(&self) -> String {
+        self.stream.finalize()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct AccumulatorState {
     /// Midstate over the identity byte stream of the CURRENT message vector.
@@ -769,6 +829,90 @@ mod tests {
         }
         streamed.extend_from_slice(b"]");
         assert_eq!(array_bytes, streamed);
+    }
+
+    /// Randomized over row sequences of mixed kinds and split points: the
+    /// midstate at any prefix extended over the rest equals a full recompute
+    /// of the whole transcript, and after a rewrite of a prefix row the same
+    /// extension never matches the rewritten transcript's digest.
+    #[test]
+    fn public_midstate_extension_equals_full_recompute_and_a_rewrite_mismatches() {
+        use crate::types::{AssistantBlock, BlockAssistantMessage, StopReason, UserMessage};
+        // Deterministic LCG: reproducible sequences without a rand dependency.
+        let mut state: u64 = 0x5eed_1234_abcd_0001;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        for round in 0..64 {
+            let length = 1 + next(24) as usize;
+            let messages: Vec<Message> = (0..length)
+                .map(|index| {
+                    let text = format!("round {round} row {index} value {}", next(1_000_000));
+                    match next(3) {
+                        0 => Message::User(UserMessage::text(text)),
+                        1 => Message::BlockAssistant(BlockAssistantMessage::new(
+                            vec![AssistantBlock::Text { text, meta: None }],
+                            StopReason::EndTurn,
+                        )),
+                        _ => Message::System(crate::types::SystemMessage::new(text)),
+                    }
+                })
+                .collect();
+            let split = next(length as u64 + 1) as usize;
+            let prefix = TranscriptDigestMidstate::of_messages(&messages[..split]).unwrap();
+            let extended = prefix.extended(&messages[split..]).unwrap();
+            let full = super::super::transcript_messages_digest(&messages).unwrap();
+            assert_eq!(extended.covered(), length);
+            assert_eq!(extended.digest(), full, "round {round} split {split}");
+            if split > 0 {
+                let target = next(split as u64) as usize;
+                let mut rewritten = messages.clone();
+                rewritten[target] =
+                    Message::User(UserMessage::text(format!("rewritten row {target}")));
+                let rewritten_full = super::super::transcript_messages_digest(&rewritten).unwrap();
+                assert_ne!(
+                    extended.digest(),
+                    rewritten_full,
+                    "round {round}: a rewrite of prefix row {target} must not match"
+                );
+                assert_ne!(
+                    prefix.digest(),
+                    super::super::transcript_messages_digest(&rewritten[..split]).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn public_midstate_extends_to_the_full_digest() {
+        let messages: Vec<Message> = (0..5)
+            .map(|index| Message::User(crate::types::UserMessage::text(format!("row {index}"))))
+            .collect();
+        let full = super::super::transcript_messages_digest(&messages).unwrap();
+        let prefix = TranscriptDigestMidstate::of_messages(&messages[..2]).unwrap();
+        assert_eq!(prefix.covered(), 2);
+        assert_eq!(
+            prefix.digest(),
+            super::super::transcript_messages_digest(&messages[..2]).unwrap()
+        );
+        let grown = prefix.extended(&messages[2..]).unwrap();
+        assert_eq!(grown.covered(), 5);
+        assert_eq!(grown.digest(), full);
+        assert_eq!(
+            TranscriptDigestMidstate::of_messages(&[]).unwrap().digest(),
+            super::super::transcript_messages_digest(&[]).unwrap()
+        );
+        // A different appended row is a different digest.
+        let other = prefix
+            .extended(&[Message::User(crate::types::UserMessage::text("other"))])
+            .unwrap();
+        assert_ne!(
+            other.digest(),
+            super::super::transcript_messages_digest(&messages[..3]).unwrap()
+        );
     }
 
     #[test]

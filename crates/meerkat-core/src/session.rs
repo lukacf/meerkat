@@ -127,6 +127,7 @@ pub mod model_routing_handoff_staging;
 mod system_prompt_update;
 mod transcript_history;
 
+pub use digest_accumulator::TranscriptDigestMidstate;
 pub(crate) use digest_accumulator::TranscriptMessages;
 pub use head_metadata::{
     SessionHeadMetadataCell, SessionHeadMetadataCellIdentity, SessionHeadMetadataCellMutation,

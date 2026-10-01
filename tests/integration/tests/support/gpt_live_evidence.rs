@@ -812,6 +812,7 @@ struct State {
     /// Shape of each channel's `session.start` seed (host-side capture,
     /// recorded when the create request is built, before `SessionAttached`).
     session_input_seeds: Vec<(u32, SessionInputSeed)>,
+    session_input_texts: Vec<(u32, Vec<String>)>,
     /// Owned instructions-lane attempts (one per wire fragment) and how many
     /// reassembled appends opened a framed summary.
     instructions_append_attempts: usize,
@@ -846,6 +847,12 @@ pub struct SessionInputSeed {
     pub input_items: usize,
     pub developer_items: usize,
     pub frames_history: bool,
+    /// The developer item summarizes only the history before the verbatim
+    /// items after it: a summary retained from an earlier open.
+    pub preceding_history_summary: bool,
+    /// Text bytes of the startup input and their conservative token estimate.
+    pub input_bytes: usize,
+    pub estimated_tokens: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -953,6 +960,7 @@ impl Journal {
                 thinking_acknowledged: 0,
                 thinking_appends: Vec::new(),
                 session_input_seeds: Vec::new(),
+                session_input_texts: Vec::new(),
                 thinking_append_attempts: 0,
                 thinking_append_texts: Vec::new(),
                 instructions_append_attempts: 0,
@@ -1110,6 +1118,10 @@ impl Journal {
                 input_items,
                 developer_items,
                 frames_history,
+                preceding_history_summary,
+                input_bytes,
+                estimated_tokens,
+                input_texts,
             } = &event.event
             {
                 let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
@@ -1119,8 +1131,14 @@ impl Journal {
                         input_items: *input_items,
                         developer_items: *developer_items,
                         frames_history: *frames_history,
+                        preceding_history_summary: *preceding_history_summary,
+                        input_bytes: *input_bytes,
+                        estimated_tokens: *estimated_tokens,
                     },
                 ));
+                state
+                    .session_input_texts
+                    .push((event.channel_ordinal, input_texts.clone()));
             }
             if let thinking_capture::EventKind::ThinkingAppendAttempt {
                 client_event_id,
@@ -1258,6 +1276,31 @@ impl Journal {
             .iter()
             .find(|(c, _)| *c == channel)
             .map(|(_, seed)| *seed))
+    }
+
+    /// Text of every startup input item of `channel`'s session.start body.
+    pub fn session_input_texts(&self, channel: u32) -> Result<Vec<String>, Fault> {
+        self.flush_wire()?;
+        let state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+        Ok(state
+            .session_input_texts
+            .iter()
+            .find(|(c, _)| *c == channel)
+            .map(|(_, texts)| texts.clone())
+            .unwrap_or_default())
+    }
+
+    /// Reassembled texts of every owned thinking append on `channel`, in
+    /// order.
+    pub fn owned_thinking_appends(&self, channel: u32) -> Result<Vec<String>, Fault> {
+        self.flush_wire()?;
+        let state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+        Ok(state
+            .thinking_appends
+            .iter()
+            .filter(|(c, _, _)| *c == channel)
+            .map(|(_, _, text)| text.clone())
+            .collect())
     }
 
     /// Reassembled text of the first owned thinking append on `channel`

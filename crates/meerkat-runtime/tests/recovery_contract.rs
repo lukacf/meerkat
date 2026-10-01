@@ -229,7 +229,20 @@ async fn shared_sqlite_cold_resume_probe(
         ));
         assert_eq!(commit_probe_session(&store, &session).await, 1);
         seeder.register_session(session.id().clone()).await.unwrap();
-        seeder.unregister_session(session.id()).await.unwrap();
+        // Join the exact registration's teardown until terminal: the plain
+        // unregister returns `UnregisterInProgress` once its 2 s caller grace
+        // elapses while the saga keeps running, which a loaded parallel run
+        // reaches, and the store is reopened below.
+        let registration = seeder
+            .current_session_registration_witness(session.id())
+            .await
+            .unwrap();
+        assert!(
+            seeder
+                .unregister_session_registration_until_terminal_if_current(&registration)
+                .await
+                .unwrap()
+        );
         sessions.push(session.id().clone());
     }
     drop(seeder);
@@ -1035,10 +1048,22 @@ async fn recovery_contract_normalizes_every_dead_process_phase_to_fresh_idle() {
                         .unwrap();
                 }
                 RuntimeState::Stopped => {
-                    seeder
-                        .stop_runtime_executor(&session_id, "seed stopped projection")
+                    // Join the exact registration's stop until terminal: the
+                    // plain stop returns `RuntimeStopInProgress` once its
+                    // caller grace elapses while the stop keeps running.
+                    let registration = seeder
+                        .current_session_registration_witness(&session_id)
                         .await
-                        .unwrap();
+                        .expect("seeded registration is current");
+                    assert!(
+                        seeder
+                            .stop_runtime_executor_until_terminal_if_current(
+                                &registration,
+                                "seed stopped projection",
+                            )
+                            .await
+                            .unwrap()
+                    );
                 }
                 RuntimeState::Destroyed => {
                     meerkat_runtime::RuntimeControlPlane::destroy(&seeder, &runtime_id)

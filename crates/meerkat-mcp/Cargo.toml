@@ -49,6 +49,9 @@ name = "form_elicitation"
 path = "tests/form_elicitation.rs"
 required-features = ["test-support"]
 
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
 [dev-dependencies]
 mcp-test-server = { path = "../../tests/fixtures/mcp-test-server" } # test-only shared rmcp handler; never a published runtime dependency
 tokio = { workspace = true, features = ["test-util", "macros"] }

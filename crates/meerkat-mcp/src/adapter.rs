@@ -1916,23 +1916,17 @@ mod tests {
     }
 
     /// Shutdown owns in-flight connects: shutting down the adapter while a
-    /// stdio server is still connecting must kill that server's child, which
-    /// then exits shortly after (asserted below within a bounded backstop;
-    /// a zombie awaiting reaping counts as exited). (Fails-old: shutdown never
-    /// joined the spawned connect task, which kept the child alive until the
-    /// connect timeout; a stopping test runtime then skipped the deferred kill
-    /// entirely and left the child holding the test's stderr.)
+    /// stdio server is still connecting kills that server, which has exited
+    /// when shutdown returns. (Fails-old: shutdown never joined the spawned
+    /// connect task, which kept the child alive until the connect timeout; a
+    /// stopping test runtime then skipped the deferred kill entirely and left
+    /// the child holding the test's stderr. After the join, the kill was still
+    /// fire-and-forget, so the child outlived shutdown.)
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn shutdown_kills_a_stdio_server_still_connecting() {
-        let pid_file = std::env::temp_dir().join(format!(
-            "meerkat-mcp-connect-join-{}-{}.pid",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default()
-        ));
+        use crate::stdio_test_fixture::{PidReport, process_exited};
+        let mut report = PidReport::new("connect-join");
         let mut router = generated_surface_router();
         router
             .stage_add(meerkat_core::McpServerConfig::stdio(
@@ -1940,50 +1934,100 @@ mod tests {
                 "/bin/sh",
                 vec![
                     "-c".to_string(),
-                    format!("echo $$ > '{}'; exec sleep 60", pid_file.display()),
+                    format!("echo $$ > '{}'; exec sleep 60", report.path().display()),
                 ],
                 HashMap::new(),
             ))
             .expect("stage add");
         router.apply_staged().await.expect("apply staged");
         let adapter = McpRouterAdapter::new(router);
-
-        // Bounded failure backstop only: the child writes its pid at startup.
-        let pid: u32 = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if let Ok(text) = std::fs::read_to_string(&pid_file)
-                    && let Ok(pid) = text.trim().parse()
-                {
-                    return pid;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("stdio child must start and record its pid");
+        let pid = report.pids().await[0];
 
         adapter.shutdown().await;
-        let _ = std::fs::remove_file(&pid_file);
 
-        // Exited means reaped (no /proc entry) or a zombie awaiting reaping;
-        // either way it no longer holds the test's pipes. Bounded backstop.
-        let exited = |pid: u32| match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            Err(_) => true,
-            Ok(stat) => stat
-                .rsplit_once(')')
-                .and_then(|(_, rest)| rest.split_whitespace().next())
-                .is_some_and(|state| state == "Z"),
-        };
-        let dead = tokio::time::timeout(Duration::from_secs(5), async {
-            while !exited(pid) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .is_ok();
         assert!(
-            dead,
+            process_exited(pid),
             "stdio child {pid} of a still-connecting server outlived adapter shutdown"
+        );
+    }
+
+    /// Stdio servers often launch through a wrapper (`sh -c`, `npx`, `uvx`),
+    /// so the real server is a grandchild. Shutdown terminates the server's
+    /// whole process group, so the grandchild cannot be orphaned.
+    /// (Fails-old: only the direct child was killed.)
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn shutdown_kills_a_wrapped_stdio_servers_whole_process_group() {
+        use crate::stdio_test_fixture::{PidReport, process_exited};
+        let mut report = PidReport::new("wrapped-group");
+        let mut router = generated_surface_router();
+        router
+            .stage_add(meerkat_core::McpServerConfig::stdio(
+                "wrapped-srv",
+                "/bin/sh",
+                vec![
+                    "-c".to_string(),
+                    format!(
+                        "sleep 60 & echo $$ $! > '{}'; wait",
+                        report.path().display()
+                    ),
+                ],
+                HashMap::new(),
+            ))
+            .expect("stage add");
+        router.apply_staged().await.expect("apply staged");
+        let adapter = McpRouterAdapter::new(router);
+        let pids = report.pids().await;
+        let (wrapper, server) = (pids[0], pids[1]);
+
+        adapter.shutdown().await;
+
+        assert!(
+            process_exited(wrapper),
+            "wrapper {wrapper} outlived adapter shutdown"
+        );
+        assert!(
+            process_exited(server),
+            "wrapped server {server} (a grandchild) outlived adapter shutdown"
+        );
+    }
+
+    /// An established wrapped server that keeps running past stdin EOF is
+    /// terminated with its whole process group, without a grace window, and
+    /// has exited when shutdown returns. (Fails-old: rmcp gave the wrapper up
+    /// to 3 s after EOF from a detached task, then killed only the wrapper.)
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn shutdown_kills_an_established_wrapped_stdio_servers_process_group() {
+        use crate::stdio_test_fixture::{PidReport, process_exited, sh_mcp_server_args};
+        let mut report = PidReport::new("established-group");
+        let mut router = generated_surface_router();
+        router
+            .stage_add(meerkat_core::McpServerConfig::stdio(
+                "established-srv",
+                "/bin/sh",
+                sh_mcp_server_args(Some(report.path())),
+                HashMap::new(),
+            ))
+            .expect("stage add");
+        router.apply_staged().await.expect("apply staged");
+        let adapter = McpRouterAdapter::new(router);
+        let pids = report.pids().await;
+        let (wrapper, server) = (pids[0], pids[1]);
+        adapter
+            .wait_until_ready(async_connect_test_timeout())
+            .await
+            .expect("fixture server completes the handshake");
+
+        adapter.shutdown().await;
+
+        assert!(
+            process_exited(wrapper),
+            "established server {wrapper} outlived adapter shutdown"
+        );
+        assert!(
+            process_exited(server),
+            "established server's grandchild {server} outlived adapter shutdown"
         );
     }
 

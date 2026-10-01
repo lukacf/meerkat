@@ -992,6 +992,7 @@ meerkat_machine_runtime_internal_inputs!(
     LiveExecutionLifecycle => [
         BindLiveExecutionChannel,
         StageExperimentalLiveExecution,
+        AdvanceLiveExperimentalStagedSeed,
         ResolveLiveExecutionModeAdmission,
         RegisterLivePlaybackOwner,
         AuthorizeLiveActiveChannelControl,

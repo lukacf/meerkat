@@ -35,6 +35,21 @@ pub(crate) fn provider_tag_rejection(
         .anthropic_provider_tag_rejection(tag)
 }
 
+/// Whether a forced tool choice (`any` or a named tool) must be refused for
+/// this request: Anthropic rejects one under extended thinking, so it is
+/// refused when the request configures thinking explicitly or when the
+/// cataloged model's thinking cannot be disabled
+/// (`supports_forced_tool_choice` is false). Uncatalogued models keep the
+/// pass-through.
+pub(crate) fn forced_tool_choice_refused(
+    model: &str,
+    tag: Option<&meerkat_core::lifecycle::run_primitive::AnthropicProviderTag>,
+) -> bool {
+    tag.is_some_and(|tag| tag.thinking.is_some() || tag.thinking_budget_tokens.is_some())
+        || meerkat_models::capabilities_for(Provider::Anthropic, model)
+            .is_some_and(|caps| !caps.supports_forced_tool_choice)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

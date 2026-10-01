@@ -1297,3 +1297,108 @@ async fn gemini_cached_content_requests_are_not_projected() {
     }
     assert!(structured_output_slot(calls[1].provider_params.as_ref()).is_some());
 }
+
+// ---------------------------------------------------------------------------
+// Tool choice through the real loop
+// ---------------------------------------------------------------------------
+
+fn tool_choice_of(call: &RecordedCall) -> Option<meerkat_core::ToolChoice> {
+    call.provider_params
+        .as_ref()
+        .and_then(|params| params.tool_choice.clone())
+}
+
+/// A forcing choice binds the run's first provider call only: the call after
+/// the forced tool's result chooses freely, so the tool is not re-forced on
+/// every result until the turn cap.
+#[tokio::test]
+async fn forcing_tool_choice_binds_only_the_first_provider_call_of_a_run() {
+    for forced in [
+        meerkat_core::ToolChoice::Required,
+        meerkat_core::ToolChoice::Tool {
+            name: "lookup".to_string(),
+        },
+    ] {
+        let client = Arc::new(RecordingSchemaClient::new(
+            Provider::OpenAI,
+            vec![
+                tool_call("call-1"),
+                text("done"),
+                tool_call("call-2"),
+                text("again"),
+            ],
+        ));
+        let builder = base_builder().provider_params(ProviderParamsOverride {
+            tool_choice: Some(forced.clone()),
+            ..Default::default()
+        });
+        let mut agent = build(&client, builder).await;
+        agent
+            .run("first".to_string().into())
+            .await
+            .expect("first run");
+        agent
+            .run("second".to_string().into())
+            .await
+            .expect("second run");
+
+        let calls = client.calls();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(
+            tool_choice_of(&calls[0]),
+            Some(forced.clone()),
+            "first call forced"
+        );
+        assert_eq!(
+            tool_choice_of(&calls[1]),
+            None,
+            "after the tool result: Auto"
+        );
+        assert_eq!(
+            tool_choice_of(&calls[2]),
+            Some(forced.clone()),
+            "the next run's first call is forced again"
+        );
+        assert_eq!(tool_choice_of(&calls[3]), None);
+    }
+}
+
+/// `None` (no tool calls) holds for every call of the run; extraction, which
+/// offers no tools, carries no tool choice at all.
+#[tokio::test]
+async fn none_tool_choice_holds_for_the_run_and_extraction_carries_none() {
+    let client = Arc::new(RecordingSchemaClient::new(
+        Provider::OpenAI,
+        vec![
+            tool_call("call-1"),
+            text("prose answer"),
+            text(VALID_REVIEW),
+        ],
+    ));
+    let builder = base_builder()
+        .output_schema(review_schema())
+        .provider_params(ProviderParamsOverride {
+            tool_choice: Some(meerkat_core::ToolChoice::None),
+            ..Default::default()
+        });
+    let mut agent = build(&client, builder).await;
+    let result = agent.run("review".to_string().into()).await.expect("run");
+    assert_eq!(result.structured_output, Some(expected_review()));
+
+    let calls = client.calls();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        tool_choice_of(&calls[0]),
+        Some(meerkat_core::ToolChoice::None)
+    );
+    assert_eq!(
+        tool_choice_of(&calls[1]),
+        Some(meerkat_core::ToolChoice::None)
+    );
+    assert!(calls[2].tool_names.is_empty(), "extraction offers no tools");
+    assert_eq!(
+        tool_choice_of(&calls[2]),
+        None,
+        "extraction carries no tool choice"
+    );
+}

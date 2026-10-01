@@ -286,6 +286,7 @@ pub use interaction::{
 };
 pub use lifecycle::run_primitive::{
     ProviderParamsCarrier, ProviderParamsMergeError, ProviderParamsOverride, ProviderTag,
+    ToolChoice,
 };
 pub use lifecycle::{
     CommittedSessionBoundaryAuthority, ConversationAppend, ConversationAppendRole,

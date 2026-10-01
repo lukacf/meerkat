@@ -193,6 +193,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
     // Source: https://developers.openai.com/api/docs/models/gpt-6-sol
     // Built for complex coding and agentic workflows. 1,050,000 context window with a separate
@@ -238,6 +239,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
     // Source: https://developers.openai.com/api/docs/models/gpt-6.1-sol
     // Near-Astra performance at lower cost for complex coding, computer use
@@ -286,6 +288,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
     // Source: https://developers.openai.com/api/docs/models/gpt-6-luna
     // The efficient GPT-6 tier for focused, high-volume tasks. 1,050,000 context window with a separate
@@ -331,6 +334,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
     // GPT-5.6 Sol / Terra / Luna (plus the official Sol alias)
     //
@@ -387,6 +391,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
     ModelCapabilities {
         id: "gpt-5.6-terra",
@@ -426,6 +431,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
     ModelCapabilities {
         id: "gpt-5.6-luna",
@@ -465,6 +471,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
     // Official alias: gpt-5.6 routes to gpt-5.6-sol.
     // Keep it catalog-owned so selection does not fall back to prefix inference.
@@ -506,6 +513,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
     // GPT-5.5
     //
@@ -549,6 +557,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
     // GPT-5.5 Pro
     //
@@ -592,6 +601,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
         call_timeout_secs: Some(7200),
+        supports_forced_tool_choice: true,
     },
     // GPT-5.4
     //
@@ -645,6 +655,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
     // GPT-5.4 mini
     //
@@ -694,6 +705,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
     // GPT-5.3 Codex
     //
@@ -742,6 +754,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
     // GPT Live 1 Codex
     //
@@ -792,6 +805,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         // close deadlines. This is the catalog-required loose ceiling for any
         // synchronous provider operation around the channel lifecycle.
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
     // GPT Live 1
     //
@@ -843,6 +857,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         // close deadlines. This is the catalog-required loose ceiling for any
         // synchronous provider operation around the channel lifecycle.
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
     // gpt-realtime-2
     //
@@ -919,5 +934,6 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         // loose ceiling on synchronous fallback paths. Realtime transport
         // owns its own reconnect/heartbeat policy.
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
 ];

@@ -635,6 +635,37 @@ impl AnthropicClient {
         }
     }
 
+    /// Lower the typed tool choice to Anthropic's `tool_choice`. `Auto`
+    /// sends nothing (as before). Anthropic rejects a forced tool call
+    /// (`any` or a named tool) under extended thinking, so a forcing choice on
+    /// a request that thinks is refused with a typed error; thinking is never
+    /// switched off implicitly to make the choice fit.
+    fn apply_tool_choice(&self, request: &LlmRequest, body: &mut Value) -> Result<(), LlmError> {
+        request.validate_tool_choice("anthropic")?;
+        if request.tool_choice.forces_a_tool_call()
+            && crate::request_support::forced_tool_choice_refused(
+                &request.model,
+                anthropic_tag(request),
+            )
+        {
+            return Err(LlmError::ToolChoiceUnsupported {
+                provider: "anthropic".to_owned(),
+                choice: request.tool_choice.clone(),
+                reason: meerkat_llm_core::ToolChoiceRefusal::ForcedToolWithThinking,
+            });
+        }
+        let choice = match &request.tool_choice {
+            meerkat_core::ToolChoice::Auto => return Ok(()),
+            meerkat_core::ToolChoice::Required => serde_json::json!({"type": "any"}),
+            meerkat_core::ToolChoice::None => serde_json::json!({"type": "none"}),
+            meerkat_core::ToolChoice::Tool { name } => {
+                serde_json::json!({"type": "tool", "name": name})
+            }
+        };
+        body["tool_choice"] = choice;
+        Ok(())
+    }
+
     /// Build request body for Anthropic API
     pub(crate) fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         // Refuse request-shaping knobs the cataloged model rejects before
@@ -976,6 +1007,8 @@ impl AnthropicClient {
                 }
             }
         }
+
+        self.apply_tool_choice(request, &mut body)?;
 
         if let Some(tag) = anthropic_tag(request) {
             // Thinking: typed enum captures adaptive vs enabled;

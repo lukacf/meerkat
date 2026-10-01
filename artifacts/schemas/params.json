@@ -10986,6 +10986,17 @@
               "null"
             ]
           },
+          "tool_choice": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolChoice"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Tool choice for this turn's provider calls; `None` keeps `Auto`."
+          },
           "top_p": {
             "format": "float",
             "type": [
@@ -12917,6 +12928,71 @@
           }
         },
         "type": "object"
+      },
+      "ToolChoice": {
+        "description": "Which tool use the model may or must make on one provider call.\n\n`Auto` is today's behaviour and the default: the model decides, and the\nprovider request carries no choice beyond what each adapter always sent.\nEvery other variant is lowered to the provider's native tool-choice field.\nA provider or model that cannot honour a requested choice refuses the\ncall with a typed unsupported error; a choice is never downgraded to\n`Auto` silently.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The model decides whether to call a tool.",
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call at least one of the offered tools.",
+            "properties": {
+              "mode": {
+                "const": "required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must not call any tool.",
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call the named tool, which must be offered.",
+            "properties": {
+              "mode": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ToolConfigChangeDomain": {
         "description": "Optional typed domain for tool-configuration change payloads.",
@@ -18194,6 +18270,17 @@
               "null"
             ]
           },
+          "tool_choice": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolChoice"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Tool choice for this turn's provider calls; `None` keeps `Auto`."
+          },
           "top_p": {
             "format": "float",
             "type": [
@@ -19324,6 +19411,71 @@
             "required": [
               "type",
               "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolChoice": {
+        "description": "Which tool use the model may or must make on one provider call.\n\n`Auto` is today's behaviour and the default: the model decides, and the\nprovider request carries no choice beyond what each adapter always sent.\nEvery other variant is lowered to the provider's native tool-choice field.\nA provider or model that cannot honour a requested choice refuses the\ncall with a typed unsupported error; a choice is never downgraded to\n`Auto` silently.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The model decides whether to call a tool.",
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call at least one of the offered tools.",
+            "properties": {
+              "mode": {
+                "const": "required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must not call any tool.",
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call the named tool, which must be offered.",
+            "properties": {
+              "mode": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "name"
             ],
             "type": "object"
           }
@@ -41298,6 +41450,17 @@
               "null"
             ]
           },
+          "tool_choice": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolChoice"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Tool choice for this turn's provider calls; `None` keeps `Auto`."
+          },
           "top_p": {
             "format": "float",
             "type": [
@@ -42428,6 +42591,71 @@
             "required": [
               "type",
               "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolChoice": {
+        "description": "Which tool use the model may or must make on one provider call.\n\n`Auto` is today's behaviour and the default: the model decides, and the\nprovider request carries no choice beyond what each adapter always sent.\nEvery other variant is lowered to the provider's native tool-choice field.\nA provider or model that cannot honour a requested choice refuses the\ncall with a typed unsupported error; a choice is never downgraded to\n`Auto` silently.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The model decides whether to call a tool.",
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call at least one of the offered tools.",
+            "properties": {
+              "mode": {
+                "const": "required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must not call any tool.",
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call the named tool, which must be offered.",
+            "properties": {
+              "mode": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "name"
             ],
             "type": "object"
           }
@@ -43655,6 +43883,17 @@
               "null"
             ]
           },
+          "tool_choice": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolChoice"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Tool choice for this turn's provider calls; `None` keeps `Auto`."
+          },
           "top_p": {
             "format": "float",
             "type": [
@@ -44785,6 +45024,71 @@
             "required": [
               "type",
               "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolChoice": {
+        "description": "Which tool use the model may or must make on one provider call.\n\n`Auto` is today's behaviour and the default: the model decides, and the\nprovider request carries no choice beyond what each adapter always sent.\nEvery other variant is lowered to the provider's native tool-choice field.\nA provider or model that cannot honour a requested choice refuses the\ncall with a typed unsupported error; a choice is never downgraded to\n`Auto` silently.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The model decides whether to call a tool.",
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call at least one of the offered tools.",
+            "properties": {
+              "mode": {
+                "const": "required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must not call any tool.",
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call the named tool, which must be offered.",
+            "properties": {
+              "mode": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "name"
             ],
             "type": "object"
           }

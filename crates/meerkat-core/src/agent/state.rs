@@ -1615,6 +1615,8 @@ where
             .set_structured_output(provider, output_schema)
             .map_err(|error| AgentError::ConfigError(error.to_string()))?;
         effective.clear_web_search();
+        // Extraction offers no tools, so a turn's tool choice does not apply.
+        effective.tool_choice = None;
         Ok((!effective.is_empty()).then_some(effective))
     }
 
@@ -5280,12 +5282,26 @@ where
             // Strip the provider-native web-search/grounding body via the typed
             // ProviderTag owner — extraction is deterministic and tool-free.
             effective_provider_params.clear_web_search();
+            // Tool-free extraction: a turn's tool choice does not apply.
+            effective_provider_params.tool_choice = None;
         }
         if matches!(
             self.config.provider_native_tools,
             crate::ProviderNativeToolPolicy::DisableAll
         ) {
             effective_provider_params.clear_provider_native_tools();
+        }
+        // A forcing tool choice binds the run's first provider call only.
+        // Later calls see the forced tool's result and choose freely (`Auto`);
+        // re-forcing them would call the tool again on every result until the
+        // turn cap. `None` (no tool calls) stays in force for the whole run.
+        if ctx.turn_count > 0
+            && effective_provider_params
+                .tool_choice
+                .as_ref()
+                .is_some_and(crate::ToolChoice::forces_a_tool_call)
+        {
+            effective_provider_params.tool_choice = None;
         }
         let typed_provider_params =
             Some(effective_provider_params).filter(|params| !params.is_empty());

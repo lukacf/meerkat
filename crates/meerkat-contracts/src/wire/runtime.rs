@@ -1454,6 +1454,9 @@ impl From<WireProviderParamsOverride>
             reasoning: value.reasoning.map(Into::into),
             thinking_budget_tokens: value.thinking_budget_tokens,
             provider_tag: value.provider_tag.map(Into::into),
+            // Tool choice is an in-process per-turn knob; it has no wire
+            // field yet, so a wire override never sets one.
+            tool_choice: None,
         }
     }
 }

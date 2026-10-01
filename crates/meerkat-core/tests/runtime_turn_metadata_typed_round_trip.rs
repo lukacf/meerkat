@@ -58,6 +58,9 @@ fn sample_metadata() -> RuntimeTurnMetadata {
                 thinking_budget_tokens: Some(2048),
                 ..Default::default()
             })),
+            tool_choice: Some(meerkat_core::ToolChoice::Tool {
+                name: "deny_probe".into(),
+            }),
         })),
         auth_binding: Some(TurnMetadataOverride::Set(AuthBindingRef {
             realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),

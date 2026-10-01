@@ -853,6 +853,27 @@ export type ProviderTag = {
 export type ReasoningMode = "emit" | "silent" | "off";
 
 /**
+ * Which tool use the model may or must make on one provider call.
+ *
+ * `Auto` is today's behaviour and the default: the model decides, and the
+ * provider request carries no choice beyond what each adapter always sent.
+ * Every other variant is lowered to the provider's native tool-choice field.
+ * A provider or model that cannot honour a requested choice refuses the
+ * call with a typed unsupported error; a choice is never downgraded to
+ * `Auto` silently.
+ */
+export type ToolChoice = {
+  mode: "auto";
+} | {
+  mode: "required";
+} | {
+  mode: "none";
+} | {
+  mode: "tool";
+  name: string;
+};
+
+/**
  * Typed per-turn provider parameter overrides.
  *
  * Replaces the legacy untyped `serde_json::Value` bag. Every knob exposed
@@ -867,6 +888,7 @@ export type ProviderParamsOverride = {
   reasoning?: ReasoningMode | null;
   temperature?: number | null;
   thinking_budget_tokens?: number | null;
+  tool_choice?: ToolChoice | null;
   top_p?: number | null;
 };
 

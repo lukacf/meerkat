@@ -485,6 +485,7 @@ export type ProviderParamsOverride = {
   reasoning?: ReasoningMode | null;
   temperature?: number | null;
   thinking_budget_tokens?: number | null;
+  tool_choice?: ToolChoice | null;
   top_p?: number | null;
 };
 
@@ -802,6 +803,17 @@ export interface SystemTime {
 export type TokenAggregationProvenance = "sum_disjoint_provider_components" | "provider_inclusive_input_total";
 
 export type ToolCallArguments = Record<string, unknown>;
+
+export type ToolChoice = {
+  mode: "auto";
+} | {
+  mode: "required";
+} | {
+  mode: "none";
+} | {
+  mode: "tool";
+  name: string;
+};
 
 export type ToolConfigChangeDomain = "tool_scope" | "deferred_catalog";
 

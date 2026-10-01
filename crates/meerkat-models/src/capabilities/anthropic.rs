@@ -142,6 +142,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(300),
+        supports_forced_tool_choice: false,
     },
     // Claude Fable 5
     //
@@ -221,6 +222,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(300),
+        supports_forced_tool_choice: false,
     },
     // Claude Opus 5.5
     //
@@ -281,6 +283,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(300),
+        supports_forced_tool_choice: false,
     },
     // Claude Opus 5
     //
@@ -332,6 +335,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(300),
+        supports_forced_tool_choice: false,
     },
     // Claude Opus 4.8
     //
@@ -390,6 +394,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(300),
+        supports_forced_tool_choice: true,
     },
     // Claude Opus 4.7
     //
@@ -447,6 +452,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(300),
+        supports_forced_tool_choice: true,
     },
     // Claude Sonnet 5.5
     //
@@ -516,6 +522,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(120),
+        supports_forced_tool_choice: false,
     },
     // Claude Sonnet 4.6
     //
@@ -570,6 +577,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: true,
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(120),
+        supports_forced_tool_choice: true,
     },
     // Claude Sonnet 4.5
     //
@@ -628,6 +636,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: true,
         beta_headers: LEGACY_THINKING_BETAS,
         call_timeout_secs: Some(120),
+        supports_forced_tool_choice: true,
     },
     // Claude Haiku 4.5
     //
@@ -677,6 +686,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: true,
         beta_headers: LEGACY_THINKING_BETAS,
         call_timeout_secs: Some(60),
+        supports_forced_tool_choice: true,
     },
     // Claude Haiku 4.5 alias
     //
@@ -720,6 +730,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: true,
         beta_headers: LEGACY_THINKING_BETAS,
         call_timeout_secs: Some(60),
+        supports_forced_tool_choice: true,
     },
     // Claude Opus 4.5
     //
@@ -775,5 +786,6 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: true,
         beta_headers: LEGACY_THINKING_BETAS,
         call_timeout_secs: Some(300),
+        supports_forced_tool_choice: true,
     },
 ];

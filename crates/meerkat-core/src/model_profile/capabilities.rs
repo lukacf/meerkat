@@ -293,6 +293,12 @@ pub struct ModelCapabilities {
     /// Beta headers the client may set when interacting with this model.
     pub beta_headers: &'static [BetaHeader],
 
+    /// Whether the model accepts a tool choice that forces a call (`any` /
+    /// `required` / a named tool). Claude models whose thinking cannot be
+    /// disabled answer 400 to a forced choice, so the Anthropic lowering
+    /// refuses it locally with a typed error instead.
+    pub supports_forced_tool_choice: bool,
+
     // ── Runtime ───────────────────────────────────────────────────────
     /// Authoritative default call timeout in seconds for this model.
     /// `None` means the model has no profiled default (unknown family).

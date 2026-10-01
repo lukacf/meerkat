@@ -7,6 +7,30 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
 
+/// `details.class` of a refused tool choice in the projected provider error.
+pub const TOOL_CHOICE_UNSUPPORTED_DETAILS_CLASS: &str = "tool_choice_unsupported";
+
+/// Why a requested [`meerkat_core::ToolChoice`] was refused locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoiceRefusal {
+    /// The provider or wire has no native tool-choice control.
+    #[error("the provider has no tool-choice control")]
+    ProviderHasNoToolChoice,
+    /// The backend fixes the tool choice itself (e.g. the ChatGPT backend).
+    #[error("the backend fixes the tool choice")]
+    BackendFixesToolChoice,
+    /// Forcing a tool call is incompatible with the thinking this request uses.
+    #[error("forcing a tool call is incompatible with extended thinking")]
+    ForcedToolWithThinking,
+    /// A forcing choice was requested but the request offers no tools.
+    #[error("no tools are offered")]
+    NoToolsOffered,
+    /// The named tool is not among the offered tools.
+    #[error("the named tool is not offered")]
+    ToolNotOffered,
+}
+
 /// Errors from LLM providers
 ///
 /// Categorized by whether they're retryable.
@@ -117,6 +141,18 @@ pub enum LlmError {
 
     #[error("Incomplete response: {message}")]
     IncompleteResponse { message: String },
+
+    // === Local request refusals ===
+    // Last, so earlier variants keep their discriminants.
+    /// The requested tool choice cannot be honoured by this provider, model
+    /// or request. Refused locally before any provider call, and never
+    /// downgraded to `Auto`.
+    #[error("Tool choice {choice:?} unsupported by {provider}: {reason}")]
+    ToolChoiceUnsupported {
+        provider: String,
+        choice: meerkat_core::ToolChoice,
+        reason: ToolChoiceRefusal,
+    },
 }
 
 /// Provider error codes that name exhausted quota, prepaid credit, or a spend
@@ -608,6 +644,20 @@ impl LlmError {
                     }),
                 ))
             }
+            Self::ToolChoiceUnsupported {
+                provider,
+                choice,
+                reason,
+            } => LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                LlmProviderErrorKind::InvalidRequest,
+                json!({
+                    "class": TOOL_CHOICE_UNSUPPORTED_DETAILS_CLASS,
+                    "provider": provider,
+                    "choice": choice,
+                    "reason": reason,
+                    "message": self.to_string(),
+                }),
+            )),
             Self::InvalidRequest { message }
             | Self::InvalidInputShape { message }
             | Self::InvalidConfig { message } => {

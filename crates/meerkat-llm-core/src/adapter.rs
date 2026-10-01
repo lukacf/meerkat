@@ -319,6 +319,9 @@ impl LlmClientAdapter {
                 temperature: effective_temperature,
                 stop_sequences: None,
                 provider_params: effective_params,
+                tool_choice: provider_params
+                    .and_then(|params| params.tool_choice.clone())
+                    .unwrap_or_default(),
             },
             projection,
         ))

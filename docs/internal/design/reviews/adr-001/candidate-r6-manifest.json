@@ -1,0 +1,19 @@
+{
+  "revision": "r6",
+  "documents": [
+    {
+      "name": "adr-001-runtime-security.md",
+      "frozen": "candidate-r6.md",
+      "sha256": "2c3744f703ea0f58f3cbd6cd02103e0539eadb5eafac4cd6a48de34f0a38c6fe",
+      "bytes": 63763,
+      "lines": 862
+    },
+    {
+      "name": "governed-deployment-profiles.md",
+      "frozen": "candidate-r6-profiles.md",
+      "sha256": "05ed1bd4202f4d53d5b7a5f83af052c6806a1809a6b8e152a060df74e294cc53",
+      "bytes": 19599,
+      "lines": 229
+    }
+  ]
+}

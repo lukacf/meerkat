@@ -1,0 +1,205 @@
+---
+title: "Integrate agent authorization"
+description: "Connect existing identity, grant, resource, and audit owners to local governed operations, and migrate without implicit authority."
+icon: "shield-check"
+---
+
+Use local governed authorization when an embedding application needs different
+agents and callers to have different tool, source, account, or communication
+permissions. Start with the [authorization concepts](/concepts/authorization).
+
+<Note>
+**Preview integration contract, October 2026.** The Rust implementation is under
+active integration. These steps identify real owner interfaces and deployment
+responsibilities; they are not a copy-and-paste configuration recipe. No new CLI
+flag or universal REST/RPC authorization setup is documented here. Existing
+[provider login](/guides/auth) remains credential setup, not activation of this
+governed profile.
+</Note>
+
+## Check support before rollout
+
+| Area | Current evidence and remaining work |
+| --- | --- |
+| Native input, grants, and tool feedback | An executed in-memory native test covers admitted work, a generated grant, refused delete, permitted read, normal completion, and native audit using a scripted model and fixture resource policy. |
+| Model/provider and infrastructure errors | Focused tests exercise primary infrastructure-error classification through three provider adapters, native deferred siblings, and live/fallback fixtures. They do not certify every production route, retry, hosted capability, or live mode. |
+| Controller continuity | Actual controller selection and retained work references exist. Account-policy changes, token release, and concurrent admission still require complete integration and validation. |
+| Durable operation audit | Native row attachment exists. Durable recovery and commit-race coverage remain incomplete; do not advertise durable audit from the in-memory test. |
+| Human consent | The existing approval owner has exact-candidate, authenticated-host, expiry, cancellation, and one-use APIs. End-to-end presentation, late decision delivery, and real sink consumption remain integration work. |
+| OS confinement | Platform work is in progress. macOS launch probes do not establish complete bootstrap integrity or all shell paths; Linux, Windows, containers, and browser/WASM need their own declared capabilities and evidence. |
+| Full application coverage | Tool/source access, peers, schedules, memory/history/export, Elephant, live/audio, and all supported surfaces remain the intended scope. A narrow successful fixture is not acceptance of this whole set. |
+
+Do not label a deployment fully governed while it has an unguarded path that can
+perform one of its declared protected operations. An unsupported required
+capability must be unavailable, not routed through a permissive fallback.
+
+## 1. Keep the existing identity owners
+
+Authenticate at the real ingress: the user session, service connection, connector,
+or scheduled-work owner. Establish the requester, ingress actor, executing agent,
+and optional represented subject independently of the request body. Qualify
+principal IDs by their identity domain.
+
+Native integration uses `NativeIngressContext` for the authenticated submission
+and `InputAuthorityAssociation` for retained work facts. Constructing either is
+not authentication. `NativeWorkAuthorizationHost` connects ingress to the input
+owner. Keep the association on the native input with its replay identity, not in
+a UI or plugin's session-ID lookup table.
+
+Verify that the actual caller may invoke the delegation. An agent holding a
+grant for a represented user does not mean every caller may use it. A restore,
+retry, or fresh login must not rewrite the original requester.
+
+## 2. Compose grants with resource policy
+
+The current Rust composition uses `LocalGrantAuthority` and
+`GrantBackedWorkPolicy`. Its two application interfaces have different jobs:
+
+| Interface | Host responsibility |
+| --- | --- |
+| `AdmittedWorkPolicyOwner` | Resolve the exact accepted work, caller entitlement, executor, represented subject, and applicable mandate. Do not accept a serialized claim as proof of admission. |
+| `OperationPolicyOwner` | Resolve the actual action/resource/account/recipient against the owners' current rules, preserving correlated permissions. |
+
+Both use the grant owner's local publication ordering. They read current local
+facts without hidden network requests. A publication stamp invalidates decisions;
+it is not a second policy database.
+
+For an external API, retain the credential in a trusted connector and enforce
+the narrower operation grant before use. Resolve a calendar ID, tenant, database,
+or destination through trusted owner data. If an adapter knows only that an
+opaque server operation is requested, authorize that conservative whole capability
+or leave it unavailable. Do not pretend a model-supplied label proves a finer rule.
+
+For Elephant, keep query and fetch enforcement in Elephant as well as the
+Meerkat invocation check. Agree on qualified identities and action/resource
+vocabulary; test allowed reads, denied writes, wrong represented subjects, and
+cross-domain identity collisions. Do not copy Elephant's policy database into
+Meerkat or treat a document citation as permission.
+
+## 3. Bind the actual operation at its execution owner
+
+The native owner supplies a `WorkAuthorizationContext` for all input contributors.
+The adapter retains a `PreparedAuthorizationBinding` with its immutable request
+or plan, carrying typed operation facts rather than policy JSON or a permit.
+
+For tools, the final check must protect the actual resolved tool call and plan.
+For a model request, resolve the real backend, endpoint, credential identity,
+wire model, and hosted capabilities. Preserve the prepared companion through
+provider delegation and explicit retries. Perform the last current check after
+relevant credential or consequence-preparation waits and before the send or body.
+
+Changed accounts, routes, targets, or arguments require a new binding. Equal-looking
+arguments do not transfer a decision. Controller inference and hosted actions
+require their own permissions under the same work context.
+
+## 4. Preserve local feedback and honest failures
+
+Map typed errors before rendering text:
+
+- `OperationAuthorizationError::Refused` represents an ordinary operation
+  refusal. Give the agent audience-safe feedback, preserve permitted siblings,
+  and let it choose a different action within existing budgets.
+- `OperationAuthorizationError::ObservationUnavailable` means required audit
+  observation failed. Preserve that infrastructure classification through tool,
+  provider, callback, live, and SDK adapters. Do not give the model a misleading
+  policy refusal, mark it retryable, or switch providers to hide the failure.
+- When an effect already returned, preserve its actual result and any separate
+  observation or settlement failure. An uncertain effect requires its existing
+  reconciliation or idempotency contract before another attempt.
+
+Render **Permission denied** or **Unable to record audit event** from the typed
+result, not string matching. Keep private grant, account, and source details out
+of public status text.
+
+Attach the required audit sink to the actual admitted input row. The production
+composition exposes `audited_work_context` for this purpose. A tracing callback
+or lossy event subscription is not a substitute. Stage observations for the next
+existing native commit, preserving concurrent suffixes and rollback behavior.
+Report process-lifetime storage as such; do not add an undisclosed fsync to each
+operation or promise crash-proof pre-effect evidence.
+
+## 5. Retain a usable controller for admitted work
+
+Resolve and pin the actual controller client during admission. A model name and
+credential reference alone are not a runnable client. Retain its selection with
+the native work, separately from the grant for tools and sources.
+
+Before ordinary revocation, route replacement, or credential removal, the real
+owners must determine whether unfinished work depends on that controller. Keep
+or atomically replace the route, or refuse the administrative change. Do not
+maintain a separate usage counter or silently stop the run. Explicit administrative
+stop remains a separate action. This continuity integration is a rollout gate,
+not something a host may assume from successful client construction.
+
+## 6. Add consent or confinement where required
+
+### Human consent
+
+The current `ApprovalService` action workflow exposes `request_action`,
+`decide_action`, `cancel_action`, and `consume_action`, with a trusted
+`ActionApprovalHost`. The host authenticates the decision event, checks current
+approver eligibility, and binds the presented facts to the exact retained
+candidate. The older audit-only actor string is not an approval credential.
+
+Present the action, target, recipient, account, arguments, requester, agent, and
+expiry to an eligible audience. Return **Approval required** while other permitted
+work continues. Deliver later authenticated decisions through ordinary native
+admission without replaying the action or changing its requester.
+
+On a later explicit attempt, resolve the retained candidate, prepare current
+authorization, and consume consent once after waits at the real entry boundary.
+Changed or lost bindings need fresh consent. A failed final check does not undo
+consumption, and an audit record cannot recreate executable consent. Test the
+presentation, delivery, and sink integration before advertising this workflow.
+
+### Process confinement
+
+Choose explicitly between host-trusted execution and a required mechanical
+profile. Required confinement includes the actual filesystem, network/IPC,
+environment, and inherited descriptor limits. A missing backend or unsupported
+requirement refuses that launch; it never retries without confinement.
+
+At host setup, validate the backend's real capabilities and compile supported
+policy for the configuration generation. Bind exact command inputs at launch
+through the existing process owner. Protect the runtime's credentials, stores,
+control endpoints, and shared bootstrap installation from every confined writer.
+A profile protecting only its own helper can leave another profile's helper
+replaceable. Do not claim this is solved by a path check alone.
+
+Use actual OS probes with successful allowed operations and blocked forbidden
+operations. Cover foreground commands, background jobs, recovered monitors,
+MCP and other subprocesses, and differently authorized agents. Existing containers
+count only for the isolation they really provide. A shared pod, proxy environment
+variable, or shell working directory is not automatically the required boundary.
+Untrusted in-process native plugins remain outside that protection.
+
+## Migrate an existing application
+
+1. Inventory actual operations and trust boundaries: model accounts, tools,
+   sources, peers, stored-resource access, schedules, and outbound routes.
+2. Reuse existing identity and resource owners. Add explicit grants and represented
+   subjects where needed; do not infer them from agent ownership or OAuth access.
+3. Wire one complete admitted-work path through the real dispatcher and audit
+   owner. Prove a denied body is never entered and an allowed sibling completes.
+4. Cover every alternate path you expose, including hosted tools, retries,
+   compaction, live/audio, browser/WASM, callbacks, and scheduled or delegated work.
+5. Validate controller continuity, failure propagation, durable recovery where
+   claimed, and the separately selected consent/confinement workflows. Measure
+   the complete added cost before broad rollout.
+
+Existing histories need no semantic relabeling or fabricated provenance. Keep
+their actual resource ACLs and retention rules. A trusted embedded deployment
+remains an explicit choice; migrating some paths does not make unguarded paths
+governed.
+
+For an optional gate agent, give the publishing capability only to the intended
+gate route. Include indirect publication queues, peers, network-capable tools,
+and hosted capabilities in that route inventory. Keep the original requester on
+queued work, and keep human consent independent from the gate's model judgment.
+
+## Related guides
+
+- [Agent authorization](/concepts/authorization)
+- [Provider credentials and bindings](/concepts/auth-and-bindings)
+- [Tools](/concepts/tools) and [hooks](/guides/hooks)
+- [Peer communications](/guides/comms) and [scheduling](/guides/scheduling)

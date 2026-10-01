@@ -1,0 +1,19 @@
+{
+  "revision": "r5",
+  "documents": [
+    {
+      "name": "adr-001-runtime-security.md",
+      "frozen": "candidate-r5.md",
+      "sha256": "dae4e6a4fab44b103ced096cd730a54668a4d617a78b72dd10c2ed30f88dd0b5",
+      "bytes": 62684,
+      "lines": 847
+    },
+    {
+      "name": "governed-deployment-profiles.md",
+      "frozen": "candidate-r5-profiles.md",
+      "sha256": "20392d72d41cb7f7c1703080a94300db4ddb14efe103f0a0bea38c38aab3dbf9",
+      "bytes": 18403,
+      "lines": 222
+    }
+  ]
+}

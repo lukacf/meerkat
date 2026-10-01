@@ -82272,6 +82272,99 @@ async fn retire_resolves_an_admitted_unopened_input_before_the_turn_boundary() {
     );
 }
 
+/// The pre-boundary step's snapshot is an observation, not a hold: the
+/// runtime loop can stage a queued input before the step cancels it, and the
+/// exact cancellation then targets its run through the session's interrupt
+/// authority, which this service (like any that keeps the trait default) does
+/// not implement. That refusal must not fail the disposal: the step
+/// re-observes and settles the run. It used to fail it outright (the
+/// `test_runtime_only_release_releases_the_members_inproc_route` flake).
+#[tokio::test]
+async fn release_survives_a_queued_input_staged_before_its_exact_cancel() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let session_id = handle
+        .spawn(
+            ProfileName::from("lead"),
+            AgentIdentity::from("lead-release-staged-before-cancel"),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    service.set_block_runtime_turns(true);
+    let gate = service.install_non_reentrant_turn_finalization_gate();
+    let disposal = super::provisioner::MemberSessionDisposalArc::new(
+        service.clone(),
+        Some(Arc::clone(&service.runtime_adapter)),
+    );
+    let mut requests = service.turn_finalization_guard_requests.subscribe();
+    // The loop acquires this gate before staging: the input stays Queued.
+    let held = gate.lock().await;
+    let seen = *requests.borrow_and_update();
+    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+        "staged between the retire snapshot and its exact cancel",
+        None,
+    ));
+    let (outcome, completion) = service
+        .runtime_adapter
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .expect("the live runtime admits the input");
+    assert!(outcome.is_accepted());
+    let completion = completion.expect("the input registers a completion waiter");
+    wait_for_turn_finalization_guard_request(&mut requests, seen, "the runtime loop").await;
+
+    let (entered, release, returned) =
+        super::provisioner::arm_queued_cancel_test_gate(session_id.clone());
+    let task_session_id = session_id.clone();
+    let releasing =
+        tokio::spawn(async move { disposal.release_runtime_only(&task_session_id).await });
+    tokio::time::timeout(Duration::from_secs(10), entered)
+        .await
+        .expect("the disposal snapshot finds the queued input")
+        .expect("the queued-cancel gate stays armed");
+
+    // The loop stages the input and its run blocks inside apply.
+    let started = service.runtime_turn_started.notified();
+    tokio::pin!(started);
+    started.as_mut().enable();
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(10), started)
+        .await
+        .expect("the staged input's run starts");
+    release
+        .send(())
+        .expect("the disposal waits on the queued-cancel gate");
+    tokio::time::timeout(Duration::from_secs(10), returned)
+        .await
+        .expect("the exact cancellation returns")
+        .expect("the queued-cancel gate reports its return");
+
+    // The refused cancellation left the disposal waiting on the run; once
+    // the turn ends, the disposal completes.
+    service.set_block_runtime_turns(false);
+    service.release_one_runtime_turn();
+    tokio::time::timeout(Duration::from_secs(10), releasing)
+        .await
+        .expect("the disposal settles within its own deadline")
+        .expect("the disposal task joins")
+        .expect("a refused exact cancel of a staged input does not fail the disposal");
+    tokio::time::timeout(Duration::from_secs(10), completion.wait())
+        .await
+        .expect("the staged input reaches a terminal")
+        .expect("the staged input's waiter resolves");
+}
+
 #[tokio::test]
 async fn test_member_turn_reconfigure_failure_resolves_after_admission_without_applying_prompt() {
     let mut definition = sample_definition();

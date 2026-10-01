@@ -37750,6 +37750,109 @@ impl CoreExecutor for CleanupRuntimeGatedStopExecutor {
     }
 }
 
+/// Regression for "runtime loop exited without acknowledging required stop
+/// cleanup": a coordinator stop request accepted by the machine while the
+/// loop is already realizing a loop-owned stop is queued behind it in the
+/// effect channel. The loop exits after the first stop; the queued request's
+/// completion must be carried into the teardown handoff and acknowledged by
+/// the owed cleanup, never dropped with the channel.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_completion_queued_behind_loop_owned_stop_is_acknowledged_by_cleanup() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let stop_entered = Arc::new(Notify::new());
+    let release_stop = Arc::new(Notify::new());
+    machine
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(CleanupRuntimeGatedStopExecutor {
+                stop_entered: Arc::clone(&stop_entered),
+                release_stop: Arc::clone(&release_stop),
+            }),
+        )
+        .await
+        .expect("runtime executor registration should succeed");
+    let (effect_tx, teardown_slot) = {
+        let sessions = machine.sessions.read().await;
+        let entry = sessions.get(&session_id).expect("registered entry");
+        (
+            entry.effect_sender().expect("live loop effect sender"),
+            entry
+                .runtime_loop_teardown
+                .clone()
+                .expect("live loop teardown slot"),
+        )
+    };
+    let stop_effect = |staged: &StagedSessionDslInput| {
+        crate::effect::runtime_effect_projection_from_dsl_effects(&staged.effects)
+            .expect("the stop projects one runtime effect")
+            .into_effect()
+    };
+
+    // A loop-owned stop (no completion): the loop parks in the executor's
+    // stop hook while realizing it.
+    let loop_owned = machine
+        .stage_session_dsl_transition(
+            &session_id,
+            dsl::MeerkatMachineInput::StopRuntimeExecutor {
+                reason: "loop-owned stop".into(),
+            },
+            "test:LoopOwnedStopRuntimeExecutor",
+        )
+        .await
+        .expect("the generated machine admits the loop-owned stop");
+    effect_tx
+        .send(stop_effect(&loop_owned))
+        .await
+        .expect("the live loop receives the loop-owned stop");
+    tokio::time::timeout(Duration::from_secs(10), stop_entered.notified())
+        .await
+        .expect("the loop enters the executor stop hook");
+
+    // A coordinator-shaped request, built exactly as
+    // `dispatch_owned_runtime_stop_request` builds it, lands behind it.
+    let requested = machine
+        .stage_session_dsl_transition(
+            &session_id,
+            dsl::MeerkatMachineInput::StopRuntimeExecutor {
+                reason: "coordinator stop".into(),
+            },
+            "test:CoordinatorStopRuntimeExecutor",
+        )
+        .await
+        .expect("the generated machine admits the coordinator stop");
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    effect_tx
+        .send(
+            stop_effect(&requested)
+                .with_stop_completion(completion_tx)
+                .expect("a stop effect carries a completion"),
+        )
+        .await
+        .expect("the queued request reaches the loop's channel");
+    drop(effect_tx);
+    release_stop.notify_one();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        teardown_slot.wait_until_published(),
+    )
+    .await
+    .expect("the loop publishes its teardown after the loop-owned stop");
+
+    machine
+        .unregister_session(&session_id)
+        .await
+        .expect("unregister runs the cleanup the loop handed off");
+    let acknowledged = tokio::time::timeout(Duration::from_secs(10), completion_rx)
+        .await
+        .expect("the queued completion settles");
+    assert!(
+        matches!(acknowledged, Ok(Ok(()))),
+        "the queued stop request is acknowledged by the owed cleanup, not dropped: {acknowledged:?}"
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn cleanup_runtime_explicit_abort_survives_origin_caller_runtime_shutdown() {

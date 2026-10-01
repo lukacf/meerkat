@@ -9,6 +9,39 @@ use crate::traits::RuntimeDriverError;
 pub(crate) type StopEffectCompletion =
     crate::tokio::sync::oneshot::Sender<Result<(), RuntimeDriverError>>;
 
+/// Every stop completion one runtime-loop exit owes an acknowledgement: the
+/// stop the loop realized, plus stop requests the machine accepted that were
+/// still queued in the effect channel when the loop exited. The owed cleanup
+/// settles all of them with its one result.
+#[derive(Debug, Default)]
+pub(crate) struct StopEffectCompletions(Vec<StopEffectCompletion>);
+
+impl StopEffectCompletions {
+    pub(crate) fn adopt(&mut self, completion: Option<StopEffectCompletion>) {
+        self.0.extend(completion);
+    }
+
+    pub(crate) fn take(&mut self) -> Self {
+        std::mem::take(self)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn acknowledge(self, result: Result<(), RuntimeDriverError>) {
+        for completion in self.0 {
+            let _ = completion.send(result.clone());
+        }
+    }
+}
+
+impl From<Option<StopEffectCompletion>> for StopEffectCompletions {
+    fn from(completion: Option<StopEffectCompletion>) -> Self {
+        Self(completion.into_iter().collect())
+    }
+}
+
 /// Neutral fact projected from a committed MeerkatMachine DSL transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RuntimeEffectFact {

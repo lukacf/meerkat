@@ -97,6 +97,13 @@ them.
   uses the new `RuntimeStore::load_current_head_canonical_metadata`, which
   observes the current HeadCanonical authority and its metadata under one
   snapshot (one SQLite read transaction).
+- A runtime stop request no longer fails with `runtime loop exited without
+  acknowledging required stop cleanup` when the machine accepted it while the
+  runtime loop was already realizing its own terminal stop. The request was
+  queued behind that stop in the loop's effect channel, and the loop exited
+  without reading it, dropping its completion. On exit the loop now closes
+  the channel and carries every queued stop completion into its teardown
+  handoff, so the owed cleanup acknowledges each with its result.
 
 - Retiring a mob member no longer waits on its turn-finalization boundary
   until the retire deadline when an input was admitted but not yet opened as a

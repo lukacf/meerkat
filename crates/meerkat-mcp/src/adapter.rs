@@ -1943,6 +1943,76 @@ mod tests {
         adapter.shutdown().await;
     }
 
+    /// Shutdown owns in-flight connects: a stdio server still connecting when
+    /// the adapter shuts down must not outlive it. (Fails-old: shutdown never
+    /// joined the spawned connect task, which kept the child alive until the
+    /// connect timeout; a stopping test runtime then skipped the deferred kill
+    /// entirely and left the child holding the test's stderr.)
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn shutdown_kills_a_stdio_server_still_connecting() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "meerkat-mcp-connect-join-{}-{}.pid",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default()
+        ));
+        let mut router = generated_surface_router();
+        router
+            .stage_add(meerkat_core::McpServerConfig::stdio(
+                "hang-srv",
+                "/bin/sh",
+                vec![
+                    "-c".to_string(),
+                    format!("echo $$ > '{}'; exec sleep 60", pid_file.display()),
+                ],
+                HashMap::new(),
+            ))
+            .expect("stage add");
+        router.apply_staged().await.expect("apply staged");
+        let adapter = McpRouterAdapter::new(router);
+
+        // Bounded failure backstop only: the child writes its pid at startup.
+        let pid: u32 = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_file)
+                    && let Ok(pid) = text.trim().parse()
+                {
+                    return pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("stdio child must start and record its pid");
+
+        adapter.shutdown().await;
+        let _ = std::fs::remove_file(&pid_file);
+
+        // Exited means reaped (no /proc entry) or a zombie awaiting reaping;
+        // either way it no longer holds the test's pipes. Bounded backstop.
+        let exited = |pid: u32| match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => true,
+            Ok(stat) => stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .is_some_and(|state| state == "Z"),
+        };
+        let dead = tokio::time::timeout(Duration::from_secs(5), async {
+            while !exited(pid) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        assert!(
+            dead,
+            "stdio child {pid} of a still-connecting server outlived adapter shutdown"
+        );
+    }
+
     #[tokio::test]
     async fn stage_reload_all_returns_typed_report_and_fails_closed_on_shutdown() {
         let Some(server_path) = skip_if_no_test_server() else {

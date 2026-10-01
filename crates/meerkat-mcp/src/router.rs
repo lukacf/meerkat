@@ -986,6 +986,11 @@ pub struct McpRouter {
     /// Poison-safe mutex wrapping the receiver.
     pending_rx: Mutex<mpsc::Receiver<PendingResult>>,
     pending_obligations: HashMap<String, SurfaceCompletionObligation>,
+    /// Background connect-and-enumerate tasks this router spawned. The router
+    /// owns them: `shutdown` aborts and joins every one still running, so no
+    /// connect attempt (or the stdio child process it owns) outlives the
+    /// router. Finished tasks are reaped as new ones are spawned.
+    connect_tasks: tokio::task::JoinSet<()>,
     pending_snapshot_alignment: Option<SurfaceSnapshotAlignmentObligation>,
     /// Queued canonical lifecycle deltas for async completions.
     completed_updates: VecDeque<CompletedLifecycleUpdate>,
@@ -1016,6 +1021,7 @@ impl McpRouter {
             pending_tx: tx,
             pending_rx: Mutex::new(rx),
             pending_obligations: HashMap::new(),
+            connect_tasks: tokio::task::JoinSet::new(),
             pending_snapshot_alignment: None,
             completed_updates: VecDeque::new(),
             mcp_lifecycle_handle: Arc::new(StdRwLock::new(None)),
@@ -1506,7 +1512,9 @@ impl McpRouter {
         let auth_mode = self.mcp_auth_mode;
         let auth_resolver = self.mcp_auth_resolver.clone();
         let client_factory = self.client_service_factory.clone();
-        tokio::spawn(async move {
+        // Reap tasks that already finished so the owned set stays bounded.
+        while self.connect_tasks.try_join_next().is_some() {}
+        self.connect_tasks.spawn(async move {
             let result = McpConnection::connect_and_enumerate_with_services(
                 &config,
                 auth_mode,
@@ -2266,6 +2274,17 @@ impl McpRouter {
         let (replacement_tx, _replacement_rx) = mpsc::channel(PENDING_CHANNEL_CAPACITY);
         let old_pending_tx = std::mem::replace(&mut self.pending_tx, replacement_tx);
         drop(old_pending_tx);
+        // Abort and join every connect task still running. Dropping an
+        // aborted task's future drops its connection attempt, and with it the
+        // stdio child (spawned kill-on-drop), before shutdown returns.
+        self.connect_tasks.abort_all();
+        while let Some(joined) = self.connect_tasks.join_next().await {
+            if let Err(error) = joined
+                && error.is_panic()
+            {
+                tracing::warn!("MCP connect task panicked before shutdown: {error}");
+            }
+        }
         // Drain any completion payloads that arrived after pending_tx drop.
         let drained_results: Vec<PendingResult> = {
             let mut rx = match self.pending_rx.lock() {

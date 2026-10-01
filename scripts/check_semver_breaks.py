@@ -838,6 +838,17 @@ def main() -> int:
             file=sys.stderr,
         )
 
+    # A crate the baseline release did not publish has nothing to compare
+    # against. It is not a failure and not silently dropped: name it on every
+    # run, failing ones included, so a reader sees which crates the measured
+    # set left out and why.
+    if args.first_publish_crate:
+        baseline = args.baseline_tag or "the baseline release"
+        print(
+            f"semver-breaks: new crate, no baseline in {baseline} (first publication, "
+            "not measured, not a failure): " + ", ".join(args.first_publish_crate)
+        )
+
     if errors:
         print("semver-breaks: FAILED", file=sys.stderr)
         for error in errors:
@@ -858,12 +869,6 @@ def main() -> int:
             "(source and dependency specs) were not rebuilt: "
             + ", ".join(args.unchanged_crate)
         )
-    if args.first_publish_crate:
-        print(
-            "semver-breaks: first publication has no registry baseline: "
-            + ", ".join(args.first_publish_crate)
-        )
-
     if not parsed.findings:
         print(
             f"semver-breaks: no public-API breaks vs the published baselines "

@@ -89,6 +89,17 @@ them.
   wrappers, preserving tool order and metadata. Later-page errors reject the
   discovery result, and repeated or cycling cursors fail instead of looping.
 
+### Changed
+
+- Main CI builds meerkat-mob's unit tests once and runs them in parallel
+  partitions. Its default and `openai-live` lanes took 12.5-20 min on the
+  hosted 4-vCPU runners, two thirds of it compiling the crate's own
+  lib-test binary; `ci-cargo-lanes.mjs` now lists it in
+  `ARCHIVED_UNIT_LANES`, so one job per lane builds a nextest archive and
+  two jobs run it with `--partition hash:k/2`. The CI gate and attestation
+  count the archived lanes as main unit coverage, and a manual dispatch
+  runs the main unit lanes so a branch can measure them.
+
 ## [0.8.49] - 2026-09-30
 
 0.8.48 was tagged but never published to crates.io or GitHub Releases, so

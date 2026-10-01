@@ -47,6 +47,12 @@ name: CI
 #                     plus one lane per feature-gated suite: the default
 #                     feature lanes cannot reach a test behind a non-default
 #                     feature (FEATURE_UNIT_SUITES in ci-cargo-lanes.mjs)
+#   main-unit-archive-build / main-unit-archive-run
+#                   - ARCHIVED_UNIT_LANES (meerkat-mob and its feature suites):
+#                     one job compiles the lib-test binary into a nextest
+#                     archive, and partition jobs run it with
+#                     --partition hash:k/n, since that crate's compile alone
+#                     fills most of a 4-vCPU lane
 #   wasm-check      - wasm32 check of meerkat-web-runtime
 #   sdk-host        - Python + TypeScript SDK suites
 #
@@ -167,6 +173,10 @@ jobs:
       unit_deferred_count: ${{ steps.plan.outputs.unit_deferred_count }}
       main_unit_shard_count: ${{ steps.plan.outputs.main_unit_shard_count }}
       main_unit_shard_matrix: ${{ steps.plan.outputs.main_unit_shard_matrix }}
+      main_archive_build_count: ${{ steps.plan.outputs.main_archive_build_count }}
+      main_archive_build_matrix: ${{ steps.plan.outputs.main_archive_build_matrix }}
+      main_archive_run_count: ${{ steps.plan.outputs.main_archive_run_count }}
+      main_archive_run_matrix: ${{ steps.plan.outputs.main_archive_run_matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -192,7 +202,7 @@ jobs:
           # build-relevant change; a failure here fails the CI gate.
           node scripts/ci-cargo-lanes.mjs --format github --base "${BASE_SHA}" --head HEAD \
             | tee "${RUNNER_TEMP}/ci-cargo-lanes.txt" >> "${GITHUB_OUTPUT}"
-          grep -vE '^(closure_flags|shard_matrix|unit_shard_matrix|main_unit_shard_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
+          grep -vE '^(closure_flags|shard_matrix|unit_shard_matrix|main_unit_shard_matrix|main_archive_build_matrix|main_archive_run_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
 
   fmt-governance:
     name: Format + governance
@@ -594,8 +604,9 @@ jobs:
     # Post-merge only: the whole workspace, including the meerkat-mob compile
     # chain that the pull-request unit lane defers; no wall-clock budget. A
     # push with no Rust-relevant change (a docs-only merge) has no unit lanes,
-    # exactly as on a pull request.
-    if: ${{ github.event_name == 'push' && needs.changes.outputs.rust_changed == 'true' }}
+    # exactly as on a pull request. A manual dispatch runs them too, so a
+    # branch can measure the main lanes before it merges.
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.rust_changed == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -661,6 +672,155 @@ jobs:
           path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3
+
+  main-unit-archive-build:
+    name: Main unit build (${{ matrix.name }})
+    needs: changes
+    # The packages in ARCHIVED_UNIT_LANES (ci-cargo-lanes.mjs) compile their
+    # lib-test binary once here into a nextest archive; main-unit-archive-run
+    # fans its execution out over partitions. Same trigger as main-unit.
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.main_archive_build_count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.main_archive_build_matrix) }}
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
+
+      - name: Build nextest archive (lib and bin targets)
+        shell: bash
+        env:
+          PACKAGES: ${{ matrix.packages }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          [[ -n "${PACKAGES}" && -n "${ARCHIVE}" ]] || { echo "::error::empty archived unit lane"; exit 1; }
+          # shellcheck disable=SC2086
+          ./scripts/repo-cargo nextest archive ${PACKAGES} --lib --bins \
+            --archive-file "${RUNNER_TEMP}/nextest-${ARCHIVE}.tar.zst"
+
+      - name: Verify the partitions cover every test exactly once
+        shell: bash
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          PARTITIONS: ${{ matrix.partitions }}
+        run: |
+          set -euo pipefail
+          [[ "${PARTITIONS}" =~ ^[0-9]+$ ]] && (( PARTITIONS >= 2 )) || { echo "::error::archived lane without a partition count"; exit 1; }
+          archive="${RUNNER_TEMP}/nextest-${ARCHIVE}.tar.zst"
+          list() {
+            cargo nextest list --archive-file "${archive}" --workspace-remap "${GITHUB_WORKSPACE}" \
+              --profile ci-pr --message-format oneline "$@" | LC_ALL=C sort
+          }
+          list > "${RUNNER_TEMP}/all.txt"
+          : > "${RUNNER_TEMP}/union.txt"
+          for (( index = 1; index <= PARTITIONS; index++ )); do
+            list --partition "hash:${index}/${PARTITIONS}" >> "${RUNNER_TEMP}/union.txt"
+          done
+          LC_ALL=C sort "${RUNNER_TEMP}/union.txt" -o "${RUNNER_TEMP}/union.txt"
+          duplicates="$(uniq -d "${RUNNER_TEMP}/union.txt" | wc -l)"
+          if [[ "${duplicates}" != "0" ]] || ! cmp -s "${RUNNER_TEMP}/all.txt" "${RUNNER_TEMP}/union.txt"; then
+            echo "::error::the ${PARTITIONS} partitions of ${ARCHIVE} do not cover its $(wc -l < "${RUNNER_TEMP}/all.txt") tests exactly once (duplicates: ${duplicates})"
+            diff "${RUNNER_TEMP}/all.txt" "${RUNNER_TEMP}/union.txt" | head -20 || true
+            exit 1
+          fi
+          echo "${ARCHIVE}: ${PARTITIONS} partitions cover all $(wc -l < "${RUNNER_TEMP}/all.txt") tests exactly once"
+
+      - name: Upload nextest archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: nextest-${{ matrix.archive }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nextest-${{ matrix.archive }}.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload sccache server log
+        if: ${{ always() }}
+        # Diagnostics can never fail a lane.
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: sccache-log-main-unit-archive-${{ matrix.archive }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /home/runner/work/_temp/sccache.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+  main-unit-archive-run:
+    name: Main unit tests (${{ matrix.name }})
+    needs: [changes, main-unit-archive-build]
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.main_archive_run_count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.main_archive_run_matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
+
+      - name: Download nextest archive
+        uses: actions/download-artifact@v5
+        with:
+          name: nextest-${{ matrix.archive }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nextest-archive
+
+      - name: Unit tests (archived lane partition)
+        shell: bash
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          PARTITION: ${{ matrix.partition }}
+          # Set only on rows whose tests need a deeper test-thread stack than
+          # the 8 MiB .cargo/config.toml default (see FEATURE_UNIT_SUITES).
+          MIN_STACK: ${{ matrix.rust_min_stack }}
+        run: |
+          set -euo pipefail
+          [[ -n "${ARCHIVE}" && -n "${PARTITION}" ]] || { echo "::error::empty archived unit partition"; exit 1; }
+          # The archive's binaries run against this checkout; .cargo/config.toml
+          # does not apply outside cargo builds, so its test-thread stack is
+          # exported here, and an explicit row stack overrides it.
+          export RUST_MIN_STACK="${MIN_STACK:-8388608}"
+          cargo nextest run --archive-file "${RUNNER_TEMP}/nextest-archive/nextest-${ARCHIVE}.tar.zst" \
+            --workspace-remap "${GITHUB_WORKSPACE}" --partition "${PARTITION}" --profile ci-pr \
+            --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
 
   closure-check:
     name: Closure check (${{ needs.changes.outputs.closure_count }} crates)
@@ -1096,6 +1256,8 @@ jobs:
       - clippy
       - unit
       - main-unit
+      - main-unit-archive-build
+      - main-unit-archive-run
       - closure-check
       - wasm-check
       - sdk-host
@@ -1113,7 +1275,9 @@ jobs:
           RATCHETS_RESULT: ${{ needs.ratchets.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
-          MAIN_UNIT_RESULT: ${{ needs.main-unit.result }}
+          MAIN_UNIT_PACKED_RESULT: ${{ needs.main-unit.result }}
+          MAIN_UNIT_ARCHIVE_BUILD_RESULT: ${{ needs.main-unit-archive-build.result }}
+          MAIN_UNIT_ARCHIVE_RUN_RESULT: ${{ needs.main-unit-archive-run.result }}
           CLOSURE_CHECK_RESULT: ${{ needs.closure-check.result }}
           WASM_CHECK_RESULT: ${{ needs.wasm-check.result }}
           SDK_HOST_RESULT: ${{ needs.sdk-host.result }}
@@ -1136,6 +1300,20 @@ jobs:
           CLOSURE_COUNT: ${{ needs.changes.outputs.closure_count }}
         run: |
           set -euo pipefail
+          # Main unit coverage is the packed shards plus the archived lanes
+          # (build once, partitioned runs): one failure or cancellation fails
+          # it, and it counts as skipped only when all three were skipped.
+          combine_main_unit() {
+            local result any_ran=0
+            for result in "$@"; do
+              case "${result}" in
+                failure|cancelled) echo "${result}"; return ;;
+                success) any_ran=1 ;;
+              esac
+            done
+            if (( any_ran )); then echo success; else echo skipped; fi
+          }
+          MAIN_UNIT_RESULT="$(combine_main_unit "${MAIN_UNIT_PACKED_RESULT}" "${MAIN_UNIT_ARCHIVE_BUILD_RESULT}" "${MAIN_UNIT_ARCHIVE_RUN_RESULT}")"
           echo "plan: mode=${MODE} packages=${PACKAGE_COUNT} closure=${CLOSURE_COUNT} clippy_shards=${SHARD_COUNT} unit_shards=${UNIT_SHARD_COUNT} (${REASON})"
           if [[ -n "${UNIT_DEFERRED}" ]]; then
             echo "::notice::unit tests deferred to the push-to-main run (meerkat-mob compile chain): ${UNIT_DEFERRED}"
@@ -1401,7 +1579,9 @@ jobs:
           RATCHETS_RESULT: ${{ needs.ratchets.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
-          MAIN_UNIT_RESULT: ${{ needs.main-unit.result }}
+          MAIN_UNIT_PACKED_RESULT: ${{ needs.main-unit.result }}
+          MAIN_UNIT_ARCHIVE_BUILD_RESULT: ${{ needs.main-unit-archive-build.result }}
+          MAIN_UNIT_ARCHIVE_RUN_RESULT: ${{ needs.main-unit-archive-run.result }}
           CLOSURE_CHECK_RESULT: ${{ needs.closure-check.result }}
           WASM_CHECK_RESULT: ${{ needs.wasm-check.result }}
           SDK_HOST_RESULT: ${{ needs.sdk-host.result }}
@@ -1416,6 +1596,20 @@ jobs:
           MAIN_UNIT_SHARD_COUNT: ${{ needs.changes.outputs.main_unit_shard_count }}
         run: |
           set -euo pipefail
+          # Main unit coverage is the packed shards plus the archived lanes
+          # (build once, partitioned runs): one failure or cancellation fails
+          # it, and it counts as skipped only when all three were skipped.
+          combine_main_unit() {
+            local result any_ran=0
+            for result in "$@"; do
+              case "${result}" in
+                failure|cancelled) echo "${result}"; return ;;
+                success) any_ran=1 ;;
+              esac
+            done
+            if (( any_ran )); then echo success; else echo skipped; fi
+          }
+          MAIN_UNIT_RESULT="$(combine_main_unit "${MAIN_UNIT_PACKED_RESULT}" "${MAIN_UNIT_ARCHIVE_BUILD_RESULT}" "${MAIN_UNIT_ARCHIVE_RUN_RESULT}")"
           destination="${RUNNER_TEMP}/meerkat-ci-attestation"
           mkdir -p "${destination}"
           tree_sha="$(git rev-parse 'HEAD^{tree}')"

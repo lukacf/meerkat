@@ -64,7 +64,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_PKG_VERSION": "0.8.50",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
     proc_macro_deps = all_crate_deps(
@@ -102,7 +102,7 @@ rust_library(
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_PKG_VERSION": "0.8.50",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
     proc_macro_deps = all_crate_deps(
@@ -144,7 +144,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_PKG_VERSION": "0.8.50",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
     tags = [
@@ -208,7 +208,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_PKG_VERSION": "0.8.50",
         "CARGO_BIN_NAME": "aws_sts_authorizer",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
@@ -267,7 +267,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_PKG_VERSION": "0.8.50",
         "CARGO_BIN_NAME": "azure_ad_authorizer",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
@@ -326,7 +326,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_PKG_VERSION": "0.8.50",
         "CARGO_BIN_NAME": "connector_oauth_commit",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
@@ -385,7 +385,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_PKG_VERSION": "0.8.50",
         "CARGO_BIN_NAME": "google_auth_authorizer",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
@@ -451,7 +451,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_PKG_VERSION": "0.8.50",
         "CARGO_BIN_NAME": "mcp_oauth_account_use",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
@@ -510,7 +510,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_PKG_VERSION": "0.8.50",
         "CARGO_BIN_NAME": "mcp_oauth_owner",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
@@ -569,7 +569,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_PKG_VERSION": "0.8.50",
         "CARGO_BIN_NAME": "oauth_flow",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
@@ -628,7 +628,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_PKG_VERSION": "0.8.50",
         "CARGO_BIN_NAME": "refresh_coordinator_crossproc",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
@@ -689,7 +689,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_PKG_VERSION": "0.8.50",
         "CARGO_BIN_NAME": "refresh_coordinator_inproc",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
@@ -748,7 +748,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_PKG_VERSION": "0.8.50",
         "CARGO_BIN_NAME": "token_lifecycle_clear",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
@@ -807,7 +807,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_PKG_VERSION": "0.8.50",
         "CARGO_BIN_NAME": "token_store_contract",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },

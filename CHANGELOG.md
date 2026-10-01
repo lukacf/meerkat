@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.50] - 2026-10-01
+
 ### Breaking
 
 - `meerkat::session_runtime::llm_reconfigure::SessionRuntimeLlmReconfigureService`
@@ -16446,7 +16448,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.49...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.50...HEAD
+[0.8.50]: https://github.com/lukacf/meerkat/compare/v0.8.49...v0.8.50
 [0.8.49]: https://github.com/lukacf/meerkat/compare/v0.8.48...v0.8.49
 [0.8.48]: https://github.com/lukacf/meerkat/compare/v0.8.47...v0.8.48
 [0.8.47]: https://github.com/lukacf/meerkat/compare/v0.8.46...v0.8.47

@@ -260,12 +260,45 @@ fn witness_exit_zero_without_completion_fails_closed() {
 #[cfg(feature = "machine-authority")]
 #[test]
 fn vacuous_witness_fails_even_when_tlc_reports_activity() {
-    let witness = canonical_witness("schedule_bundle", "pause_resume_without_revision");
+    // The canonical catalog no longer carries vacuous witnesses (#1362
+    // scripted or removed every one), so build one: a real witness with its
+    // script and every expectation cleared, exactly the old
+    // `witness(name, &[])` placeholder shape.
+    let mut witness = canonical_witness("schedule_bundle", "pause_resume_without_revision");
+    witness.preload_inputs.clear();
+    witness.expected_routes.clear();
+    witness.expected_scheduler_rules.clear();
+    witness.expected_states.clear();
+    witness.expected_transitions.clear();
+    witness.expected_transition_order.clear();
     assert!(witness_declares_no_conditions(&witness));
     let coverage = parse_tlc_coverage(&witness_coverage_output(witness.name.as_str(), Some("1:1")));
     let err = ensure_witness_completed("schedule_bundle", &witness, &coverage)
         .expect_err("a witness that declares nothing must fail");
     assert!(err.to_string().contains("vacuous"), "{err:#}");
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn canonical_composition_witnesses_are_not_vacuous() {
+    // A witness with no script and no expectations "passes" TLC while proving
+    // nothing; the harness fails it. Keep the catalog free of them so a
+    // placeholder cannot reappear unnoticed in a lane that skips TLC.
+    let vacuous = meerkat_machine_schema::canonical_composition_schemas()
+        .into_iter()
+        .flat_map(|schema| {
+            let name = schema.name.to_string();
+            schema
+                .witnesses
+                .into_iter()
+                .filter(witness_declares_no_conditions)
+                .map(move |witness| format!("{name}/{}", witness.name))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        vacuous.is_empty(),
+        "vacuous canonical witnesses: {vacuous:?}"
+    );
 }
 
 #[cfg(feature = "machine-authority")]

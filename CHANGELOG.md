@@ -72,6 +72,19 @@ them.
   (discard the actor, release its exact registration) and re-attempts. It
   still waits on in-flight claims. The competitor's old bindings and
   registration witness are refused typed afterwards.
+### Changed
+
+- Debug worker-stack headroom (#1446): the unregister teardown saga and the
+  session registration chain no longer reserve every section's temporaries
+  in one poll frame. Their numbered phases and sections now run in boxed
+  async blocks, and the registration path's large child futures are built in
+  their own frames, with bodies unchanged. Measured on the 2 MiB stack canary
+  (debug), at the deepest machine apply:
+  - the teardown chain went from 1,487,592 B to 597,784 B (the saga's own
+    poll frame from 787,560 B to 58,584 B);
+  - the registration chain went from 1,490,216 B to 697,224 B.
+
+  The canary now also passes at 1536 KiB and 1280 KiB. No behaviour change.
 
 ## [0.8.50] - 2026-10-01
 

@@ -5218,6 +5218,26 @@ export interface LiveStatusResult {
   status: WireLiveAdapterStatus;
 }
 
+export interface LiveMediaHealthRequestedParams {
+  channel_id: string;
+  output_id: string;
+}
+
+export interface LiveMediaHealthParams {
+  audible_frames: number;
+  channel_id: string;
+  decoded_frames: number;
+  max_rms: number;
+  output_id: string;
+}
+
+export type LiveMediaHealthVerdict = "audible" | "media_fault";
+
+export interface LiveMediaHealthResult {
+  reopen_recommended?: boolean;
+  verdict: LiveMediaHealthVerdict;
+}
+
 export interface LiveSendInputParams {
   channel_id: string;
   chunk: LiveInputChunkWire;
@@ -5429,6 +5449,8 @@ export interface WireLiveDegradationReasonUnknown {
 
 export type WireLiveDegradationReason = WireLiveDegradationReasonRateLimited | WireLiveDegradationReasonProviderThrottled | WireLiveDegradationReasonNetworkUnstable | WireLiveDegradationReasonOther | WireLiveDegradationReasonUnknown;
 
+export type WireLiveCloseReason = "media_fault";
+
 export interface WireLiveAdapterStatusIdle {
   status: "idle";
 }
@@ -5451,6 +5473,8 @@ export interface WireLiveAdapterStatusClosing {
 }
 
 export interface WireLiveAdapterStatusClosed {
+  reason?: WireLiveCloseReason | null;
+  reopen_recommended?: boolean;
   status: "closed";
 }
 

@@ -1240,6 +1240,19 @@ pub fn rpc_notification_catalog(
         ]);
     }
 
+    if options.runtime_available && options.live_enabled && options.live_webrtc_enabled {
+        notifications.extend([
+            RpcNotificationDescriptor::basic(
+                "live/assistant_output_available",
+                "Opaque playback handle for one admitted assistant output (measured playback)",
+            ),
+            RpcNotificationDescriptor::basic(
+                "live/media_health_requested",
+                "Request for the client's decoded-audio counters for a channel's first assistant output",
+            ),
+        ]);
+    }
+
     notifications
 }
 

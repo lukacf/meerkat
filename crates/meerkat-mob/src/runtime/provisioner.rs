@@ -2105,6 +2105,10 @@ pub(super) enum ProvisionPrepareTestFault {
     /// Another owner occupies the session's runtime materialization claim
     /// (a `RetainedActor` registration), so the real unique prepare refuses.
     OccupiedClaim,
+    /// Another owner holds an in-flight unique materialization transaction
+    /// (a `Prepared` claim) for the session; the test releases it through the
+    /// exact rollback captured in [`IN_FLIGHT_CLAIMS_FOR_TEST`].
+    InFlightClaim,
     /// The attempt fails having recorded no settlement fact at all.
     UnrecordedFailure,
     /// The attempt leaves a claimed runtime registration behind (residue)
@@ -2115,6 +2119,29 @@ pub(super) enum ProvisionPrepareTestFault {
 #[cfg(all(test, feature = "runtime-adapter"))]
 static PROVISION_PREPARE_TEST_FAULTS: std::sync::LazyLock<
     StdMutex<HashMap<SessionId, ProvisionPrepareTestFault>>,
+> = std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// #1251 fault seam: the competing owner's in-flight unique materialization
+/// transaction captured when `InFlightClaim` fires.
+#[cfg(all(test, feature = "runtime-adapter"))]
+pub(super) static IN_FLIGHT_CLAIMS_FOR_TEST: std::sync::LazyLock<
+    StdMutex<HashMap<SessionId, meerkat_runtime::PreparedSessionMaterialization>>,
+> = std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// #1251 fault seam: the competing owner's exact handles (its cloneable
+/// bindings and registration witness) captured when `OccupiedClaim` fires, so
+/// a test can drive that owner after the member reclaimed its claim.
+#[cfg(all(test, feature = "runtime-adapter"))]
+pub(super) static OCCUPIED_CLAIM_COMPETITORS_FOR_TEST: std::sync::LazyLock<
+    StdMutex<
+        HashMap<
+            SessionId,
+            (
+                meerkat_core::SessionRuntimeBindings,
+                Option<meerkat_runtime::RuntimeSessionRegistrationWitness>,
+            ),
+        >,
+    >,
 > = std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 #[cfg(all(test, feature = "runtime-adapter"))]
@@ -2155,6 +2182,17 @@ async fn apply_provision_prepare_test_fault(
                 "test-forced provisioning failure for '{session_id}' after registration residue"
             )))
         }
+        Some(ProvisionPrepareTestFault::InFlightClaim) => {
+            let prepared = adapter
+                .prepare_session_materialization(session_id.clone())
+                .await
+                .map_err(|error| MobError::Internal(error.to_string()))?;
+            IN_FLIGHT_CLAIMS_FOR_TEST
+                .lock()
+                .expect("in-flight claim slot")
+                .insert(session_id.clone(), prepared);
+            Ok(())
+        }
         Some(ProvisionPrepareTestFault::OccupiedClaim) => {
             let bindings = adapter
                 .prepare_bindings(session_id.clone())
@@ -2164,6 +2202,13 @@ async fn apply_provision_prepare_test_fault(
                 .map_err(|error| MobError::Internal(error.to_string()))?
                 .commit()
                 .map_err(|error| MobError::Internal(error.to_string()))?;
+            let registration = adapter
+                .session_registration_witness_for_bindings(&bindings)
+                .await;
+            OCCUPIED_CLAIM_COMPETITORS_FOR_TEST
+                .lock()
+                .expect("occupied claim competitor slot")
+                .insert(session_id.clone(), (bindings, registration));
             Ok(())
         }
     }

@@ -44,9 +44,6 @@ impl McpTransportKind {
 }
 
 /// Stdio transport configuration
-///
-/// `Debug` keeps the command and env names but redacts argument and env
-/// values, which commonly carry tokens.
 #[derive(Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct McpStdioConfig {
@@ -61,9 +58,6 @@ pub struct McpStdioConfig {
 }
 
 /// HTTP transport configuration (streamable HTTP or legacy SSE)
-///
-/// `Debug` keeps header names but redacts header values, and redacts URL
-/// userinfo, query and fragment, which commonly carry credentials.
 #[derive(Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct McpHttpConfig {
@@ -77,6 +71,9 @@ pub struct McpHttpConfig {
     pub transport: Option<McpHttpTransport>,
 }
 
+/// Keeps the command and env names but redacts argument and env values,
+/// which commonly carry tokens. (Kept off the type's docs, which become the
+/// wire schema description.)
 impl std::fmt::Debug for McpStdioConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpStdioConfig")
@@ -87,6 +84,8 @@ impl std::fmt::Debug for McpStdioConfig {
     }
 }
 
+/// Keeps header names but redacts header values, and redacts URL userinfo,
+/// query and fragment, which commonly carry credentials.
 impl std::fmt::Debug for McpHttpConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpHttpConfig")

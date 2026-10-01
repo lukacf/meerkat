@@ -667,8 +667,7 @@ impl From<&str> for ExternalResolverId {
     }
 }
 
-/// Where credentials come from. `Debug` redacts the inline secret and the
-/// command's argument and env values.
+/// Where credentials come from.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -722,6 +721,7 @@ pub enum CredentialSourceSpec {
     },
 }
 
+/// Redacts the inline secret and the command's argument and env values.
 impl std::fmt::Debug for CredentialSourceSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use crate::redact::{REDACTED, RedactedList, RedactedValues};

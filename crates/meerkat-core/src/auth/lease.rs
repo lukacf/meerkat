@@ -72,8 +72,7 @@ impl std::fmt::Debug for ResolvedAuthKind {
 /// Surface-safe projection of the resolved credential state. Returned by
 /// external resolver handles (WASM, desktop bridges) where shipping a full
 /// trait object is not practical. Serde-roundtrippable so WASM/RPC bridges
-/// can cross the process boundary. `Debug` redacts the secret and header
-/// values.
+/// can cross the process boundary.
 #[derive(Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -108,6 +107,7 @@ pub enum ResolvedAuthEnvelope {
     },
 }
 
+/// Redacts the secret and header values.
 impl std::fmt::Debug for ResolvedAuthEnvelope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

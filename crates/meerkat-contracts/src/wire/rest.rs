@@ -269,8 +269,6 @@ pub enum RestPatchConfigRequest {
 }
 
 /// `POST /auth/profiles` — store binding-scoped credentials.
-///
-/// `Debug` redacts the secret.
 #[derive(Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RestAuthProfileCreateRequest {
@@ -283,6 +281,7 @@ pub struct RestAuthProfileCreateRequest {
     pub secret: String,
 }
 
+/// Redacts the secret.
 impl std::fmt::Debug for RestAuthProfileCreateRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RestAuthProfileCreateRequest")

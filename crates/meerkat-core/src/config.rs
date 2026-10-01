@@ -2661,9 +2661,6 @@ impl std::fmt::Display for HookRuntimeKind {
 }
 
 /// Typed payload for a [`HookRuntimeKind::Command`] adapter.
-///
-/// `Debug` keeps the command and env names but redacts argument and env
-/// values.
 #[derive(Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CommandRuntimeConfig {
     pub command: String,
@@ -2678,9 +2675,6 @@ fn default_http_method() -> String {
 }
 
 /// Typed payload for a [`HookRuntimeKind::Http`] adapter.
-///
-/// `Debug` keeps the method, header names and URL location but redacts header
-/// values and URL userinfo, query and fragment.
 #[derive(Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct HttpRuntimeConfig {
     pub url: String,
@@ -2690,6 +2684,7 @@ pub struct HttpRuntimeConfig {
     pub headers: HashMap<String, String>,
 }
 
+/// Keeps the command and env names but redacts argument and env values.
 impl std::fmt::Debug for CommandRuntimeConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CommandRuntimeConfig")
@@ -2700,6 +2695,8 @@ impl std::fmt::Debug for CommandRuntimeConfig {
     }
 }
 
+/// Keeps the method, header names and URL location but redacts header values
+/// and URL userinfo, query and fragment.
 impl std::fmt::Debug for HttpRuntimeConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpRuntimeConfig")

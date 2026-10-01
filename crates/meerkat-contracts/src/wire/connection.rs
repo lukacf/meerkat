@@ -131,7 +131,7 @@ pub struct BindingIdParams {
     pub profile_id: Option<String>,
 }
 
-/// Request payload for `auth/profile/create`. `Debug` redacts the secret.
+/// Request payload for `auth/profile/create`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CreateProfileParams {
@@ -143,6 +143,7 @@ pub struct CreateProfileParams {
     pub secret: String,
 }
 
+/// Redacts the secret.
 impl std::fmt::Debug for CreateProfileParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CreateProfileParams")
@@ -204,8 +205,7 @@ pub struct DeviceCompleteParams {
     pub profile_id: Option<String>,
 }
 
-/// Request payload for `auth/login/provision_api_key`. `Debug` redacts the
-/// access token.
+/// Request payload for `auth/login/provision_api_key`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProvisionApiKeyParams {
@@ -219,6 +219,7 @@ pub struct ProvisionApiKeyParams {
     pub profile_id: Option<String>,
 }
 
+/// Redacts the access token.
 impl std::fmt::Debug for ProvisionApiKeyParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProvisionApiKeyParams")

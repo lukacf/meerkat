@@ -4032,6 +4032,18 @@ async fn delegated_request(
     barge_in: Option<PlayAt>,
     seen_executor_turns: &mut std::collections::BTreeSet<String>,
 ) -> Result<DelegatedRequest, Box<dyn std::error::Error>> {
+    // An operation that exists before this request is spoken is never this
+    // request's: a native exchange the model delegated (its delegation is
+    // counted against that exchange's window) may finish, or release its
+    // result, inside this request's window. Only operations created after
+    // this point can be joined to this request's own delegation.
+    let runtime = live.shared()?.0.runtime.clone();
+    for snapshot in runtime
+        .live_delegation_recovery_snapshots(&live.session_id)
+        .await?
+    {
+        seen_executor_turns.insert(snapshot.operation_id().to_string());
+    }
     let events_before = live.peer.events().await?.len();
     let schedule_id = live.peer.play_at(&spec).await?;
     let fixture_start_ms = live

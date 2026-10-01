@@ -408,6 +408,16 @@ them.
   and its past-deadline read accepts both documented outcomes
   (`NotAdmittedByDeadline`, or `NotObservedByDeadline` when the one read
   cannot finish within the 100 ms floor).
+- `meerkat-runtime`'s `recovery_contract`
+  `shared_sqlite_concurrent_cold_resume_and_unregister_settle` no longer
+  fails under load with `UnregisterInProgress`. Its fixture seeding called a
+  plain `unregister_session`, which returns that typed in-progress result
+  once its 2 s caller grace elapses while the coordinator-owned saga keeps
+  running, and the store is reopened right after. Seeding now joins the
+  exact registration's teardown through
+  `unregister_session_registration_until_terminal_if_current`. The same
+  file's stopped-projection seeding joins its stop through
+  `stop_runtime_executor_until_terminal_if_current`.
 - Three `meerkat-mob` runtime tests no longer fail on a loaded host:
   - `test_retire_fanout_notifies_150_peers_with_bounded_parallelism` joins
     its retirement saga to its terminal reply instead of failing on the typed

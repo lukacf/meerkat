@@ -42,7 +42,9 @@ artifacts. The E2E plan has five stories and 37 named checkpoints, budgeted at
 17 live calls per attempt or 34 with one outer retry. These are not executed
 coverage. Root reports that final packet
 `b17de27b1043db434d4ef9c1b6df40fd07291637a9e9b94f8ab032a00246ceaa` was accepted
-by GCP, HomeCore and OB3 at 16:14 UTC; Toolkit's final review remains pending.
+by GCP, HomeCore and OB3 at 16:14 UTC. Toolkit verified the final
+two-paragraph delta, with closure relayed by GCP. All four reviewers have
+closed the UX r5 and E2E r7 designs; this is not execution coverage.
 
 [Draft MobKit PR 520](https://github.com/lukacf/meerkat-mobkit/pull/520) contains
 the first console slice using existing contracts, not new native producers.

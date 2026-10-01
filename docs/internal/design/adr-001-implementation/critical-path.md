@@ -73,10 +73,11 @@ claiming a self-contained checks-and-audit slice.
 
 The final review packet is
 `b17de27b1043db434d4ef9c1b6df40fd07291637a9e9b94f8ab032a00246ceaa`.
-Root reports GCP, HomeCore and OB3 acceptance on the bus at 16:14 UTC; Toolkit's
-final packet review remains pending. Design acceptance does not establish
-implementation coverage. The separate provider diagnostics included in the
-packet are not Turbo S scenario passes.
+Root reports GCP, HomeCore and OB3 acceptance on the bus at 16:14 UTC.
+Toolkit verified the final two-paragraph delta, with closure relayed by GCP;
+all four reviewers have closed the UX r5 and E2E r7 designs. Design acceptance
+does not establish implementation coverage. The separate provider diagnostics
+included in the packet are not Turbo S scenario passes.
 
 [MobKit PR 520](https://github.com/lukacf/meerkat-mobkit/pull/520) is a draft of
 the first console slice over existing contracts. It adds no native authority

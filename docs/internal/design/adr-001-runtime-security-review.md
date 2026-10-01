@@ -220,7 +220,8 @@ cleared the same substantive text before the mechanical scope-column addition.
 The final pair consists of the [frozen r6 ADR](reviews/adr-001/candidate-r6.md)
 and [frozen r6 profiles](reviews/adr-001/candidate-r6-profiles.md), identified by
 this [manifest](reviews/adr-001/candidate-r6-manifest.json). The complete
-[r5-to-r6 patch](reviews/adr-001/candidate-r5-to-r6.patch) was supplied to all
+[r5-to-r6 patch](reviews/adr-001/candidate-r5-to-r6.patch.b64), now stored in
+[verified base64 transport](reviews/adr-001/README.md), was supplied to all
 four bus reviewers with the final hashes. No earlier verdict is silently
 carried forward to different bytes.
 

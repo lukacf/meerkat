@@ -4912,20 +4912,23 @@ enum — see `wire_live_adapter_status_byte_compatible_with_core`)."""
 @dataclass
 class LiveMediaHealthRequestedParams:
     """Runtime request notification `live/media_health_requested`: at the typed
-end of a channel's first assistant output, the runtime asks the client for
-its raw decoded-audio counters for exactly that output (from its
-`live/assistant_output_available` notification to now). The client answers
-with `live/media_health`. A client that never answers leaves the output
-unjudged."""
+end of a channel's first assistant output (its first segment settled with
+a non-empty transcript), the runtime asks the client for its raw
+decoded-audio counters from the channel's media start to now (nothing was
+audible before the first output). The `output_id` is only the report key;
+that output is already settled and is not a playback handle. The client
+answers with `live/media_health`. A client that never answers leaves the
+output unjudged."""
     channel_id: str
     output_id: str
 
 
 @dataclass
 class LiveMediaHealthParams:
-    """`live/media_health` request: the client's raw decoded-audio counters for
-the requested output. The runtime judges them; the client never sends a
-verdict."""
+    """`live/media_health` request: the client's raw decoded-audio counters from
+the channel's media start to now, for the output a
+`live/media_health_requested` notification named. The runtime judges them;
+the client never sends a verdict."""
     audible_frames: int
     channel_id: str
     decoded_frames: int

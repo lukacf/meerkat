@@ -504,25 +504,40 @@ fn bounded_late_recent_items(recent: &[Message]) -> Vec<InitialItem> {
 /// hold, then any replies left at the front of the tail so the verbatim part
 /// starts at a user row (no answer seeded without its question, as on the
 /// Late path). The truncation is typed and reported by the caller.
+///
+/// The third value counts the items dropped by a provider limit (the item
+/// count or the token budget) rather than by the deliberate verbatim cap and
+/// user-row start, so only a genuine provider-limit truncation is reported
+/// as a warning.
 fn budget_startup_input(
     keep: InitialItem,
     recent: &[InitialItem],
-) -> (Vec<InitialItem>, LiveStartupInputTruncation) {
+) -> (Vec<InitialItem>, LiveStartupInputTruncation, usize) {
     let mut truncation = LiveStartupInputTruncation::default();
+    let mut provider_limited = 0;
     let mut items = Vec::with_capacity(recent.len() + 1);
     let mut tokens = estimated_startup_tokens(&keep);
     // Newest first so the oldest are the ones left out. The summary covers
-    // every recent item, so the verbatim bound only trims repetition.
+    // every recent item, so the verbatim bound only trims repetition. The
+    // walk stops at the first item that does not fit: the verbatim tail is
+    // always contiguous, never newer turns with a gap where a large one was.
     let mut kept_recent = Vec::new();
+    let mut stopped = false;
     for item in recent.iter().rev() {
         let item_tokens = estimated_startup_tokens(item);
-        if kept_recent.len() < LIVE_STARTUP_VERBATIM_ITEMS_MAX
+        let under_cap = kept_recent.len() < LIVE_STARTUP_VERBATIM_ITEMS_MAX;
+        if !stopped
+            && under_cap
             && kept_recent.len() + 1 < LIVE_STARTUP_INPUT_MAX_ITEMS
             && tokens + item_tokens <= LIVE_STARTUP_INPUT_TOKEN_BUDGET
         {
             tokens += item_tokens;
             kept_recent.push(item.clone());
         } else {
+            stopped = true;
+            if under_cap {
+                provider_limited += 1;
+            }
             truncation.dropped_items += 1;
             truncation.dropped_bytes += item
                 .content
@@ -546,7 +561,7 @@ fn budget_startup_input(
     }
     items.push(keep);
     items.extend(kept_recent);
-    (items, truncation)
+    (items, truncation, provider_limited)
 }
 
 impl PublicLiveContextSeed {
@@ -595,14 +610,24 @@ impl PublicLiveContextSeed {
                     items.extend(recent.iter().cloned());
                     return (items, LiveStartupInputTruncation::default());
                 }
-                let (items, truncation) = budget_startup_input(developer, recent);
-                if truncation != LiveStartupInputTruncation::default() {
+                let (items, truncation, provider_limited) = budget_startup_input(developer, recent);
+                if provider_limited > 0 {
                     tracing::warn!(
+                        provider_limited_items = provider_limited,
                         dropped_items = truncation.dropped_items,
                         dropped_bytes = truncation.dropped_bytes,
                         max_items = LIVE_STARTUP_INPUT_MAX_ITEMS,
                         token_budget = LIVE_STARTUP_INPUT_TOKEN_BUDGET,
-                        "public Live startup input dropped the oldest recent turns to fit the provider limits"
+                        "public Live startup input dropped recent turns to fit the provider limits; the summary covers them"
+                    );
+                } else if truncation != LiveStartupInputTruncation::default() {
+                    // The deliberate verbatim cap (and its user-row start), not
+                    // an incident: the fresh summary covers every dropped row.
+                    tracing::debug!(
+                        dropped_items = truncation.dropped_items,
+                        dropped_bytes = truncation.dropped_bytes,
+                        verbatim_items_max = LIVE_STARTUP_VERBATIM_ITEMS_MAX,
+                        "public Live startup seed applied the verbatim item cap; the fresh summary covers the dropped rows"
                     );
                 }
                 (items, truncation)
@@ -3085,6 +3110,98 @@ mod tests {
             fresh.context_seed.initial_input().unwrap().len()
                 <= 1 + LIVE_STARTUP_VERBATIM_ITEMS_MAX
         );
+    }
+
+    /// Only a provider-limit drop counts as one: the deliberate verbatim cap
+    /// (and its user-row start) is covered by the fresh summary, so it is
+    /// logged at debug, not warned as an incident.
+    #[test]
+    fn startup_budget_separates_the_verbatim_cap_from_provider_limit_drops() {
+        use meerkat_core::types::UserMessage;
+        let items = |messages: Vec<Message>| -> Vec<InitialItem> {
+            messages.iter().filter_map(history_item).collect()
+        };
+        let summary = summary_item("summary", SummaryCoverage::Opening);
+        // 130 tiny turns: 126 dropped, all by the cap.
+        let tiny = items(
+            (0..130)
+                .map(|index| Message::User(UserMessage::text(format!("t{index}"))))
+                .collect(),
+        );
+        let (kept, truncation, provider_limited) = budget_startup_input(summary.clone(), &tiny);
+        assert_eq!(kept.len(), 1 + LIVE_STARTUP_VERBATIM_ITEMS_MAX);
+        assert_eq!(
+            truncation.dropped_items,
+            130 - LIVE_STARTUP_VERBATIM_ITEMS_MAX
+        );
+        assert_eq!(provider_limited, 0, "the cap is not a provider-limit drop");
+        // Three 9,000-byte turns: the token budget drops the oldest while the
+        // cap still has room, which is a genuine provider-limit truncation.
+        let large = items(
+            (1..=3)
+                .map(|index| {
+                    Message::User(UserMessage::text(format!(
+                        "turn {index} {}",
+                        "x".repeat(9_000)
+                    )))
+                })
+                .collect(),
+        );
+        let (kept, truncation, provider_limited) = budget_startup_input(summary, &large);
+        assert_eq!(kept.len(), 3);
+        assert_eq!(truncation.dropped_items, 1);
+        assert_eq!(provider_limited, 1);
+    }
+
+    /// The budget walk stops at the first item that does not fit, so a large
+    /// turn never leaves a gap with older turns seeded around it.
+    #[test]
+    fn startup_budget_keeps_a_contiguous_verbatim_tail() {
+        use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, StopReason, UserMessage};
+        let assistant = |text: String| {
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text { text, meta: None }],
+                StopReason::EndTurn,
+            ))
+        };
+        let user = |text: &str| Message::User(UserMessage::text(text));
+        let big = "x".repeat(30_000);
+        let seed = |rows: &[Message]| {
+            let config = PublicLiveOpenConfig::new("v=0", "marin")
+                .unwrap()
+                .with_history(rows)
+                .with_context_summary("summary");
+            let items = config.context_seed.initial_input().unwrap();
+            assert_eq!(items[0].role, InitialRole::Developer);
+            let texts: Vec<String> = items[1..]
+                .iter()
+                .map(|item| item.content[0].text.chars().take(8).collect())
+                .collect();
+            (texts, config.startup_input_truncation())
+        };
+        // u0 a0(large) u1 a1: a1 and u1 fit, a0 does not, so u0 is not seeded
+        // either, although it would fit on its own.
+        let rows = vec![
+            user("u0"),
+            assistant(big.clone()),
+            user("u1"),
+            assistant("a1".to_string()),
+        ];
+        let (texts, truncation) = seed(&rows);
+        assert_eq!(texts, ["u1", "a1"]);
+        assert_eq!(truncation.dropped_items, 2, "a0 and u0 are reported");
+        assert!(truncation.dropped_bytes >= big.len() + "u0".len());
+        // A large newest turn leaves no verbatim tail: the summary covers it
+        // and everything before it.
+        let rows = vec![
+            user("u0"),
+            assistant("a0".to_string()),
+            user("u1"),
+            assistant(big),
+        ];
+        let (texts, truncation) = seed(&rows);
+        assert!(texts.is_empty(), "{texts:?}");
+        assert_eq!(truncation.dropped_items, 4);
     }
 
     /// A fresh-summary open trims its verbatim tail the way the Late path

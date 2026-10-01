@@ -384,6 +384,20 @@ them.
   newest four items is dropped (and counted in `LiveStartupInputTruncation`)
   instead of being seeded without its question. The fresh summary covers the
   whole history, so nothing is lost.
+- A fresh-summary GPT Live open no longer logs a warning when it applies the
+  verbatim startup cap. Since the cap landed, "dropped the oldest recent turns
+  to fit the provider limits" fired on every open with more than four
+  verbatim items, although that trim is deliberate and the fresh summary
+  covers the dropped rows. The cap is now logged at debug ("applied the
+  verbatim item cap; the fresh summary covers the dropped rows"); the warning
+  remains only when the provider token budget or item limit drops a row.
+- A fresh-summary GPT Live startup seed keeps a contiguous verbatim tail. The
+  token-budget walk from newest to oldest skipped a turn too large to fit and
+  kept scanning, so a seed could hold newer and older turns with the large
+  one missing between them, a distorted recent history. The walk now stops at
+  the first item that does not fit (the summary covers it and everything
+  before it), and the dropped items are counted in
+  `LiveStartupInputTruncation`.
 
 - The Cargo test lanes provide the MCP form-elicitation fixture again. Since
   #1338, `meerkat-mcp`'s `form_elicitation` tests (which require

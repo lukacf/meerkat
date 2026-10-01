@@ -13,6 +13,33 @@ default requirements. External witnesses, authenticated time, external attempt
 anchors and human-only recovery remain preserved high-assurance work. They are
 not prerequisites for this default. Earlier acceptances retain their exact scope.
 
+## Current direction: r8
+
+Luka directly rejected semantic provenance as a mechanical confidentiality
+promise: once information enters an LLM context, metadata cannot prevent its
+meaning from appearing in later output. R7 removes semantic envelopes, transitive
+dependency propagation, whole-context confinement, memory/compaction taint,
+legacy adoption, `PolicyWithheld` projection, per-chunk gating and room-audience
+binding from the default. The amendment includes an explicit supersession table.
+
+Mechanical tool/source/account access, peering, qualified work identity, narrowing
+grants, current local checks, normal model feedback and full coverage remain.
+Optional gates use mandatory permission topology with honest model judgment.
+Audit describes observed access/actions and actual durability, not complete
+semantic provenance. HomeCore supplied a code-based account of its current
+instruction-only gate and partial callback enforcement; it is not cited as an
+already mechanically enforced reference implementation.
+
+R7 received design acceptance from HomeCore, OB3 and Toolkit. GCP accepted with
+two conditions: declare the complete egress inventory for mandatory gates and
+close affected open subscriptions on owner invalidation. R8 adds both, explicit
+actor/requester/represented-subject/account/delegation separation, all delegation
+forms, exact-action expiring single-use human approval and scoped connector
+routing mandates. Two independent internal reviewers accepted the exact r8
+candidate and bounded additions. GCP, HomeCore, OB3 and Toolkit each accepted
+the exact frozen r8 candidate and patch. Implementation acceptance remains open. The user has
+no pending terminality or semantic-provenance question.
+
 ## Candidate and review history
 
 | Candidate | Exact SHA-256 | Result |
@@ -20,16 +47,35 @@ not prerequisites for this default. Earlier acceptances retain their exact scope
 | r1 | `bbf338e21790cf4f300aabfe44954662ad32706ecb5f77fe43397d11ecd44527` | Internal adversarial findings repaired in r2. |
 | r2 | `589ede7935310f466492da380b2f666ba42ee4071fa5b9551999835047b26c9d` | Three internal reviewers GREEN. Four bus reviewers returned the findings below. |
 | r3 | `c765254055ed49bc83c0a4db6b9faf245d3b74fd89e684a72457fe5f55403b18` | Three internal reviewers GREEN. OB3 and Homecore closed their findings; GCP closed F2-F8 but required the premature scheduler choice to become pending and the planned filtering/lease clauses to appear in the text. |
-| r4 | `ff5fc7bc7f87ee3ee715b72dde5efee0fbb5b1e43c4e9d8f3a2c5cc70f7fe31c` | Independent information/runtime delta reviews GREEN. All four bus reviewers accepted the common contract and closed their findings. Irreducible-request disposition remains expressly pending Luka, so complete final design acceptance is not claimed. |
+| r4 | `ff5fc7bc7f87ee3ee715b72dde5efee0fbb5b1e43c4e9d8f3a2c5cc70f7fe31c` | Independent information/runtime delta reviews GREEN. All four bus reviewers accepted the common contract and closed their findings. The irreducible-request question was pending at that checkpoint and was resolved by Luka in r5. |
+| r5 | `c923089fe65c2eb1af90f04151b2aa83c47a08e036bcf9a2190a52625efa30e8` | Applies Luka's direct clarification: refused actions return normal model feedback. Review found an undefined last-controller-route case, resolved in r6; no terminal request or parked-run mechanism was selected. |
+| r6 | `5190b3dc8c4393ae38a83e94df7ef5f0836643ea7786e487cf75354705d737d6` | All four bus reviewers accepted the exact design. The later direct semantic-provenance correction supersedes its conflicting requirements. |
+| r7 | `c1a69f24c0cc7102953199db9f34b87cdc2af20b8179c125529ae4dc78075fdf` | Three bus reviewers accepted; GCP required closed egress inventory and open-subscription invalidation. Both are incorporated in r8. |
+| r8 | `5ba0c71ab4de8950bf2e596b4f3d6f87babbc31d2522b79a5da7a6810dd0bd8b` | Two internal reviewers GREEN. GCP, HomeCore, OB3 and Toolkit ACCEPT the exact bounded design delta; implementation and performance remain open. |
 
 Frozen candidates, exact patches, manifests and copied reviews live under
-`/Users/luka/.codex/adr-001-evidence/local-governed-default-r{1,2,3,4}`.
+`/Users/luka/.codex/adr-001-evidence/local-governed-default-r{1,2,3,4,5,6,7,8}`.
 The r3 candidate manifest is
 `5d2c4e63470d179070afcc86dfeb58d0cfe80b9cc1c32249c4807d525e7a223a`;
 its internal-review manifest is
 `3c8e2cbeb659c4390ff9184a2f9eed3269efb71624e4761c885074bb3c9a30e5`.
 Root read all reports and verified their candidate hashes. Frozen bytes remain
 unchanged when a successor candidate is prepared.
+
+R8 manifest: `ff0da549f49a4d43c1394bb78102f43a05acbf80c3e60e72c3ce00af0a20df6a`.
+R7-to-r8 patch: `bc2ebf0e982e4ad0beaf6ee58fc5ab16a93281dbcb08f8c180b61e59c8f8d89a`.
+Root read both full initial r8 reports and both bounded final-condition reports.
+The four bus envelopes and available full reports are copied under r8
+`bus-reviews/manifest.json`, SHA-256
+`f3481b0e694c6efb9ff1863a62f38e3bd05602922b724b0d36ab2ec1357598b2`.
+Root read each envelope and both full external reports. These acceptances do not
+close the Toolkit coverage obligations or establish source acceptance.
+
+## Historical reviews, superseded where r8 conflicts
+
+The following sections record what reviewers required at each earlier checkpoint.
+They are historical reasoning, not current authorization to rebuild the removed
+semantic-provenance machinery.
 
 ## Four bus reviewers on r2
 
@@ -115,28 +161,59 @@ verification; no source-only plan establishes a working governed path.
 
 ## Implementation checkpoint
 
+### R5 user clarification
+
+Luka rejected both alternatives in the earlier pending question. A denied action
+must feed a typed result back to the model, as a tool call does, so the agent can
+adapt. R5 records that decision. GCP proposed the existing `SystemNotice` path
+with a fixed `PolicyWithheld` notice for excluded context, including the current
+input, and the existing fallback selector for an eligible alternate processor.
+Zero runnable feedback capability is checked at setup; ordinary mid-turn denial
+cannot be disguised as configuration failure. The exact candidate requires tests
+for each case and for later administrative capability removal.
+
+The r5 candidate manifest is
+`26c64a9d6ef58c838e5dfb248d906a81907ecfcedf1d13713054c73f5e8536a5`;
+its r4-to-r5 patch is
+`48783c6736035db11e21359e0a4ee41cac632b8d20834a5b93a65754f0059da8`.
+The four bus reviewers received that exact candidate and patch. Acceptance of
+the user's direction is distinct from closure of the exact r5 wording.
+
+### Source integration
+
 The shared integration worktree now uses `codex/local-governed-default`, based
-on main `4040e8ff6ceb3e7f7ed494de52d6fa2ea9044d71`. Its first three commits
-selectively carry the already reviewed qualified-principal contracts, ending at
-`2ae3237f7bf4eb84915eba8e97f363691a43f244`. The old 26-commit stack remains
+on main `32edb5ebdb4aeb633ed5c47cef0a3d167f79d3e8`. The rebase completed
+without conflicts; its qualified-principal and simplified-source checkpoint is
+`fe929df4981ed0c4a444ccb9dc13ab580e7a4afc`. The old 26-commit stack remains
 preserved as `codex/native-governed-admission-m1` at
 `69d040f7ed3c2f186662146f8ac7cecb326e64a3`; it is not imported wholesale.
 
 Source work proceeds on the local pure contracts, minimal core extension seams,
-and tool-local refusal handling. Neither irreducible-request option may be
-implemented until Luka decides. GCP's four reserved admission transitions and
-live machine declarations remain untouched pending its separate 2b merge
-handoff. These source changes have not yet been built or tested on this base.
+tool-local refusal handling. The retained-source slice and its storage-format
+changes were removed using its exact ownership-scoped inverse; the full archive
+remains at `/tmp/adr-001-retained-source-parked-r1`. The operation-feedback
+path is now selected; neither earlier terminal/parking alternative is authorized.
+GCP has now opened the native association hook and four admission transitions
+after PR 1403 merged at `32edb5ebdb4aeb633ed5c47cef0a3d167f79d3e8`.
+Live state, context-outbox and recovery declarations remain reserved. The
+integration branch now has that base. Native association, canonical grants,
+provider forwarding and independent tool-settlement diagnostics are being
+integrated. A targeted core library check passed on this base. Combined native,
+grant and provider checks are in progress; no integrated test or performance
+result is claimed by that library check.
 
 ## Validation and execution posture
 
-`make docs-check` and `git diff --check` passed for r3 and r4. The check covered 116
-public documentation pages and the associated documentation contract tests.
+`make docs-check` and `git diff --check` passed for the earlier checkpoints.
+`make docs-check` also passed for the frozen r8 candidate (116 public pages and
+54 documentation contract tests).
 This is documentation validation only. There are no authorization performance
 measurements or full-path implementation acceptance claims for this candidate.
 
-No heavy build is active or queued from this work. The former GRANT-03 build
-reservation is withdrawn; OB3's production-priority build lane is preserved.
+OB3 allocated 12:05-13:35 UTC on 2026-10-01 for root-owned compilation with
+two build jobs and four test workers in an isolated Rust lane. Benchmarks remain
+withheld until OB3 explicitly opens the quiet window. The former GRANT-03
+reservation is withdrawn; no child agent runs Cargo or generation.
 The next source composition must selectively reuse necessary canonical contracts
 and owner code, not import the parked witness stack wholesale. The complete
 implementation objective, four-reviewer implementation acceptance and green PR

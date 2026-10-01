@@ -1,367 +1,383 @@
-# ADR-001 amendment: a local governed default
+# ADR-001 amendment: local permissions and explicit disclosure limits
 
-## Status and reason
+## Status and scope
 
-Candidate r4, 2026-10-01. One irreducible-request disposition below
-is explicitly pending Luka's clarification; no new scheduler path is selected.
-Luka has approved replacing the previous first-profile requirements with a
-simpler default. The detailed contract below
-is undergoing adversarial review. It is a design decision, not an implementation
-or performance claim.
+Candidate r8, 2026-10-01. Luka has explicitly clarified the default: cheap local
+checks, normal refusal feedback to the model, full execution-mode coverage,
+mechanical tool/source and peering permissions, information-handling instructions,
+and an optional gate agent. Automatic semantic provenance tracking and
+whole-context information-flow confinement are outside this decision.
 
-This amendment supersedes the default/first-profile requirements in
-[ADR-001](adr-001-runtime-security.md),
-[governed profiles](governed-deployment-profiles.md) and the
-[implementation acceptance plan](adr-001-implementation/acceptance-plan.md)
-where they conflict. Earlier review evidence remains historical evidence for
-its exact scope. It does not establish acceptance of this amendment.
+This candidate supersedes conflicting requirements in earlier candidates,
+[ADR-001](adr-001-runtime-security.md), the [profile companion](governed-deployment-profiles.md)
+and the [acceptance plan](adr-001-implementation/acceptance-plan.md). Earlier
+frozen reviews and source remain historical evidence for their exact scope.
+This is a design candidate, not implementation or performance acceptance.
 
-The default must make fine-grained authorization routine across Meerkat,
-MobKit and Elephant without introducing a second execution system. The previous
-first profile made remote witness availability, authenticated time, special
-transport ownership and uncertain-call recovery prerequisites for ordinary
-work. Its complexity, latency and exclusions are unacceptable for the default.
+### Supersession of r4-r6
 
-## Decision and threat model
-
-Introduce `local-governed-v1` as the first governed profile. The existing
-`trusted-embedded` profile remains explicit and isolated. A governed operation
-never silently falls back to trusted-embedded after refusal or configuration
-failure. Host administration selects the profile; request bodies do not.
-
-The host process, OS, storage, clock, configured authentication issuers, resource
-adapters and provider/tool implementations are trusted. The profile protects
-against unauthorized users, agents and service callers; confused-deputy use;
-cross-principal batching; unauthorized tool actions; and disclosure to the wrong
-processor or audience. Prompts, model output and caller-supplied identity or
-resource attributes cannot grant authority. It is not a sandbox for malicious
-native plugins or a defense against compromised host administrators, restored
-host images, forged host time or malicious trusted adapters. It cannot make an
-external processor forget information already disclosed.
-
-All profiles and execution modes, including every provider, streaming, tools,
-compaction, memory, comms and live/voice, are in the delivery scope. A slim profile
-is only a smoke-test fixture, never the end state. Enforce at shared semantic
-boundaries, with typed provider/source observations where needed. A particular unknown destination,
-unsupported resource contract or unlabelled protected dependency refuses the
-particular operation. Refusing entire existing execution modes is not the
-implementation strategy. Built-in routes must satisfy this contract before
-delivery acceptance. Extensions use an explicit conservative tool/server contract
-or supply trusted metadata for finer resource and destination decisions.
-
-There are no additional network round trips or fsyncs on admission, tool,
-model or output hot paths. Existing authentication handshakes, requested tool
-or source calls and runtime storage commits remain. Policy administration,
-connection setup and asynchronous control-plane distribution are outside those
-hot paths and have separate availability and startup measurements.
-
-Deployment policy defines protected source classes and supplies explicit default
-envelopes for ordinary messages, email, sensors and connector results. Absence of
-a label is neither public access nor automatic rejection of every input. The
-configured source authority assigns a versioned, ingress/source-scoped envelope
-before use; callers cannot choose it. Defaults never erase known restrictions
-or implicitly adopt legacy data. A bounded classifier may propose only outcomes expressly authorized
-by its scoped mandate, with isolated per-item context. Broader outcomes are an
-explicit trust/release choice, not proof of classification accuracy.
-
-Existing histories and stores have an adoption path. An applicable resource
-policy authority can adopt an immutable enumerated legacy bundle under a stated
-processor, audience, retention and revocation contract that explicitly covers
-unknown internal provenance. Known source restrictions still bind; adoption
-invents neither historical requester identities nor permission to replay old
-work. Host administration installs this policy but storage custody alone does
-not confer release authority. Record the bundle/version and adoption authority;
-new bytes need their own envelope. The non-witness classification and adoption
-semantics in the profile companion remain applicable. Test adoption on real-sized
-histories; an unadopted partition must not disable unrelated members or work.
-
-## One association and one authority
-
-The existing native `InputId` row owns an immutable association: qualified
-requester, authenticated ingress actor, logical executor/target, original work
-and authentication references, grant lineage, restriction ceiling, source
-provenance and the host-selected contract. A fresh credential or restart does
-not rewrite original provenance. Authentication is performed by shared ingress
-adapters, using the existing identity contract; provider API credentials are a
-separate authentication domain.
-
-Persist the association with its existing input/work owner and ordinary
-transaction, and decisions with their native operation. Memory, schedules,
-connectors and console history retain references/envelopes in their own existing
-records; they need not all move into runtime SQLite. An in-memory work item's
-association lives and dies with that item. Restore/reseed must preserve the
-association or perform explicitly authorized fresh admission; a dashboard or
-message replay cannot impersonate the lost original. Do not add a side ledger,
-requester registry or independently mutable permission map. Exact qualified idempotency scope and exact association/content comparison
-survive replay. Generated native batching preserves order and never mixes
-qualified requesters.
-The native owner compares the actual requester, realm, logical executor, target
-and context generation, conjoins every contributor ceiling and retains each
-complete original association. Different original event/authentication references
-do not themselves forbid otherwise compatible work. Incompatible contributors
-remain separate; no union of permissions or loss of provenance is allowed.
-Delegation can only narrow the parent's effective
-permissions; it cannot substitute the tool host's service account for the
-requester. Existing canonical grant/policy owners remain authoritative. Scheduled
-and connector work can use a host-issued scoped service mandate, retained by the
-actual schedule/connector owner with its commissioning actor and bound to each
-occurrence. Each occurrence checks current authority/deadlines; credentials and
-timers confer no authority themselves. No human requester is invented or required.
-
-Evaluate current policy and the canonical restriction algebra at admission and
-turn/context preparation. Produce an immutable, private compiled decision for
-that exact work and context. It holds indexed action/resource/processor/audience
-bounds, the earliest validity deadline and a coherent current owner/version
-snapshot. Correlated policy predicates remain intact: indexes are ceilings and
-lookup aids, never a Cartesian product that invents new permitted combinations.
-It is a disposable projection of canonical owners, not a permission authority
-or a serializable bearer token. A new tool target, source, destination, provider
-fallback or changed context must be evaluated and bound before use. An earlier
-turn decision does not bless arbitrary future arguments.
-
-Each enforcement point performs a constant-time final check of that exact
-prepared decision, current local generation and deadline. Work that resolves
-new attributes or builds a changed context is counted in the authorization
-cost; moving it into preparation does not hide its overhead. Context dependency
-aggregation uses the existing preparation pass. Partition context and compaction
-before inference by compatible source/processor/reader restrictions: retain restricted segments
-separately so permitted shared context remains usable. Within each derived item,
-retain the complete union of contributing restrictions through summaries, tool
-results and memory. A summary or model label never declassifies its sources. Splitting one mixed-context
-response afterward does not establish independent provenance.
-
-Build each model request as an authorized context projection. Omit disallowed
-items and their complete transitive data/control-derived closure before
-inference, then continue with eligible context. Retained artifacts keep their
-envelopes; removing a citation does not sanitize a summary, argument or later
-message. Unknown closure excludes the whole uncertain artifact. Use a fixed
-typed withheld marker only under an explicit audience-safe contract, including
-whether existence/count may be revealed. Reset provider-held context/cache that
-contains excluded dependencies. Preserve the original input and association;
-projection cannot silently drop or reinterpret the request to manufacture an
-eligible call.
-
-The checked local generation covers every depended-on local fact: policy, grant
-and ancestor validity, identity relationships, resource classification and
-route/audience binding. Their canonical owners publish changes and invalidate
-decisions under one coherent local ordering contract. The derived invalidation
-stamp owns no policy; stale decisions cannot be retagged as current. Restart
-discards decisions under a fresh host incarnation. Other processes must share
-that ordering or advertise a bounded distribution contract, not instantaneous
-revocation. No subscriber or console cache decides local currentness. A final
-authorization check, after relevant awaits, is the local linearization point: work authorized before a concurrent revoke may already be
-in flight; later checks must see the new generation and recompute or refuse.
-Do not hold a policy lock across network or tool execution. Streaming checks at
-bounded publication units stop future delivery after local revocation is
-observed; already delivered bytes cannot be recalled.
-
-## Enforcement points and information flow
-
-| Shared boundary | Required decision and attribution |
+| Earlier requirement | Disposition in this candidate |
 | --- | --- |
-| Ingress and native admission | Authenticate the real actor, establish requester/mandate, authorize target and operation, bind immutable association and qualified replay identity. Console filtering is only a projection. |
-| Tool and source dispatch | Authorize the exact tool action, resolved resource attributes and destination. Bind requester/executor and source restrictions. Built-in, MCP and host tools share this check; visibility is not invocation permission. |
-| Model context/request construction | Authorize the complete context dependency union for the actual provider/account/processor and request semantics, including hosted tools and caches. Cover main turns, direct compaction, curator, web search, image generation, fallback and live sessions. Existing adapters supply typed facts; no replacement HTTP transport. |
-| Comms, delegation and schedules | Authorize send/spawn/execute and recipient/audience; carry the original association and narrowed mandate. A timer or agent address does not create authority. |
-| Output, stream and live publication | Carry authenticated subscriber identity through every surface, including replay and WASM raw polling. Gate each recipient and bounded text/audio/event unit against the envelope and current generation/deadline, including audio dequeue/write. Internal broadcast taps are not public authorization. |
-| Persistent memory, blobs, history, export and audit | Retain source envelopes with writes and authorize every reader/retrieval before hydration. Owner-scoped memory is not automatically readable by all requesters. IDs confer no access; diagnostics exclude raw protected fields by default. |
+| Authenticated requester/actor/executor, exact work association and narrowing grants | Keep as authority for observable operations, including peer and schedule hops. |
+| Exact tool, source, account, provider and peer checks; local invalidation | Keep at the existing operation owners. |
+| Semantic envelopes, transitive dependency propagation and whole-context confinement | Remove. They cannot establish semantic non-disclosure and are not default infrastructure. |
+| Memory restriction propagation, compaction partitions and legacy source adoption | Remove. Actual stored-resource ACLs remain with the resource owner. |
+| Source leases and trusted-adapter retained-copy contracts for semantic propagation | Remove. The source's own enforcement and stored copies' actual ACL/retention policy remain. |
+| Source-to-model projection, `PolicyWithheld` rewriting and semantic cache purging | Remove. Check the actual configured provider/model/account; use ordinary context. |
+| Per-chunk subscriber gating and physical-room audience binding | Replace with authenticated session read/subscribe admission and actual communication/tool destination checks. |
+| Gate approval as evidence of confidentiality | Replace with mechanically mandatory gate placement and explicitly fallible model judgment. |
+| Audit as complete provenance or pre-effect crash proof | Replace with observable operation records in existing commits and explicit uncertainty. |
+| External witnesses, authenticated time and human-gated security recovery | Remain parked as separately selected future assurance work. |
+| Local feedback, last controller route, full coverage and measured cost | Keep, with no semantic-information-flow acceptance test. |
 
-Ordinary MCP tools need no new per-resource protocol to function: policy may
-explicitly authorize a named tool and its actual server/account/credential scope
-as one conservative unit, with
-result envelopes inherited from inputs and the configured source contract.
-Resource-specific rules require trusted host mappings or tool descriptors; a
-missing mapping refuses that call. Argument-selected processors/destinations
-still require resolution unless expressly covered by that unit grant. A server
-using its own broad credential is
-inside that declared trust boundary, not evidence of per-resource enforcement.
-Provider-hosted tools likewise require their actual action/destination contract;
-protected retrieval must have its source envelope or trusted source enforcement
-bound before provider consumption, not merely a label on the returned result.
+## What the system guarantees
 
-Deduplicated blob bytes keep each reference's envelope; sharing content identity
-never selects the least restrictive reference. An output envelope conservatively
-inherits all contributing source restrictions.
-Explicit declassification requires current feature-specific authority and a
-trusted transformation contract. Tools or provider-native transformations may
-introduce new dependencies; apply their envelopes before publishing resulting
-content or including it in a later request. A live conversation retains these
-same facts for its evolving context; context changes invalidate its compiled
-decision before the next affected disclosure. The underlying live/turn owner
-continues to own cancellation, completion and recovery. If a provider retains
-context that is no longer eligible, use the ordinary fresh provider-context path
-with permitted segments; do not terminate the native run/session or leave live
-output permanently silent. A room/voice device uses an explicit physical-audience
-policy, not an invented authenticated human. Dynamic channels declare retention
-and future-reader access or an explicit broader release policy. Send-time
-membership alone is insufficient; monitoring copies are separate disclosures.
+Meerkat mechanically enforces who may execute an operation, access a particular
+tool or information source, and communicate with a particular peer or destination.
+It attributes those observable operations to authenticated actors and retained
+work. These guarantees are enforced at the shared owners, across all surfaces.
 
-Elephant remains the authority for its resources and ABAC attributes. Its normal
-query/fetch response supplies resource identity, policy/envelope version and
-restriction metadata under the existing authenticated connection. Meerkat
-combines those source restrictions with work authority. Meerkat policy cannot
-widen Elephant access, and an Elephant reader permission is not permission to
-send the data to every model or recipient. Shared principal/resource contracts
-and conformance vectors connect the systems; neither imports the other's
-internal policy database.
+It does not claim to track the meaning of information through an LLM. An agent
+can read an allowed Elephant document and reproduce its meaning in a limerick,
+a summary, a tool argument or another message without retaining any reference.
+Document IDs, citations, labels and dependency metadata do not prove that such
+an output contains no protected information. Once information enters a model's
+context, this design provides no mechanical guarantee against its later semantic
+disclosure to an otherwise permitted destination. Luka explicitly accepts this
+limitation.
 
-Remote revocation is not magically instantaneous without communication. For
-retained remote information, use an explicit source-issued policy lease with an
-agreed, advertised staleness bound. Authenticated invalidation, when available,
-can shorten it. Disconnect alone does not invalidate an unexpired lease. Expiry
-refuses only dependent operations until normal source access or control-plane
-refresh supplies current metadata. Derivation, caching and reconnect never
-renew a lease; only its source authority can do that. No extra
-synchronous validation round trip is inserted into every dispatch. Local
-revocation takes effect at the next local check; remote staleness is a distinct,
-documented guarantee, not a local generation counter pretending to be remote
-truth.
+Applications use information-handling instructions and may require a gate agent
+to review particular outgoing actions. The runtime can enforce that the gate
+was consulted for the exact action and that its decision was honored. Whether
+the content is appropriate remains model judgment. Neither instructions nor a
+gate are described as complete confidentiality enforcement.
 
-Ordinary Slack, Gmail or device APIs need not implement Elephant's protocol.
-Under an explicit source contract, a declared trusted adapter/local policy
-owner can attest local classification, retained-copy use and freshness bounds.
-It cannot invent a vendor-issued lease or claim stronger remote ACL currentness
-than authenticated observations establish. If remote-current access is required,
-that remote authority's accepted lease/observation is necessary. Remote-issued
-restrictions keep their own issuer/expiry and cannot be renewed locally. A local
-retained-copy contract must state its separate use, revocation and deletion
-semantics; a TTL, cache hit or reconnect is not new permission.
+The host process, OS, configured identity issuers, policy owners, storage and
+registered tool/provider adapters are trusted. This is not a sandbox against
+malicious native plugins or a compromised administrator. A deployment needing
+stronger isolation must keep information out of an untrusted agent/context or
+separate agents, stores and permitted routes at actual boundaries; attaching
+metadata after disclosure does not create isolation.
 
-## Time, failures, retries and audit
+## One mechanical authorization path
 
-Use the host clock with configured bounded leeway for expiry, following the
-same host-trusted model as bearer credentials. Compute the effective deadline
-as the minimum of the individually permitted grant/source deadlines, including
-only leeway each issuer allowed. A deployment cannot extend an Elephant lease
-unilaterally. Leeway is explicit in policy, tests and audit and is applied once. Clock
-rollback protection and authenticated time are outside this default profile.
+`local-governed-v1` is the first governed profile. `trusted-embedded` remains an
+explicit host choice. A governed refusal never falls back to trusted execution.
+Request bodies cannot select the profile or install authority. All providers,
+streaming, live/voice, compaction, memory, comms, schedules and supported native
+and WASM surfaces remain in scope. A slim fixture is an integration milestone,
+not the delivered feature boundary.
 
-A stale or expired compiled decision recomputes once from current local facts.
-An actual denial, expired source lease or unavailable required metadata produces
-`OperationRefused`, with a sanitized reason and the affected native operation
-identity. This is a normal operation outcome, never `FatalFailure`, `RunErrored`,
-turn cancellation, session hold, teardown or a poisoned owner. Invalidate only
-the decision, release only its operation resources and continue other eligible
-work in the current turn. Tool refusals return as typed ordinary tool results alongside executable
-sibling results so the agent can adapt. Admission refuses only that submitted work; output
-refusal affects only the recipient/publication unit. Memory read/write,
-compaction and comms refusals use their operation-specific typed results. A
-refused subscriber receives an audience-safe notice while others continue;
-notices themselves have a fixed authorized disclosure contract.
+The existing native work/input owner retains one immutable association: qualified
+requester, authenticated ingress actor, logical executor and target, original
+work/authentication references, authority basis, restriction ceiling and selected
+host contract. Recorded source references, when available, are audit observations,
+not semantic taint or permission. Authentication and original provenance cannot
+be rewritten by restart, reauthentication, replay or a console projection.
 
-If projection cannot produce an authorized model request, first schedule an
-independently authorized context, route or other ready operation. Never erase
-source restrictions, re-use a tainted summary or escalate permissions. Identical
-denied bindings are not retried without a relevant change. Real process,
-provider or storage failure retains its existing behavior; governance does not
-widen an operation denial into one.
+Shared ingress adapters authenticate the real actor. An agent, service, schedule
+or connector can act under an explicitly issued scoped mandate; no human identity
+is invented. The existing schedule/connector owner retains the mandate and its
+commissioning actor and checks current authority for each occurrence. Provider
+API credentials establish access to the provider account, not the authority of
+the user or agent to perform an application operation.
 
-**One disposition is pending Luka's direct clarification:** no permitted
-processor can process the original current request at all. The smaller option
-returns a typed, audience-safe request-refusal outcome, releases that request's
-run slot and lets queued work proceed, without claiming the task succeeded.
-The strict non-completion option preserves the run/input/turn and payload, gives
-waiters a visible nonterminal refusal, and still lets independent queued work
-proceed. The current owner has one run slot per session; the latter would require
-an explicit native scheduling extension. Simply adding `AwaitingWork`, keeping
-that slot occupied or reusing `WaitingForOps` would violate the no-session-hold
-requirement. Neither option is selected or implemented here. Do not silently
-convert queued work to steer, merge incompatible requesters or introduce a
-security latch while this decision is pending.
+Keep the acting agent, actual requester, represented user when different,
+external account/credential binding and explicit delegation scope distinct.
+Tool configuration selects available connections and baseline agent capabilities;
+possession of a connection never activates every permission of its human owner.
+Each work item retains its actual delegation, and each operation must satisfy
+the acting agent's permissions, that delegation and the actual source/account
+policy. A shared agent does not acquire Luka's authority merely because he owns
+it when someone else asks it to act. For example, Luka's calendar assistant may
+read availability in selected calendars while event deletion remains forbidden,
+even when Luka and the OAuth token can delete those events.
 
-An uncertain disclosure-only model call is audited and may retry automatically
-after fresh authorization under existing bounded retry/backoff policy. Repeated
-disclosure of the same bytes to the same processor is acceptable while authorized.
-Build the next attempt from the canonical current transcript and observed outcomes,
-retain its predecessor/Unknown link, and never replay old tool effects or append
-a restarted stream prefix as if it were new continuation output. Deduplicate or
-explicitly present a replacement attempt through existing output semantics.
+For Elephant and other services we control, the receiving service authenticates
+the acting agent and represented subject together with their scoped delegation
+and enforces the requested operation there. For an external API that recognizes
+only the user's OAuth account, the trusted connector retains the credential and
+enforces the narrower action/resource/account grant locally before use. Raw
+credentials stay outside model access. Audit retains agent, requester,
+represented user, delegation and actual external account; it does not claim that
+an external API distinguishes identities absent from its protocol.
 
-Classify the actual effect: a provider-hosted mutation inside a model request
-obeys the same existing idempotency/reconciliation contract as a mutating tool.
-No blind retry of payments, actuator commands or other uncertain mutations is
-authorized. Any required reconciliation belongs to that one operation; it cannot
-stop the turn or session. There is no parallel security retry machine or
-human-only default recovery gate.
+[RFC 8693's delegation vocabulary](https://www.rfc-editor.org/rfc/rfc8693.html#section-1.1)
+distinguishes actor from subject. It is a vocabulary and interoperability option,
+not a requirement to add token exchange or a network round trip to each action.
+Existing `ActingOnBehalfOf` and pre-materialization auth-binding checks are
+foundations; permission to materialize a credential is not an operation grant.
 
-Record the requester/actor/executor, work and parent operation, policy version,
-source/processor/audience bindings, decision/reason, start and observed outcome
-through the native operation/event owner. Authoritative audit batches join the
-next existing native commit boundary, with existing retention/access controls;
-there is no hidden per-dispatch commit/fsync. An in-memory embedder names the
-actual existing durable host commit it joins (such as ordinary per-turn session
-persistence), or explicitly declares process-lifetime audit. Neither a native
-in-memory commit nor an optional exporter manufactures durability. Accepted
-pending records cannot
-silently drop on backpressure or clean close. Cover denials, delegation, reads,
-compaction, model/tool calls, comms and publication. Known authoritative staging
-failure refuses the affected new protected operation; native transaction failure
-keeps its ordinary scope. Never retroactively relabel a completed effect failed.
+Bind the association to the actual `InputId`, including its qualified idempotency
+scope and exact content/association comparison, in the existing transaction.
+In-memory work has process-lifetime custody unless its host retains it normally.
+Restore/reseed preserves the association or performs fresh authorized admission;
+a message replay cannot impersonate missing admitted work. No side ledger,
+requester registry or mutable permission mirror is introduced.
 
-Optional projections/exporters fail observably without blocking execution. A
-silently dropping queue cannot be the sole audit authority: in particular,
-MobKit's current `EventLogHandle::ingest` ignores `try_send` failure
-([issue 510](https://github.com/lukacf/meerkat-mobkit/issues/510)). Stall/overflow
-that path in acceptance tests and prove native audit survives and export loss is
-observable; export completeness is distinct from native audit.
+Native batching retains every contributing association and conjoins their
+ceilings. It cannot union permissions, choose the first contributor's identity
+or mix incompatible qualified requesters. Different event/authentication
+references alone need not prevent otherwise compatible work. This preserves
+mechanical attribution and authority; it does not prove semantic independence
+between content that shares an agent context.
 
-This is host-trusted semantic audit, not a crash-complete external proof. With
-no additional durable pre-effect barrier, a crash can lose the most recent
-uncommitted attempt details. Recovery marks the unfinished native work as an
-uncertain audit tail; it cannot assert the exact set of external effects or
-claim that missing records prove non-execution. Operators who require externally
-witnessed, rollback-resistant or complete pre-effect evidence need a separately selected future high-assurance profile.
+The feature-owned policy composition reads the canonical identity, grant,
+resource and destination owners. A resolved operation includes the actual tool,
+arguments/resource target, executor, requester, provider/account where relevant,
+and recipient/channel. A host may declare a conservative whole-tool/server/account
+contract when no finer resource mapping is available. A request requiring finer
+controls needs trusted metadata or enforcement by that actual source/provider;
+model-authored arguments do not establish resource attributes or authority.
 
-## Acceptance and implementation order
+Delegation only narrows the parent's effective permissions, including mob spawn,
+helpers/subagents, delegate, `fork_off`, temporary councils and session fork.
+At issue and use,
+the canonical grant owner checks the complete current ancestor chain, issuer,
+grantee, scope, lifetime and delegation depth. Historical validation is not a
+reusable permit. Correlated ABAC rules stay correlated; separate indexes must
+not invent an action/resource/recipient combination that no rule permitted.
+An administrator's or tool host's credential never substitutes for the requester.
+Peer requests retain the actual originating requester and conjoin its authority
+with the receiving agent's permissions. A receiver cannot turn an otherwise
+denied request into its own more privileged operation. A scheduled occurrence
+uses its retained commissioning authority, not whichever agent happens to run it.
+Connector-mandated routing chains retain the scoped service mandate across their
+hops; deployments must explicitly permit their intended routing and notifications.
 
-The added authorization cost must be below **1 ms p99 per tool dispatch and
-per model call**, and at most **10 percent per representative turn**. Include
-policy matching, metadata resolution, context aggregation, generation misses,
-recording and allocation attributable to authorization. Count any extra model
-calls/tokens from partitioned compaction against the turn budget; they are not
-free preparation work. Report warm hits, policy invalidation/recompute, cold setup and source refresh separately, with
-unfavorable cases visible. Zero added hot-path RTT and fsync counts are explicit
-assertions, not assumptions from latency alone.
+Prepare an immutable private decision for the exact resolved operation. Retain
+it with that operation's real request/plan. The final local check verifies the
+same binding, the current coherent policy generation and its deadline after
+relevant preparation waits and immediately before the protected action. A
+changed target, argument binding, account, peer or route requires fresh evaluation.
+The decision is disposable, nonserializable and never a bearer token.
 
-Use matched trusted-embedded/governed runs with identical deterministic tools
-and provider behavior, logical payloads, concurrency and existing store settings.
-Report authorization-induced changes in call count rather than normalizing them
-away. Measure at 1 and 16 concurrent operations, 1/100/1,000/10,000 dependencies and sustained
-streaming/audio publication. Record at least 10,000 dispatch samples per
-steady-state cell, p50/p95/p99, CPU, allocations, native write-lock hold time and
-storage/network calls. Reserve an actual quiet host window; compile everything beforehand. Test active memory
-pressure separately. Larger-context cost must scale with context changes, not
-repeat a whole dependency walk on every tool dispatch or stream chunk.
+Canonical owners publish relevant local identity, grant, resource and route
+changes under one coherent invalidation ordering. The stamp owns no permissions.
+No policy lock is held across network or tool execution. Work already authorized
+before a concurrent revoke may be in flight; later checks observe the new local
+generation. An established session subscription is authorized at subscribe/read;
+this decision does not introduce a separate permission check on every chunk.
+When a relevant owner invalidation changes that permission, the subscription
+owner rechecks and closes the affected subscription. This is event-driven and
+does not terminate the agent's run or session. Already released bytes cannot be
+recalled; no per-chunk atomic revocation guarantee is claimed.
+Restart discards prepared decisions. Remote systems retain their own enforcement
+and propagation guarantees; a local generation does not prove remote currentness.
 
-1. Integrate native association, existing-transaction persistence and homogeneous
-   batching with one real local policy owner and the shared enforcement seams.
-   Demonstrate an admitted input through actual model/tool calls and authorized
-   output, denial before sink entry, restart and revocation during a stream.
-   Inject every refusal class while another tool, model or publication operation
-   is ready: prove no run-terminal event, cancellation or session hold occurs.
-   Revoke a grant ancestor without a policy edit, race compile/invalidation, and
-   test excluded cross-product tuples through cache reuse, batching and fallback.
-   Prove each refusal route (tool, model, recipient, memory/compaction/comms)
-   leaves no unanswered waiter or session blocked by the refused operation. The
-   irreducible-request case follows the explicit owner decision still pending above.
-2. Extend that same path across every built-in provider, streaming/live,
-   compaction, memory, comms/delegation and Elephant. Shared evaluation stays
-   portable, including wasm32, without pulling native witness/clock dependencies
-   into embeddings. Acceptance requires full coverage; the slim smoke fixture
-   is not a narrower product profile. Include adopted 10,000-message history,
-   newly enveloped connector input, service schedules, partitioned compaction,
-   persistent-memory reader isolation, provider-route changes, MCP defaults,
-   live context reset, audio revocation and independently gated replay subscribers.
-3. Run focused races/fault cases and the measured budgets, then obtain independent
-   implementation acceptance and green PR CI. Review deltas from accepted
-   checkpoints; rerun broader gates only when affected by a concrete change.
+## Shared enforcement boundaries
 
-| Disposition | Existing work |
+| Boundary | Mechanical contract |
 | --- | --- |
-| Retain and integrate | Qualified principals; immutable native association and exact replay binding; canonical restriction algebra; narrowed delegation; source provenance; homogeneous batching; operation-local refusals; portable governed feature isolation; ordinary transaction and generated-owner preparation where actually needed. |
-| Park, preserve evidence | External witness service, commissioning/rollback detection, NTS/chronyd producer, external attempt anchors, witness-backed recovery, sealed witness storage and their physical control protocol. They are not prerequisites or transitive runtime dependencies of local-governed-v1. |
-| Remove from default requirements | Human-only Unknown continuation, mandatory buffered output, a special owner-built HTTP transport, per-attempt extra durable barriers and blanket refusal of providers/live/compaction. Existing safe provider/tool contracts remain. |
+| Ingress/native admission | Authenticate the actual actor; authorize the target and operation; retain exact work, mandate and replay identity. |
+| Tool/source access | Check exact action and resolved resource/server/account at invocation or hydration. Visibility is not permission. Preserve source-owned ACL checks. |
+| Model/provider operations | Check the configured model/backend/account/destination and hosted capability. A permitted model receives its ordinary agent context; no semantic source-to-model taint system is added. |
+| Peer communications and delegation | Check the actual authenticated sender/requester, logical executor, recipient and action. Apply the same rule to helpers, delegated agents, replies, handoffs and monitoring copies. |
+| Session observation | Authenticate and authorize session read, history/export and subscription admission, including monitoring copies. Enforce current owner policy at the next operation check; do not add per-chunk gates. |
+| Communications and publication | Check the actual sender/requester, destination, account and action at each send or publishing tool invocation, including live paths. A route label is not a semantic confidentiality guarantee. |
+| Stored history, memory, blobs, export and audit | Enforce the owning store/resource's reader and writer permissions. An ID or shared blob hash grants no access; search and hydration must not bypass the declared resource ACL. |
+| Schedules/connectors | Check the retained service mandate and current target permissions for each real occurrence. Timers and credentials grant no application authority. |
 
-The original ADR, frozen reviews and code branches remain available. This
-amendment changes the required default deliberately; it does not relabel the
-unfinished high-assurance implementation as complete or publish it as supported.
+These checks apply at existing shared seams, including provider-native tools,
+image/search executors, compaction/curator calls and live paths. Native tools
+include shell, apply_patch, wire/unwire/spawn/retire member and `meerkat_schedule_*`;
+none escapes through a path outside the callback bridge. Adapters provide
+actual typed facts; they do not own policy. Delegation through another client
+must retain the operation's authority context. Redirects, retries or queued
+commands cannot silently change the permitted destination or bypass a final
+check. Use existing transport controls and provider contracts; there is no
+replacement security transport.
+
+For opaque hosted capabilities, authorize the declared conservative unit before
+enabling it. A required finer rule that the provider cannot enforce refuses that
+capability, while eligible model work continues. Do not claim that inspecting a
+returned result prevented a server-side action that already occurred.
+
+Peering is a real permission relation, not a console filter, display name or
+unsigned sender string. Each send and spawn checks current permissions. Wiring
+and topology mutation are authorized owner operations; an agent cannot grant
+itself a peer or publishing route. The source application or channel owner
+retains membership and history access rules. Once a permitted peer receives content,
+its later behavior is governed by its own permissions and instructions; this
+ADR does not claim to prevent semantic relaying through permitted peers.
+
+## Instructions and optional gate agents
+
+Hosts provide information-handling instructions appropriate to the agent's role
+and connected sources. Prompts and model decisions cannot widen a mechanical
+permission. Instructions can guide discretion but are not a security proof.
+
+A host may require a gate for selected sends, publications or tool actions.
+Prefer ordinary permission topology: only the designated gate agent may reach
+the declared external destination or publishing tool. Other agents can submit
+candidates to it but cannot publish directly, rewire their own permissions, or
+delegate to an unguarded publisher. Its identity and permission to inspect a
+candidate are explicit. If a separate executor consumes a gate decision, bind
+that decision to the exact candidate action and recipient; changing either
+requires a new decision. A missing, refusing or unavailable required gate refuses
+only that action and returns normal feedback to the originating agent. Optional
+means the deployment chooses whether to install it; once required for an action,
+it cannot be skipped.
+
+Declared gate topology also covers indirect routes through shared stores. An
+ungated agent cannot write a memory, task, blackboard or WorkGraph resource that
+an unguarded publisher uses as an authorized publication queue. Such a route must
+pass through the gate or be unavailable under the deployment's mechanical ACLs.
+This is configuration and operation enforcement, not automatic discovery of
+semantic flows between arbitrary data. The publishing operation independently
+checks the exact agent, original requester and destination; a gate verdict grants
+no extra authority.
+
+A gate-requiring deployment declares a closed inventory of egress capabilities:
+network-capable shell/HTTP/browser/code tools, outbound MCP servers, hosted
+search/code/image capabilities, schedule `HostRunnable` targets, external peers
+and live output, together with model/provider connections. Each entry is either
+gate-only or explicitly accepted as ungated. Unclassified capabilities are
+unavailable to non-gate agents. General execution tools require a trusted bounded
+host contract or are classified as a whole capability; inspecting an arbitrary
+script cannot establish its eventual destinations. The mandatory-gate guarantee
+is relative to this declared inventory. It does not discover covert semantic
+channels or certify content sent over explicitly accepted ungated connections.
+
+Retain the original requester and work on an explicitly declared publication
+queue item. A publisher refuses a queue item missing that required association;
+it cannot adopt the writer's request as its own. This is attribution of a queued
+operation, not semantic provenance of arbitrary stored text. Keep requester
+authority separate from each executor's permissions: agent A may be allowed to
+submit a candidate, gate G may independently be allowed to publish it for
+requester R, and A may still be forbidden to publish directly. The gate cannot
+override R's restrictions, but A's direct-executor ACL is not incorrectly
+substituted for G's own authority on the declared gated route.
+
+The gate's decision and observed action are auditable. No gate reply grants new
+tool/source/peer permissions or overrides the policy owner. Gate review may add
+model calls, latency and cost; report that separately as the explicitly selected
+application workflow, never hide it inside the cheap default authorization cost.
+
+## Elephant and existing applications
+
+Elephant remains authoritative for its resource attributes, ABAC and query/fetch
+permissions. Its existing authenticated request path must receive the actual
+requester/delegation contract or a deliberately scoped service mandate, and keep
+its own enforcement before returning protected data. Meerkat separately checks
+permission to invoke that source/tool and to communicate over its permitted routes.
+Shared qualified identities, operation/resource vocabulary and conformance cases
+connect the two systems; neither imports the other's policy database.
+
+A successful Elephant read is an observable authorized access, not a proof that
+later model output is safe. The default does not propagate document labels through
+summaries, memory, compaction or arbitrary generated text. Revoking source access
+prevents later governed reads under the source's actual contract; it cannot make
+an agent forget content already read. Existing stored copies have their own
+resource access/retention policy, without pretending that semantic recall was
+revoked. Existing histories need no fabricated provenance or blanket adoption
+process merely to remain usable.
+
+MobKit supplies domain policy and projects authorized state through its console.
+It does not maintain a parallel runtime permission truth. HomeCore-style gate
+workflows remain application compositions over the common enforced route.
+HomeCore's current instruction-only gate is not evidence that mandatory routing
+already exists. Its callback approval path and native tools need the same shared
+checks, including topology mutation and selected-account binding. A human
+approval, when an application requests one, must derive from the approver's
+authenticated input rather than an agent's claim that the person approved.
+The existing approval owner binds it to the exact action/recipient, with expiry
+and single-use consumption; an edited or replayed action needs new approval.
+
+## Refusals, configuration and audit
+
+An ordinary denied, expired or unresolved operation returns typed audience-safe
+feedback to the agent, like a tool result. The agent can choose another action;
+allowed siblings and the turn continue. No `FatalFailure`, `RunErrored`, session
+hold, teardown or security-specific parked state is synthesized from that denial.
+Affected resources are released and affected waiters receive their ordinary
+operation result. A completed physical effect is never relabeled failed merely
+because its bookkeeping or audit settlement later failed; retain both facts.
+
+Refused model/route changes leave the existing permitted controller route usable
+and give feedback through the ordinary loop. A policy route change is evaluated
+before any forbidden send and applies to that request; it does not accidentally
+inherit sticky session fallback behavior or failed-attempt thresholds. There is
+no per-document context filtering, `PolicyWithheld` rewriting or semantic cache
+purging in this default.
+
+Setup requires a usable authorized controller route for admitted work. Ordinary
+policy changes preserve or atomically replace that route while queued or in-flight
+admitted work depends on it; this is not an indefinite lease for idle sessions.
+A change that would remove the last one is a typed administrative refusal.
+Controller authority must cover the admitted work's lifetime independently of
+narrower tool/source grants. Deliberately removing all execution capability
+requires an explicit attributed administrative stop through the existing owner,
+not a stop inferred from an operation refusal. Actual provider/process/storage
+failures retain their existing behavior and must not be used to disguise denial.
+
+Refusals consume existing tool-call, turn, token and time budgets. Identical
+runtime-denied bindings are not automatically retried without a relevant change.
+Uncertain mutations retain their ordinary idempotency/reconciliation contract;
+no blind repeat of effects or separate security retry machine is introduced.
+
+Audit records observable authentication, requester/actor/executor, work and
+operation, resolved resource/recipient, policy version, decision, start and
+observed outcome. Recorded references aid investigation; they are not complete
+semantic provenance or proof of what a model learned or disclosed. Audit data
+itself has reader permissions and excludes raw protected fields by default.
+
+Authoritative records join the next existing native/host commit, without an extra
+per-operation fsync. An in-memory host declares process-lifetime audit unless
+it joins an actual existing durable host commit. A crash may lose the newest
+uncommitted details; recovery records uncertainty rather than claiming that
+missing audit proves no effect. Required staging failure refuses only the new
+affected operation; it does not rewrite completed physical outcomes.
+
+Optional exporters fail observably and do not block ordinary execution. MobKit's
+lossy event-log ingress must not be the only audit authority; test its overflow
+and verify that native records survive and export loss is visible. External
+witnesses, rollback-resistant storage and complete pre-effect evidence remain
+separately selected future assurance work, not default dependencies.
+
+## Cost, implementation and acceptance
+
+No added network round trips or fsyncs on ordinary admission, model, tool or
+publication hot paths. Existing authentication handshakes, requested source/tool
+calls and ordinary storage commits remain. Optional gate-agent calls are explicit
+application work, measured separately. Host time with bounded declared leeway is
+sufficient; no authenticated clock or witness service is required.
+
+Added authorization cost must be below 1 ms p99 per tool/model operation and at
+most 10 percent per representative turn. Count evaluation, attribute resolution,
+cache misses, recording and allocation. The final warm check is constant time;
+preparation is not free merely because it precedes dispatch. Measure matched
+trusted/governed runs, warm and cold paths, invalidation, 1/16 concurrency,
+1/100/1,000/10,000 relevant policy/resource entries, streaming and audio. Report
+p50/p95/p99, CPU, allocations, lock time and actual network/storage counts.
+Reserve a quiet benchmark window after compilation.
+
+1. Complete one real governed path: authenticated native input and immutable
+   association, actual policy/grant owner, exact tool/source/peer dispatch,
+   ordinary refusal feedback, permitted sibling and continued model turn,
+   native audit and restart. Test revocation after an await, qualified replay,
+   mixed-requester rejection, correlated permissions and completed-effect
+   settlement failure. Preserve existing generated lifecycle owners.
+2. Extend those same checks across every built-in execution mode and surface,
+   including live/audio, WASM, memory/history, schedules, hosted tools and
+   Elephant. Test actual sink entry and bypass attempts, not just policy helpers.
+   Test optional mandatory gate placement and edited-action rejection separately
+   from its model judgment, including a legitimate gated publication that the
+   originating agent cannot perform directly and a queue item missing its
+   requester/work association. No semantic non-disclosure claim is an acceptance gate.
+   Test each declared egress category for gate bypass and unclassified capability
+   refusal, and revoke an active subscription to verify owner-driven closure
+   while its agent run remains usable.
+   Also exercise the same broad external credential with an allowed selected-
+   calendar read, refused deletion, refused account switch and a different caller
+   who has no delegation from the credential's owner. Verify receiving-service
+   enforcement for Elephant and connector-local enforcement for opaque APIs.
+3. Run focused adversarial races/fault cases and cost measurements, obtain the
+   four independent bus implementation reviews, and create the PR with green CI.
+   Review changes from accepted checkpoints; preserve shared build reservations.
+
+Preserve but remove from the default path the unfinished witness/time/recovery
+stack and the semantic envelope, transitive-dependency, legacy-adoption and
+context-partition machinery. Do not introduce storage-format migrations solely
+to carry semantic labels that this contract no longer requires. Existing real
+resource ACLs and observable work/audit identity remain in scope.

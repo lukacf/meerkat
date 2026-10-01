@@ -19,6 +19,7 @@ meerkat-machine-schema.workspace = true
 meerkat-machine-dsl.workspace = true
 meerkat-authorization-contracts.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

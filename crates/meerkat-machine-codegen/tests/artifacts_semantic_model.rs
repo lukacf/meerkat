@@ -188,7 +188,7 @@ fn meerkat_semantic_model_keeps_internal_session_transport_domain() {
 
 #[test]
 fn meerkat_ci_cfg_uses_closed_string_enum_binding_domains() {
-    let rendered = render_machine_ci_cfg(&meerkat_machine(), false);
+    let rendered = render_machine_ci_cfg(&meerkat_machine(), false).expect("valid CI CFG");
 
     let content_shape_values = ContentShape::ALL
         .into_iter()
@@ -276,7 +276,7 @@ fn meerkat_ci_cfg_uses_closed_string_enum_binding_domains() {
 
 #[test]
 fn meerkat_deep_cfg_uses_closed_tool_filter_domain() {
-    let rendered = render_machine_ci_cfg(&meerkat_machine(), true);
+    let rendered = render_machine_ci_cfg(&meerkat_machine(), true).expect("valid deep CFG");
 
     assert_eq!(
         tool_filter_override_line(&rendered),
@@ -304,7 +304,7 @@ fn meerkat_deep_cfg_uses_closed_tool_filter_domain() {
 
 #[test]
 fn meerkat_cfg_uses_model_operators_for_record_valued_domains() {
-    let rendered = render_machine_ci_cfg(&meerkat_machine(), false);
+    let rendered = render_machine_ci_cfg(&meerkat_machine(), false).expect("valid CI CFG");
     let model =
         render_machine_semantic_model(&meerkat_machine()).expect("render machine semantic model");
 
@@ -579,4 +579,112 @@ fn composition_route_owner_expected_revision_uses_target_revision() {
         ),
         "route-provided expected_revision must not use the generic numeric domain:\n{rendered}"
     );
+}
+
+// These assertions use the canonical owner, not a handwritten model fixture.
+#[test]
+fn grant_ci_keeps_linked_record_inputs_and_two_retained_rows() {
+    let schema = meerkat_machine_schema::catalog::dsl::dsl_grant_authority_machine();
+    let model = render_machine_semantic_model(&schema).expect("grant model");
+    assert!(!model.contains("GrantRecordValuesCi == {}"));
+    assert!(!model.contains("DerivedChildRestrictionsValuesCi == {}"));
+    let bound = model
+        .lines()
+        .find(|line| line.starts_with("CiStateConstraint =="))
+        .expect("CI bound");
+    assert!(bound.contains("model_step_count <= 6"));
+    assert!(bound.contains("Cardinality(DOMAIN records) <= 2"));
+    assert!(bound.contains("Cardinality(revoked) <= 2"));
+}
+
+#[test]
+fn grant_both_profiles_include_resolved_window_and_empty_uncertainty() {
+    let schema = meerkat_machine_schema::catalog::dsl::dsl_grant_authority_machine();
+    let model = render_machine_semantic_model(&schema).expect("grant model");
+    for profile in ["Ci", "Deep"] {
+        let prefix = format!("GrantRecordValues{profile} ==");
+        let records = model
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .expect("record domain");
+        assert!(records.contains("unresolved |-> {}"));
+        assert!(records.contains("tag |-> \"Window\""));
+        assert!(records.contains("issued_revision |-> 2"));
+        assert!(records.contains("parent |-> Some(\"grant_root\")"));
+        assert!(
+            records.contains("issuer |-> \"principal_a\", grantee |-> \"principal_b\"")
+                || (records.contains("issuer |-> \"principal_a\"")
+                    && records.contains("grantee |-> \"principal_b\""))
+        );
+        let cfg = render_machine_ci_cfg(&schema, profile == "Deep").expect("valid grant CFG");
+        assert!(cfg.contains("EvidenceIdValues <- EvidenceIdValues"));
+        assert!(cfg.contains("GrantPrincipalValues <- GrantPrincipalValues"));
+    }
+}
+
+#[test]
+fn explicit_model_rejects_unconsumed_sample_domain() {
+    let mut schema = meerkat_machine_schema::catalog::dsl::dsl_grant_authority_machine();
+    schema
+        .tlc_model
+        .as_mut()
+        .expect("model")
+        .ci
+        .named_values
+        .insert(
+            meerkat_machine_schema::identity::NamedTypeId::parse("GrantNumber").expect("name"),
+            vec![meerkat_machine_schema::TlcValue::U64(1)],
+        );
+    assert!(matches!(
+        render_machine_semantic_model(&schema),
+        Err(meerkat_machine_codegen::CompositionTlaError::InvalidTlcModel { .. })
+    ));
+    let did_not_unwind = [false, true]
+        .map(|deep| std::panic::catch_unwind(|| render_machine_ci_cfg(&schema, deep)).is_ok());
+    assert_eq!(
+        did_not_unwind,
+        [true, true],
+        "invalid explicit model must return without unwinding in CI and Deep"
+    );
+    for deep in [false, true] {
+        let result = render_machine_ci_cfg(&schema, deep);
+        assert!(
+            matches!(
+                &result,
+                Err(meerkat_machine_codegen::CompositionTlaError::InvalidTlcModel {
+                    machine,
+                    reason,
+                }) if machine.as_str() == schema.machine.as_str() && reason.contains("GrantNumber")
+            ),
+            "invalid explicit model must return a typed CFG error: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn nested_explicit_max_uses_existing_tlc_constant_without_expression_max() {
+    let mut schema = meerkat_machine_schema::catalog::dsl::dsl_grant_authority_machine();
+    // This rendering-only control removes every runtime expression that could
+    // otherwise account for the constant. The nested explicit sample remains.
+    schema.helpers.clear();
+    schema.derived.clear();
+    schema.invariants.clear();
+    for transition in &mut schema.transitions {
+        transition.guards.clear();
+    }
+    let model = render_machine_semantic_model(&schema).expect("fixture model");
+    let constants = model
+        .lines()
+        .find(|line| line.starts_with("CONSTANTS "))
+        .expect("constants");
+    assert!(constants.contains("RustU64Max"));
+    assert!(model.contains("expires_at_ms |-> RustU64Max"));
+    assert!(!model.contains("18446744073709551615"));
+    for deep in [false, true] {
+        assert!(
+            render_machine_ci_cfg(&schema, deep)
+                .expect("valid explicit-max CFG")
+                .contains("RustU64Max = 2147483647")
+        );
+    }
 }

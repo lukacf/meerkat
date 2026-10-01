@@ -21,6 +21,83 @@ fn who(name: &str) -> PrincipalRef {
     )
     .expect("principal")
 }
+
+#[test]
+fn resolved_grant_retains_actual_publication_until_accepted_mutation() {
+    use crate::publication::PublicationError;
+
+    let fixture = Fixture::new();
+    let lineage = fixture.three_levels();
+    let resolved = fixture.resolve(&lineage).expect("current grant");
+    assert_eq!(resolved.check_current(), Ok(()));
+    assert_eq!(resolved.expires_at_ms(), 250);
+
+    fixture
+        .authority
+        .revoke(&who("root"), &lineage[0], &mut IsolatedGrantTestCustody)
+        .expect("accepted ancestor revocation");
+    assert_eq!(resolved.check_current(), Err(PublicationError::Changed));
+    assert!(matches!(
+        fixture.resolve(&lineage),
+        Err(GrantRefusal::Denied)
+    ));
+}
+
+#[test]
+fn resolved_grant_current_check_does_not_claim_deadline_validation() {
+    let fixture = Fixture::new();
+    let lineage = fixture.three_levels();
+    let resolved = fixture.resolve(&lineage).expect("current grant");
+    fixture.clock.0.store(301, Ordering::SeqCst);
+
+    // Time alone does not publish an owner change. The prepared operation must
+    // independently check its deadline even if the retained facts are current.
+    assert_eq!(resolved.check_current(), Ok(()));
+    assert!(matches!(
+        fixture.resolve(&lineage),
+        Err(GrantRefusal::Denied)
+    ));
+}
+
+#[test]
+fn actual_resolution_rejects_publication_change_during_clock_read() {
+    struct PublishingClock(LocalAuthorizationPublication);
+    impl LocalAuthorizationClock for PublishingClock {
+        fn now(&self) -> Result<LocalAuthorizationTime, LocalClockError> {
+            let change = self.0.begin_owner_change().expect("other owner changes");
+            drop(change);
+            Ok(LocalAuthorizationTime {
+                unix_ms: 100,
+                monotonic: Instant::now(),
+            })
+        }
+    }
+
+    let publication = LocalAuthorizationPublication::new();
+    let authority = LocalGrantAuthority::new(
+        LocalGrantConfiguration {
+            root: who("root"),
+            namespace: id("clock-observation"),
+            generation: 1,
+        },
+        publication.clone(),
+        Arc::new(PublishingClock(publication)),
+    )
+    .expect("configure");
+    let grant = authority
+        .issue_root(
+            &who("root"),
+            id("clock-grant"),
+            who("executor"),
+            None,
+            ExecutionRestrictions::unrestricted(),
+        )
+        .expect("issue without reading the clock");
+    assert!(matches!(
+        authority.resolve_lineage(&[grant], &who("executor"), None),
+        Err(GrantRefusal::Unavailable)
+    ));
+}
 fn id(name: &str) -> EvidenceId {
     EvidenceId::new(name).expect("id")
 }
@@ -478,6 +555,7 @@ fn direct_generated_child_rejects_foreign_parent_math_and_subject_substitution()
     .expect("foreign math");
     let mut record = GrantRecord {
         id: id("forged"),
+        authority_incarnation: root.authority_incarnation,
         parent: Some(parent.id.clone()),
         issuer: parent.grantee.clone(),
         grantee: principal(who("executor")).expect("qualified"),
@@ -541,6 +619,7 @@ fn direct_generated_use_rejects_missing_revoked_and_substituted_ancestors() {
                 .apply(GrantAuthorityInput::ResolveUse {
                     namespace: id("namespace"),
                     generation: 1,
+                    incarnation: references[0].authority_incarnation,
                     executor: leaf.grantee.clone(),
                     represented_subject: leaf.represented_subject.clone(),
                     leaf: leaf.clone(),
@@ -601,7 +680,7 @@ fn unavailable_clock_refuses_use_and_child_without_changing_grant_state() {
         )
         .expect("root");
     let before = authority.owner.lock().expect("owner").state().clone();
-    let (_, stamp) = publication.observe(|| ()).expect("before failure");
+    let ((), stamp) = publication.observe(|| ()).expect("before failure");
     clock.0.store(true, Ordering::SeqCst);
 
     assert!(matches!(
@@ -621,10 +700,7 @@ fn unavailable_clock_refuses_use_and_child_without_changing_grant_state() {
         Err(GrantRefusal::Unavailable)
     ));
     assert_eq!(authority.owner.lock().expect("owner").state(), &before);
-    assert_eq!(
-        stamp.check_current(),
-        Err(crate::publication::PublicationError::Changed)
-    );
+    assert_eq!(stamp.check_current(), Ok(()));
 
     clock.0.store(false, Ordering::SeqCst);
     let child = authority
@@ -636,6 +712,10 @@ fn unavailable_clock_refuses_use_and_child_without_changing_grant_state() {
             ExecutionRestrictions::unrestricted(),
         )
         .expect("same child ID remains available");
+    assert_eq!(
+        stamp.check_current(),
+        Err(crate::publication::PublicationError::Changed)
+    );
     assert!(
         authority
             .resolve_lineage(&[root, child], &who("executor"), None)
@@ -656,7 +736,7 @@ fn native_custody_veto_precedes_publication_and_grant_mutation() {
         callbacks: usize,
     }
     impl ControllerGrantMutationCustody for Custody {
-        fn with_unreferenced_grant<T, E>(
+        fn with_unreferenced_controller_grant<T, E>(
             &mut self,
             reference: &GrantLineageRef,
             mutate: impl FnOnce() -> Result<T, E>,
@@ -680,7 +760,7 @@ fn native_custody_veto_precedes_publication_and_grant_mutation() {
         .expect("owner")
         .state()
         .clone();
-    let (_, stamp) = fixture.publication.observe(|| ()).expect("before veto");
+    let ((), stamp) = fixture.publication.observe(|| ()).expect("before veto");
     let mut custody = Custody {
         expected: root.clone(),
         refusal: None,
@@ -689,8 +769,8 @@ fn native_custody_veto_precedes_publication_and_grant_mutation() {
     };
     for (refusal, expected) in [
         (
-            ControllerCustodyRefusal::ReferencedByUnfinishedWork,
-            GrantRefusal::Denied,
+            ControllerCustodyRefusal::ControllerInUse,
+            GrantRefusal::ControllerInUse,
         ),
         (
             ControllerCustodyRefusal::Unavailable,
@@ -789,6 +869,7 @@ fn decoded_candidate_requires_actual_retained_issuance_and_exact_row() {
                 .apply(GrantAuthorityInput::ResolveUse {
                     namespace: reference.authority_namespace.clone(),
                     generation: reference.authority_generation,
+                    incarnation: reference.authority_incarnation,
                     executor: candidate.grantee.clone(),
                     represented_subject: candidate.represented_subject.clone(),
                     leaf: candidate.clone(),
@@ -806,6 +887,7 @@ fn decoded_candidate_requires_actual_retained_issuance_and_exact_row() {
         .apply(GrantAuthorityInput::ResolveUse {
             namespace: reference.authority_namespace,
             generation: reference.authority_generation,
+            incarnation: reference.authority_incarnation,
             executor: decoded.grantee.clone(),
             represented_subject: decoded.represented_subject.clone(),
             leaf: decoded.clone(),
@@ -817,4 +899,479 @@ fn decoded_candidate_requires_actual_retained_issuance_and_exact_row() {
         matches!(effect, GrantAuthorityEffect::UseResolved { leaf } if leaf == &decoded)
     }));
     assert_eq!(owner.state(), &before);
+}
+
+// These tests intentionally reuse every configured coordinate and issued ID.
+// Dropping the old process-local owner must not make its references reusable.
+#[test]
+fn restart_same_configuration_and_id_refuses_old_reference() {
+    let original = Fixture::new();
+    let old = original
+        .authority
+        .issue_root(
+            &who("root"),
+            id("restart-root"),
+            who("executor"),
+            None,
+            ExecutionRestrictions {
+                actions: ExactRestriction::exact([action("read")]),
+                ..ExecutionRestrictions::unrestricted()
+            },
+        )
+        .expect("original issuance");
+    assert!(
+        original
+            .authority
+            .resolve_lineage(std::slice::from_ref(&old), &who("executor"), None)
+            .is_ok()
+    );
+    drop(original);
+
+    let restarted = Fixture::new();
+    let fresh = restarted
+        .authority
+        .issue_root(
+            &who("root"),
+            id("restart-root"),
+            who("executor"),
+            None,
+            ExecutionRestrictions {
+                actions: ExactRestriction::exact([action("delete")]),
+                ..ExecutionRestrictions::unrestricted()
+            },
+        )
+        .expect("fresh issuance");
+    assert_eq!(old.root_authority, fresh.root_authority);
+    assert_eq!(old.authority_namespace, fresh.authority_namespace);
+    assert_eq!(old.authority_generation, fresh.authority_generation);
+    assert_eq!(old.grant_id, fresh.grant_id);
+    assert_eq!(old.issued_revision, fresh.issued_revision);
+    assert!(matches!(
+        restarted
+            .authority
+            .resolve_lineage(&[old], &who("executor"), None),
+        Err(GrantRefusal::Denied)
+    ));
+    let resolved = restarted
+        .authority
+        .resolve_lineage(&[fresh], &who("executor"), None)
+        .expect("fresh reference");
+    assert_eq!(
+        resolved.restrictions().actions,
+        ExactRestriction::exact([action("delete")])
+    );
+}
+
+#[test]
+fn restart_reissued_revoked_root_does_not_resurrect_old_reference() {
+    let original = Fixture::new();
+    let old = original.root();
+    original
+        .authority
+        .revoke(&who("root"), &old, &mut IsolatedGrantTestCustody)
+        .expect("revoke");
+    assert!(
+        original
+            .authority
+            .resolve_lineage(
+                std::slice::from_ref(&old),
+                &who("delegator"),
+                Some(&who("represented-human"))
+            )
+            .is_err()
+    );
+    drop(original);
+
+    let restarted = Fixture::new();
+    let fresh = restarted.root();
+    assert!(matches!(
+        restarted.authority.resolve_lineage(
+            &[old],
+            &who("delegator"),
+            Some(&who("represented-human"))
+        ),
+        Err(GrantRefusal::Denied)
+    ));
+    assert!(
+        restarted
+            .authority
+            .resolve_lineage(&[fresh], &who("delegator"), Some(&who("represented-human")))
+            .is_ok()
+    );
+}
+
+#[test]
+fn restart_recreated_revoked_ancestor_chain_refuses_old_and_mixed_lineages() {
+    let original = Fixture::new();
+    let old = original.three_levels();
+    original
+        .authority
+        .revoke(&who("root"), &old[0], &mut IsolatedGrantTestCustody)
+        .expect("revoke ancestor");
+    assert!(original.resolve(&old).is_err());
+    drop(original);
+
+    let restarted = Fixture::new();
+    let fresh = restarted.three_levels();
+    assert!(matches!(restarted.resolve(&old), Err(GrantRefusal::Denied)));
+    let mut mixed = fresh.clone();
+    mixed[0] = old[0].clone();
+    assert!(matches!(
+        restarted.resolve(&mixed),
+        Err(GrantRefusal::Denied)
+    ));
+    assert!(restarted.resolve(&fresh).is_ok());
+}
+
+#[test]
+fn cross_owner_reference_cannot_issue_child_or_revoke_live_grant() {
+    let first = Fixture::new();
+    let old = first.root();
+    let second = Fixture::new();
+    let fresh = second.root();
+    assert!(
+        first
+            .authority
+            .resolve_lineage(
+                std::slice::from_ref(&old),
+                &who("delegator"),
+                Some(&who("represented-human"))
+            )
+            .is_ok()
+    );
+    assert!(matches!(
+        second.authority.issue_child(
+            &who("delegator"),
+            &old,
+            id("foreign-child"),
+            who("executor"),
+            ExecutionRestrictions::unrestricted()
+        ),
+        Err(GrantRefusal::Denied)
+    ));
+    assert!(matches!(
+        second
+            .authority
+            .revoke(&who("root"), &old, &mut IsolatedGrantTestCustody),
+        Err(GrantRefusal::Denied)
+    ));
+    let child = second
+        .authority
+        .issue_child(
+            &who("delegator"),
+            &fresh,
+            id("foreign-child"),
+            who("executor"),
+            ExecutionRestrictions::unrestricted(),
+        )
+        .expect("matching live owner can issue");
+    assert!(
+        second
+            .authority
+            .resolve_lineage(
+                &[fresh.clone(), child],
+                &who("executor"),
+                Some(&who("represented-human"))
+            )
+            .is_ok()
+    );
+    second
+        .authority
+        .revoke(&who("root"), &fresh, &mut IsolatedGrantTestCustody)
+        .expect("matching live owner can revoke");
+}
+
+#[test]
+fn generated_owner_binds_root_child_use_and_revoke_to_its_incarnation() {
+    let first = Fixture::new();
+    let old_root = first.root();
+    let old_record = {
+        let owner = first.authority.owner.lock().expect("first owner");
+        exact_record(&owner, &old_root).expect("old row").clone()
+    };
+    let second = Fixture::new();
+    {
+        let mut owner = second.authority.owner.lock().expect("second owner");
+        assert_ne!(
+            owner.state().incarnation,
+            Some(old_root.authority_incarnation)
+        );
+        let before = owner.state().clone();
+        // ID is unused, revision is exactly next, actor and all configured
+        // coordinates match. Only the prior incarnation is wrong.
+        assert!(
+            owner
+                .apply(GrantAuthorityInput::IssueRoot {
+                    actor: old_record.issuer.clone(),
+                    record: old_record.clone(),
+                })
+                .is_err()
+        );
+        assert_eq!(owner.state(), &before);
+    }
+
+    let fresh = second.root();
+    let mut owner = second.authority.owner.lock().expect("second owner");
+    let current = exact_record(&owner, &fresh).expect("current row").clone();
+    assert_ne!(fresh.authority_incarnation, old_root.authority_incarnation);
+    assert_eq!(current.authority_incarnation, fresh.authority_incarnation);
+    let before = owner.state().clone();
+    assert!(
+        owner
+            .apply(GrantAuthorityInput::Revoke {
+                actor: current.issuer.clone(),
+                record: old_record,
+            })
+            .is_err()
+    );
+    assert_eq!(owner.state(), &before);
+
+    let derived = DerivedChildRestrictions::new(
+        current.restrictions.clone(),
+        ExecutionRestrictions::unrestricted(),
+    )
+    .expect("actual parent math");
+    let mut child = GrantRecord {
+        id: id("incarnation-child"),
+        authority_incarnation: old_root.authority_incarnation,
+        parent: Some(current.id.clone()),
+        issuer: current.grantee.clone(),
+        grantee: principal(who("executor")).expect("principal"),
+        represented_subject: current.represented_subject.clone(),
+        issued_revision: owner.state().revision + 1,
+        restrictions: derived.effective().clone(),
+    };
+    assert!(
+        owner
+            .apply(GrantAuthorityInput::IssueChild {
+                actor: current.grantee.clone(),
+                record: child.clone(),
+                derived: derived.clone(),
+                chain: vec![current.clone()],
+                now_ms: 100,
+            })
+            .is_err()
+    );
+    assert_eq!(owner.state(), &before);
+
+    assert!(
+        owner
+            .apply(GrantAuthorityInput::ResolveUse {
+                namespace: fresh.authority_namespace.clone(),
+                generation: fresh.authority_generation,
+                incarnation: old_root.authority_incarnation,
+                executor: current.grantee.clone(),
+                represented_subject: current.represented_subject.clone(),
+                leaf: current.clone(),
+                chain: vec![current.clone()],
+                now_ms: 100,
+            })
+            .is_err()
+    );
+    assert_eq!(owner.state(), &before);
+    owner
+        .apply(GrantAuthorityInput::ResolveUse {
+            namespace: fresh.authority_namespace,
+            generation: fresh.authority_generation,
+            incarnation: fresh.authority_incarnation,
+            executor: current.grantee.clone(),
+            represented_subject: current.represented_subject.clone(),
+            leaf: current.clone(),
+            chain: vec![current.clone()],
+            now_ms: 100,
+        })
+        .expect("current incarnation use");
+    assert_eq!(owner.state(), &before);
+
+    child.authority_incarnation = fresh.authority_incarnation;
+    owner
+        .apply(GrantAuthorityInput::IssueChild {
+            actor: current.grantee.clone(),
+            record: child,
+            derived,
+            chain: vec![current],
+            now_ms: 100,
+        })
+        .expect("same child with current incarnation");
+}
+
+#[test]
+fn controller_custody_keeps_only_controller_lineage_sticky() {
+    use meerkat_authorization_contracts::grant_mutation::{
+        ControllerCustodyRefusal, ControllerGrantMutationCustody,
+    };
+
+    // Contract fixture only. Actual accepted-row/lifecycle traversal belongs to
+    // the native adapter and must receive its own integration test in Slice2.
+    struct HeldWork {
+        controller_lineage: Vec<GrantLineageRef>,
+        operation_lineage: Vec<GrantLineageRef>,
+        callbacks: usize,
+    }
+    impl ControllerGrantMutationCustody for HeldWork {
+        fn with_unreferenced_controller_grant<T, E>(
+            &mut self,
+            reference: &GrantLineageRef,
+            mutate: impl FnOnce() -> Result<T, E>,
+        ) -> Result<Result<T, E>, ControllerCustodyRefusal> {
+            if self.controller_lineage.contains(reference) {
+                return Err(ControllerCustodyRefusal::ControllerInUse);
+            }
+            // Ordinary operation/delegation references never supply this veto.
+            self.callbacks += 1;
+            Ok(mutate())
+        }
+    }
+
+    let fixture = Fixture::new();
+    let controller_root = fixture
+        .authority
+        .issue_root(
+            &who("root"),
+            id("controller-root"),
+            who("delegator"),
+            None,
+            ExecutionRestrictions {
+                delegation_depth: DelegationDepth::remaining(1),
+                ..ExecutionRestrictions::unrestricted()
+            },
+        )
+        .expect("controller root");
+    let controller_leaf = fixture
+        .authority
+        .issue_child(
+            &who("delegator"),
+            &controller_root,
+            id("controller-leaf"),
+            who("executor"),
+            ExecutionRestrictions {
+                delegation_depth: DelegationDepth::remaining(0),
+                ..ExecutionRestrictions::unrestricted()
+            },
+        )
+        .expect("controller leaf");
+    let operation = fixture
+        .authority
+        .issue_root(
+            &who("root"),
+            id("operation-grant"),
+            who("executor"),
+            None,
+            restrictions(0, 100, 300),
+        )
+        .expect("ordinary held delegation");
+    let controller_lineage = vec![controller_root, controller_leaf];
+    fixture
+        .authority
+        .resolve_controller_lineage(&controller_lineage, &who("executor"), None)
+        .expect("actual issued controller lineage");
+    fixture
+        .authority
+        .resolve_lineage(std::slice::from_ref(&operation), &who("executor"), None)
+        .expect("actual issued operation grant");
+    let mut custody = HeldWork {
+        controller_lineage: controller_lineage.clone(),
+        operation_lineage: vec![operation.clone()],
+        callbacks: 0,
+    };
+
+    // Retention as ordinary work does not prevent authorized revocation.
+    assert!(custody.operation_lineage.contains(&operation));
+    fixture
+        .authority
+        .revoke(&who("root"), &operation, &mut custody)
+        .expect("held ordinary delegation remains revocable");
+    assert_eq!(custody.callbacks, 1);
+    assert!(matches!(
+        fixture
+            .authority
+            .resolve_lineage(std::slice::from_ref(&operation), &who("executor"), None),
+        Err(GrantRefusal::Denied)
+    ));
+    fixture
+        .authority
+        .resolve_controller_lineage(&controller_lineage, &who("executor"), None)
+        .expect("ordinary revoke preserves the controller");
+
+    let before = fixture
+        .authority
+        .owner
+        .lock()
+        .expect("owner")
+        .state()
+        .clone();
+    let ((), stamp) = fixture.publication.observe(|| ()).expect("before veto");
+    for reference in &controller_lineage {
+        let result = fixture
+            .authority
+            .revoke(&who("root"), reference, &mut custody);
+        assert_eq!(result, Err(GrantRefusal::ControllerInUse));
+        assert_eq!(
+            fixture.authority.owner.lock().expect("owner").state(),
+            &before
+        );
+        assert_eq!(stamp.check_current(), Ok(()));
+    }
+    assert_eq!(
+        custody.callbacks, 1,
+        "controller veto never invokes the mutation"
+    );
+
+    // Once the native owner no longer retains the controller lineage, ordinary
+    // authorized revocation reaches the same generated reducer.
+    custody.controller_lineage.clear();
+    fixture
+        .authority
+        .revoke(&who("root"), &controller_lineage[0], &mut custody)
+        .expect("settled controller can be revoked");
+    assert_eq!(custody.callbacks, 2);
+    assert!(matches!(
+        fixture
+            .authority
+            .resolve_controller_lineage(&controller_lineage, &who("executor"), None),
+        Err(GrantRefusal::Denied)
+    ));
+}
+
+#[test]
+fn recovered_grant_state_rejects_insert_without_revision_advance() {
+    let fixture = Fixture::new();
+    let root = fixture.root();
+    let mut state = fixture
+        .authority
+        .owner
+        .lock()
+        .expect("owner")
+        .state()
+        .clone();
+    let mut inserted = state
+        .records
+        .get(&root.grant_id)
+        .expect("issued root")
+        .clone();
+    inserted.id = id("partial-insert");
+    inserted.issued_revision = state.revision + 1;
+    state.records.insert(inserted.id.clone(), inserted);
+    assert!(
+        GrantAuthorityMachineAuthority::recover_from_state(state).is_err(),
+        "a retained insert without its revision update is not a recovered owner"
+    );
+}
+
+#[test]
+fn recovered_grant_state_rejects_revoke_without_revision_advance() {
+    let fixture = Fixture::new();
+    let root = fixture.root();
+    let mut state = fixture
+        .authority
+        .owner
+        .lock()
+        .expect("owner")
+        .state()
+        .clone();
+    state.revoked.insert(root.grant_id);
+    assert!(
+        GrantAuthorityMachineAuthority::recover_from_state(state).is_err(),
+        "a retained revocation without its revision update must not be repaired"
+    );
 }

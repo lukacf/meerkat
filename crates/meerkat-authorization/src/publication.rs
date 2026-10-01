@@ -61,23 +61,53 @@ impl LocalAuthorizationPublication {
     /// # Errors
     /// A poisoned or exhausted publication cannot issue fresh projections.
     pub fn begin_owner_change(&self) -> Result<LocalPublicationGuard<'_>, PublicationError> {
+        let mut guard = self.reserve_owner_change()?;
+        guard.publish();
+        Ok(guard)
+    }
+
+    /// Reserve the writer without invalidating observations yet. This private
+    /// path is only for a mutation whose complete facts stay inaccessible under
+    /// one owner mutex until `publish` is called. Validate exhaustion before any
+    /// mutation; after successful apply, publication cannot fail.
+    ///
+    /// Lock order remains publication writer, then owner. A rejected canonical
+    /// apply may drop the reservation unchanged only when it changed no facts.
+    pub(crate) fn reserve_owner_change(
+        &self,
+    ) -> Result<LocalPublicationGuard<'_>, PublicationError> {
         let writer = self
             .inner
             .writer
             .lock()
             .map_err(|_| PublicationError::Unavailable)?;
         let previous = self.inner.sequence.load(Ordering::Acquire);
-        if previous >= INVALID - 2 || previous % 2 != 0 {
+        if previous >= INVALID - 2 || !previous.is_multiple_of(2) {
             self.inner.sequence.store(INVALID, Ordering::Release);
             return Err(PublicationError::Unavailable);
         }
-        // Invalidate all old decisions before any new owner fact is visible.
-        self.inner.sequence.swap(previous + 1, Ordering::AcqRel);
         Ok(LocalPublicationGuard {
             inner: &self.inner,
             completed_sequence: previous + 2,
+            published: false,
             _writer: writer,
         })
+    }
+
+    /// Permanently retire this publication before reconstructing its owners.
+    /// Taking the actual writer lock waits for any older guard's final store;
+    /// no guard can subsequently overwrite retirement with a healthy sequence.
+    /// Poison is retained. This never resets or reuses a publication instance.
+    pub(crate) fn retire(&self) {
+        let _writer = match self.inner.writer.lock() {
+            Ok(writer) => writer,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        self.inner.sequence.store(INVALID, Ordering::Release);
+    }
+
+    pub(crate) fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     /// Observe the current owners and bind that disposable view to one coherent
@@ -95,7 +125,7 @@ impl LocalAuthorizationPublication {
         if sequence == INVALID {
             return Err(PublicationError::Unavailable);
         }
-        if sequence % 2 != 0 {
+        if !sequence.is_multiple_of(2) {
             return Err(PublicationError::Changed);
         }
         let value = observe_owners();
@@ -114,18 +144,36 @@ impl LocalAuthorizationPublication {
 pub struct LocalPublicationGuard<'a> {
     inner: &'a PublicationInner,
     completed_sequence: u64,
+    published: bool,
     _writer: MutexGuard<'a, ()>,
+}
+
+impl LocalPublicationGuard<'_> {
+    /// Infallible after reservation. For the deferred path this is the mutation
+    /// linearization point: canonical apply has succeeded, but the actual owner
+    /// lock must still hide its facts. Keep that lock until this returns.
+    pub(crate) fn publish(&mut self) {
+        if !self.published {
+            self.inner
+                .sequence
+                .swap(self.completed_sequence - 1, Ordering::AcqRel);
+            self.published = true;
+        }
+    }
 }
 
 impl Drop for LocalPublicationGuard<'_> {
     fn drop(&mut self) {
-        // A panicked partial mutation cannot publish a supposedly coherent view.
-        let sequence = if std::thread::panicking() {
-            INVALID
-        } else {
-            self.completed_sequence
-        };
-        self.inner.sequence.store(sequence, Ordering::Release);
+        // Even a deferred reservation poisons publication on panic: the owner
+        // may have been partially mutated. Ordinary rejected inputs changed no
+        // state and leave the sequence intact.
+        if std::thread::panicking() {
+            self.inner.sequence.store(INVALID, Ordering::Release);
+        } else if self.published {
+            self.inner
+                .sequence
+                .store(self.completed_sequence, Ordering::Release);
+        }
     }
 }
 
@@ -207,7 +255,7 @@ mod tests {
     #[allow(clippy::panic)] // Deliberately inject a partial owner-mutation panic.
     fn panic_during_owner_mutation_never_publishes_partial_facts() {
         let publication = LocalAuthorizationPublication::new();
-        let (_, stamp) = publication.observe(|| ()).expect("initial stamp");
+        let ((), stamp) = publication.observe(|| ()).expect("initial stamp");
         let result = std::panic::catch_unwind(|| {
             let _change = publication.begin_owner_change().expect("owner change");
             panic!("simulated partial owner mutation");
@@ -231,7 +279,7 @@ mod tests {
             .inner
             .sequence
             .store(INVALID - 1, Ordering::Release);
-        let (_, stamp) = publication.observe(|| ()).expect("last even stamp");
+        let ((), stamp) = publication.observe(|| ()).expect("last even stamp");
         assert!(matches!(
             publication.begin_owner_change(),
             Err(PublicationError::Unavailable)

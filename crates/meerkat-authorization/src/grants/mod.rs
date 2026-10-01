@@ -16,17 +16,19 @@ use std::sync::{Arc, Mutex};
 use meerkat_authorization_contracts::constraints::{ExecutionRestrictions, LifetimeBound};
 use meerkat_authorization_contracts::derived_child::DerivedChildRestrictions;
 use meerkat_authorization_contracts::evidence::EvidenceId;
-use meerkat_authorization_contracts::grant::GrantLineageRef;
+use meerkat_authorization_contracts::grant::{GrantAuthorityIncarnation, GrantLineageRef};
 use meerkat_core::auth::PrincipalRef;
 
 use crate::clock::LocalAuthorizationClock;
-use crate::publication::LocalAuthorizationPublication;
+use crate::publication::{LocalAuthorizationPublication, LocalPublicationStamp, PublicationError};
 
 pub(crate) mod dsl;
+mod reconstruction;
 use dsl::{
     GrantAuthorityEffect, GrantAuthorityInput, GrantAuthorityMachineAuthority,
     GrantAuthorityMachineMutator, GrantPrincipal, GrantRecord,
 };
+pub use reconstruction::GrantReconstructionError;
 
 /// Source-selected root configuration, not authentication of its supplier.
 /// Never manufacture this from the grant claim in a work association.
@@ -47,6 +49,9 @@ impl std::fmt::Debug for LocalGrantConfiguration {
 pub enum GrantRefusal {
     #[error("grant operation refused")]
     Denied,
+    /// Revocation would remove a retained unfinished controller lineage.
+    #[error("grant is required by unfinished controller work")]
+    ControllerInUse,
     #[error("grant authority unavailable")]
     Unavailable,
 }
@@ -64,12 +69,15 @@ impl std::fmt::Debug for LocalGrantAuthority {
     }
 }
 
-/// Freshly resolved data, not an entry permit. It must remain under the calling
-/// policy compiler's publication observation and be conjoined with its other
-/// owner decisions. The value has no serialization or public constructor.
+/// Freshly resolved preparation data bound to its actual owner observation.
+/// It must be conjoined with the policy compiler's other owner decisions.
+/// The value has no serialization or public constructor and is not an entry
+/// permit. Retain it in the prepared decision; the final local boundary checks
+/// its publication and the operation's independently bound deadline.
 pub struct ResolvedGrant {
     restrictions: ExecutionRestrictions,
     expires_at_ms: u64,
+    publication: LocalPublicationStamp,
 }
 
 impl std::fmt::Debug for ResolvedGrant {
@@ -79,6 +87,14 @@ impl std::fmt::Debug for ResolvedGrant {
 }
 
 impl ResolvedGrant {
+    /// Check only that the observed local owner facts are still current.
+    /// This is one allocation-free atomic read. It does not check elapsed time,
+    /// the operation binding or policy; those remain separate entry conditions.
+    /// A changed or unavailable publication requires a fresh owner observation.
+    pub fn check_current(&self) -> Result<(), PublicationError> {
+        self.publication.check_current()
+    }
+
     pub fn restrictions(&self) -> &ExecutionRestrictions {
         &self.restrictions
     }
@@ -89,6 +105,8 @@ impl ResolvedGrant {
 
 impl LocalGrantAuthority {
     /// Select a new process-local authority from trusted embedding configuration.
+    /// Every new owner mints a fresh incarnation; configured generation reuse
+    /// cannot revive a reference from an earlier owner.
     /// Restart cannot recover prior grants from associations or historical audit.
     /// A durable owner adapter must be added before claiming retained issuance.
     pub fn new(
@@ -96,12 +114,15 @@ impl LocalGrantAuthority {
         publication: LocalAuthorizationPublication,
         clock: Arc<dyn LocalAuthorizationClock>,
     ) -> Result<Self, GrantRefusal> {
+        let incarnation = GrantAuthorityIncarnation::from_uuid(uuid::Uuid::new_v4())
+            .map_err(|_| GrantRefusal::Unavailable)?;
         let mut owner = GrantAuthorityMachineAuthority::new();
         owner
             .apply(GrantAuthorityInput::Configure {
                 root: principal(configuration.root)?,
                 namespace: configuration.namespace,
                 generation: configuration.generation,
+                incarnation,
             })
             .map_err(|_| GrantRefusal::Denied)?;
         Ok(Self {
@@ -125,13 +146,14 @@ impl LocalGrantAuthority {
         let actor = principal(caller.clone())?;
         let grantee = principal(grantee)?;
         let represented_subject = represented_subject.map(principal).transpose()?;
-        let _publication = self
+        let mut publication = self
             .publication
-            .begin_owner_change()
+            .reserve_owner_change()
             .map_err(|_| GrantRefusal::Unavailable)?;
         let mut owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
         let record = GrantRecord {
             id,
+            authority_incarnation: owner.state().incarnation.ok_or(GrantRefusal::Unavailable)?,
             parent: None,
             issuer: actor.clone(),
             grantee,
@@ -149,6 +171,9 @@ impl LocalGrantAuthority {
                 record: record.clone(),
             })
             .map_err(|_| GrantRefusal::Denied)?;
+        // Generated rejection precedes every update. Successful issuance is
+        // hidden by the actual owner mutex until this publication point.
+        publication.publish();
         lineage_ref(&owner, &record)
     }
 
@@ -164,9 +189,9 @@ impl LocalGrantAuthority {
     ) -> Result<GrantLineageRef, GrantRefusal> {
         let actor = principal(caller.clone())?;
         let grantee = principal(grantee)?;
-        let _publication = self
+        let mut publication = self
             .publication
-            .begin_owner_change()
+            .reserve_owner_change()
             .map_err(|_| GrantRefusal::Unavailable)?;
         let mut owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
         let parent = exact_record(&owner, parent)?.clone();
@@ -175,6 +200,7 @@ impl LocalGrantAuthority {
             .map_err(|_| GrantRefusal::Denied)?;
         let record = GrantRecord {
             id,
+            authority_incarnation: owner.state().incarnation.ok_or(GrantRefusal::Unavailable)?,
             parent: Some(parent.id),
             issuer: actor.clone(),
             grantee,
@@ -200,11 +226,17 @@ impl LocalGrantAuthority {
                 now_ms,
             })
             .map_err(|_| GrantRefusal::Denied)?;
+        // Generated rejection precedes every update. Successful issuance is
+        // hidden by the actual owner mutex until this publication point.
+        publication.publish();
         lineage_ref(&owner, &record)
     }
 
     /// Revocation never deletes or reuses an issued ID. Either the configured
     /// root or the actual issuer can revoke; an expired ancestor cannot revive it.
+    /// Native custody vetoes only references in unfinished controller lineages,
+    /// including their ancestors. Ordinary delegation/work-use references do
+    /// not prevent revocation. The veto has the distinct `ControllerInUse` result.
     pub fn revoke(
         &self,
         caller: &PrincipalRef,
@@ -213,9 +245,11 @@ impl LocalGrantAuthority {
     ) -> Result<(), GrantRefusal> {
         use meerkat_authorization_contracts::grant_mutation::ControllerCustodyRefusal;
         custody
-            .with_unreferenced_grant(grant, || self.revoke_under_native_custody(caller, grant))
+            .with_unreferenced_controller_grant(grant, || {
+                self.revoke_under_native_custody(caller, grant)
+            })
             .map_err(|refusal| match refusal {
-                ControllerCustodyRefusal::ReferencedByUnfinishedWork => GrantRefusal::Denied,
+                ControllerCustodyRefusal::ControllerInUse => GrantRefusal::ControllerInUse,
                 ControllerCustodyRefusal::Unavailable => GrantRefusal::Unavailable,
             })?
     }
@@ -226,15 +260,22 @@ impl LocalGrantAuthority {
         grant: &GrantLineageRef,
     ) -> Result<(), GrantRefusal> {
         let actor = principal(caller.clone())?;
-        let _publication = self
+        let mut publication = self
             .publication
-            .begin_owner_change()
+            .reserve_owner_change()
             .map_err(|_| GrantRefusal::Unavailable)?;
         let mut owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
         let record = exact_record(&owner, grant)?.clone();
+        let revision = owner.state().revision;
         owner
             .apply(GrantAuthorityInput::Revoke { actor, record })
             .map_err(|_| GrantRefusal::Denied)?;
+        // RevokeAlready is a canonical successful no-op. Only RevokeNew
+        // advances this owner's revision, so no second semantic decision is
+        // made here and repeated revocation does not churn observations.
+        if owner.state().revision != revision {
+            publication.publish();
+        }
         Ok(())
     }
 
@@ -269,8 +310,36 @@ impl LocalGrantAuthority {
         represented_subject: Option<&PrincipalRef>,
         controller: bool,
     ) -> Result<ResolvedGrant, GrantRefusal> {
+        let (resolved, publication) = self
+            .publication
+            .observe(|| {
+                self.resolve_lineage_data(references, executor, represented_subject, controller)
+            })
+            .map_err(|_| GrantRefusal::Unavailable)?;
+        let (restrictions, expires_at_ms) = resolved?;
+        Ok(ResolvedGrant {
+            restrictions,
+            expires_at_ms,
+            publication,
+        })
+    }
+
+    // Called only inside the actual publication observation above. Resolution
+    // prepares a disposable view; it does not run on the warm entry-check path.
+    fn resolve_lineage_data(
+        &self,
+        references: &[GrantLineageRef],
+        executor: &PrincipalRef,
+        represented_subject: Option<&PrincipalRef>,
+        controller: bool,
+    ) -> Result<(ExecutionRestrictions, u64), GrantRefusal> {
         let executor = principal(executor.clone())?;
         let represented_subject = represented_subject.cloned().map(principal).transpose()?;
+        let now_ms = self
+            .clock
+            .now()
+            .map_err(|_| GrantRefusal::Unavailable)?
+            .unix_ms;
         let mut owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
         let reference = references.last().ok_or(GrantRefusal::Denied)?;
         let leaf = exact_record(&owner, reference)?.clone();
@@ -293,32 +362,8 @@ impl LocalGrantAuthority {
         {
             return Err(GrantRefusal::Denied);
         }
-        let now_ms = self
-            .clock
-            .now()
-            .map_err(|_| GrantRefusal::Unavailable)?
-            .unix_ms;
-        let transition = owner
-            .apply(GrantAuthorityInput::ResolveUse {
-                namespace: reference.authority_namespace.clone(),
-                generation: reference.authority_generation,
-                executor,
-                represented_subject,
-                leaf,
-                chain: chain.clone(),
-                now_ms,
-            })
-            .map_err(|_| GrantRefusal::Denied)?;
-        let resolved = transition
-            .effects()
-            .iter()
-            .find_map(|effect| match effect {
-                GrantAuthorityEffect::UseResolved { leaf } => Some(leaf.clone()),
-                _ => None,
-            })
-            .ok_or(GrantRefusal::Unavailable)?;
         // Pure projection of accepted retained bounds, not a second permission
-        // decision. Operation matching remains the existing restriction algebra.
+        // decision. Compute before moving the chain into its generated owner.
         let expires_at_ms = chain
             .iter()
             .filter_map(|record| match record.restrictions.lifetime.bound() {
@@ -327,10 +372,27 @@ impl LocalGrantAuthority {
             })
             .min()
             .unwrap_or(u64::MAX);
-        Ok(ResolvedGrant {
-            restrictions: resolved.restrictions,
-            expires_at_ms,
-        })
+        let transition = owner
+            .apply(GrantAuthorityInput::ResolveUse {
+                namespace: reference.authority_namespace.clone(),
+                generation: reference.authority_generation,
+                incarnation: reference.authority_incarnation,
+                executor,
+                represented_subject,
+                leaf,
+                chain,
+                now_ms,
+            })
+            .map_err(|_| GrantRefusal::Denied)?;
+        let restrictions = transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                GrantAuthorityEffect::UseResolved { leaf } => Some(leaf.restrictions.clone()),
+                _ => None,
+            })
+            .ok_or(GrantRefusal::Unavailable)?;
+        Ok((restrictions, expires_at_ms))
     }
 }
 
@@ -356,6 +418,7 @@ fn lineage_ref(
             .clone()
             .ok_or(GrantRefusal::Unavailable)?,
         authority_generation: owner.state().generation,
+        authority_incarnation: owner.state().incarnation.ok_or(GrantRefusal::Unavailable)?,
         grant_id: record.id.clone(),
         issued_revision: record.issued_revision,
     })
@@ -404,6 +467,8 @@ fn chain(
 }
 
 #[cfg(test)]
+mod publication_tests;
+#[cfg(test)]
 mod tests;
 
 /// Grant/compiler unit fixtures have no actual native runtime attached. Never
@@ -415,7 +480,7 @@ pub(crate) struct IsolatedGrantTestCustody;
 impl meerkat_authorization_contracts::grant_mutation::ControllerGrantMutationCustody
     for IsolatedGrantTestCustody
 {
-    fn with_unreferenced_grant<T, E>(
+    fn with_unreferenced_controller_grant<T, E>(
         &mut self,
         _reference: &GrantLineageRef,
         mutate: impl FnOnce() -> Result<T, E>,
@@ -426,3 +491,6 @@ impl meerkat_authorization_contracts::grant_mutation::ControllerGrantMutationCus
         Ok(mutate())
     }
 }
+
+#[cfg(test)]
+mod reconstruction_tests;

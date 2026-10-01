@@ -5,16 +5,53 @@ use serde::{Deserialize, Serialize};
 
 use crate::evidence::EvidenceId;
 
+/// Identity of one process-local grant owner. A decoded value is only a claim;
+/// the live host mints its own UUID v4 once and the generated owner retains it.
+/// UUID v4 provides 122 random bits. It is not an authentication credential or
+/// a restoration token, and it does not replace current grant resolution.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct GrantAuthorityIncarnation(uuid::Uuid);
+
+impl GrantAuthorityIncarnation {
+    /// Check the shape of untrusted incarnation data, not ownership of it.
+    ///
+    /// # Errors
+    /// Refuses any UUID that is not RFC 4122 variant, version 4.
+    pub fn from_uuid(value: uuid::Uuid) -> Result<Self, GrantReferenceError> {
+        if value.get_variant() != uuid::Variant::RFC4122
+            || value.get_version() != Some(uuid::Version::Random)
+        {
+            return Err(GrantReferenceError::Incarnation);
+        }
+        Ok(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for GrantAuthorityIncarnation {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::from_uuid(uuid::Uuid::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Debug for GrantAuthorityIncarnation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GrantAuthorityIncarnation([protected])")
+    }
+}
+
 /// The issued identity, distinct from a later current-authority observation.
 /// Zero issued revision is untrusted candidate data; only an actual retained
-/// issued row establishes the reference. An authority generation is immutable
-/// across recovery of that same authority incarnation.
+/// issued row establishes the reference. The configured generation alone does
+/// not identify a process-local owner; each new owner mints a fresh incarnation.
+/// This foundation does not restore a previous owner or its incarnation.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantLineageRef {
     pub root_authority: PrincipalRef,
     pub authority_namespace: EvidenceId,
     pub authority_generation: u64,
+    pub authority_incarnation: GrantAuthorityIncarnation,
     pub grant_id: EvidenceId,
     pub issued_revision: u64,
 }
@@ -48,6 +85,8 @@ pub enum GrantReferenceError {
     Unqualified,
     #[error("grant reference requires a nonzero authority generation")]
     Shape,
+    #[error("grant incarnation requires an RFC 4122 version 4 UUID")]
+    Incarnation,
 }
 
 #[cfg(test)]

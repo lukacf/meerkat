@@ -37,6 +37,17 @@ them.
 
 ### Breaking
 
+- `meerkat_machine_schema::MachineSchema` and
+  `meerkat_machine_schema::catalog::dsl::MachineSchemaMetadata` gain the public
+  field `tlc_model: Option<MachineTlcModel>`. Struct literals must supply it;
+  use `None` to keep the existing inferred finite model, or `Some(...)` for
+  explicit typed TLC fixtures. `MachineSchemaError` gains
+  `InvalidTlcModel { reason: String }`; exhaustive matches must handle it.
+- `meerkat_machine_codegen::render_machine_ci_cfg` now returns
+  `Result<String, CompositionTlaError>` instead of `String`. Callers must handle
+  generation failure; malformed explicit TLC metadata returns
+  `CompositionTlaError::InvalidTlcModel` instead of panicking.
+
 - `meerkat_core::auth::PrincipalRef` gains the public `qualification` field
   (`PrincipalQualification`), also re-exported through `meerkat_core` and
   `meerkat_contracts`. Rust struct literals must supply it. Use

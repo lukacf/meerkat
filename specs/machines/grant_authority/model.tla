@@ -4,19 +4,26 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 \* Generated semantic machine model for GrantAuthorityMachine.
 
 \* RustU64Max is the TLA boundary for Expr::U64Max; production generated Rust renders u64::MAX.
-CONSTANTS DerivedChildRestrictionsValues, EvidenceIdValues, GrantPrincipalValues, GrantRecordValues, NatValues, SetOfEvidenceIdValues, RustU64Max
+CONSTANTS DerivedChildRestrictionsValues, EvidenceIdValues, GrantAuthorityIncarnationValues, GrantPrincipalValues, GrantRecordValues, NatValues, SetOfEvidenceIdValues, RustU64Max
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
 
-DerivedChildRestrictionsValuesCi == {}
-GrantRecordValuesCi == {}
+DerivedChildRestrictionsValuesCi == {[effective |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 0, tag |-> "Remaining"], remaining_edges |-> 0, unresolved |-> {}], lifetime |-> [bound |-> [expires_at_ms |-> 2, not_before_ms |-> 1, tag |-> "Window"], expires_at_ms |-> 2, not_before_ms |-> 1, unresolved |-> {}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"], parent |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 1, tag |-> "Remaining"], remaining_edges |-> 1, unresolved |-> {}], lifetime |-> [bound |-> [expires_at_ms |-> 3, not_before_ms |-> 0, tag |-> "Window"], expires_at_ms |-> 3, not_before_ms |-> 0, unresolved |-> {}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"], requested |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 0, tag |-> "Remaining"], remaining_edges |-> 0, unresolved |-> {}], lifetime |-> [bound |-> [expires_at_ms |-> 2, not_before_ms |-> 1, tag |-> "Window"], expires_at_ms |-> 2, not_before_ms |-> 1, unresolved |-> {}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"]]}
+EvidenceIdValuesCi == {"grant_root", "grant_child"}
+GrantAuthorityIncarnationValuesCi == {"owner_incarnation"}
+GrantPrincipalValuesCi == {"principal_a", "principal_b"}
+GrantRecordValuesCi == {[authority_incarnation |-> "owner_incarnation", grantee |-> "principal_b", id |-> "grant_root", issued_revision |-> 1, issuer |-> "principal_a", parent |-> None, represented_subject |-> None, restrictions |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 1, tag |-> "Remaining"], remaining_edges |-> 1, unresolved |-> {}], lifetime |-> [bound |-> [expires_at_ms |-> 3, not_before_ms |-> 0, tag |-> "Window"], expires_at_ms |-> 3, not_before_ms |-> 0, unresolved |-> {}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"]], [authority_incarnation |-> "owner_incarnation", grantee |-> "principal_a", id |-> "grant_child", issued_revision |-> 2, issuer |-> "principal_b", parent |-> Some("grant_root"), represented_subject |-> None, restrictions |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 0, tag |-> "Remaining"], remaining_edges |-> 0, unresolved |-> {}], lifetime |-> [bound |-> [expires_at_ms |-> 2, not_before_ms |-> 1, tag |-> "Window"], expires_at_ms |-> 2, not_before_ms |-> 1, unresolved |-> {}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"]], [authority_incarnation |-> "owner_incarnation", grantee |-> "principal_a", id |-> "grant_root", issued_revision |-> 1, issuer |-> "principal_b", parent |-> None, represented_subject |-> None, restrictions |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 1, tag |-> "Remaining"], remaining_edges |-> 1, unresolved |-> {}], lifetime |-> [bound |-> [expires_at_ms |-> 3, not_before_ms |-> 0, tag |-> "Window"], expires_at_ms |-> 3, not_before_ms |-> 0, unresolved |-> {}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"]], [authority_incarnation |-> "owner_incarnation", grantee |-> "principal_b", id |-> "grant_child", issued_revision |-> 2, issuer |-> "principal_a", parent |-> Some("grant_root"), represented_subject |-> None, restrictions |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 0, tag |-> "Remaining"], remaining_edges |-> 0, unresolved |-> {}], lifetime |-> [bound |-> [expires_at_ms |-> 2, not_before_ms |-> 1, tag |-> "Window"], expires_at_ms |-> 2, not_before_ms |-> 1, unresolved |-> {}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"]]}
 
-DerivedChildRestrictionsValuesDeep == {[parent |-> [actions |-> "grantactionbounds_1", resource_domains |-> "grantresourcebounds_1", processors |-> "grantprocessorbounds_1", audiences |-> "grantaudiencebounds_1", lifetime |-> [bound |-> [tag |-> "Unrestricted"], unresolved |-> {"Absent"}, not_before_ms |-> 1, expires_at_ms |-> 1], delegation_depth |-> [bound |-> [tag |-> "Unrestricted"], unresolved |-> {"Absent"}, remaining_edges |-> 1]], requested |-> [actions |-> "grantactionbounds_1", resource_domains |-> "grantresourcebounds_1", processors |-> "grantprocessorbounds_1", audiences |-> "grantaudiencebounds_1", lifetime |-> [bound |-> [tag |-> "Unrestricted"], unresolved |-> {"Absent"}, not_before_ms |-> 1, expires_at_ms |-> 1], delegation_depth |-> [bound |-> [tag |-> "Unrestricted"], unresolved |-> {"Absent"}, remaining_edges |-> 1]], effective |-> [actions |-> "grantactionbounds_1", resource_domains |-> "grantresourcebounds_1", processors |-> "grantprocessorbounds_1", audiences |-> "grantaudiencebounds_1", lifetime |-> [bound |-> [tag |-> "Unrestricted"], unresolved |-> {"Absent"}, not_before_ms |-> 1, expires_at_ms |-> 1], delegation_depth |-> [bound |-> [tag |-> "Unrestricted"], unresolved |-> {"Absent"}, remaining_edges |-> 1]]], [parent |-> [actions |-> "grantactionbounds_2", resource_domains |-> "grantresourcebounds_2", processors |-> "grantprocessorbounds_2", audiences |-> "grantaudiencebounds_2", lifetime |-> [bound |-> [tag |-> "Empty"], unresolved |-> {"Unknown"}, not_before_ms |-> 2, expires_at_ms |-> 2], delegation_depth |-> [bound |-> [tag |-> "Remaining", edges |-> 1], unresolved |-> {"Unknown"}, remaining_edges |-> 2]], requested |-> [actions |-> "grantactionbounds_2", resource_domains |-> "grantresourcebounds_2", processors |-> "grantprocessorbounds_2", audiences |-> "grantaudiencebounds_2", lifetime |-> [bound |-> [tag |-> "Empty"], unresolved |-> {"Unknown"}, not_before_ms |-> 2, expires_at_ms |-> 2], delegation_depth |-> [bound |-> [tag |-> "Remaining", edges |-> 1], unresolved |-> {"Unknown"}, remaining_edges |-> 2]], effective |-> [actions |-> "grantactionbounds_2", resource_domains |-> "grantresourcebounds_2", processors |-> "grantprocessorbounds_2", audiences |-> "grantaudiencebounds_2", lifetime |-> [bound |-> [tag |-> "Empty"], unresolved |-> {"Unknown"}, not_before_ms |-> 2, expires_at_ms |-> 2], delegation_depth |-> [bound |-> [tag |-> "Remaining", edges |-> 1], unresolved |-> {"Unknown"}, remaining_edges |-> 2]]]}
-GrantRecordValuesDeep == {[id |-> "evidenceid_1", parent |-> None, issuer |-> "grantprincipal_1", grantee |-> "grantprincipal_1", represented_subject |-> None, issued_revision |-> 1, restrictions |-> [actions |-> "grantactionbounds_1", resource_domains |-> "grantresourcebounds_1", processors |-> "grantprocessorbounds_1", audiences |-> "grantaudiencebounds_1", lifetime |-> [bound |-> [tag |-> "Unrestricted"], unresolved |-> {"Absent"}, not_before_ms |-> 1, expires_at_ms |-> 1], delegation_depth |-> [bound |-> [tag |-> "Unrestricted"], unresolved |-> {"Absent"}, remaining_edges |-> 1]]], [id |-> "evidenceid_2", parent |-> Some("evidenceid_1"), issuer |-> "grantprincipal_2", grantee |-> "grantprincipal_2", represented_subject |-> Some("grantprincipal_1"), issued_revision |-> 2, restrictions |-> [actions |-> "grantactionbounds_2", resource_domains |-> "grantresourcebounds_2", processors |-> "grantprocessorbounds_2", audiences |-> "grantaudiencebounds_2", lifetime |-> [bound |-> [tag |-> "Empty"], unresolved |-> {"Unknown"}, not_before_ms |-> 2, expires_at_ms |-> 2], delegation_depth |-> [bound |-> [tag |-> "Remaining", edges |-> 1], unresolved |-> {"Unknown"}, remaining_edges |-> 2]]]}
+DerivedChildRestrictionsValuesDeep == {[effective |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 0, tag |-> "Remaining"], remaining_edges |-> 0, unresolved |-> {}], lifetime |-> [bound |-> [expires_at_ms |-> 2, not_before_ms |-> 1, tag |-> "Window"], expires_at_ms |-> 2, not_before_ms |-> 1, unresolved |-> {}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"], parent |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 1, tag |-> "Remaining"], remaining_edges |-> 1, unresolved |-> {}], lifetime |-> [bound |-> [expires_at_ms |-> 3, not_before_ms |-> 0, tag |-> "Window"], expires_at_ms |-> 3, not_before_ms |-> 0, unresolved |-> {}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"], requested |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 0, tag |-> "Remaining"], remaining_edges |-> 0, unresolved |-> {}], lifetime |-> [bound |-> [expires_at_ms |-> 2, not_before_ms |-> 1, tag |-> "Window"], expires_at_ms |-> 2, not_before_ms |-> 1, unresolved |-> {}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"]]}
+EvidenceIdValuesDeep == {"grant_root", "grant_child"}
+GrantAuthorityIncarnationValuesDeep == {"owner_incarnation"}
+GrantPrincipalValuesDeep == {"principal_a", "principal_b"}
+GrantRecordValuesDeep == {[authority_incarnation |-> "owner_incarnation", grantee |-> "principal_b", id |-> "grant_root", issued_revision |-> 1, issuer |-> "principal_a", parent |-> None, represented_subject |-> None, restrictions |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 1, tag |-> "Remaining"], remaining_edges |-> 1, unresolved |-> {}], lifetime |-> [bound |-> [expires_at_ms |-> 3, not_before_ms |-> 0, tag |-> "Window"], expires_at_ms |-> 3, not_before_ms |-> 0, unresolved |-> {}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"]], [authority_incarnation |-> "owner_incarnation", grantee |-> "principal_a", id |-> "grant_child", issued_revision |-> 2, issuer |-> "principal_b", parent |-> Some("grant_root"), represented_subject |-> None, restrictions |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 0, tag |-> "Remaining"], remaining_edges |-> 0, unresolved |-> {}], lifetime |-> [bound |-> [expires_at_ms |-> 2, not_before_ms |-> 1, tag |-> "Window"], expires_at_ms |-> 2, not_before_ms |-> 1, unresolved |-> {}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"]], [authority_incarnation |-> "owner_incarnation", grantee |-> "principal_a", id |-> "grant_root", issued_revision |-> 1, issuer |-> "principal_b", parent |-> None, represented_subject |-> None, restrictions |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 1, tag |-> "Remaining"], remaining_edges |-> 1, unresolved |-> {}], lifetime |-> [bound |-> [expires_at_ms |-> 3, not_before_ms |-> 0, tag |-> "Window"], expires_at_ms |-> 3, not_before_ms |-> 0, unresolved |-> {}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"]], [authority_incarnation |-> "owner_incarnation", grantee |-> "principal_b", id |-> "grant_child", issued_revision |-> 2, issuer |-> "principal_a", parent |-> Some("grant_root"), represented_subject |-> None, restrictions |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 0, tag |-> "Remaining"], remaining_edges |-> 0, unresolved |-> {}], lifetime |-> [bound |-> [expires_at_ms |-> 2, not_before_ms |-> 1, tag |-> "Window"], expires_at_ms |-> 2, not_before_ms |-> 1, unresolved |-> {}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"]], [authority_incarnation |-> "owner_incarnation", grantee |-> "principal_b", id |-> "grant_root", issued_revision |-> 1, issuer |-> "principal_a", parent |-> None, represented_subject |-> None, restrictions |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 1, tag |-> "Remaining"], remaining_edges |-> 1, unresolved |-> {}], lifetime |-> [bound |-> [tag |-> "Unrestricted"], expires_at_ms |-> RustU64Max, not_before_ms |-> 0, unresolved |-> {"Unknown"}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"]], [authority_incarnation |-> "foreign_incarnation", grantee |-> "principal_b", id |-> "grant_root", issued_revision |-> 1, issuer |-> "principal_a", parent |-> None, represented_subject |-> None, restrictions |-> [actions |-> "unrestricted_actions", audiences |-> "unrestricted_audiences", delegation_depth |-> [bound |-> [edges |-> 1, tag |-> "Remaining"], remaining_edges |-> 1, unresolved |-> {}], lifetime |-> [bound |-> [expires_at_ms |-> 3, not_before_ms |-> 0, tag |-> "Window"], expires_at_ms |-> 3, not_before_ms |-> 0, unresolved |-> {}], processors |-> "unrestricted_processors", resource_domains |-> "unrestricted_resources"]]}
 
 MapEvidenceIdGrantRecordValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in EvidenceIdValues, v \in GrantRecordValues }
 OptionEvidenceIdValues == {None} \cup {Some(x) : x \in EvidenceIdValues}
+OptionGrantAuthorityIncarnationValues == {None} \cup {Some(x) : x \in GrantAuthorityIncarnationValues}
 OptionGrantPrincipalValues == {None} \cup {Some(x) : x \in GrantPrincipalValues}
 SeqOfGrantRecordValues == {<<>>} \cup {<<x>> : x \in GrantRecordValues} \cup {<<x, y>> : x \in GrantRecordValues, y \in GrantRecordValues}
 
@@ -33,12 +40,12 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, root, namespace, generation, revision, records, revoked
+VARIABLES phase, model_step_count, root, namespace, generation, incarnation, revision, records, revoked
 
-vars == << phase, model_step_count, root, namespace, generation, revision, records, revoked >>
+vars == << phase, model_step_count, root, namespace, generation, incarnation, revision, records, revoked >>
 
 child_rank(parent, child) == (IF (parent.delegation_depth.bound.tag = "Unrestricted") THEN TRUE ELSE ((parent.delegation_depth.bound.tag = "Remaining") /\ (child.delegation_depth.bound.tag = "Remaining") /\ (child.delegation_depth.remaining_edges < parent.delegation_depth.remaining_edges)))
-lifetime_current(restrictions, now_ms) == ((Len(restrictions.lifetime.unresolved) = 0) /\ (Len(restrictions.delegation_depth.unresolved) = 0) /\ (IF (restrictions.lifetime.bound.tag = "Unrestricted") THEN TRUE ELSE ((restrictions.lifetime.bound.tag = "Window") /\ (restrictions.lifetime.not_before_ms <= now_ms) /\ (now_ms < restrictions.lifetime.expires_at_ms))))
+lifetime_current(restrictions, now_ms) == ((Cardinality(restrictions.lifetime.unresolved) = 0) /\ (Cardinality(restrictions.delegation_depth.unresolved) = 0) /\ (IF (restrictions.lifetime.bound.tag = "Unrestricted") THEN TRUE ELSE ((restrictions.lifetime.bound.tag = "Window") /\ (restrictions.lifetime.not_before_ms <= now_ms) /\ (now_ms < restrictions.lifetime.expires_at_ms))))
 chain_links(chain, arg_root, now_ms) == ((Len(chain) > 0) /\ (Len(chain) <= 64) /\ (\A link \in SeqElements(chain) : (lifetime_current(link.restrictions, now_ms) /\ (IF (link.parent = None) THEN (Some(link.issuer) = arg_root) ELSE (\E parent \in SeqElements(chain) : ((link.parent = Some(parent.id)) /\ (link.issuer = parent.grantee) /\ (link.represented_subject = parent.represented_subject) /\ (parent.issued_revision < link.issued_revision) /\ child_rank(parent.restrictions, link.restrictions)))))))
 
 Init ==
@@ -47,6 +54,7 @@ Init ==
     /\ root = None
     /\ namespace = None
     /\ generation = 0
+    /\ incarnation = None
     /\ revision = 0
     /\ records = [x \in {} |-> None]
     /\ revoked = {}
@@ -54,11 +62,11 @@ Init ==
 \* Named UNCHANGED frames. One definition per distinct frame; every action
 \* that leaves those variables unchanged references the definition by name.
 UnchangedFrame_00c7c6781b869e99 == UNCHANGED << revision, records, revoked >>
-UnchangedFrame_0feea0d3f95c4d9e == UNCHANGED << root, namespace, generation, revision, records, revoked >>
-UnchangedFrame_6f79c3b2ec7cb7d1 == UNCHANGED << root, namespace, generation, revoked >>
-UnchangedFrame_b0f37960469bf115 == UNCHANGED << root, namespace, generation, records >>
+UnchangedFrame_015cc440bac5e227 == UNCHANGED << root, namespace, generation, incarnation, records >>
+UnchangedFrame_44d4642097625110 == UNCHANGED << root, namespace, generation, incarnation, revision, records, revoked >>
+UnchangedFrame_74d70b51478fdc0f == UNCHANGED << root, namespace, generation, incarnation, revoked >>
 
-Configure(arg_root, arg_namespace, arg_generation) ==
+Configure(arg_root, arg_namespace, arg_generation, arg_incarnation) ==
     /\ phase = "Unconfigured"
     /\ (arg_generation > 0)
     /\ phase' = "Active"
@@ -66,12 +74,14 @@ Configure(arg_root, arg_namespace, arg_generation) ==
     /\ root' = Some(arg_root)
     /\ namespace' = Some(arg_namespace)
     /\ generation' = arg_generation
+    /\ incarnation' = Some(arg_incarnation)
     /\ UnchangedFrame_00c7c6781b869e99
 
 
 IssueRoot(actor, record) ==
     /\ phase = "Active"
     /\ (Some(actor) = root)
+    /\ (Some(record.authority_incarnation) = incarnation)
     /\ ((record.issuer = actor) /\ (record.parent = None))
     /\ (((record.id \in DOMAIN records) = FALSE) /\ (revision < RustU64Max))
     /\ (record.issued_revision = (revision + 1))
@@ -79,12 +89,13 @@ IssueRoot(actor, record) ==
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ records' = MapSet(records, record.id, record)
-    /\ UnchangedFrame_6f79c3b2ec7cb7d1
+    /\ UnchangedFrame_74d70b51478fdc0f
 
 
 IssueChild(actor, record, derived, chain, now_ms) ==
     /\ phase = "Active"
     /\ (revision < RustU64Max)
+    /\ (Some(record.authority_incarnation) = incarnation)
     /\ (((record.id \in DOMAIN records) = FALSE) /\ (record.issued_revision = (revision + 1)))
     /\ ((64 > Len(chain)) /\ chain_links(chain, root, now_ms))
     /\ (\A link \in SeqElements(chain) : (((IF (link.id \in DOMAIN records) THEN Some((IF link.id \in DOMAIN records THEN records[link.id] ELSE "None")) ELSE None) = Some(link)) /\ ((link.id \in revoked) = FALSE)))
@@ -93,7 +104,7 @@ IssueChild(actor, record, derived, chain, now_ms) ==
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ records' = MapSet(records, record.id, record)
-    /\ UnchangedFrame_6f79c3b2ec7cb7d1
+    /\ UnchangedFrame_74d70b51478fdc0f
 
 
 RevokeNew(actor, record) ==
@@ -106,7 +117,7 @@ RevokeNew(actor, record) ==
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ revoked' = (revoked \cup {record.id})
-    /\ UnchangedFrame_b0f37960469bf115
+    /\ UnchangedFrame_015cc440bac5e227
 
 
 RevokeAlready(actor, record) ==
@@ -116,37 +127,45 @@ RevokeAlready(actor, record) ==
     /\ (record.id \in revoked)
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_0feea0d3f95c4d9e
+    /\ UnchangedFrame_44d4642097625110
 
 
-ResolveUse(arg_namespace, arg_generation, executor, represented_subject, leaf, chain, now_ms) ==
+ResolveUse(arg_namespace, arg_generation, arg_incarnation, executor, represented_subject, leaf, chain, now_ms) ==
     /\ phase = "Active"
-    /\ ((Some(arg_namespace) = namespace) /\ (arg_generation = generation))
+    /\ ((Some(arg_namespace) = namespace) /\ (arg_generation = generation) /\ (Some(arg_incarnation) = incarnation))
     /\ ((leaf.grantee = executor) /\ (leaf.represented_subject = represented_subject) /\ (leaf \in SeqElements(chain)))
     /\ chain_links(chain, root, now_ms)
     /\ (\A link \in SeqElements(chain) : (((IF (link.id \in DOMAIN records) THEN Some((IF link.id \in DOMAIN records THEN records[link.id] ELSE "None")) ELSE None) = Some(link)) /\ ((link.id \in revoked) = FALSE)))
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_0feea0d3f95c4d9e
+    /\ UnchangedFrame_44d4642097625110
 
 
 Next ==
-    \/ \E arg_root \in GrantPrincipalValues : \E arg_namespace \in EvidenceIdValues : \E arg_generation \in 0..2 : Configure(arg_root, arg_namespace, arg_generation)
+    \/ \E arg_root \in GrantPrincipalValues : \E arg_namespace \in EvidenceIdValues : \E arg_generation \in 0..2 : \E arg_incarnation \in GrantAuthorityIncarnationValues : Configure(arg_root, arg_namespace, arg_generation, arg_incarnation)
     \/ \E actor \in GrantPrincipalValues : \E record \in GrantRecordValues : IssueRoot(actor, record)
     \/ \E actor \in GrantPrincipalValues : \E record \in GrantRecordValues : \E derived \in DerivedChildRestrictionsValues : \E chain \in SeqOfGrantRecordValues : \E now_ms \in 0..2 : IssueChild(actor, record, derived, chain, now_ms)
     \/ \E actor \in GrantPrincipalValues : \E record \in GrantRecordValues : RevokeNew(actor, record)
     \/ \E actor \in GrantPrincipalValues : \E record \in GrantRecordValues : RevokeAlready(actor, record)
-    \/ \E arg_namespace \in EvidenceIdValues : \E arg_generation \in 0..2 : \E executor \in GrantPrincipalValues : \E represented_subject \in OptionGrantPrincipalValues : \E leaf \in GrantRecordValues : \E chain \in SeqOfGrantRecordValues : \E now_ms \in 0..2 : ResolveUse(arg_namespace, arg_generation, executor, represented_subject, leaf, chain, now_ms)
+    \/ \E arg_namespace \in EvidenceIdValues : \E arg_generation \in 0..2 : \E arg_incarnation \in GrantAuthorityIncarnationValues : \E executor \in GrantPrincipalValues : \E represented_subject \in OptionGrantPrincipalValues : \E leaf \in GrantRecordValues : \E chain \in SeqOfGrantRecordValues : \E now_ms \in 0..2 : ResolveUse(arg_namespace, arg_generation, arg_incarnation, executor, represented_subject, leaf, chain, now_ms)
 
-configured_identity_is_present == (IF (phase = "Unconfigured") THEN TRUE ELSE ((root # None) /\ (namespace # None) /\ (generation > 0)))
+configured_identity_is_present == (IF (phase = "Unconfigured") THEN TRUE ELSE ((root # None) /\ (namespace # None) /\ (generation > 0) /\ (incarnation # None)))
+unconfigured_state_is_empty == (IF (phase # "Unconfigured") THEN TRUE ELSE ((root = None) /\ (namespace = None) /\ (generation = 0) /\ (incarnation = None) /\ (revision = 0) /\ (Cardinality(DOMAIN records) = 0) /\ (Cardinality(revoked) = 0)))
+revision_accounts_for_retained_mutations == ((revision >= Cardinality(DOMAIN records)) /\ ((revision - Cardinality(DOMAIN records)) = Cardinality(revoked)))
+issued_records_have_exact_identity_and_revision == (\A id \in DOMAIN records : (((IF "value" \in DOMAIN (IF (id \in DOMAIN records) THEN Some((IF id \in DOMAIN records THEN records[id] ELSE "None")) ELSE None) THEN (IF (id \in DOMAIN records) THEN Some((IF id \in DOMAIN records THEN records[id] ELSE "None")) ELSE None)["value"] ELSE None).id = id) /\ ((IF "value" \in DOMAIN (IF (id \in DOMAIN records) THEN Some((IF id \in DOMAIN records THEN records[id] ELSE "None")) ELSE None) THEN (IF (id \in DOMAIN records) THEN Some((IF id \in DOMAIN records THEN records[id] ELSE "None")) ELSE None)["value"] ELSE None).issued_revision > 0) /\ ((IF "value" \in DOMAIN (IF (id \in DOMAIN records) THEN Some((IF id \in DOMAIN records THEN records[id] ELSE "None")) ELSE None) THEN (IF (id \in DOMAIN records) THEN Some((IF id \in DOMAIN records THEN records[id] ELSE "None")) ELSE None)["value"] ELSE None).issued_revision <= revision)))
+issued_records_belong_to_this_incarnation == (\A id \in DOMAIN records : (Some((IF "value" \in DOMAIN (IF (id \in DOMAIN records) THEN Some((IF id \in DOMAIN records THEN records[id] ELSE "None")) ELSE None) THEN (IF (id \in DOMAIN records) THEN Some((IF id \in DOMAIN records THEN records[id] ELSE "None")) ELSE None)["value"] ELSE None).authority_incarnation) = incarnation))
 revoked_records_remain_present == (\A id \in revoked : (id \in DOMAIN records))
 
-CiStateConstraint == /\ model_step_count <= 4 /\ Cardinality(DOMAIN records) <= 1 /\ Cardinality(revoked) <= 1
+CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(DOMAIN records) <= 2 /\ Cardinality(revoked) <= 2
 DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(DOMAIN records) <= 2 /\ Cardinality(revoked) <= 2
 
 Spec == Init /\ [][Next]_vars
 
 THEOREM Spec => []configured_identity_is_present
+THEOREM Spec => []unconfigured_state_is_empty
+THEOREM Spec => []revision_accounts_for_retained_mutations
+THEOREM Spec => []issued_records_have_exact_identity_and_revision
+THEOREM Spec => []issued_records_belong_to_this_incarnation
 THEOREM Spec => []revoked_records_remain_present
 
 =============================================================================

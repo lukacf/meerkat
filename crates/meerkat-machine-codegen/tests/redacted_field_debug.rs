@@ -114,6 +114,7 @@ fn schema() -> MachineSchema {
         effect_dispositions: vec![],
         named_types: vec![],
         ci_step_limit: None,
+        tlc_model: None,
         deep_domain_overrides: Default::default(),
     }
 }

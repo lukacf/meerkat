@@ -63,6 +63,7 @@ pub struct MachineSchemaMetadata {
     pub tlc_representative_inputs: Vec<InputVariantId>,
     pub command_plans: Vec<CommandPlanSchema>,
     pub ci_step_limit: Option<u32>,
+    pub tlc_model: Option<crate::MachineTlcModel>,
     pub deep_domain_overrides: std::collections::BTreeMap<String, usize>,
 }
 
@@ -73,8 +74,14 @@ impl MachineSchemaMetadata {
         schema.tlc_representative_inputs = self.tlc_representative_inputs;
         schema.command_plans = self.command_plans;
         schema.ci_step_limit = self.ci_step_limit;
+        schema.tlc_model = self.tlc_model;
         schema.deep_domain_overrides = self.deep_domain_overrides;
         schema
+    }
+
+    pub fn with_tlc_model(mut self, model: crate::MachineTlcModel) -> Self {
+        self.tlc_model = Some(model);
+        self
     }
 
     pub fn with_ci_step_limit(mut self, ci_step_limit: u32) -> Self {
@@ -235,6 +242,7 @@ fn machine_schema_metadata(
         tlc_representative_inputs: Vec::new(),
         command_plans: Vec::new(),
         ci_step_limit: None,
+        tlc_model: None,
         deep_domain_overrides: std::collections::BTreeMap::new(),
     }
 }

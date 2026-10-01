@@ -18,6 +18,8 @@ pub type DerivedChildRestrictions =
 pub type EvidenceId = meerkat_authorization_contracts::evidence::EvidenceId;
 pub type ExecutionRestrictions =
     meerkat_authorization_contracts::constraints::ExecutionRestrictions;
+pub type GrantAuthorityIncarnation =
+    meerkat_authorization_contracts::grant::GrantAuthorityIncarnation;
 pub type GrantPrincipal =
     meerkat_machine_schema::catalog::dsl::grant_authority::types::GrantPrincipal;
 pub type GrantRecord = meerkat_machine_schema::catalog::dsl::grant_authority::types::GrantRecord;
@@ -39,6 +41,7 @@ pub struct State {
     pub root: Option<GrantPrincipal>,
     pub namespace: Option<EvidenceId>,
     pub generation: u64,
+    pub incarnation: Option<GrantAuthorityIncarnation>,
     pub revision: u64,
     pub records: std::collections::BTreeMap<EvidenceId, GrantRecord>,
     pub revoked: std::collections::BTreeSet<EvidenceId>,
@@ -50,6 +53,10 @@ impl std::fmt::Debug for State {
             .field("root", &self.root.as_ref().map(|_| "<redacted>"))
             .field("namespace", &self.namespace.as_ref().map(|_| "<redacted>"))
             .field("generation", &self.generation)
+            .field(
+                "incarnation",
+                &self.incarnation.as_ref().map(|_| "<redacted>"),
+            )
             .field("revision", &self.revision)
             .field(
                 "records",
@@ -76,6 +83,7 @@ pub mod inputs {
         pub root: GrantPrincipal,
         pub namespace: EvidenceId,
         pub generation: u64,
+        pub incarnation: GrantAuthorityIncarnation,
     }
     impl std::fmt::Debug for Configure {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -83,6 +91,7 @@ pub mod inputs {
                 .field("root", &"<redacted>")
                 .field("namespace", &"<redacted>")
                 .field("generation", &self.generation)
+                .field("incarnation", &"<redacted>")
                 .finish()
         }
     }
@@ -138,6 +147,7 @@ pub mod inputs {
     pub struct ResolveUse {
         pub namespace: EvidenceId,
         pub generation: u64,
+        pub incarnation: GrantAuthorityIncarnation,
         pub executor: GrantPrincipal,
         pub represented_subject: Option<GrantPrincipal>,
         pub leaf: GrantRecord,
@@ -149,6 +159,7 @@ pub mod inputs {
             f.debug_struct("ResolveUse")
                 .field("namespace", &"<redacted>")
                 .field("generation", &self.generation)
+                .field("incarnation", &"<redacted>")
                 .field("executor", &"<redacted>")
                 .field(
                     "represented_subject",
@@ -332,6 +343,7 @@ pub fn initial_state() -> State {
         root: None,
         namespace: None,
         generation: 0,
+        incarnation: None,
         revision: 0,
         records: Default::default(),
         revoked: Default::default(),

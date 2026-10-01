@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `1`
+- Version: `2`
 - Rust owner: `self` / `catalog::dsl::grant_authority`
 
 ## State
@@ -10,16 +10,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `root`: `Option<GrantPrincipal>`
 - `namespace`: `Option<EvidenceId>`
 - `generation`: `u64`
+- `incarnation`: `Option<GrantAuthorityIncarnation>`
 - `revision`: `u64`
 - `records`: `Map<EvidenceId, GrantRecord>`
 - `revoked`: `Set<EvidenceId>`
 
 ## Inputs
-- `Configure`(root: GrantPrincipal, namespace: EvidenceId, generation: u64)
+- `Configure`(root: GrantPrincipal, namespace: EvidenceId, generation: u64, incarnation: GrantAuthorityIncarnation)
 - `IssueRoot`(actor: GrantPrincipal, record: GrantRecord)
 - `IssueChild`(actor: GrantPrincipal, record: GrantRecord, derived: DerivedChildRestrictions, chain: Seq<GrantRecord>, now_ms: u64)
 - `Revoke`(actor: GrantPrincipal, record: GrantRecord)
-- `ResolveUse`(namespace: EvidenceId, generation: u64, executor: GrantPrincipal, represented_subject: Option<GrantPrincipal>, leaf: GrantRecord, chain: Seq<GrantRecord>, now_ms: u64)
+- `ResolveUse`(namespace: EvidenceId, generation: u64, incarnation: GrantAuthorityIncarnation, executor: GrantPrincipal, represented_subject: Option<GrantPrincipal>, leaf: GrantRecord, chain: Seq<GrantRecord>, now_ms: u64)
 
 ## Signals
 
@@ -36,12 +37,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Invariants
 - `configured_identity_is_present`
+- `unconfigured_state_is_empty`
+- `revision_accounts_for_retained_mutations`
+- `issued_records_have_exact_identity_and_revision`
+- `issued_records_belong_to_this_incarnation`
 - `revoked_records_remain_present`
 
 ## Transitions
 ### `Configure`
 - From: `Unconfigured`
-- On: `Configure`(root, namespace, generation)
+- On: `Configure`(root, namespace, generation, incarnation)
 - Guards:
   - ``
 - Emits: `Configured`
@@ -55,6 +60,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - ``
   - ``
   - ``
+  - ``
 - Emits: `Issued`
 - To: `Active`
 
@@ -62,6 +68,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Active`
 - On: `IssueChild`(actor, record, derived, chain, now_ms)
 - Guards:
+  - ``
   - ``
   - ``
   - ``
@@ -93,7 +100,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveUse`
 - From: `Active`
-- On: `ResolveUse`(namespace, generation, executor, represented_subject, leaf, chain, now_ms)
+- On: `ResolveUse`(namespace, generation, incarnation, executor, represented_subject, leaf, chain, now_ms)
 - Guards:
   - ``
   - ``

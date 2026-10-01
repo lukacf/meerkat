@@ -665,6 +665,7 @@ test_suite(
         "//crates/meerkat-machine-schema:draining_registration_fence_test",
         "//crates/meerkat-machine-schema:forked_participant_lifecycle_machine_test",
         "//crates/meerkat-machine-schema:gpt_live_authority_contract_test",
+        "//crates/meerkat-machine-schema:grant_tlc_model_test",
         "//crates/meerkat-machine-schema:identity_roundtrip_test",
         "//crates/meerkat-machine-schema:meerkat_machine_schema_unit_test",
         "//crates/meerkat-machine-schema:model_routing_handoff_lifecycle_test",

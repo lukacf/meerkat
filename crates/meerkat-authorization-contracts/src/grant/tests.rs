@@ -1,10 +1,10 @@
 #![allow(clippy::expect_used)]
 
-use super::{GrantLineageRef, GrantReferenceError};
+use super::{GrantAuthorityIncarnation, GrantLineageRef, GrantReferenceError};
 use meerkat_core::auth::{PrincipalKind, PrincipalRef, TrustDomainId};
 use serde_json::json;
 
-const WIRE: &str = r#"{"root_authority":{"kind":"service_account","id":"root","qualification":{"kind":"qualified","trust_domain_id":"grant-fixture"}},"authority_namespace":"namespace","authority_generation":1,"grant_id":"grant","issued_revision":7}"#;
+const WIRE: &str = r#"{"root_authority":{"kind":"service_account","id":"root","qualification":{"kind":"qualified","trust_domain_id":"grant-fixture"}},"authority_namespace":"namespace","authority_generation":1,"authority_incarnation":"8ce78497-72c4-4f5e-8e28-4570e54d4b5b","grant_id":"grant","issued_revision":7}"#;
 
 fn reference() -> GrantLineageRef {
     GrantLineageRef {
@@ -16,6 +16,10 @@ fn reference() -> GrantLineageRef {
         .expect("principal"),
         authority_namespace: crate::evidence::EvidenceId::new("namespace").expect("namespace"),
         authority_generation: 1,
+        authority_incarnation: GrantAuthorityIncarnation::from_uuid(
+            uuid::Uuid::parse_str("8ce78497-72c4-4f5e-8e28-4570e54d4b5b").expect("UUID"),
+        )
+        .expect("v4 incarnation"),
         grant_id: crate::evidence::EvidenceId::new("grant").expect("grant"),
         issued_revision: 7,
     }
@@ -40,6 +44,7 @@ fn moved_reference_rejects_unknown_missing_duplicate_and_malformed_fields() {
         "root_authority",
         "authority_namespace",
         "authority_generation",
+        "authority_incarnation",
         "grant_id",
         "issued_revision",
     ] {
@@ -79,4 +84,31 @@ fn validation_remains_data_only_and_preserves_error_precedence() {
     assert_eq!(value.validate(), Err(GrantReferenceError::Unqualified));
     value.authority_generation = 1;
     assert_eq!(value.validate(), Err(GrantReferenceError::Unqualified));
+}
+
+#[test]
+fn incarnation_wire_rejects_missing_malformed_and_non_v4_values() {
+    let good = reference();
+    let encoded = serde_json::to_value(good.authority_incarnation).expect("incarnation wire");
+    assert_eq!(
+        serde_json::from_value::<GrantAuthorityIncarnation>(encoded).expect("roundtrip"),
+        good.authority_incarnation
+    );
+    assert_eq!(
+        format!("{:?}", good.authority_incarnation),
+        "GrantAuthorityIncarnation([protected])"
+    );
+    for value in [
+        json!(null),
+        json!(""),
+        json!("not-a-uuid"),
+        json!("00000000-0000-0000-0000-000000000000"),
+        json!("8ce78497-72c4-1f5e-8e28-4570e54d4b5b"),
+        json!("8ce78497-72c4-4f5e-0e28-4570e54d4b5b"),
+        json!({"uuid":"8ce78497-72c4-4f5e-8e28-4570e54d4b5b"}),
+    ] {
+        let mut wire = serde_json::to_value(&good).expect("reference wire");
+        wire["authority_incarnation"] = value;
+        assert!(serde_json::from_value::<GrantLineageRef>(wire).is_err());
+    }
 }

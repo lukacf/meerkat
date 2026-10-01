@@ -139,6 +139,8 @@ pub struct MachineSchema {
     /// may need a lower limit to keep CI verification tractable. `None` uses the
     /// codegen default (6 for CI, 8 for deep).
     pub ci_step_limit: Option<u32>,
+    /// Explicit finite model fixtures; never runtime authority or vocabulary.
+    pub tlc_model: Option<crate::MachineTlcModel>,
     /// Per-domain sample-cardinality overrides for the DEEP TLC profile,
     /// keyed by the generated CONSTANT name (e.g. `"AgentIdentityValues"`).
     /// Model-checker configuration only — never machine vocabulary. Mirrors
@@ -537,6 +539,11 @@ impl MachineSchema {
             }
         }
         validate_string_enum_named_variants_machine(self)?;
+        if let Some(model) = &self.tlc_model {
+            model
+                .validate(&self.named_types)
+                .map_err(|reason| MachineSchemaError::InvalidTlcModel { reason })?;
+        }
 
         // Validate effect dispositions: every rule must reference a known effect
         // variant with no duplicates, and — unconditionally (#294) — when the
@@ -2012,6 +2019,7 @@ pub enum MachineSchemaError {
     MissingEffectDisposition { variant: String },
     HandoffProtocolOnRoutedEffect { variant: String },
     SurfaceOnlyInputHasTransition { variant: String, transition: String },
+    InvalidTlcModel { reason: String },
     DuplicateNamedTypeBinding { name: String },
     MissingNamedTypeBinding { name: String },
     MissingStringEnumBinding { name: String },
@@ -2103,6 +2111,7 @@ impl fmt::Display for MachineSchemaError {
                     "surface-only input `{variant}` must not have transition `{transition}`"
                 )
             }
+            Self::InvalidTlcModel { reason } => write!(f, "invalid finite TLC model: {reason}"),
             Self::DuplicateNamedTypeBinding { name } => {
                 write!(f, "duplicate named-type binding for `{name}`")
             }

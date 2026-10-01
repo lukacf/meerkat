@@ -54,6 +54,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `configured_identity_is_present`
   - anchors: `grant_authority`
   - scenarios: (unclaimed)
+- `unconfigured_state_is_empty`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `revision_accounts_for_retained_mutations`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `issued_records_have_exact_identity_and_revision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `issued_records_belong_to_this_incarnation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `revoked_records_remain_present`
   - anchors: `grant_authority`
   - scenarios: (unclaimed)

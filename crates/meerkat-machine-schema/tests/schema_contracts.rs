@@ -2839,6 +2839,10 @@ mod grant_candidate_wire {
     fn candidate_record_roundtrips_and_refuses_unknown_duplicate_or_bad_principal() {
         let record = GrantRecord {
             id: EvidenceId::new("candidate-record").expect("id"),
+            authority_incarnation: serde_json::from_value(json!(
+                "8ce78497-72c4-4f5e-8e28-4570e54d4b5b"
+            ))
+            .expect("incarnation"),
             parent: None,
             issuer: principal(),
             grantee: principal(),
@@ -2847,6 +2851,16 @@ mod grant_candidate_wire {
             restrictions: ExecutionRestrictions::unrestricted(),
         };
         let wire = serde_json::to_string(&record).expect("record wire");
+        let mut missing_incarnation = serde_json::to_value(&record).expect("record value");
+        missing_incarnation
+            .as_object_mut()
+            .expect("object")
+            .remove("authority_incarnation");
+        assert!(serde_json::from_value::<GrantRecord>(missing_incarnation).is_err());
+        let mut malformed_incarnation = serde_json::to_value(&record).expect("record value");
+        malformed_incarnation["authority_incarnation"] =
+            json!("00000000-0000-0000-0000-000000000000");
+        assert!(serde_json::from_value::<GrantRecord>(malformed_incarnation).is_err());
         assert_eq!(
             serde_json::from_str::<GrantRecord>(&wire).expect("record decode"),
             record

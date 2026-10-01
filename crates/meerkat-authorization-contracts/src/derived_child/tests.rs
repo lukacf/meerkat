@@ -342,7 +342,7 @@ fn diagnostics_do_not_expose_private_restriction_values() {
 fn readonly_view_is_detached_from_checked_value_and_wire_has_no_wrapper() {
     let derived = derived();
     let before = wire();
-    let mut view = std::ops::Deref::deref(&derived).clone();
+    let mut view = (*derived).clone();
     view.effective = ExecutionRestrictions::unrestricted();
     assert_ne!(view.effective, *derived.effective());
     assert_eq!(serde_json::to_value(&derived).expect("encode"), before);

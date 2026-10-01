@@ -3,6 +3,8 @@ mod composition;
 pub mod identity;
 mod machine;
 mod seam;
+mod tlc_model;
+pub use tlc_model::{MachineTlcModel, MachineTlcProfile, MachineTlcStateLimits, TlcValue};
 pub mod types;
 
 pub use identity::{

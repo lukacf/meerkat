@@ -259,12 +259,12 @@
       "name": "handoff_back",
       "file": "handoff-back.wav",
       "voice": "alloy",
-      "text": "Okay, I'm back on voice. What happened while I was gone?",
-      "sha256": "6287659f22c160e4f8d428ec58e8b4393d7b2a7dbde2101ea39e2ea41bbf94b0",
-      "duration_ms": 4855,
+      "text": "Okay, now that I'm back on voice, what happened while I was gone?",
+      "sha256": "6328c7df0defe71abde7df454532721234fd48c7dc6c1120cc21dc27f3d91c4d",
+      "duration_ms": 5161,
       "sample_rate_hz": 24000,
-      "trailing_silence_ms": 1580,
-      "notes": "S104 first utterance after the reopen: the answer window should carry the job's planted result token and the typed turn's fact. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, alloy), VAD-normalised, 1500 ms trailing-silence floor."
+      "trailing_silence_ms": 1630,
+      "notes": "S104 first utterance after the reopen: the answer window should carry the job's planted result token and the typed turn's fact. One clause, no sentence break: \"I'm back on voice.\" as a finished sentence drew an early \"Okay, welcome back\" over the question (gpt-live-1 turn detection; the #1308 pattern). Minted with `voice_fixtures mint` (gpt-4o-mini-tts, alloy), VAD-normalised, 1500 ms trailing-silence floor."
     },
     {
       "name": "busy_job1",

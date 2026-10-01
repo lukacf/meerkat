@@ -3,28 +3,199 @@
 ## Current direction after owner confirmation
 
 Luka approved the [local governed default](../adr-001-local-governed-default.md)
-on 2026-10-01. The [review record](../adr-001-local-governed-review.md)
-tracks exact candidates and findings. Review that short delta before further
-implementation. Preserve
-existing evidence and branches. Witness/bootstrap, authenticated time, external
-anchors and their physical grant-control path are parked; GRANT-03 is withdrawn.
-No heavy build or benchmark is active or queued from this work.
+on 2026-10-01. Its r8 candidate has four-reviewer design acceptance. The
+[review record](../adr-001-local-governed-review.md) binds the exact candidates
+and findings. External witnesses, authenticated time, external anchors and
+human-gated recovery remain optional preserved work. Semantic provenance,
+context taint and semantic disclosure prevention are not implementation goals.
+There is no pending user decision about terminality: a permission refusal is
+ordinary feedback to the model, and admitted work retains its usable controller.
 
-The next integrated milestone is native association and exact replay persisted
-in existing transactions, local policy/restriction evaluation, shared model/tool
-entry and authorized streaming output. Prove denial before sink entry, restart,
-revocation, uncertain model retry and audit-gap semantics. All built-in providers,
-live, compaction and other shared paths remain first-profile acceptance work.
+The integrated donor is `codex/local-governed-default` in
+`/Users/luka/.codex/worktrees/security-adr/meerkat-native-governed-m1`. Its frozen
+audit checkpoint remains unchanged. Publication is being extracted separately
+in `codex/authorization-foundation`, at
+`/Users/luka/.codex/worktrees/security-adr/meerkat-authorization-publication`,
+from main `9ebe09fac976c34a07d965d98e988677e00bfab4`. This keeps the foundational
+contracts and generated grant owner separate from runtime checks and audit;
+it does not import the integrated donor or the earlier high-assurance stack
+wholesale.
 
-Root prepared an isolated native composition on the lead-agreed 8302972d at
-69d040f7e. No new native declaration was written. Two generated model conflicts
-kept the new base artifact wholesale pending canonical regeneration; those
-artifacts are not claimed current. Reserved live declarations still await the
-lead handoff. No push or broad gate has been attempted. The simplified default will start from
-a clean main and selectively reuse required contracts and owner code; the old
-26-commit composition is preserved evidence, not its required dependency stack.
-R4 and the review record explicitly leave the irreducible-request outcome pending
-Luka's clarification. No new scheduler/terminal path has started.
+The first milestone was one real native admission, generated grant check,
+refused tool call returned to the controller, permitted tool call and ordinary
+completion of that same run, with entry and outcome observations on the native
+input owner. That storeless fixture passed on 2026-10-01: one test, 5m57s build
+and 0.05s execution. Its frozen source/result checkpoint is
+`/Users/luka/.codex/adr-001-evidence/native-loop-green-20261001T1338Z`, manifest
+`76b34a8bced8ca1837ca7d6fc80bce4e98bbbb8ca42cb35fed66e31a473b5dc7`.
+Provider responses and application resource semantics are fixtures. This does
+not establish persistent recovery, real provider access or complete coverage.
+
+Use tests first for critical behavior. Root serializes package-scoped Cargo
+commands in the warm integration lane, with two build jobs and four test
+workers. Agents prepare source and review deltas without starting builds. The
+next implementation checkpoint is controller continuity after the frozen audit
+slice. Optional OS confinement, consent and persistent/detached work remain held
+for their separate checkpoints. Authored tests are not recorded as observed
+failures or passes until executed.
+Benchmarks require a separately confirmed quiet host window.
+
+After the first path, close real ingress/account policy and controller-mutation
+composition, persistent admission/recovery, all provider and operation families,
+Elephant and other sources, comms/gates, and surface adoption. The
+[confinement and consent addendum](../adr-001-confinement-and-consent.md) adds
+actual process boundaries and existing-owner human consent. These are reviewed
+in slices, but a narrow profile is not the final product. Finish with adversarial
+implementation acceptance, a reviewable PR and green CI on its exact head.
+
+## Current publication and design status, 2026-10-01
+
+The frozen audit checkpoint is unchanged: 266 selected Rust tests, 414 Python
+SDK tests and 460 TypeScript SDK tests passed. The exact evidence remains under
+`/Users/luka/.codex/adr-001-evidence/audit-sdk-green-20261001`, manifest
+`e3e352ff860ef150aa1a6ee090a410870b9db84939ab2fe03ff3e1eaac52be33`.
+These results distinguish ordinary local policy feedback from audit
+infrastructure failure; they are not full-profile or persistent-recovery
+acceptance.
+
+Foundation extraction has passed 42 contracts tests plus six documentation
+tests, and 291 authorization/schema tests. Canonical machine generation and
+release metadata checks passed; strict lint, packaging and WASM remain pending. This slice supplies qualified
+principals, portable contracts and the generated local grant owner, with no
+runtime enablement. The next-slice dependency inventory found missing RPC,
+MCP and constructor closure; that extraction plan is being revised before
+claiming a self-contained checks-and-audit slice.
+
+| Design | Exact candidate | Status |
+| --- | --- | --- |
+| [Authorization UX/DX](../adr-001-authorization-ux-dx.md) | r5, `d87179cecf50154d8abff97bbfa23aeab445dad40f4fef82dd344f143b2b4ab0` | Design, not implemented native authority |
+| [Turbo S E2E scenarios](../adr-001-turbos-e2e-scenarios.md) | r7, `659c2674cd981410c24b910506fddd6cede524ba26ebe30c9bc9a29f3670ba7c` | Five stories, 37 named checkpoints, 17 live calls per attempt and 34 with one outer retry; proposed coverage, not executed scenario results |
+
+The final review packet is
+`b17de27b1043db434d4ef9c1b6df40fd07291637a9e9b94f8ab032a00246ceaa`.
+Root reports GCP, HomeCore and OB3 acceptance on the bus at 16:14 UTC; Toolkit's
+final packet review remains pending. Design acceptance does not establish
+implementation coverage. The separate provider diagnostics included in the
+packet are not Turbo S scenario passes.
+
+[MobKit PR 520](https://github.com/lukacf/meerkat-mobkit/pull/520) is a draft of
+the first console slice over existing contracts. It adds no native authority
+producers. Its CI asset failure was traced to CommonJS output polluted by a
+local symlink path. The generated-file repair is pushed at `8ebe2cb9ecb826e8fb1eab00ac0fd02e449d4cf8`;
+local freshness passed and new CI run `36891393790` is pending. The superseded
+failed run was canceled. CI is not GREEN, and no merge or deployment is claimed.
+
+## Remaining execution holds
+
+The user's production-expansion freeze still requires one coherent verified
+slice at a time. The four controller-continuity RED cases remain open, including
+real credential/account custody. The controller-setup fixture's missing canonical
+runtime binding preparation has a separate test-only repair pending validation.
+Post-effect live settlement diagnostics and interrupted-callback recovery also
+remain open.
+
+Sandbox, consent and persistent/detached production work remain held. Their
+isolated source and test proposals are preserved. The complete scope still
+includes all provider and operation families, Elephant and other sources,
+communications, delegation, surfaces, recovery, explicit OS confinement and
+consent. Neither the foundation package tests, console slice nor accepted E2E
+design permits a narrow profile to be advertised as complete. Benchmarks still
+need a qualified quiet host window.
+
+## Historical audit validation and parallel product work, 15:48 UTC
+
+The following records the earlier checkpoint; the publication and design status
+above supersedes its then-current queue and candidate counts.
+
+The combined package-scoped test build completed in 38m48s. All 266 selected
+tests passed, including the three native governed-loop tests, provider adapter
+and fallback classification, approval, callback/sibling settlement, and the final
+Mob observation-infrastructure case. All twelve original audit regression cases
+are now GREEN. Exact binary paths, commands, counts and logs are retained in
+`/tmp/adr-001-tdd-validation-20261001/audit-fix-results.json`; these are executed
+results, not a full-suite or full-profile acceptance claim.
+
+Canonical schema emission and the reviewed SDK old-generator RED/new-generator
+GREEN check also passed: 414 Python tests and 460 TypeScript tests, plus typed
+TypeScript compilation, schema freshness, event inventory and RPC/REST alignment.
+The old generator failed the intended missing settlement-field assertion. The
+working generated files exactly match the isolated tested outputs. The frozen
+integrated checkpoint is
+`/Users/luka/.codex/adr-001-evidence/audit-sdk-green-20261001`, manifest
+`e3e352ff860ef150aa1a6ee090a410870b9db84939ab2fe03ff3e1eaac52be33`.
+It includes the larger working tree's dependencies and is not yet an independent
+audit-only PR. Publication now requires extracting a coherent dependency closure
+onto current main, targeting `release/0.8.51` when available.
+
+The four controller-continuity RED cases remain next. A separate newly executed
+controller-setup fixture failed because it omitted canonical runtime binding
+preparation; its test-only repair also belongs to that next checkpoint. Deferred
+post-effect live settlement and interrupted-callback recovery gaps remain open.
+
+Luka explicitly requested independent documentation, UX/DX and Turbo S scenario
+work while the shared Rust integration stays serialized. The two public preview
+guides passed documentation checks. The [UX/DX design](../adr-001-authorization-ux-dx.md)
+has root acceptance for its product model and first existing-contract console
+slice; a different agent is implementing it. The
+[Turbo S scenario design](../adr-001-turbos-e2e-scenarios.md) has root and
+independent-agent review: five stories, 32 named checkpoints, a complete
+feature/surface matrix, explicit missing integrations and bounded live-call costs.
+It is a design, not newly executed E2E coverage. Both proposals have been sent to
+the GCP lead, HomeCore, OB3 and Toolkit for focused bus review.
+
+Console rendering and existing MobKit access administration do not install the
+new native authority producers. The full editor follows real authenticated
+owner contracts, starting with the calendar/account path and then Elephant.
+This parallel frontend work does not authorize unfinished sandbox, consent or
+persistent Rust changes to bypass the audit and controller checkpoints.
+
+## Release integration plan, 2026-10-01
+
+GCP relayed the release scope decisions from Luka at 13:48 UTC and accepted the
+following dependency order at 13:51 UTC. Security PRs target `release/0.8.51`
+after the 0.8.50 cut, with a VM gate for each slice and one final integrated gate.
+The release branch base SHA is pending. No integration-tree checkpoint is itself
+a release-ready PR.
+
+1. Canonical authority contracts and generated local grant owner (Mac).
+2. Exact operation checks, local policy feedback and distinct audit infrastructure
+   failures, including provider and tool sibling behavior (Mac).
+3. Native admission, controller/account/grant custody, audit and archive guard
+   (Mac).
+4. Persistent and detached native coverage, including durable owner recovery and
+   complete unloaded-work custody (VM `turbo-live`, after 3).
+5. Full sources, communications, delegation and surface wiring, including Calendar
+   association validation and exact non-prompt replay (Mac and Toolkit VM lane).
+6. Consent with authenticated late delivery and a fresh explicit attempt (Mac,
+   with OB3 acceptance).
+7. Common confinement launch contract and macOS Seatbelt, including all concrete
+   process launch families (Mac, developed beside 3-6).
+8. Linux Landlock/seccomp and bubblewrap adapters (VM `turbo-det`, after the common
+   API in 7).
+9. Full coverage, measured overhead, active-profile Turbo S and final review
+   (joint).
+
+Confinement is explicit opt-in per deployment/profile; absent configuration uses
+the existing trusted-host launch behavior. Linux and macOS are required for this
+batch. Windows confinement returns typed unsupported and follows in a later
+batch. Authorization is intended to ship on by default only if both the measured
+overhead budget and full active-profile Turbo S gate pass; otherwise it ships
+opt-in. These are release activation decisions, not permission to omit coverage.
+
+The VM contract packets name exact owner seams, dependency gaps, file ownership
+and tests. Persistent grant recovery is an explicit dependency; associations and
+historical audit cannot reconstruct grant issuance. Linux adapters must reject
+unsupported exact restrictions instead of widening them. The Mac retains common
+API and generated-source ownership, so no lane hand-merges generated artifacts.
+
+Observed TDD checkpoint: 22 approval tests and 6 core controller-loop tests pass.
+The strict decoder suite first produced five intended failures; its repair is
+awaiting the focused GREEN run. Shell tests exposed two real required-confinement
+bypasses and four fixture failures, with fixture corrections retained separately.
+After the narrow macOS startup baseline repair, 12 process tests pass, two network
+cases fail, and six bootstrap-integrity attacks fail their protection assertions
+while the allowed helper control passes. These remain implementation work, not
+release or security acceptance.
 
 ## Prior high-assurance schedule, retained as history
 

@@ -51,6 +51,7 @@
                   "concepts/realm-inheritance",
                   "concepts/sessions",
                   "concepts/auth-and-bindings",
+                  "concepts/authorization",
                   "concepts/memory-and-compaction",
                   "concepts/comms",
                   "concepts/mobs",
@@ -71,6 +72,7 @@
               {
                 "group": "Guides: Runtime Behavior",
                 "pages": [
+                  "guides/authorization-integration",
                   "guides/realms",
                   "guides/structured-output",
                   "guides/memory",

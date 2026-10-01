@@ -1,0 +1,173 @@
+---
+title: "Agent authorization"
+description: "Control what an agent may do without confusing credentials, delegation, human consent, and process isolation."
+icon: "shield-halved"
+---
+
+Local governed authorization checks whether an agent may perform a concrete
+operation: read a document, invoke a tool, use a provider account, or send to a
+peer. Permissions belong to the authenticated work and the actual operation,
+not to a model's claim that it is authorized.
+
+<Note>
+**Implementation preview, October 2026.** A native in-memory integration test
+exercises real input admission, generated grants, denied-tool feedback,
+permitted-tool execution, normal run completion, and native audit records with
+a scripted model. This is not full deployment coverage or a released configuration
+recipe. See [integration and current support](/guides/authorization-integration)
+before enabling a governed path.
+</Note>
+
+## Authentication does not grant every action
+
+Authentication identifies a caller. Authorization decides what that caller may
+ask a particular agent to do. [Provider bindings](/concepts/auth-and-bindings)
+select a model backend and credential; they do not grant application permissions.
+
+Keep these identities separate:
+
+| Identity | Question it answers |
+| --- | --- |
+| Requester | Who is asking for this work? |
+| Ingress actor | Which authenticated user, service, or connector submitted it? |
+| Executing agent | Which agent will perform the operation? |
+| Represented subject | On whose behalf is it acting, if anyone? |
+| Credential account | Which external account will the connector use? |
+| Delegation | What authority was explicitly given for this work? |
+
+A qualified principal includes its identity domain. A display name, a string in
+a prompt, or a decoded principal reference is not proof that the sender owns
+that identity. The host's authenticated ingress supplies that proof.
+
+For example, a calendar assistant may read availability in selected calendars
+but be forbidden to delete events. A connected OAuth token with delete access
+does not widen the assistant's grant. Another person using the same assistant
+does not inherit the account owner's authority either.
+
+## Grants narrow authority
+
+A root grant states the authority given to an agent. A child grant can narrow
+its parent's actions, resources, recipients, lifetime, and delegation depth.
+It cannot widen them or silently change the represented subject. At issue and
+use, the grant owner checks the full current chain, including revocation and
+expiry. An earlier successful check is not a permanent permit.
+
+Each operation must satisfy the requester's delegation, the agent's permissions,
+the admitted work's ceiling, and current resource, account, and destination rules.
+Batching work does not union contributors' permissions.
+
+Rules also preserve their combinations. A rule allowing **read calendar A** and
+another allowing **delete calendar B** do not allow **delete calendar A** merely
+because both the action and calendar appear somewhere in the policy.
+
+## Check the operation that will actually run
+
+The adapter retains an immutable binding with the actual request or execution
+plan. Authorization prepares a private decision for that binding. After relevant
+waits, a final local check verifies the same operation, current policy publication,
+and deadline immediately before entry.
+
+Changing tool arguments, resource, recipient, account, or provider route requires
+fresh evaluation. Retries and delegation through another adapter must retain the
+governed context; they cannot silently switch to an ungoverned API. A prepared
+decision is process-local and is not a serializable bearer token.
+
+The design adds no authorization network round trip or separate audit fsync to
+each operation. It targets constant-time warm checking; preparation and recording
+still have a cost. Performance acceptance requires measurement, not just a fast
+lookup in a unit test.
+
+## A denied operation gives feedback
+
+An ordinary permission refusal is a result the agent can act on, like a denied
+tool call. It does not by itself fail the run, cancel allowed sibling actions,
+or put the session into a security hold. The agent may choose another permitted
+action within its existing budgets. An unchanged denied operation is not
+automatically retried, and a governed refusal never falls back to trusted execution.
+
+Infrastructure failure is different:
+
+| Observation | Meaning and handling |
+| --- | --- |
+| **Permission denied** | The requested operation is not allowed. Return audience-safe feedback without entering its body. |
+| **Unable to record audit event** | Required observation storage or staging failed. Preserve an infrastructure error; do not turn it into policy feedback or a retryable provider error. A required entry record failure prevents that new entry. |
+| **Action returned, settlement failed** | Preserve the actual result and the separate settlement diagnostic. Do not claim the physical effect did not occur or repeat it blindly. |
+
+Detailed policy, source, principal, and account information belongs in protected
+records. Public error text must not disclose it to an audience that cannot read it.
+
+## Keep the controller usable
+
+The controller model drives the agent's reasoning and receives operation results.
+Admitted work needs a permitted controller route for its lifetime, independently
+of narrower tool or source grants. Controller inference and provider-hosted
+actions such as web search have separate permissions; permission to reason does
+not automatically permit hosted actions.
+
+Ordinary grant, route, and credential changes must preserve or atomically replace
+the last usable controller while unfinished work depends on it, or receive an
+administrative refusal. Deliberate stopping is a separate, attributed operation.
+This is not an indefinite lease for idle sessions. Complete controller mutation
+and credential continuity are still being integrated.
+
+## Sources, peers, and Elephant
+
+Source access is checked at read, search, or hydration. Tool visibility, an object
+ID, or a content hash does not grant access. Histories, memory, blobs, and exports
+retain their own read and write rules.
+
+Meerkat checks permission to invoke Elephant; Elephant keeps authority over its
+attributes, ABAC rules, and query/fetch permissions. The integration must transmit
+the real actor and scoped delegation, or an authorized service mandate. It must
+not substitute an unrestricted service account for an unauthenticated caller.
+
+Peer sends, helper creation, delegation, and scheduled work follow the same
+principle. The receiver keeps the original requester and checks its own authority;
+it cannot turn a denied request into a more privileged request of its own.
+Schedules retain their commissioning mandate. Console visibility and a signed-in
+provider account are not substitutes for those checks.
+
+## Information handling has an explicit limit
+
+Once an agent reads allowed information into a model context, this system cannot
+mechanically prevent the model from expressing its meaning in a summary,
+limerick, message, or tool argument sent to an otherwise permitted destination.
+There is no semantic provenance, context-taint propagation, or automatic
+source-to-model filtering. Revoking a source blocks later reads under that
+source's policy; it cannot make an agent forget earlier content.
+
+Use role-specific information-handling instructions and real separation of
+agents, stores, and routes where needed. A deployment may require a gate agent
+for selected outgoing actions. Prefer a topology in which only the gate can
+publish to that destination. The runtime can enforce the route and exact
+candidate review; the gate's judgment about content remains fallible.
+
+The local profile trusts the host process, administrator, configured identity and
+policy owners, storage, and registered adapters. It does not provide rollback
+resistance or protect against malicious native code inside that trusted host.
+
+## Confinement and consent add independent requirements
+
+**Process confinement** limits the OS resources a command can use after tool
+authorization. A working directory is not a filesystem sandbox. A selected
+`Required` confinement profile must be enforceable by the host or the launch is
+refused. An explicit `TrustedHost` path retains host access; there is no automatic
+downgrade from required confinement. Untrusted native code must run outside the
+trusted host process.
+
+**Human consent** adds approval for an otherwise permitted exact action. An
+authenticated eligible approver decides on a retained candidate, account,
+recipient, and expiry. Approval is not execution. A later explicit attempt
+rechecks current permissions and consumes consent once at the real entry
+boundary. Decline, expiry, cancellation, or a changed candidate gives local
+feedback. A gate agent's approval is not human consent, and neither can override
+a nonoverridable permission ceiling.
+
+Audit keeps decision, consent consumption, entry attempt, returned result, and
+uncertainty distinct. Pending observations join existing native commits; an
+in-memory host provides process-lifetime history. An optional event exporter is
+not the authoritative record, and a missing record after a crash does not prove
+that no effect occurred.
+
+Read the [integration and migration guide](/guides/authorization-integration)
+for host responsibilities and the remaining deployment checks.

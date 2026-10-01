@@ -42,6 +42,21 @@ no pending terminality or semantic-provenance question.
 
 ## Candidate and review history
 
+The [process confinement and human consent addendum](adr-001-confinement-and-consent.md)
+is a proposed implementation contract following the user-authorized side-chat
+handoff. GCP, HomeCore and OB3 accepted r2; GCP relayed Toolkit's design
+acceptance with five implementation conditions. R3 incorporates those conditions
+and has two independent internal GREEN reviews. GCP accepted and froze r3;
+HomeCore accepted it and OB3 reported no objection. Toolkit's direct response to
+the final wording is pending. It does not change the accepted r8 semantic disclosure
+limit or make design acceptance apply to new implementation.
+R3 candidate: `ed2ae4e13b6bfae2a7b680d0f8b320cca5b09e3406710a5e08d17c83bac4fc50`.
+Frozen candidates, patches and reviews are under
+`/Users/luka/.codex/adr-001-evidence/confinement-consent-addendum-r{1,2,3}`.
+Critical behavior now follows the user's explicit TDD direction: add failing
+regressions first, execute focused checks in a serialized build window, and
+reserve broader suites for coherent integration checkpoints.
+
 | Candidate | Exact SHA-256 | Result |
 | --- | --- | --- |
 | r1 | `bbf338e21790cf4f300aabfe44954662ad32706ecb5f77fe43397d11ecd44527` | Internal adversarial findings repaired in r2. |
@@ -210,7 +225,7 @@ result is claimed by that library check.
 This is documentation validation only. There are no authorization performance
 measurements or full-path implementation acceptance claims for this candidate.
 
-OB3 allocated 12:05-13:35 UTC on 2026-10-01 for root-owned compilation with
+OB3 extended root-owned compilation through 14:10 UTC on 2026-10-01, with
 two build jobs and four test workers in an isolated Rust lane. Benchmarks remain
 withheld until OB3 explicitly opens the quiet window. The former GRANT-03
 reservation is withdrawn; no child agent runs Cargo or generation.

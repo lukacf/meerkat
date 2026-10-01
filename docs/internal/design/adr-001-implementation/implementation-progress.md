@@ -4,18 +4,64 @@
 
 The owner explicitly approved replacing the previous first-profile requirements
 with the [local governed default](../adr-001-local-governed-default.md). Its
-candidate is undergoing adversarial review. The old 111-requirement/57-case
+r8 candidate has four-reviewer design acceptance. The old 111-requirement/57-case
 inventory must be dispositioned against this amendment; it is no longer a
 blanket requirement to finish parked high-assurance work before delivery.
 Existing source/test claims below retain their exact historical scope. They
 do not establish an implemented local governed path.
 
-Checkpoint: 2026-10-01. This supplements the original static requirement
-inventory. Its 111 requirements and 57 explicit cases remain open until their
-actual owner, recovery and sink evidence is assembled. The components below
-are prerequisites and bounded observations, not complete governed enforcement.
+## Current integration and publication checkpoint, 2026-10-01
 
-## Current integration checkpoint
+The integrated donor remains `meerkat-native-governed-m1` on
+`codex/local-governed-default`. Its frozen audit/SDK checkpoint is unchanged:
+266 selected Rust tests, 414 Python tests and 460 TypeScript tests passed, with
+typed TypeScript compilation and the recorded schema/surface checks. Evidence
+is retained under
+`/Users/luka/.codex/adr-001-evidence/audit-sdk-green-20261001`, manifest
+`e3e352ff860ef150aa1a6ee090a410870b9db84939ab2fe03ff3e1eaac52be33`.
+This includes the storeless native model-tool-model fixture: denied delete,
+feedback, permitted read and completion of the same run with native audit
+assertions. Scripted provider results do not prove real-provider or persistent
+coverage.
+
+Publication is a separate extraction in `meerkat-authorization-publication`,
+branch `codex/authorization-foundation`, based on main `9ebe09fa`. The first
+slice preserves qualified principals, pure contracts and the generated grant
+owner without runtime enablement. It has passed 42 contracts tests plus six
+documentation tests and 291 authorization/schema tests. Canonical machine
+generation and release metadata passed; strict lint, packaging and WASM remain
+pending. Missing RPC, MCP and constructor closure
+in the next checks-and-audit slice is being addressed in its extraction plan;
+the larger donor is not an independently publishable audit-only package.
+
+The [UX/DX r5 design](../adr-001-authorization-ux-dx.md), SHA-256
+`d87179cecf50154d8abff97bbfa23aeab445dad40f4fef82dd344f143b2b4ab0`, and
+[Turbo S r7 design](../adr-001-turbos-e2e-scenarios.md), SHA-256
+`659c2674cd981410c24b910506fddd6cede524ba26ebe30c9bc9a29f3670ba7c`, are design
+artifacts. The E2E plan has five stories and 37 named checkpoints, budgeted at
+17 live calls per attempt or 34 with one outer retry. These are not executed
+coverage. Root reports that final packet
+`b17de27b1043db434d4ef9c1b6df40fd07291637a9e9b94f8ab032a00246ceaa` was accepted
+by GCP, HomeCore and OB3 at 16:14 UTC; Toolkit's final review remains pending.
+
+[Draft MobKit PR 520](https://github.com/lukacf/meerkat-mobkit/pull/520) contains
+the first console slice using existing contracts, not new native producers.
+Its CI asset failure was diagnosed as CommonJS symlink-path pollution. A tested
+repair is pushed at `8ebe2cb9ecb826e8fb1eab00ac0fd02e449d4cf8`; local freshness
+passed and new CI run `36891393790` is pending. No green CI, merge or deployment
+is claimed.
+
+The [critical path](critical-path.md) retains the full implementation scope.
+The four controller-continuity RED cases, account/credential custody and the
+controller-setup fixture repair remain for the next checkpoint. Optional OS
+confinement, consent and persistent/detached production changes remain held;
+post-effect live diagnostics and interrupted-callback recovery are still open.
+Full provider/source/Elephant/comms/delegation/surface support and measured cost
+remain required. No benchmark or full-profile acceptance is inferred from these
+package results or design reviews. Historical records below retain their
+original scope and do not override this status.
+
+## Earlier native and high-assurance checkpoints
 
 The current lower native association checkpoint is clean at
 `2356d0eccb6b6a43172e5d73474a22745f1a53ee`, on composed prerequisite parent

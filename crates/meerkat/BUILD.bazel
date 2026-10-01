@@ -3901,8 +3901,9 @@ rust_test(
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
     tags = [
-        "live",
+        "fast",
     ],
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -4321,8 +4322,9 @@ rust_test(
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
     tags = [
-        "live",
+        "fast",
     ],
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -5356,8 +5358,9 @@ rust_test(
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
     tags = [
-        "live",
+        "fast",
     ],
+    size = "medium",
     data = [
         "//crates/meerkat-rpc:package_runfiles",
     ],
@@ -6256,7 +6259,9 @@ test_suite(
         ":embedded_skill_registration_test",
         ":factory_build_agent_test",
         ":job_composition_test",
+        ":job_delivery_projector_test",
         ":job_surface_test",
+        ":live_pipeline_unit_test",
         ":meerkat_unit_test",
         ":persistence_contract_test",
         ":predicate_schedule_test",
@@ -6266,6 +6271,7 @@ test_suite(
         ":sdk_structured_output_test",
         ":session_runtime_admission_test",
         ":session_runtime_builder_test",
+        ":session_runtime_live_orchestration_test",
         ":session_runtime_llm_reconfigure_test",
         ":session_runtime_recovery_test",
         ":session_runtime_runtime_state_test",

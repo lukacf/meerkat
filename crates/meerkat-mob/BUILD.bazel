@@ -672,8 +672,9 @@ rust_test(
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
-        "live",
+        "fast",
     ],
+    size = "medium",
     data = [
         "//tests/integration:package_runfiles",
     ],
@@ -1751,8 +1752,9 @@ rust_test(
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
-        "live",
+        "fast",
     ],
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -4203,6 +4205,7 @@ test_suite(
         ":cold_resume_digest_cost_test",
         ":cross_host_events_test",
         ":cross_host_flows_test",
+        ":cross_host_live_test",
         ":cross_host_wiring_test",
         ":dispatcher_rule_synthetic_injection_test",
         ":flow_frame_recovery_tests_test",
@@ -4215,6 +4218,7 @@ test_suite(
         ":host_actor_test",
         ":host_bind_ceremony_test",
         ":host_forked_participant_attachment_test",
+        ":host_forked_participant_live_daemon_test",
         ":host_materialize_serving_test",
         ":host_member_release_test",
         ":host_member_revival_test",

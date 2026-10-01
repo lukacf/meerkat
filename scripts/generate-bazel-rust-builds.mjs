@@ -1129,18 +1129,51 @@ function compileData(target, packageRoot, includeTests) {
   };
 }
 
-// Test targets whose name says "live" for the GPT Live product region, not
-// for a live provider: they run in-process with no provider key, so the
-// substring rule below must not give them the `live` tag that every Bazel CI
-// lane filters out. gpt_live_generated_authority (meerkat-runtime, 71 tests)
-// was verified green with every provider key unset, with and without the
-// crate's `live` feature.
-const NOT_LIVE_PROVIDER_TESTS = new Set(["meerkat-runtime:gpt_live_generated_authority"]);
+// The `live` tag marks tests that need a real provider (keys, network). Every
+// Bazel CI lane filters it out; the live lanes name their targets
+// explicitly. It is an explicit opt-in: a test is live when it requires the
+// openai-live-e2e feature or is listed below. It used to be any target whose
+// package, name or path contained "live", which hid 15 provider-free targets
+// from every Bazel lane (GPT Live region tests, and "delivery" matching
+// "live"); each of those passed with every provider key unset, an
+// unreachable proxy and no --ignored (2026-10-01). A new real-provider test
+// joins this list; one that is not listed runs in the Bazel lanes and fails
+// there without keys, which is the visible failure mode.
+const LIVE_PROVIDER_FEATURES = new Set(["openai-live-e2e"]);
+const LIVE_PROVIDER_TESTS = new Set([
+  "meerkat-cli:cli_mobpack_live_smoke",
+  "meerkat-cli:live_smoke_cli",
+  "meerkat-client:live_client_provider_matrix",
+  "meerkat-gemini:live_video_uri_smoke",
+  "meerkat-mcp-server:live_mcp_matrix",
+  "meerkat-rest:live_continue_tmp",
+  "meerkat-rest:live_rest_matrix",
+  "meerkat-rest:live_rest_regression",
+  "meerkat-rpc:live_rpc_regression",
+  "meerkat-rpc:live_smoke_rpc",
+  "meerkat:live_meerkat_regression",
+  "meerkat:live_meerkat_user_flows",
+  "meerkat:live_video_uri_surface_smoke",
+  "tests/fixtures/surface-build-fixtures:live_roundtrip",
+  "tests/integration:copilot_live_e2e",
+  "tests/integration:e2e_live_lane",
+  "tests/integration:live_mob_tools",
+]);
+
+function isLiveProviderTest(pkg, target) {
+  return (
+    LIVE_PROVIDER_TESTS.has(`${packageKey(pkg)}:${target.name}`) ||
+    (target["required-features"] ?? []).some((feature) => LIVE_PROVIDER_FEATURES.has(feature))
+  );
+}
 
 function testTags(pkg, target) {
-  const tags = testTagsFromName(pkg, target);
-  if (!NOT_LIVE_PROVIDER_TESTS.has(`${packageKey(pkg)}:${target.name}`)) return tags;
-  const kept = tags.filter((tag) => tag !== "live");
+  const named = testTagsFromName(pkg, target);
+  if (isLiveProviderTest(pkg, target)) {
+    return [...new Set([...named.filter((tag) => tag !== "fast"), "live"])].sort();
+  }
+  if (!named.includes("live")) return named;
+  const kept = named.filter((tag) => tag !== "live");
   return kept.length ? kept : ["fast"];
 }
 

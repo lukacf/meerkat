@@ -1062,8 +1062,9 @@ rust_test(
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
-        "live",
+        "fast",
     ],
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -2945,6 +2946,7 @@ test_suite(
         ":detached_wake_contract_test",
         ":driver_ephemeral_test",
         ":driver_persistent_test",
+        ":durable_delivery_inbox_test",
         ":durable_tail_recovery_authorization_test",
         ":gpt_live_generated_authority_test",
         ":handles_dispatch_through_dispatcher_test",

@@ -1338,6 +1338,51 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         self
     }
 
+    /// Forget the summary this host retained for `session`, so its next open
+    /// generates a fresh one. Hosts that retire a member session can call
+    /// this; an open also forgets a retained summary on its own once the
+    /// session is archived or gone, or its transcript was rewritten.
+    #[cfg(feature = "openai-live")]
+    pub fn forget_live_context_summary(&self, session: &SessionId) {
+        if let Some(policy) = &self.context_summary_policy {
+            policy.retention().forget(session);
+        }
+    }
+
+    /// Read-only provenance of the summary this host retained for `session`:
+    /// what a later open may seed ahead of the rows committed since. Never
+    /// lifecycle or admission authority.
+    #[cfg(feature = "openai-live")]
+    pub fn retained_live_context_summary(
+        &self,
+        session: &SessionId,
+    ) -> Option<crate::session_runtime::live_summary::LiveContextSummaryProvenance> {
+        self.context_summary_policy
+            .as_ref()?
+            .retention()
+            .get(session)
+            .map(|retained| retained.provenance())
+    }
+
+    /// Forget every retained summary whose session is archived, retired,
+    /// destroyed or gone, and return how many were forgotten. Each retain
+    /// already sweeps a bounded number of the least recently retained
+    /// sessions; a host that archives or retires many member sessions can
+    /// call this after doing so.
+    #[cfg(feature = "openai-live")]
+    pub async fn prune_retained_live_context_summaries(&self) -> usize {
+        let Some(policy) = &self.context_summary_policy else {
+            return 0;
+        };
+        self.orchestrator()
+            .sweep_retained_live_context_summaries(
+                policy,
+                None,
+                crate::session_runtime::live_summary::LIVE_CONTEXT_RETAINED_SUMMARY_CAPACITY,
+            )
+            .await
+    }
+
     #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     async fn catch_up_live_context_after_bind(
         &self,
@@ -2013,6 +2058,10 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 pending,
                 projection,
                 boundary,
+                // A recovery replacement's seed cursor is fixed by generated
+                // recovery authority; a retained seed reads to the committed
+                // head, which may be past it.
+                crate::session_runtime::live_summary::RetainedSeedAdmission::Refused,
             )
             .await?;
         Ok((Some(outcome), Some(cursor)))

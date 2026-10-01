@@ -76,6 +76,19 @@ them.
   `PersistentSessionService::commit_live_user_transcript_represented_with_machine_at_turn_boundary`,
   `EphemeralSessionService::commit_live_user_transcript_represented`, and the
   defaulted `MobSessionService::commit_live_delegation_represented_transcript_at_turn_boundary`.
+- Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
+  meerkat-runtime `meerkat_machine::dsl`) gains the input
+  `AdvanceLiveExperimentalStagedSeed { session_id, channel_id, runtime_id,
+  fence_token, generation, previous_seed_cursor, next_seed_cursor }` (a staged
+  live channel's seed advances one row before the bind to the cursor its
+  provider session was seeded with). It is added mid-enum
+  (`MeerkatMachineInput::*`, `MeerkatMachineInputVariant::*`, kernel
+  `Input::*` and kernel `InputKind::*` discriminants move). The transitions
+  `AdvanceLiveExperimentalStagedSeedIdle`,
+  `AdvanceLiveExperimentalStagedSeedAttached` and
+  `AdvanceLiveExperimentalStagedSeedRunning` are added (`TransitionId::*`
+  discriminants move). Exhaustive matches on these enums must handle the new
+  variants.
 
 ### Added
 
@@ -85,6 +98,31 @@ them.
   selected server configuration; authentication remains with the auth resolver.
   Other callbacks are not enabled by this first profile. AgentFactory, SDK and
   Toolkit configuration of this optional service remain separate follow-ups.
+- `ServiceMemberLiveHost::forget_live_context_summary`,
+  `ServiceMemberLiveHost::retained_live_context_summary` (read-only
+  provenance) and `ServiceMemberLiveHost::prune_retained_live_context_summaries`
+  manage the retained summaries above.
+- `meerkat_openai::public_live::PublicLiveOpenConfig::with_preceding_history_summary`
+  and `meerkat_openai::public_live::preceding_history_summary_fits` seed a
+  summary of everything before a set of verbatim messages, never dropping one
+  of those messages to fit the startup limits.
+- `ExperimentalLivePendingOpen::accepts_preceding_history_summary`, a provided
+  method (default `false`), lets a provider accept that seed shape.
+- Semver: apart from the generated machine enums declared under Breaking,
+  additive only. The new trait method has a default body. Three
+  supporting items are public but `#[doc(hidden)]`:
+  `meerkat_core::session::TranscriptDigestMidstate`,
+  `PersistentSessionService::observe_live_context_committed_tail` and
+  `RealtimeSessionOpenConfig::for_open_after_covered_prefix`. The new enums
+  (`SummaryCoverage` in `meerkat-openai`, the retained-summary store and seed
+  admission in `meerkat`) are private. The `preceding_history_summary` field on
+  the `test-realtime-fixtures` capture event `SessionInputSeeded` is behind a
+  `#[doc(hidden)]` test feature outside the published API. The generated
+  MeerkatMachine gains one input and transition,
+  `AdvanceLiveExperimentalStagedSeed` (a staged channel's seed advances one row
+  at a time, before the bind, to the cursor its provider session was seeded
+  with, consuming a row already queued at that cursor), and changes one guard
+  and its complementary deferral guard; no new state or effects.
 
 ### Fixed
 
@@ -234,6 +272,53 @@ them.
   and its past-deadline read accepts both documented outcomes
   (`NotAdmittedByDeadline`, or `NotObservedByDeadline` when the one read
   cannot finish within the 100 ms floor).
+- A GPT Live voice channel reopened on a session whose earlier channel was
+  seeded with a context summary (or had one validated for late delivery) now
+  opens with that summary plus the conversation rows committed since it,
+  verbatim, in the startup `session.input`. No summary is generated and
+  nothing waits on the 2.5 s pre-open bound. Before, every reopen generated a
+  fresh summary (2.1-4.0 s measured), missed the bound, and delivered it on the
+  thinking lane at the user's first words, where the model interjected or
+  echoed the user and talked over them (Release Turbo S S104). The reopen reads
+  only the committed head and the rows after the retained summary, never the
+  prefix it summarizes: the prefix is proved by extending a transcript digest
+  midstate kept with the summary over those rows and matching the committed
+  head digest. The seed is sealed again when the provider session is created,
+  over the rows committed since the open (a job result that committed while
+  the open ran), and the channel binds at that cursor: every row committed
+  before the voice session exists is in its startup input, so the model
+  answers about it natively. A row committed later reaches the channel through
+  the live-context owner, and a question about it may be answered through the
+  executor. The verbatim rows are every row the voice channel is ever
+  given (user and assistant text); executor system rows, notices and tool
+  results never cross into the voice session, exactly as the live-context
+  owner and the canonical startup history treat them. The retained summary is
+  reused only while that proof, the rewrite generation and the LLM identity
+  hold and the rows since it fit the recent-turns window (four conversation
+  turns, a turn being a user utterance plus its reply) and the provider's
+  startup limits; otherwise the open generates a fresh summary exactly as
+  before. The window is not a size limit: a longer verbatim startup history
+  correlated with the provider stopping input transcription after a long
+  answer (8/10 attempts against 1/8 within a four-row window), with no error
+  event. Recovery replacements,
+  whose seed cursor generated recovery authority fixes, keep generating one.
+  The developer item of such a seed says the summary covers the conversation
+  before the messages that follow it, and never "at voice-channel open".
+  Retained summaries live in memory in the host's `LiveContextSummaryPolicy`,
+  one per session and at most 1,024, and are forgotten lazily: when an open
+  finds them stale or the session archived, retired or gone, by a bounded
+  background sweep after each retain, by eviction, or with the policy when a
+  new one replaces it.
+- On a GPT Live channel seeded at open, runtime work output committed after the
+  voice session was created (the member's reply to a job result merged after
+  the previous call ended) is no longer replayed on the thinking lane while the
+  user's first utterance is in flight, where the model then spoke over the
+  user. It is held while a user turn is open (first input delta through the
+  finished user turn) and released by the finished turn, never by an input
+  delta, with no timer; it still waits for the conversation to start, since
+  released into a quiet channel it was read aloud over the user's first
+  question. Channels still preparing their history (a late summary) keep the
+  earlier replay timing.
 
 ### Changed
 
@@ -245,6 +330,7 @@ them.
   two jobs run it with `--partition hash:k/2`. The CI gate and attestation
   count the archived lanes as main unit coverage, and a manual dispatch
   runs the main unit lanes so a branch can measure them.
+
 
 ## [0.8.49] - 2026-09-30
 

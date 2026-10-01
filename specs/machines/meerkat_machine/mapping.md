@@ -4055,6 +4055,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `StageExperimentalLiveExecutionRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AdvanceLiveExperimentalStagedSeedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdvanceLiveExperimentalStagedSeedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdvanceLiveExperimentalStagedSeedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterLivePlaybackOwnerIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

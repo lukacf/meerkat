@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use meerkat_core::session::TranscriptDigestMidstate;
 use meerkat_core::{CanonicalContextRevision, Message, Session, SessionId, SessionLlmIdentity};
 use meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig;
 
@@ -99,6 +100,18 @@ pub enum LiveLateSummaryLane {
 
 /// Host opt-in policy. Both sizes are UTF-8 bytes (input is serialized JSON);
 /// overflow refuses rather than selecting an unannounced partial window.
+///
+/// The policy also retains, per session, the last summary a channel was
+/// seeded with or had validated for late delivery, so a later open of that
+/// session can seed it with the conversation rows committed since it,
+/// verbatim, instead of generating a fresh one. Retained summaries are a
+/// cache, never authority: they live in memory only (nothing is persisted),
+/// one per session and at most 1,024 per policy (the least recently retained
+/// session is forgotten first), and each open validates the one it would
+/// reuse against the committed snapshot. A retained summary whose prefix,
+/// rewrite generation or LLM identity no longer matches, or whose session is
+/// archived, retired or gone, is discarded and the open generates a fresh
+/// summary. Clones share the store; a new policy starts with an empty one.
 #[derive(Clone)]
 pub struct LiveContextSummaryPolicy {
     summarizer: Arc<dyn LiveContextSummarizer>,
@@ -108,6 +121,9 @@ pub struct LiveContextSummaryPolicy {
     bootstrap_mode: LiveContextBootstrapMode,
     pre_open_bound: Duration,
     late_summary_lane: LiveLateSummaryLane,
+    /// Shared by every clone: the summaries this policy's channels were seeded
+    /// with or had validated for late delivery.
+    retention: LiveContextSummaryRetention,
 }
 
 impl LiveContextSummaryPolicy {
@@ -128,6 +144,7 @@ impl LiveContextSummaryPolicy {
             bootstrap_mode: LiveContextBootstrapMode::BeforeOpen,
             pre_open_bound: LIVE_CONTEXT_PRE_OPEN_SUMMARY_BOUND,
             late_summary_lane: LiveLateSummaryLane::default(),
+            retention: LiveContextSummaryRetention::default(),
         })
     }
 
@@ -171,6 +188,12 @@ impl LiveContextSummaryPolicy {
         self.late_summary_lane
     }
 
+    /// The retained summaries of this policy's channels, one per session. A policy
+    /// that replaces this one starts with an empty store.
+    pub(crate) fn retention(&self) -> &LiveContextSummaryRetention {
+        &self.retention
+    }
+
     pub(crate) fn capture(
         &self,
         session: Session,
@@ -202,8 +225,17 @@ impl LiveContextSummaryPolicy {
             meerkat_core::session::transcript_messages_digest(&seed_messages)?,
         );
         let rewrite_generation = source.transcript_rewrite_generation()?;
+        // Kept with the summary so a later open can prove the committed rows
+        // after this prefix from those rows alone.
+        let midstate = TranscriptDigestMidstate::of_messages(
+            source
+                .messages()
+                .get(..cursor)
+                .ok_or(LiveContextSummaryError::StaleSnapshot)?,
+        )?;
         Ok(LiveContextSummaryCapture {
             source: Arc::new(source),
+            midstate,
             cursor,
             source_identity,
             messages: seed_messages,
@@ -304,6 +336,8 @@ impl LiveContextSummaryBoundary {
 /// summarized prefix.
 pub(crate) struct LiveContextSummaryCapture {
     source: Arc<Session>,
+    /// Transcript digest midstate over exactly the captured prefix.
+    midstate: TranscriptDigestMidstate,
     /// Always at most `source.messages().len()`: sealed by `capture_prefix`.
     cursor: usize,
     source_identity: SessionLlmIdentity,
@@ -363,11 +397,14 @@ impl LiveContextSummaryCapture {
             return Err(LiveContextSummaryError::Empty);
         }
         Ok(LiveContextSummary {
-            source: self.source,
+            source: SummarySource::Snapshot {
+                session: self.source,
+                revision: self.revision,
+                projection_digest: self.projection_digest,
+                midstate: Some(self.midstate),
+            },
             cursor: self.cursor,
             source_identity: self.source_identity,
-            revision: self.revision,
-            projection_digest: self.projection_digest,
             rewrite_generation: self.rewrite_generation,
             text,
             source_reader: self.source_reader,
@@ -426,6 +463,19 @@ impl Drop for LiveContextSummaryJob {
     }
 }
 
+/// Whether an open may seed a retained summary with the committed rows after
+/// it instead of generating one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetainedSeedAdmission {
+    /// An ordinary open or reopen: the seed covers the committed head read
+    /// at the open, and the channel stages there.
+    Allowed,
+    /// A recovery replacement: generated recovery authority fixes the seed
+    /// cursor, which a retained seed reading to the committed head could
+    /// overrun.
+    Refused,
+}
+
 /// Outcome of the bounded pre-open summary wait for one concurrent boundary.
 pub(crate) enum LivePreOpenSummary {
     /// The summary was ready and exactly current: it rides the startup
@@ -457,6 +507,9 @@ pub(crate) struct LiveContextSummaryPregeneration {
     result:
         Arc<std::sync::Mutex<Option<Result<LiveContextSummary, LiveContextPregenerationFailure>>>>,
     ready: Arc<tokio::sync::Notify>,
+    /// The admitting policy's store: a late summary validated for delivery
+    /// is retained for the session's next open.
+    retention: LiveContextSummaryRetention,
 }
 
 impl Drop for LiveContextSummaryPregeneration {
@@ -468,6 +521,7 @@ impl Drop for LiveContextSummaryPregeneration {
 impl LiveContextSummaryPregeneration {
     pub(crate) fn spawn(boundary: LiveContextSummaryBoundary) -> Self {
         use futures::FutureExt;
+        let retention = boundary.policy.retention().clone();
         let captured = Arc::new(std::sync::Mutex::new(None));
         let captured_notify = Arc::new(tokio::sync::Notify::new());
         let result = Arc::new(std::sync::Mutex::new(None));
@@ -514,6 +568,7 @@ impl LiveContextSummaryPregeneration {
             captured_notify,
             result,
             ready,
+            retention,
         }
     }
 
@@ -581,6 +636,7 @@ impl LiveContextSummaryJob {
             runtime: Arc::downgrade(&runtime),
             lease: lease.clone(),
         });
+        let retention = pregeneration.retention.clone();
         let task = tokio::spawn(async move {
             let cancellation = lease.cancellation_token();
             let captured = tokio::select! {
@@ -669,6 +725,11 @@ impl LiveContextSummaryJob {
             *produced_provenance
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(summary.provenance());
+            // Validated current against the provider source and handed to
+            // generated delivery for this channel: the session's next open
+            // may seed it. Retained before the provider acknowledges it, so
+            // the acknowledged state always finds it retained.
+            retention.retain(&summary);
             if let Err(error) = runtime
                 .deliver_live_context_preparation(&lease, summary.text().to_string())
                 .await
@@ -740,15 +801,40 @@ async fn record_preparation_failure(
 /// summary owner can construct this value; the callback cannot choose a cursor.
 #[derive(Clone)]
 pub struct LiveContextSummary {
-    source: Arc<Session>,
-    /// Always at most `source.messages().len()`: sealed by `capture_prefix`.
+    source: SummarySource,
+    /// The opening cursor: the rows the seed built on this summary covers.
     cursor: usize,
     source_identity: SessionLlmIdentity,
-    revision: CanonicalContextRevision,
-    projection_digest: LiveContextSummarySourceDigest,
     rewrite_generation: u64,
     text: String,
     source_reader: Arc<dyn LiveSummarySource>,
+}
+
+/// What a summary's opening seed was proved against.
+#[derive(Clone)]
+enum SummarySource {
+    /// The committed document that was read; the text summarizes its first
+    /// `cursor` rows.
+    Snapshot {
+        session: Arc<Session>,
+        revision: CanonicalContextRevision,
+        projection_digest: LiveContextSummarySourceDigest,
+        /// Transcript digest midstate at `cursor`, kept so a later open of
+        /// the session can prove the committed rows after it (see
+        /// [`RetainedLiveContextSummary`]). `None` only for a summary that
+        /// did not come from a capture.
+        midstate: Option<TranscriptDigestMidstate>,
+    },
+    /// A retained summary reopened over the committed tail: the text
+    /// summarizes `retained`'s prefix, `following` are the committed rows
+    /// after that prefix up to `cursor` exactly as read, and `midstate` is
+    /// the transcript digest midstate at `cursor`. No session body is held.
+    RetainedTail {
+        session_id: SessionId,
+        retained: RetainedLiveContextSummary,
+        following: Arc<Vec<Message>>,
+        midstate: TranscriptDigestMidstate,
+    },
 }
 
 /// Channel-scoped, read-only provenance retained after source snapshot custody
@@ -813,13 +899,142 @@ impl std::fmt::Debug for LiveContextSummary {
 }
 
 impl LiveContextSummary {
+    /// What the text summarizes: for a retained summary, the earlier prefix
+    /// it was generated from, not the opening seed.
     pub(crate) fn provenance(&self) -> LiveContextSummaryProvenance {
-        LiveContextSummaryProvenance {
-            source_revision: self.revision.clone(),
-            source_projection_digest: self.projection_digest.clone(),
-            canonical_message_cursor: self.canonical_message_cursor(),
-            text: self.text.clone(),
+        match &self.source {
+            SummarySource::Snapshot {
+                revision,
+                projection_digest,
+                ..
+            } => LiveContextSummaryProvenance {
+                source_revision: revision.clone(),
+                source_projection_digest: projection_digest.clone(),
+                canonical_message_cursor: self.cursor as u64,
+                text: self.text.clone(),
+            },
+            SummarySource::RetainedTail { retained, .. } => retained.provenance(),
         }
+    }
+
+    /// The retainable record of what this text summarizes, when the summary
+    /// carries the digest midstate a later open needs to prove its tail.
+    pub(crate) fn retained_record(&self) -> Option<RetainedLiveContextSummary> {
+        match &self.source {
+            SummarySource::Snapshot {
+                revision,
+                projection_digest,
+                midstate: Some(midstate),
+                ..
+            } => Some(RetainedLiveContextSummary {
+                text: self.text.clone(),
+                cursor: self.cursor,
+                revision: revision.clone(),
+                projection_digest: projection_digest.clone(),
+                rewrite_generation: self.rewrite_generation,
+                source_identity: self.source_identity.clone(),
+                midstate: midstate.clone(),
+            }),
+            SummarySource::Snapshot { midstate: None, .. } => None,
+            SummarySource::RetainedTail { retained, .. } => Some(retained.clone()),
+        }
+    }
+
+    /// The committed document a fresh summary was captured from.
+    #[cfg(test)]
+    pub(crate) fn snapshot_session(&self) -> Option<&Session> {
+        match &self.source {
+            SummarySource::Snapshot { session, .. } => Some(session),
+            SummarySource::RetainedTail { .. } => None,
+        }
+    }
+
+    /// Whether the text summarizes only an earlier prefix of the opening
+    /// seed (see [`Self::following_history`]).
+    pub(crate) fn summarizes_preceding_history(&self) -> bool {
+        matches!(self.source, SummarySource::RetainedTail { .. })
+    }
+
+    /// The committed rows after a retained summary's prefix, up to the
+    /// opening cursor, exactly as read: what the opening projection seeds.
+    pub(crate) fn covered_following_rows(&self) -> Option<&[Message]> {
+        match &self.source {
+            SummarySource::RetainedTail { following, .. } => Some(following),
+            SummarySource::Snapshot { .. } => None,
+        }
+    }
+
+    /// For a retained summary, the conversation rows committed after the
+    /// prefix it summarizes, up to the opening cursor, in order: the history
+    /// the opening seed gives the voice channel verbatim after it. `None`
+    /// when the text covers the whole opening prefix. It carries every row
+    /// the live-context owner would ever give the channel: executor system
+    /// rows and notices are left out here and tool results and rows without
+    /// text by the provider seed, exactly as the owner classifies them
+    /// (never delivered to a voice channel) and as the canonical startup
+    /// history does. A background job's result merged into the member after
+    /// its call ended is injected context (a user-role row) plus the
+    /// member's reply, both carried.
+    pub(crate) fn following_history(&self) -> Option<Vec<Message>> {
+        Some(
+            self.covered_following_rows()?
+                .iter()
+                .filter(|message| !matches!(message, Message::System(_) | Message::SystemNotice(_)))
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// A retained seed sealed again at the committed head now: the same
+    /// summary with the rows committed since its opening cursor appended to
+    /// the verbatim rows, proved by extending its digest midstate over them
+    /// against the head digest (O(new rows)). The provider session is
+    /// created from this, so every row committed before its creation rides
+    /// the startup input. `None` when nothing was committed since or the
+    /// summary is not a retained seed; a head that is not the sealed rows
+    /// plus the new ones is a stale snapshot.
+    pub(crate) async fn resealed_at_committed_head(
+        &self,
+    ) -> Result<Option<LiveContextSummary>, LiveContextSummaryError> {
+        let SummarySource::RetainedTail {
+            session_id,
+            retained,
+            following,
+            midstate,
+        } = &self.source
+        else {
+            return Ok(None);
+        };
+        let tail = self
+            .source_reader
+            .read_committed_tail(session_id, self.cursor as u64)
+            .await?;
+        if tail.identity != self.source_identity
+            || !tail.proves(self.rewrite_generation, midstate)?
+        {
+            return Err(LiveContextSummaryError::StaleSnapshot);
+        }
+        if tail.rows.is_empty() {
+            return Ok(None);
+        }
+        let cursor = usize::try_from(tail.message_count)
+            .map_err(|_| LiveContextSummaryError::StaleSnapshot)?;
+        let midstate = midstate.extended(&tail.rows)?;
+        let mut rows = following.as_ref().clone();
+        rows.extend(tail.rows);
+        Ok(Some(LiveContextSummary {
+            source: SummarySource::RetainedTail {
+                session_id: session_id.clone(),
+                retained: retained.clone(),
+                following: Arc::new(rows),
+                midstate,
+            },
+            cursor,
+            source_identity: tail.identity,
+            rewrite_generation: self.rewrite_generation,
+            text: self.text.clone(),
+            source_reader: Arc::clone(&self.source_reader),
+        }))
     }
 
     pub fn text(&self) -> &str {
@@ -827,49 +1042,84 @@ impl LiveContextSummary {
     }
 
     pub fn session_id(&self) -> &SessionId {
-        self.source.id()
+        match &self.source {
+            SummarySource::Snapshot { session, .. } => session.id(),
+            SummarySource::RetainedTail { session_id, .. } => session_id,
+        }
     }
 
     pub fn canonical_message_cursor(&self) -> u64 {
         self.cursor as u64
     }
 
-    /// The summarized rows: the admitted prefix of the read source document.
-    fn source_prefix(&self) -> &[Message] {
-        self.source
-            .messages()
-            .get(..self.cursor)
-            .unwrap_or_else(|| self.source.messages())
-    }
-
+    /// What the text summarizes.
     pub fn source_revision(&self) -> &CanonicalContextRevision {
-        &self.revision
-    }
-
-    /// Recheck the exact source prefix at the deferred provider boundary.
-    /// Appends after the summary was accepted are caught up by the ordinary
-    /// live-context owner; rewrites, replacement bodies and model/auth changes
-    /// invalidate this opening snapshot even when the row count is unchanged.
-    pub(crate) async fn validate_provider_source(&self) -> Result<(), LiveContextSummaryError> {
-        let (current, identity) = self.source_reader.read(self.session_id()).await?;
-        let prefix = self.source_prefix();
-        if current.id() != self.source.id()
-            || current.messages().get(..prefix.len()) != Some(prefix)
-            || current.transcript_rewrite_generation()? != self.rewrite_generation
-            || identity != self.source_identity
-        {
-            return Err(LiveContextSummaryError::StaleSnapshot);
+        match &self.source {
+            SummarySource::Snapshot { revision, .. } => revision,
+            SummarySource::RetainedTail { retained, .. } => &retained.revision,
         }
-        Ok(())
     }
 
+    /// Recheck the exact source at the deferred provider boundary. Appends
+    /// after the summary was accepted are caught up by the ordinary
+    /// live-context owner; rewrites, replacement bodies and model/auth
+    /// changes invalidate this opening seed even when the row count is
+    /// unchanged. A retained seed rereads only the committed rows after its
+    /// cursor and proves them against the committed head digest.
+    pub(crate) async fn validate_provider_source(&self) -> Result<(), LiveContextSummaryError> {
+        match &self.source {
+            SummarySource::Snapshot { session, .. } => {
+                let (current, identity) = self.source_reader.read(self.session_id()).await?;
+                let prefix = session
+                    .messages()
+                    .get(..self.cursor)
+                    .unwrap_or_else(|| session.messages());
+                if current.id() != session.id()
+                    || current.messages().get(..prefix.len()) != Some(prefix)
+                    || current.transcript_rewrite_generation()? != self.rewrite_generation
+                    || identity != self.source_identity
+                {
+                    return Err(LiveContextSummaryError::StaleSnapshot);
+                }
+                Ok(())
+            }
+            SummarySource::RetainedTail {
+                session_id,
+                midstate,
+                ..
+            } => {
+                let tail = self
+                    .source_reader
+                    .read_committed_tail(session_id, self.cursor as u64)
+                    .await?;
+                if tail.identity != self.source_identity
+                    || !tail.proves(self.rewrite_generation, midstate)?
+                {
+                    return Err(LiveContextSummaryError::StaleSnapshot);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether `session` is exactly the snapshot this summary covers. A
+    /// retained seed is never checked against a whole snapshot: its proof is
+    /// [`Self::validate_provider_source`].
     pub(super) fn validate_current(
         &self,
         session: &Session,
         identity: &SessionLlmIdentity,
     ) -> Result<(), LiveContextSummaryError> {
-        if session.id() != self.source.id()
-            || session.canonical_context_revision()? != self.revision
+        let SummarySource::Snapshot {
+            session: source,
+            revision,
+            ..
+        } = &self.source
+        else {
+            return Err(LiveContextSummaryError::StaleSnapshot);
+        };
+        if session.id() != source.id()
+            || &session.canonical_context_revision()? != revision
             || session.transcript_rewrite_generation()? != self.rewrite_generation
             || session.messages().len() as u64 != self.canonical_message_cursor()
             || identity != &self.source_identity
@@ -902,19 +1152,287 @@ impl LiveContextSummary {
         session_id: &SessionId,
         config: &RealtimeSessionOpenConfig,
     ) -> Result<(), LiveContextSummaryError> {
-        if session_id != self.source.id()
+        let seeds_exactly = match &self.source {
+            SummarySource::Snapshot { session, .. } => {
+                let prefix = session
+                    .messages()
+                    .get(..self.cursor)
+                    .unwrap_or_else(|| session.messages());
+                config.seed_messages() == session.messages_for_model_boundary_prefix(self.cursor)?
+                    && config.canonical_system_messages_ref()
+                        == RealtimeSessionOpenConfig::canonical_system_messages(prefix)
+            }
+            // The projection seeds exactly the rows after the retained
+            // prefix and reads nothing before them.
+            SummarySource::RetainedTail { following, .. } => {
+                config.seed_messages()
+                    == meerkat_core::types::materialize_latest_system_prompt_versions(following)
+                    && config.canonical_system_messages_ref().is_empty()
+            }
+        };
+        if session_id != self.session_id()
             || config.canonical_message_cursor() != self.canonical_message_cursor()
             || config.transcript_rewrite_generation != self.rewrite_generation
-            || config.seed_messages()
-                != self
-                    .source
-                    .messages_for_model_boundary_prefix(self.cursor)?
-            || config.canonical_system_messages_ref()
-                != RealtimeSessionOpenConfig::canonical_system_messages(self.source_prefix())
+            || !seeds_exactly
         {
             return Err(LiveContextSummaryError::ConflictingProjection);
         }
         Ok(())
+    }
+}
+
+/// Why a retained seed was not sealed again at provider-session creation.
+/// The seed then opens at its staged cursor, and rows committed since reach
+/// the channel through the live-context owner: the reseal is an
+/// optimization, and its failure never fails the open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SeedResealSkip {
+    /// The resealed rows would exceed the recent-turns window.
+    WindowExceeded,
+    /// The resealed rows would not fit the provider's startup limits.
+    OverStartupLimits,
+    /// The committed tail could not be read.
+    SourceUnavailable,
+}
+
+/// Conversation turns in `rows`, the unit of the recent-turns window: a turn
+/// is a user utterance plus the assistant reply to it, with tool rows riding
+/// inside the turn. Consecutive user rows (an utterance transcribed as
+/// several finals, a typed row with injected context) open one turn, and
+/// leading rows before any user row (a reply whose utterance precedes the
+/// rows) count as one.
+pub(crate) fn conversation_turns(rows: &[Message]) -> usize {
+    let mut turns = 0;
+    let mut in_user_rows = false;
+    let mut turn_open = false;
+    for message in rows {
+        match message {
+            Message::User(_) => {
+                if !in_user_rows {
+                    turns += 1;
+                    in_user_rows = true;
+                }
+                turn_open = true;
+            }
+            _ => {
+                if !turn_open {
+                    turns += 1;
+                    turn_open = true;
+                }
+                in_user_rows = false;
+            }
+        }
+    }
+    turns
+}
+
+/// The committed head of a session plus exactly its rows after a cursor, and
+/// the session's current LLM identity: what a retained summary is proved
+/// against without reading the prefix it summarizes.
+pub(crate) struct CommittedTail {
+    pub(crate) message_count: u64,
+    pub(crate) transcript_revision: String,
+    pub(crate) rewrite_generation: u64,
+    pub(crate) rows: Vec<Message>,
+    pub(crate) identity: SessionLlmIdentity,
+}
+
+impl CommittedTail {
+    /// Whether `midstate` (the transcript digest midstate at this tail's
+    /// start) extended over the rows is exactly the committed head digest,
+    /// under `rewrite_generation`: the committed transcript is the proved
+    /// prefix followed by these rows.
+    fn proves(
+        &self,
+        rewrite_generation: u64,
+        midstate: &TranscriptDigestMidstate,
+    ) -> Result<bool, LiveContextSummaryError> {
+        Ok(self.rewrite_generation == rewrite_generation
+            && self.message_count == (midstate.covered() + self.rows.len()) as u64
+            && midstate.extended(&self.rows)?.digest() == self.transcript_revision)
+    }
+}
+
+/// Most sessions one policy retains a used summary for; the least recently
+/// retained session is forgotten first.
+pub(crate) const LIVE_CONTEXT_RETAINED_SUMMARY_CAPACITY: usize = 1024;
+
+/// A summary a channel of the session was seeded with or had validated for
+/// late delivery (retained before the provider acknowledges it, so a late
+/// append the provider rejects stays retained; it is still an exact summary
+/// of its prefix), retained so a later open can seed it together with the
+/// conversation rows committed after it, verbatim, instead of waiting on a
+/// fresh generation. A validated cache, never authority: an open reuses it
+/// only when the committed head digest proves the prefix it summarizes
+/// unchanged. It holds no session body: only the transcript digest midstate
+/// at its cursor, in memory.
+#[derive(Clone)]
+pub(crate) struct RetainedLiveContextSummary {
+    text: String,
+    /// The summarized prefix: the first `cursor` rows.
+    cursor: usize,
+    revision: CanonicalContextRevision,
+    projection_digest: LiveContextSummarySourceDigest,
+    rewrite_generation: u64,
+    source_identity: SessionLlmIdentity,
+    /// Transcript digest midstate over exactly the summarized prefix.
+    midstate: TranscriptDigestMidstate,
+}
+
+impl RetainedLiveContextSummary {
+    /// Read-only provenance of what the retained text summarizes.
+    pub(crate) fn provenance(&self) -> LiveContextSummaryProvenance {
+        LiveContextSummaryProvenance {
+            source_revision: self.revision.clone(),
+            source_projection_digest: self.projection_digest.clone(),
+            canonical_message_cursor: self.cursor as u64,
+            text: self.text.clone(),
+        }
+    }
+
+    /// The row the committed tail after this summary starts at.
+    pub(crate) fn cursor(&self) -> u64 {
+        self.cursor as u64
+    }
+
+    /// The opening summary over `tail`, the committed rows after this
+    /// summary's prefix up to the committed head: seeded as this text plus
+    /// those rows, covering the head. O(tail): the prefix is proved by
+    /// extending the retained midstate over the rows and matching the head
+    /// digest, never read. A rewrite (any row of the prefix or the tail
+    /// changed), a model or auth change, or a head that is not exactly the
+    /// prefix plus these rows is a stale snapshot.
+    pub(crate) fn opening_from_committed_tail(
+        self,
+        session_id: SessionId,
+        tail: CommittedTail,
+        source_reader: Arc<dyn LiveSummarySource>,
+    ) -> Result<LiveContextSummary, LiveContextSummaryError> {
+        if tail.identity != self.source_identity
+            || !tail.proves(self.rewrite_generation, &self.midstate)?
+        {
+            return Err(LiveContextSummaryError::StaleSnapshot);
+        }
+        let cursor = usize::try_from(tail.message_count)
+            .map_err(|_| LiveContextSummaryError::StaleSnapshot)?;
+        let midstate = self.midstate.extended(&tail.rows)?;
+        Ok(LiveContextSummary {
+            source: SummarySource::RetainedTail {
+                session_id,
+                following: Arc::new(tail.rows),
+                midstate,
+                retained: self.clone(),
+            },
+            cursor,
+            source_identity: tail.identity,
+            rewrite_generation: self.rewrite_generation,
+            text: self.text,
+            source_reader,
+        })
+    }
+}
+
+/// The retained summaries of one policy's channels, keyed by session: at most one
+/// per session and at most [`LIVE_CONTEXT_RETAINED_SUMMARY_CAPACITY`] in
+/// all, in memory only. Entries leave when an open finds them stale or the
+/// session archived or gone, when a sweep on retain finds the session
+/// archived or gone, on [`Self::forget`], on eviction, and with the policy.
+#[derive(Clone, Default)]
+pub(crate) struct LiveContextSummaryRetention(Arc<std::sync::Mutex<RetainedSummaries>>);
+
+#[derive(Default)]
+struct RetainedSummaries {
+    entries: std::collections::HashMap<SessionId, (u64, RetainedLiveContextSummary)>,
+    next_sequence: u64,
+}
+
+impl LiveContextSummaryRetention {
+    fn lock(&self) -> std::sync::MutexGuard<'_, RetainedSummaries> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Retain what `summary` summarizes for its session. A summary of a
+    /// shorter prefix under the same rewrite generation never replaces a
+    /// longer one, and an older rewrite generation never replaces a newer.
+    pub(crate) fn retain(&self, summary: &LiveContextSummary) {
+        if let Some(record) = summary.retained_record() {
+            self.retain_record(summary.session_id().clone(), record);
+        }
+    }
+
+    fn retain_record(&self, session_id: SessionId, record: RetainedLiveContextSummary) {
+        let mut store = self.lock();
+        if let Some((_, existing)) = store.entries.get(&session_id)
+            && (existing.rewrite_generation > record.rewrite_generation
+                || (existing.rewrite_generation == record.rewrite_generation
+                    && existing.cursor > record.cursor))
+        {
+            return;
+        }
+        let sequence = store.next_sequence;
+        store.next_sequence = sequence.saturating_add(1);
+        store.entries.insert(session_id, (sequence, record));
+        while store.entries.len() > LIVE_CONTEXT_RETAINED_SUMMARY_CAPACITY {
+            let Some(oldest) = store
+                .entries
+                .iter()
+                .min_by_key(|(_, (sequence, _))| *sequence)
+                .map(|(session_id, _)| session_id.clone())
+            else {
+                break;
+            };
+            store.entries.remove(&oldest);
+        }
+    }
+
+    pub(crate) fn get(&self, session_id: &SessionId) -> Option<RetainedLiveContextSummary> {
+        self.lock()
+            .entries
+            .get(session_id)
+            .map(|(_, record)| record.clone())
+    }
+
+    pub(crate) fn forget(&self, session_id: &SessionId) {
+        self.lock().entries.remove(session_id);
+    }
+
+    /// Up to `limit` retained sessions other than `except`, least recently
+    /// retained first: the ones a sweep checks for archived or gone
+    /// sessions.
+    pub(crate) fn least_recent_sessions(
+        &self,
+        except: Option<&SessionId>,
+        limit: usize,
+    ) -> Vec<SessionId> {
+        let store = self.lock();
+        let mut sessions: Vec<(u64, &SessionId)> = store
+            .entries
+            .iter()
+            .filter(|(session_id, _)| Some(*session_id) != except)
+            .map(|(session_id, (sequence, _))| (*sequence, session_id))
+            .collect();
+        sessions.sort_unstable_by_key(|(sequence, _)| *sequence);
+        sessions
+            .into_iter()
+            .take(limit)
+            .map(|(_, session_id)| session_id.clone())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.lock().entries.len()
+    }
+
+    /// Retain a copy of `summary`'s record under another session: a
+    /// retained entry for a session the service never knew.
+    #[cfg(test)]
+    pub(crate) fn retain_copy_for(&self, session_id: SessionId, summary: &LiveContextSummary) {
+        if let Some(record) = summary.retained_record() {
+            self.retain_record(session_id, record);
+        }
     }
 }
 
@@ -926,6 +1444,36 @@ pub(crate) trait LiveSummarySource: Send + Sync {
         &self,
         id: &SessionId,
     ) -> Result<(Session, SessionLlmIdentity), LiveContextSummaryError>;
+
+    /// The committed head plus exactly its rows from `from` on, and the
+    /// current identity, without reading the rows before `from`. Sources
+    /// without a committed tail read refuse, so a retained seed never opens
+    /// over them.
+    async fn read_committed_tail(
+        &self,
+        _id: &SessionId,
+        _from: u64,
+    ) -> Result<CommittedTail, LiveContextSummaryError> {
+        Err(LiveContextSummaryError::Unsupported)
+    }
+}
+
+async fn service_committed_tail<B: crate::SessionAgentBuilder + 'static>(
+    service: &crate::PersistentSessionService<B>,
+    id: &SessionId,
+    from: u64,
+) -> Result<CommittedTail, LiveContextSummaryError> {
+    let (boundary, rows) = service
+        .observe_live_context_committed_tail(id, from)
+        .await?;
+    let identity = service.live_session_llm_identity(id).await?;
+    Ok(CommittedTail {
+        message_count: boundary.message_count(),
+        transcript_revision: boundary.transcript_revision().to_string(),
+        rewrite_generation: boundary.rewrite_generation(),
+        rows,
+        identity,
+    })
 }
 
 pub(super) struct ServiceLiveSummarySource<B: crate::SessionAgentBuilder>(
@@ -946,6 +1494,14 @@ impl<B: crate::SessionAgentBuilder + 'static> LiveSummarySource
     ) -> Result<(Session, SessionLlmIdentity), LiveContextSummaryError> {
         Ok(self.0.export_live_context_summary_snapshot(id).await?)
     }
+
+    async fn read_committed_tail(
+        &self,
+        id: &SessionId,
+        from: u64,
+    ) -> Result<CommittedTail, LiveContextSummaryError> {
+        service_committed_tail(&self.0, id, from).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -958,6 +1514,14 @@ impl<B: crate::SessionAgentBuilder + 'static> LiveSummarySource for ServiceLiveS
             self.0.export_realtime_refresh_session_snapshot(id).await?,
             self.0.live_session_llm_identity(id).await?,
         ))
+    }
+
+    async fn read_committed_tail(
+        &self,
+        id: &SessionId,
+        from: u64,
+    ) -> Result<CommittedTail, LiveContextSummaryError> {
+        service_committed_tail(&self.0, id, from).await
     }
 }
 
@@ -997,6 +1561,29 @@ mod tests {
             _: &SessionId,
         ) -> Result<(Session, SessionLlmIdentity), LiveContextSummaryError> {
             Ok((self.0.clone(), self.1.clone()))
+        }
+
+        async fn read_committed_tail(
+            &self,
+            _: &SessionId,
+            from: u64,
+        ) -> Result<CommittedTail, LiveContextSummaryError> {
+            Ok(committed_tail(&self.0, from as usize, self.1.clone()))
+        }
+    }
+
+    /// The committed tail of `session` from `from`, as a service source reads it.
+    fn committed_tail(
+        session: &Session,
+        from: usize,
+        identity: SessionLlmIdentity,
+    ) -> CommittedTail {
+        CommittedTail {
+            message_count: session.messages().len() as u64,
+            transcript_revision: session.transcript_revision().unwrap(),
+            rewrite_generation: session.transcript_rewrite_generation().unwrap(),
+            rows: session.messages().get(from..).unwrap_or_default().to_vec(),
+            identity,
         }
     }
 
@@ -1153,7 +1740,10 @@ mod tests {
         ));
         let delayed = policy
             .summarize(
-                (*summary.source).clone(),
+                summary
+                    .snapshot_session()
+                    .expect("a captured summary")
+                    .clone(),
                 &config,
                 Arc::new(Source(session.clone(), config.llm_identity.clone())),
             )
@@ -1747,5 +2337,381 @@ mod tests {
             LiveLateSummaryLane::Instructions
         );
         assert!(policy.pre_open_bound().is_zero());
+    }
+
+    fn identity_of(config: &RealtimeSessionOpenConfig) -> SessionLlmIdentity {
+        config.llm_identity.clone()
+    }
+
+    fn assistant(text: &str) -> Message {
+        Message::BlockAssistant(meerkat_core::types::BlockAssistantMessage::new(
+            vec![meerkat_core::AssistantBlock::Text {
+                text: text.into(),
+                meta: None,
+            }],
+            meerkat_core::types::StopReason::EndTurn,
+        ))
+    }
+
+    async fn retained_from_first_open() -> (Session, RealtimeSessionOpenConfig, LiveContextSummary)
+    {
+        let (session, config) = source("plan the trip to Lisbon");
+        let policy = LiveContextSummaryPolicy::new(
+            producer("The user is planning a trip to Lisbon."),
+            4096,
+            100,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let summary = policy.produce(session.clone(), &config).await.unwrap();
+        (session, config, summary)
+    }
+
+    fn reopen(
+        retained: RetainedLiveContextSummary,
+        session: &Session,
+        identity: SessionLlmIdentity,
+    ) -> Result<LiveContextSummary, LiveContextSummaryError> {
+        let tail = committed_tail(session, retained.cursor, identity.clone());
+        let reader = Arc::new(Source(session.clone(), identity));
+        retained.opening_from_committed_tail(session.id().clone(), tail, reader)
+    }
+
+    /// A reopen after rows were committed: proved from the committed tail
+    /// alone, the retained text summarizes its prefix, the seed covers the
+    /// committed head, and the rows since the prefix are the verbatim history
+    /// (executor system rows left out). Provenance keeps naming what the text
+    /// summarizes.
+    #[tokio::test]
+    async fn retained_summary_opens_over_the_committed_tail_without_the_prefix() {
+        let (mut session, config, summary) = retained_from_first_open().await;
+        let retained = summary
+            .retained_record()
+            .expect("a captured summary is retainable");
+        session.push(Message::User(meerkat_core::types::UserMessage::text(
+            "typed: book the hotel",
+        )));
+        session.append_system_message("executor-only instruction");
+        session.push(assistant("The hotel is booked."));
+        let opening = reopen(retained.clone(), &session, identity_of(&config)).unwrap();
+        assert!(opening.summarizes_preceding_history());
+        assert_eq!(opening.canonical_message_cursor(), 5);
+        assert_eq!(opening.text(), "The user is planning a trip to Lisbon.");
+        assert_eq!(opening.covered_following_rows().unwrap().len(), 3);
+        let following = opening.following_history().unwrap();
+        assert_eq!(following.len(), 2, "the system row is not voice history");
+        assert!(
+            matches!(&following[0], Message::User(user) if user.text_content() == "typed: book the hotel")
+        );
+        assert!(matches!(&following[1], Message::BlockAssistant(_)));
+        let provenance = opening.provenance();
+        assert_eq!(provenance.canonical_message_cursor(), 2);
+        assert_eq!(
+            provenance.source_revision(),
+            summary.provenance().source_revision()
+        );
+        assert_eq!(provenance.text(), summary.text());
+        // The projection seeds exactly the rows after the prefix at the head.
+        let projection = RealtimeSessionOpenConfig::for_open_after_covered_prefix(
+            meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            identity_of(&config),
+            Vec::new(),
+            opening.covered_following_rows().unwrap().to_vec(),
+            5,
+        )
+        .unwrap();
+        opening
+            .validate_projection(session.id(), &projection)
+            .unwrap();
+        // A projection that seeds anything else is refused.
+        assert!(opening.validate_projection(session.id(), &config).is_err());
+        // Append-only catch-up after the head keeps the source valid.
+        opening.validate_provider_source().await.unwrap();
+        // Retaining it again records the same prefix, not the seed.
+        let again = opening.retained_record().unwrap();
+        assert_eq!(again.cursor, 2);
+        assert_eq!(again.revision, retained.revision);
+    }
+
+    /// Nothing committed since the retained summary: the seed is the summary
+    /// alone at the same cursor.
+    #[tokio::test]
+    async fn retained_summary_with_no_rows_since_seeds_the_summary_alone() {
+        let (session, config, summary) = retained_from_first_open().await;
+        let opening = reopen(
+            summary.retained_record().unwrap(),
+            &session,
+            identity_of(&config),
+        )
+        .unwrap();
+        assert_eq!(opening.canonical_message_cursor(), 2);
+        assert_eq!(opening.following_history().unwrap().len(), 0);
+    }
+
+    /// A rewrite (inside or after the summarized prefix), a model or auth
+    /// change, a divergent or shorter transcript, or tail rows that are not
+    /// the committed rows make the retained summary stale.
+    #[tokio::test]
+    async fn retained_summary_is_stale_after_a_rewrite_an_identity_change_or_a_divergent_prefix() {
+        let (session, config, summary) = retained_from_first_open().await;
+        let retained = summary.retained_record().unwrap();
+        let stale = |current: &Session, identity: SessionLlmIdentity| {
+            matches!(
+                reopen(retained.clone(), current, identity),
+                Err(LiveContextSummaryError::StaleSnapshot)
+            )
+        };
+        // Rewrite of the summarized prefix.
+        let mut rewritten = session.clone();
+        let parent = rewritten.transcript_revision().unwrap();
+        rewritten
+            .commit_transcript_rewrite(
+                meerkat_core::TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::User(meerkat_core::types::UserMessage::text(
+                    "plan the trip to Porto",
+                ))],
+                meerkat_core::TranscriptRewriteReason::new("edit"),
+                None,
+                Some(parent),
+            )
+            .unwrap();
+        assert!(stale(&rewritten, identity_of(&config)));
+        // Rewrite after the prefix: the prefix rows are unchanged, the
+        // rewrite generation is not.
+        let mut later = session.clone();
+        later.push(Message::User(meerkat_core::types::UserMessage::text(
+            "typed row",
+        )));
+        let parent = later.transcript_revision().unwrap();
+        later
+            .commit_transcript_rewrite(
+                meerkat_core::TranscriptRewriteSelection::MessageRange { start: 2, end: 3 },
+                vec![Message::User(meerkat_core::types::UserMessage::text(
+                    "edited row",
+                ))],
+                meerkat_core::TranscriptRewriteReason::new("edit"),
+                None,
+                Some(parent),
+            )
+            .unwrap();
+        assert!(stale(&later, identity_of(&config)));
+        // Model change.
+        let mut other_model = identity_of(&config);
+        other_model.model = "gpt-6".into();
+        assert!(stale(&session, other_model));
+        // Same length, different prefix.
+        let (divergent, _) = source("plan the trip to Madrid");
+        assert!(stale(&divergent, identity_of(&config)));
+        // Shorter transcript than the summarized prefix.
+        let mut shorter = Session::new();
+        shorter.append_system_message("background instructions");
+        assert!(stale(&shorter, identity_of(&config)));
+        // Tail rows that are not what the head commits.
+        let mut grown = session;
+        grown.push(Message::User(meerkat_core::types::UserMessage::text(
+            "real row",
+        )));
+        let mut forged = committed_tail(&grown, 2, identity_of(&config));
+        forged.rows = vec![Message::User(meerkat_core::types::UserMessage::text(
+            "forged row",
+        ))];
+        let reader = Arc::new(Source(grown.clone(), identity_of(&config)));
+        assert!(matches!(
+            retained.opening_from_committed_tail(grown.id().clone(), forged, reader),
+            Err(LiveContextSummaryError::StaleSnapshot)
+        ));
+    }
+
+    fn record(cursor: usize, rewrite_generation: u64) -> RetainedLiveContextSummary {
+        RetainedLiveContextSummary {
+            text: format!("summary of {cursor} rows"),
+            cursor,
+            revision: Session::new().canonical_context_revision().unwrap(),
+            projection_digest: LiveContextSummarySourceDigest(format!("digest-{cursor}")),
+            midstate: TranscriptDigestMidstate::of_messages(&[]).unwrap(),
+            rewrite_generation,
+            source_identity: SessionLlmIdentity {
+                provider: meerkat_core::Provider::OpenAI,
+                model: "gpt-5.5".into(),
+                auth_binding: None,
+                provider_params: None,
+                self_hosted_server_id: None,
+            },
+        }
+    }
+
+    /// One entry per session; a shorter prefix never replaces a longer one
+    /// under the same rewrite generation, an older generation never replaces
+    /// a newer one, and a newer generation always wins.
+    #[test]
+    fn retention_keeps_one_entry_per_session_and_never_moves_backwards() {
+        let retention = LiveContextSummaryRetention::default();
+        let session = SessionId::new();
+        retention.retain_record(session.clone(), record(4, 0));
+        retention.retain_record(session.clone(), record(2, 0));
+        assert_eq!(retention.get(&session).unwrap().cursor, 4);
+        retention.retain_record(session.clone(), record(6, 0));
+        assert_eq!(retention.get(&session).unwrap().cursor, 6);
+        retention.retain_record(session.clone(), record(3, 1));
+        assert_eq!(
+            retention.get(&session).unwrap().cursor,
+            3,
+            "newer rewrite generation"
+        );
+        retention.retain_record(session.clone(), record(9, 0));
+        assert_eq!(
+            retention.get(&session).unwrap().cursor,
+            3,
+            "older rewrite generation"
+        );
+        assert_eq!(retention.len(), 1);
+        retention.forget(&session);
+        assert!(retention.get(&session).is_none());
+        assert_eq!(retention.len(), 0);
+    }
+
+    /// The store is bounded: past capacity the least recently retained
+    /// session is forgotten, and re-retaining refreshes a session.
+    #[test]
+    fn retention_evicts_the_least_recently_retained_session_at_capacity() {
+        let retention = LiveContextSummaryRetention::default();
+        let sessions: Vec<SessionId> = (0..LIVE_CONTEXT_RETAINED_SUMMARY_CAPACITY)
+            .map(|_| SessionId::new())
+            .collect();
+        for session in &sessions {
+            retention.retain_record(session.clone(), record(2, 0));
+        }
+        assert_eq!(retention.len(), LIVE_CONTEXT_RETAINED_SUMMARY_CAPACITY);
+        // Refresh the oldest, so the second oldest is the one evicted.
+        retention.retain_record(sessions[0].clone(), record(3, 0));
+        let newcomer = SessionId::new();
+        retention.retain_record(newcomer.clone(), record(2, 0));
+        assert_eq!(retention.len(), LIVE_CONTEXT_RETAINED_SUMMARY_CAPACITY);
+        assert!(retention.get(&sessions[0]).is_some());
+        assert!(retention.get(&sessions[1]).is_none());
+        assert!(retention.get(&newcomer).is_some());
+        assert_eq!(
+            retention.least_recent_sessions(Some(&sessions[2]), 2),
+            vec![sessions[3].clone(), sessions[4].clone()],
+            "the sweep reads the least recently retained, never the opening session"
+        );
+    }
+
+    /// Clones of one policy share its store; a new policy that replaces it
+    /// starts empty, so the replaced policy's entries are gone with it.
+    #[tokio::test]
+    async fn a_replacing_policy_starts_with_an_empty_store() {
+        let (_, _, summary) = retained_from_first_open().await;
+        let policy =
+            LiveContextSummaryPolicy::new(producer("unused"), 4096, 100, Duration::from_secs(1))
+                .unwrap();
+        let clone = policy.clone();
+        policy.retention().retain(&summary);
+        assert!(clone.retention().get(summary.session_id()).is_some());
+        let replacement =
+            LiveContextSummaryPolicy::new(producer("unused"), 4096, 100, Duration::from_secs(1))
+                .unwrap();
+        assert!(replacement.retention().get(summary.session_id()).is_none());
+        assert_eq!(replacement.retention().len(), 0);
+    }
+
+    #[test]
+    fn conversation_turns_count_utterances_with_their_replies() {
+        let user = |text: &str| Message::User(meerkat_core::types::UserMessage::text(text));
+        assert_eq!(conversation_turns(&[]), 0);
+        // A reply whose utterance precedes the rows is one turn.
+        assert_eq!(conversation_turns(&[assistant("tail of an answer")]), 1);
+        // Utterance plus reply, then utterance split in two finals plus reply.
+        assert_eq!(
+            conversation_turns(&[
+                user("book the hotel"),
+                assistant("booked"),
+                user("and a table"),
+                user("for two"),
+                assistant("done"),
+            ]),
+            2
+        );
+        // Tool rows ride inside the turn.
+        let tool_results = Message::ToolResults {
+            results: Vec::new(),
+            created_at: meerkat_core::types::message_timestamp_now(),
+        };
+        assert_eq!(
+            conversation_turns(&[
+                user("check the file"),
+                assistant("calling a tool"),
+                tool_results,
+                assistant("the file says hello"),
+            ]),
+            1
+        );
+        // A user row with no reply yet still opens a turn.
+        assert_eq!(
+            conversation_turns(&[assistant("earlier"), user("new question")]),
+            2
+        );
+    }
+
+    /// Rows committed after the opening cursor and before the provider
+    /// session is created: the retained seed is sealed again at the head,
+    /// proved from the new rows alone, and a head that is not the sealed rows
+    /// plus the new ones is stale.
+    #[tokio::test]
+    async fn retained_seed_reseals_at_the_committed_head() {
+        let (mut session, config, summary) = retained_from_first_open().await;
+        session.push(Message::User(meerkat_core::types::UserMessage::text(
+            "typed: book the hotel",
+        )));
+        let opening = reopen(
+            summary.retained_record().unwrap(),
+            &session,
+            identity_of(&config),
+        )
+        .unwrap();
+        assert_eq!(opening.canonical_message_cursor(), 3);
+        // Nothing committed since: no reseal.
+        assert!(
+            opening
+                .resealed_at_committed_head()
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // The job result commits while the open runs.
+        let mut later = session.clone();
+        later.push(assistant("The coffee ode is written."));
+        let reader = Arc::new(Source(later.clone(), identity_of(&config)));
+        let tail = committed_tail(&session, 2, identity_of(&config));
+        let opening = summary
+            .retained_record()
+            .unwrap()
+            .opening_from_committed_tail(session.id().clone(), tail, reader)
+            .unwrap();
+        let resealed = opening
+            .resealed_at_committed_head()
+            .await
+            .unwrap()
+            .expect("the new row reseals the seed");
+        assert_eq!(resealed.canonical_message_cursor(), 4);
+        assert_eq!(resealed.following_history().unwrap().len(), 2);
+        assert_eq!(resealed.provenance().canonical_message_cursor(), 2);
+        resealed.validate_provider_source().await.unwrap();
+        // A head that rewrote the sealed rows is stale.
+        let (divergent, _) = source("plan the trip to Madrid");
+        let mut divergent = divergent;
+        divergent.push(Message::User(meerkat_core::types::UserMessage::text("x")));
+        divergent.push(assistant("y"));
+        let reader = Arc::new(Source(divergent, identity_of(&config)));
+        let tail = committed_tail(&session, 2, identity_of(&config));
+        let opening = summary
+            .retained_record()
+            .unwrap()
+            .opening_from_committed_tail(session.id().clone(), tail, reader)
+            .unwrap();
+        assert!(matches!(
+            opening.resealed_at_committed_head().await,
+            Err(LiveContextSummaryError::StaleSnapshot)
+        ));
     }
 }

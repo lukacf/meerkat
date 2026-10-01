@@ -12,6 +12,17 @@
 //! recent user turn. Those joins are provider evidence only; transcript
 //! admission, delegation meaning, channel policy, and model selection remain
 //! outside this module.
+//!
+//! Measured provider behavior (Release Turbo S S106, 2026-10-01): a session
+//! created with a long verbatim startup history (25-29 user and assistant
+//! items, only 3.5-3.8 KB, about 1.2k estimated tokens) stopped emitting input
+//! transcription for the user's next utterance after a long assistant answer
+//! in 8 of 10 attempts, against 1 of 8 when the startup history was a summary
+//! plus at most the recent-turns window and 0 of 18 on the fresh-summary path.
+//! The input deltas simply stop about 0.5 s before the speech ends: no turn
+//! end, no reply and no error event follow. It is not size-related, and the
+//! provider-side cause is unknown, so callers keep verbatim startup history to
+//! the recent-turns window.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -61,6 +72,20 @@ pub mod thinking_capture {
             input_items: usize,
             developer_items: usize,
             frames_history: bool,
+            /// The developer item summarizes only the history before the
+            /// verbatim items that follow it (a retained summary).
+            #[serde(default)]
+            preceding_history_summary: bool,
+            /// Text bytes of every startup input item.
+            #[serde(default)]
+            input_bytes: usize,
+            /// The startup budget's conservative token estimate of them.
+            #[serde(default)]
+            estimated_tokens: usize,
+            /// Text of every startup input item, in order (test fixtures
+            /// only, like the append attempt texts).
+            #[serde(default)]
+            input_texts: Vec<String>,
         },
         ThinkingAppendAttempt {
             client_event_id: String,
@@ -280,13 +305,28 @@ pub struct PublicLiveOpenConfig {
 enum PublicLiveContextSeed {
     Absent,
     History(Vec<InitialItem>),
-    /// A summary as one developer item, plus the most recent canonical turns
-    /// it also covers, seeded verbatim within the startup input budget.
+    /// A summary as one developer item, plus canonical turns seeded verbatim
+    /// after it. What the summary covers decides which of those turns the
+    /// startup input budget may drop.
     FactualSummary {
         summary: String,
         recent: Vec<InitialItem>,
+        coverage: SummaryCoverage,
     },
     HistoricalContextPending,
+}
+
+/// What a seeded summary covers relative to the verbatim turns after it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SummaryCoverage {
+    /// The summary covers the whole context at open; the verbatim turns are
+    /// the most recent ones it also covers, and the budget drops the oldest
+    /// of them first.
+    Opening,
+    /// The summary covers everything before the verbatim turns, which are
+    /// the only record of the conversation after it. None of them is ever
+    /// dropped: an oversize seed rejects channel creation instead.
+    PrecedingHistory,
 }
 
 /// Provider limits on startup history: 128 messages and 8,192 rendered
@@ -307,6 +347,90 @@ pub struct LiveStartupInputTruncation {
 fn estimated_startup_tokens(item: &InitialItem) -> usize {
     let bytes: usize = item.content.iter().map(|part| part.text.len()).sum();
     bytes.div_ceil(LIVE_STARTUP_INPUT_BYTES_PER_TOKEN)
+}
+
+/// The developer-role startup item carrying `summary`, framed by what it
+/// covers.
+fn summary_item(summary: &str, coverage: SummaryCoverage) -> InitialItem {
+    let prefix = match coverage {
+        SummaryCoverage::Opening => PublicLiveContextSeed::SUMMARY_ITEM_PREFIX,
+        SummaryCoverage::PrecedingHistory => {
+            PublicLiveContextSeed::PRECEDING_HISTORY_SUMMARY_ITEM_PREFIX
+        }
+    };
+    InitialItem {
+        role: InitialRole::Developer,
+        content: vec![InitialText {
+            text: format!("{prefix}\n{summary}"),
+            text_type: Some(InitialTextType::InputText),
+        }],
+        id: Field::Absent,
+        status: Field::Absent,
+        item_type: Some(MessageType::Message),
+    }
+}
+
+/// One canonical message as a startup history item under its own role, or
+/// `None` for rows the tool-less voice model never sees (executor system
+/// messages, notices, tool results) and for empty text.
+fn history_item(message: &Message) -> Option<InitialItem> {
+    let (role, text_type, text) = match message {
+        Message::User(user) => (
+            InitialRole::User,
+            InitialTextType::InputText,
+            user.text_content(),
+        ),
+        Message::BlockAssistant(assistant) => (
+            InitialRole::Assistant,
+            InitialTextType::OutputText,
+            if assistant.blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    meerkat_core::AssistantBlock::Transcript {
+                        source: meerkat_core::types::TranscriptSource::SpokenUnmeasured,
+                        ..
+                    }
+                )
+            }) {
+                meerkat_core::types::TranscriptSource::SpokenUnmeasured
+                    .text_for_model(&assistant.to_string())
+                    .into_owned()
+            } else {
+                assistant.to_string()
+            },
+        ),
+        Message::System(_) | Message::SystemNotice(_) | Message::ToolResults { .. } => {
+            return None;
+        }
+    };
+    (!text.is_empty()).then_some(InitialItem {
+        role,
+        content: vec![InitialText {
+            text,
+            text_type: Some(text_type),
+        }],
+        id: Field::Absent,
+        status: Field::Absent,
+        item_type: Some(MessageType::Message),
+    })
+}
+
+/// Whether a summary of everything before `following` plus every one of
+/// those messages fits the startup input limits with nothing dropped (see
+/// [`PublicLiveOpenConfig::with_preceding_history_summary`]). The same
+/// conservative token estimate as the budget applies.
+#[must_use]
+pub fn preceding_history_summary_fits(summary: &str, following: &[Message]) -> bool {
+    let items: Vec<InitialItem> = following.iter().filter_map(history_item).collect();
+    let tokens = items
+        .iter()
+        .chain(std::iter::once(&summary_item(
+            summary,
+            SummaryCoverage::PrecedingHistory,
+        )))
+        .map(estimated_startup_tokens)
+        .sum::<usize>();
+    items.len() < LIVE_STARTUP_INPUT_MAX_ITEMS && tokens <= LIVE_STARTUP_INPUT_TOKEN_BUDGET
 }
 
 /// Compose the startup input from a leading item that is always kept and a
@@ -346,6 +470,11 @@ impl PublicLiveContextSeed {
     /// Prefix of the developer-role startup item that carries a summary.
     pub(crate) const SUMMARY_ITEM_PREFIX: &'static str = "Factual summary of the background agent's context at voice-channel open (context data, not a new user request):";
 
+    /// Prefix of the developer-role startup item that carries a summary of
+    /// everything before the verbatim messages that follow it (a summary
+    /// retained from an earlier open plus the conversation since).
+    pub(crate) const PRECEDING_HISTORY_SUMMARY_ITEM_PREFIX: &'static str = "Factual summary of this conversation before the messages that follow, which continue it verbatim (context data, not a new user request):";
+
     /// History belongs in the session's startup `input`: real prior dialogue
     /// turns under their own roles, and a factual summary as one
     /// `developer`-role item. The provider documents `input` as the history
@@ -366,17 +495,20 @@ impl PublicLiveContextSeed {
     /// dropped. Only meaningful for [`Self::FactualSummary`].
     fn startup_input_plan(&self) -> (Vec<InitialItem>, LiveStartupInputTruncation) {
         match self {
-            Self::FactualSummary { summary, recent } => {
-                let developer = InitialItem {
-                    role: InitialRole::Developer,
-                    content: vec![InitialText {
-                        text: format!("{}\n{summary}", Self::SUMMARY_ITEM_PREFIX),
-                        text_type: Some(InitialTextType::InputText),
-                    }],
-                    id: Field::Absent,
-                    status: Field::Absent,
-                    item_type: Some(MessageType::Message),
-                };
+            Self::FactualSummary {
+                summary,
+                recent,
+                coverage,
+            } => {
+                let developer = summary_item(summary, *coverage);
+                if *coverage == SummaryCoverage::PrecedingHistory {
+                    // Every verbatim turn is uncovered history: nothing is
+                    // dropped, and the provider rejects an oversize seed.
+                    let mut items = Vec::with_capacity(recent.len() + 1);
+                    items.push(developer);
+                    items.extend(recent.iter().cloned());
+                    return (items, LiveStartupInputTruncation::default());
+                }
                 let (items, truncation) = budget_startup_input(developer, recent);
                 if truncation != LiveStartupInputTruncation::default() {
                     tracing::warn!(
@@ -414,10 +546,13 @@ impl std::fmt::Debug for PublicLiveContextSeed {
                 .debug_struct("History")
                 .field("messages", &items.len())
                 .finish(),
-            Self::FactualSummary { recent, .. } => formatter
+            Self::FactualSummary {
+                recent, coverage, ..
+            } => formatter
                 .debug_struct("FactualSummary")
                 .field("summary", &"<redacted>")
                 .field("recent", &recent.len())
+                .field("coverage", coverage)
                 .finish(),
             Self::HistoricalContextPending => formatter.write_str("HistoricalContextPending"),
         }
@@ -477,50 +612,7 @@ impl PublicLiveOpenConfig {
     /// channel creation rather than silently losing canonical context.
     #[must_use]
     pub fn with_history(mut self, messages: &[Message]) -> Self {
-        let input = messages
-            .iter()
-            .filter_map(|message| {
-                let (role, text_type, text) = match message {
-                    Message::User(user) => (
-                        InitialRole::User,
-                        InitialTextType::InputText,
-                        user.text_content(),
-                    ),
-                    Message::BlockAssistant(assistant) => (
-                        InitialRole::Assistant,
-                        InitialTextType::OutputText,
-                        if assistant.blocks.iter().any(|block| {
-                            matches!(
-                                block,
-                                meerkat_core::AssistantBlock::Transcript {
-                                    source: meerkat_core::types::TranscriptSource::SpokenUnmeasured,
-                                    ..
-                                }
-                            )
-                        }) {
-                            meerkat_core::types::TranscriptSource::SpokenUnmeasured
-                                .text_for_model(&assistant.to_string())
-                                .into_owned()
-                        } else {
-                            assistant.to_string()
-                        },
-                    ),
-                    Message::System(_) | Message::SystemNotice(_) | Message::ToolResults { .. } => {
-                        return None;
-                    }
-                };
-                (!text.is_empty()).then_some(InitialItem {
-                    role,
-                    content: vec![InitialText {
-                        text,
-                        text_type: Some(text_type),
-                    }],
-                    id: Field::Absent,
-                    status: Field::Absent,
-                    item_type: Some(MessageType::Message),
-                })
-            })
-            .collect();
+        let input = messages.iter().filter_map(history_item).collect();
         self.context_seed = PublicLiveContextSeed::History(input);
         self
     }
@@ -545,6 +637,26 @@ impl PublicLiveOpenConfig {
         self.context_seed = PublicLiveContextSeed::FactualSummary {
             summary: summary.to_owned(),
             recent,
+            coverage: SummaryCoverage::Opening,
+        };
+        self
+    }
+
+    /// Lower a summary of everything before `following` as one
+    /// `developer`-role startup item, then every message of `following`
+    /// verbatim under its own role: a summary retained from an earlier open
+    /// plus the conversation since it. The developer item says the summary
+    /// ends where the verbatim messages begin. Nothing is dropped to fit the
+    /// provider limits, because the verbatim messages are the only record of
+    /// that conversation; check [`preceding_history_summary_fits`] first, and
+    /// an oversize seed rejects channel creation. Replaces any history or
+    /// summary selected before.
+    #[must_use]
+    pub fn with_preceding_history_summary(mut self, summary: &str, following: &[Message]) -> Self {
+        self.context_seed = PublicLiveContextSeed::FactualSummary {
+            summary: summary.to_owned(),
+            recent: following.iter().filter_map(history_item).collect(),
+            coverage: SummaryCoverage::PrecedingHistory,
         };
         self
     }
@@ -724,6 +836,29 @@ impl PublicLiveBrokerFactory {
                     &session.instructions,
                     Field::Value(text) if text.contains("Conversation history:")
                 ),
+                input_bytes: items
+                    .iter()
+                    .flat_map(|item| item.content.iter())
+                    .map(|part| part.text.len())
+                    .sum(),
+                estimated_tokens: items.iter().map(estimated_startup_tokens).sum(),
+                input_texts: items
+                    .iter()
+                    .map(|item| {
+                        item.content
+                            .iter()
+                            .map(|part| part.text.as_str())
+                            .collect::<String>()
+                    })
+                    .collect(),
+                preceding_history_summary: items.iter().any(|item| {
+                    item.role == InitialRole::Developer
+                        && item.content.iter().any(|part| {
+                            part.text.starts_with(
+                                PublicLiveContextSeed::PRECEDING_HISTORY_SUMMARY_ITEM_PREFIX,
+                            )
+                        })
+                }),
             });
         }
         let request = CreateRequest {
@@ -2622,6 +2757,98 @@ mod tests {
         let items = huge.context_seed.initial_input().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(huge.startup_input_truncation().dropped_items, 3);
+    }
+
+    #[test]
+    fn preceding_history_summary_frames_the_summary_as_ending_where_the_verbatim_turns_begin() {
+        use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, StopReason, UserMessage};
+        let following = vec![
+            Message::User(UserMessage::text("typed while the call was closed")),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "typed answer".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            )),
+        ];
+        let config = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_instructions("Speak briefly.")
+            .with_preceding_history_summary("The user planned a trip.", &following);
+        let factory = PublicLiveBrokerFactory::try_from_target(realtime_target(
+            "gpt-live-1",
+            OpenAiBackendKind::OpenAiApi,
+        ))
+        .unwrap();
+        let session = factory.session_config(&config);
+        session
+            .validate()
+            .expect("developer item plus the verbatim turns after it");
+        let encoded = serde_json::to_value(session).unwrap();
+        let input = encoded["input"].as_array().unwrap();
+        assert_eq!(input.len(), 3, "{encoded}");
+        assert_eq!(input[0]["role"], "developer");
+        let text = input[0]["content"][0]["text"].as_str().unwrap();
+        // The summary covers only what precedes the verbatim turns: the
+        // framing says so, and it never claims to describe the context at
+        // this voice-channel open.
+        assert_eq!(
+            text,
+            "Factual summary of this conversation before the messages that follow, which continue it verbatim (context data, not a new user request):\nThe user planned a trip."
+        );
+        assert!(text.starts_with(PublicLiveContextSeed::PRECEDING_HISTORY_SUMMARY_ITEM_PREFIX));
+        assert!(!text.contains("voice-channel open"));
+        assert_eq!(input[1]["role"], "user");
+        assert_eq!(
+            input[1]["content"][0]["text"],
+            "typed while the call was closed"
+        );
+        assert_eq!(input[2]["role"], "assistant");
+        assert_eq!(input[2]["content"][0]["text"], "typed answer");
+        assert_eq!(encoded["instructions"], "Speak briefly.");
+        assert!(!format!("{config:?}").contains("planned a trip"));
+        assert!(format!("{config:?}").contains("PrecedingHistory"));
+    }
+
+    #[test]
+    fn preceding_history_summary_never_drops_a_verbatim_turn() {
+        use meerkat_core::types::UserMessage;
+        // Three 9,000-byte turns would lose the oldest under the opening
+        // budget; after a preceding-history summary they are the only record
+        // of that conversation, so all three stay and the fit check refuses.
+        let following: Vec<Message> = (1..=3)
+            .map(|index| {
+                Message::User(UserMessage::text(format!(
+                    "turn {index} {}",
+                    "x".repeat(9_000)
+                )))
+            })
+            .collect();
+        let config = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_preceding_history_summary("summary", &following);
+        assert_eq!(
+            config.startup_input_truncation(),
+            LiveStartupInputTruncation::default()
+        );
+        let items = config.context_seed.initial_input().unwrap();
+        assert_eq!(items.len(), 4);
+        assert!(items[1].content[0].text.starts_with("turn 1 "));
+        assert!(!preceding_history_summary_fits("summary", &following));
+        assert!(preceding_history_summary_fits("summary", &following[..2]));
+        // The item cap: the developer item plus 127 turns fit, 128 do not.
+        let many: Vec<Message> = (0..128)
+            .map(|index| Message::User(UserMessage::text(format!("t{index}"))))
+            .collect();
+        assert!(preceding_history_summary_fits("summary", &many[..127]));
+        assert!(!preceding_history_summary_fits("summary", &many));
+        // Rows the voice model never sees do not count against the limits.
+        let mut with_system = many[..127].to_vec();
+        with_system.push(Message::System(meerkat_core::types::SystemMessage::new(
+            "executor instructions",
+        )));
+        assert!(preceding_history_summary_fits("summary", &with_system));
     }
 
     #[test]

@@ -1219,6 +1219,32 @@ mod orchestrator {
             .clone()
     }
 
+    /// Forget the retained summaries of up to `limit` sessions other than
+    /// `except`, least recently retained first, whose durable source is
+    /// archived (archived, retired or destroyed) or absent. Returns how many
+    /// were forgotten. An unobservable source keeps its entry: the open that
+    /// would reuse it validates it again.
+    #[cfg(feature = "openai-live")]
+    async fn sweep_retained_live_context_summaries<B: SessionAgentBuilder + 'static>(
+        service: &PersistentSessionService<B>,
+        retention: &super::live_summary::LiveContextSummaryRetention,
+        except: Option<&SessionId>,
+        limit: usize,
+    ) -> usize {
+        let mut forgotten = 0;
+        for session_id in retention.least_recent_sessions(except, limit) {
+            if matches!(
+                service.observe_live_durable_source(&session_id).await,
+                Ok(meerkat_session::LiveDurableSourceObservation::Archived
+                    | meerkat_session::LiveDurableSourceObservation::Absent)
+            ) {
+                retention.forget(&session_id);
+                forgotten += 1;
+            }
+        }
+        forgotten
+    }
+
     impl<B: SessionAgentBuilder + 'static> LiveOrchestrator<'_, B> {
         fn recovery_context(&self) -> RecoveryContext<'_, B> {
             RecoveryContext {
@@ -1578,6 +1604,7 @@ mod orchestrator {
                 )
                 .await?;
             self.validate_live_summary_current(&summary).await?;
+            self.retain_live_context_summary(policy, &summary);
             Ok(RealtimeSessionOpenProjection {
                 open_config: config,
                 seed_status: LiveSeedProjectionStatus::Summarized,
@@ -2503,6 +2530,7 @@ mod orchestrator {
                         pending.as_mut(),
                         &mut projection,
                         boundary,
+                        super::live_summary::RetainedSeedAdmission::Allowed,
                     )
                     .await?,
                 ),
@@ -2571,14 +2599,20 @@ mod orchestrator {
                         .await
                         .map(|(stage, lease)| (stage, Some(lease)))
                 }
-                // Seeded at open: the boundary's rows are covered by the
-                // startup input exactly like a before-open summary.
-                (Some(super::live_summary::LivePreOpenSummary::Seeded), Some(seeded_cursor)) => {
-                    self.runtime_adapter
-                        .stage_experimental_live_execution(session_id, &channel_id, seeded_cursor)
-                        .await
-                        .map(|stage| (stage, None))
-                }
+                // Seeded at open: every row up to the seed's cursor is
+                // covered by the startup input exactly like a before-open
+                // summary. For a fresh summary that is the admitted boundary;
+                // a retained seed covers the committed head it read, which a
+                // row committed during the open may have moved past it.
+                (Some(super::live_summary::LivePreOpenSummary::Seeded), Some(_)) => self
+                    .runtime_adapter
+                    .stage_experimental_live_execution(
+                        session_id,
+                        &channel_id,
+                        canonical_seed_cursor,
+                    )
+                    .await
+                    .map(|stage| (stage, None)),
                 _ => self
                     .runtime_adapter
                     .stage_experimental_live_execution(
@@ -2665,6 +2699,7 @@ mod orchestrator {
         /// preparation job adopts it, delivering the summary after the first
         /// user turn on the channel.
         #[cfg(feature = "openai-live")]
+        #[allow(clippy::too_many_arguments)]
         pub(crate) async fn pre_open_concurrent_summary(
             &self,
             session_id: &SessionId,
@@ -2673,10 +2708,39 @@ mod orchestrator {
             pending: &mut dyn crate::experimental_gpt_live::ExperimentalLivePendingOpen,
             projection: &mut RealtimeSessionOpenProjection,
             boundary: super::live_summary::LiveContextSummaryBoundary,
+            retained_seed: super::live_summary::RetainedSeedAdmission,
         ) -> Result<super::live_summary::LivePreOpenSummary, super::ExperimentalLiveChannelOpenError>
         {
             use super::live_summary::{LiveContextSummaryPregeneration, LivePreOpenSummary};
             let boundary_cursor = boundary.canonical_message_cursor();
+            // A summary an earlier channel of this session used still
+            // summarizes the committed prefix it was generated from: seed it
+            // with every row committed since, verbatim, and open at once. No
+            // generation starts and nothing waits on one.
+            if retained_seed == super::live_summary::RetainedSeedAdmission::Allowed
+                && let Some((summary, open_config)) = self
+                    .retained_opening_summary(
+                        session_id,
+                        turning_mode,
+                        policy,
+                        &mut *pending,
+                        &boundary,
+                        &projection.open_config,
+                    )
+                    .await
+            {
+                tracing::info!(
+                    %session_id,
+                    following_history = summary.following_history().map_or(0, |rows| rows.len()),
+                    "seeding the retained live context summary and the rows committed since as startup input"
+                );
+                pending.set_context_summary(summary.clone())?;
+                policy.retention().retain(&summary);
+                projection.open_config = open_config;
+                projection.seed_status = LiveSeedProjectionStatus::Summarized;
+                projection.summary = Some(summary);
+                return Ok(LivePreOpenSummary::Seeded);
+            }
             let pregeneration = LiveContextSummaryPregeneration::spawn(boundary);
             let bound = policy.pre_open_bound();
             let ready = if bound.is_zero() {
@@ -2704,6 +2768,7 @@ mod orchestrator {
                             "live context summary ready before the provider open; seeding it as startup input"
                         );
                         pending.set_context_summary(summary.clone())?;
+                        self.retain_live_context_summary(policy, &summary);
                         projection.open_config = open_config;
                         projection.seed_status = LiveSeedProjectionStatus::Summarized;
                         projection.summary = Some(summary);
@@ -2781,6 +2846,205 @@ mod orchestrator {
             // check fell back to a late open whose adapter then found the seed
             // custody consumed and refused the open.
             Ok(summary.adopt_seeded_projection(session_id, body_free, config)?)
+        }
+
+        /// The retained summary of `session_id` as an opening summary over
+        /// the committed head, with the open config it seeds, or `None` when
+        /// the open must take the fresh-summary path: nothing retained, the
+        /// session archived or gone (the entry is forgotten), a committed head
+        /// that is not the retained prefix plus the rows read after it, or a
+        /// changed rewrite generation or identity (the entry is forgotten), or
+        /// rows since the summary that the provider cannot seed verbatim in
+        /// full.
+        ///
+        /// O(tail) and never behind the member's actor or a turn guard: only
+        /// the committed head and the rows after the retained prefix are read,
+        /// and the prefix is proved by the retained transcript digest
+        /// midstate. The seed covers the committed head as read, where the
+        /// Seeded arm stages; rows committed later are caught up by the
+        /// live-context owner.
+        #[cfg(feature = "openai-live")]
+        async fn retained_opening_summary(
+            &self,
+            session_id: &SessionId,
+            turning_mode: RealtimeTurningMode,
+            policy: &super::live_summary::LiveContextSummaryPolicy,
+            pending: &mut dyn crate::experimental_gpt_live::ExperimentalLivePendingOpen,
+            boundary: &super::live_summary::LiveContextSummaryBoundary,
+            body_free: &RealtimeSessionOpenConfig,
+        ) -> Option<(
+            super::live_summary::LiveContextSummary,
+            RealtimeSessionOpenConfig,
+        )> {
+            let retention = policy.retention();
+            let Some(retained) = retention.get(session_id) else {
+                tracing::info!(%session_id, "no retained live context summary for the session; generating a fresh summary");
+                return None;
+            };
+            match self.service.observe_live_durable_source(session_id).await {
+                Ok(meerkat_session::LiveDurableSourceObservation::Committed { .. }) => {}
+                Ok(
+                    meerkat_session::LiveDurableSourceObservation::Archived
+                    | meerkat_session::LiveDurableSourceObservation::Absent,
+                ) => {
+                    retention.forget(session_id);
+                    return None;
+                }
+                Ok(observation) => {
+                    tracing::info!(%session_id, ?observation, "retained live context summary: durable source not committed; generating a fresh summary");
+                    return None;
+                }
+                Err(error) => {
+                    tracing::warn!(%session_id, %error, "retained live context summary source unobservable; generating a fresh summary");
+                    return None;
+                }
+            }
+            use super::live_summary::LiveSummarySource as _;
+            // O(tail): the committed head and only the rows after the
+            // retained prefix, read without the member's actor or any turn
+            // guard. Rows committed while the open runs join the tail when
+            // they are committed by the time of the read.
+            let tail = match super::live_summary::ConcurrentServiceLiveSummarySource(Arc::clone(
+                self.service,
+            ))
+            .read_committed_tail(session_id, retained.cursor())
+            .await
+            {
+                Ok(tail) => tail,
+                Err(error) => {
+                    tracing::warn!(%session_id, %error, "retained live context summary: committed tail unreadable; generating a fresh summary");
+                    return None;
+                }
+            };
+            let admitted_cursor = boundary.canonical_message_cursor();
+            let tail_rows = tail.rows.len();
+            let summary = match retained.opening_from_committed_tail(
+                session_id.clone(),
+                tail,
+                Arc::new(super::live_summary::ConcurrentServiceLiveSummarySource(
+                    Arc::clone(self.service),
+                )),
+            ) {
+                Ok(summary) => summary,
+                Err(error) => {
+                    tracing::info!(%session_id, %error, "retained live context summary no longer matches the session; generating a fresh summary");
+                    retention.forget(session_id);
+                    return None;
+                }
+            };
+            // A retained seed carries at most the recent-turns window of
+            // conversation turns since its summary. Longer verbatim startup
+            // history correlated with the provider stopping input
+            // transcription after a long answer (S106: 8/10 stalled against
+            // 1/8 within a four-row window and 0/18 on main), with no error
+            // event and not related to size; above the window the open
+            // generates a fresh summary as before.
+            if let Some(following) = summary.following_history()
+                && super::live_summary::conversation_turns(&following)
+                    > crate::experimental_gpt_live::LIVE_STARTUP_RECENT_TURNS
+            {
+                tracing::info!(
+                    %session_id,
+                    following_turns = super::live_summary::conversation_turns(&following),
+                    "turns since the retained live context summary exceed the recent-turns window; generating a fresh summary"
+                );
+                return None;
+            }
+            if let Some(following) = summary.following_history()
+                && !pending.accepts_preceding_history_summary(summary.text(), &following)
+            {
+                tracing::info!(
+                    %session_id,
+                    following_history = following.len(),
+                    "rows committed since the retained live context summary do not fit the startup input; generating a fresh summary"
+                );
+                return None;
+            }
+            // The rows after the retained prefix only, at the committed head's
+            // cursor; the prefix is never read. The tools are the body-free
+            // config's, as on every concurrent open: the voice channel is
+            // tool-less, and reading the member's visible tools would wait on
+            // its actor while a turn runs. Only a projection the summary
+            // validates against takes over the body-free config's lease.
+            let config = RealtimeSessionOpenConfig::for_open_after_covered_prefix(
+                turning_mode,
+                body_free.llm_identity.clone(),
+                body_free.visible_tools.clone(),
+                summary
+                    .covered_following_rows()
+                    .unwrap_or_default()
+                    .to_vec(),
+                summary.canonical_message_cursor(),
+            )
+            .map(|config| {
+                config.with_transcript_rewrite_generation(body_free.transcript_rewrite_generation)
+            });
+            let adopted = match config {
+                Ok(config) => summary.adopt_seeded_projection(session_id, body_free, config),
+                Err(error) => {
+                    tracing::warn!(%session_id, %error, "retained live context summary projection failed; generating a fresh summary");
+                    return None;
+                }
+            };
+            match adopted {
+                Ok(Some(open_config)) => {
+                    tracing::info!(
+                        %session_id,
+                        admitted_cursor,
+                        seeded_cursor = summary.canonical_message_cursor(),
+                        tail_rows,
+                        "retained live context summary seeds the committed head; later rows are caught up by the live-context owner"
+                    );
+                    Some((summary, open_config))
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::warn!(%session_id, %error, "retained live context summary projection failed; generating a fresh summary");
+                    None
+                }
+            }
+        }
+
+        /// Retain a summary a channel of its session is seeded with, then
+        /// sweep the least recently retained other sessions for archived or
+        /// gone ones on a spawned task: the sweep reads the store, so the
+        /// open never waits on it, and it is bounded per retain.
+        #[cfg(feature = "openai-live")]
+        pub(crate) fn retain_live_context_summary(
+            &self,
+            policy: &super::live_summary::LiveContextSummaryPolicy,
+            summary: &super::live_summary::LiveContextSummary,
+        ) {
+            const SWEEP_PER_RETAIN: usize = 8;
+            let retention = policy.retention().clone();
+            retention.retain(summary);
+            let service = Arc::clone(self.service);
+            let except = summary.session_id().clone();
+            tokio::spawn(async move {
+                sweep_retained_live_context_summaries(
+                    &service,
+                    &retention,
+                    Some(&except),
+                    SWEEP_PER_RETAIN,
+                )
+                .await;
+            });
+        }
+
+        /// Forget the retained summaries of up to `limit` sessions other than
+        /// `except`, least recently retained first, whose durable source is
+        /// archived (archived, retired or destroyed) or absent. Returns how
+        /// many were forgotten. An unobservable source keeps its entry: the
+        /// open that would reuse it validates it again.
+        #[cfg(feature = "openai-live")]
+        pub(crate) async fn sweep_retained_live_context_summaries(
+            &self,
+            policy: &super::live_summary::LiveContextSummaryPolicy,
+            except: Option<&SessionId>,
+            limit: usize,
+        ) -> usize {
+            sweep_retained_live_context_summaries(self.service, policy.retention(), except, limit)
+                .await
         }
 
         /// Hand an adopted pre-open generation to its preparation job once
@@ -3031,9 +3295,22 @@ mod orchestrator {
                     .validate_projection(session_id, &prepared_projection.open_config)
                     .map_err(RealtimeSessionOpenProjectionError::from)
                     .map_err(LiveOpenError::OpenConfig)?;
-                self.validate_live_summary_current(summary)
-                    .await
-                    .map_err(LiveOpenError::OpenConfig)?;
+                if summary.summarizes_preceding_history() {
+                    // A retained seed covers the committed boundary; rows past
+                    // it (a turn still committing) are expected and caught up
+                    // by the live-context owner. Its proof is append-only
+                    // against the committed source, which never waits on the
+                    // member's actor.
+                    summary
+                        .validate_provider_source()
+                        .await
+                        .map_err(RealtimeSessionOpenProjectionError::from)
+                        .map_err(LiveOpenError::OpenConfig)?;
+                } else {
+                    self.validate_live_summary_current(summary)
+                        .await
+                        .map_err(LiveOpenError::OpenConfig)?;
+                }
             }
             let seed_status = prepared_projection.seed_status;
             let prepared_open_config = prepared_projection.open_config;

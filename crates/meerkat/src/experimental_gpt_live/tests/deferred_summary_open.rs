@@ -409,6 +409,8 @@ struct DeferredSummaryEnvironment {
     authority: Arc<ScriptedStrictOpenAuthority>,
     store: Arc<GatedMaterializationStore>,
     producer: Arc<DeferredSummaryProducer>,
+    /// A clone of the member host's policy: clones share its retained store.
+    summary_policy: LiveContextSummaryPolicy,
     held_client: Arc<HeldTurnClient>,
     session_id: SessionId,
     /// Committed rows at the moment the open is admitted.
@@ -613,18 +615,17 @@ async fn build_environment_with_pre_open_bound(
             instance_id: None,
             backend: None,
         })
-        .with_webrtc_cleanup_state(webrtc_state)
-        .with_context_summary_policy(
-            LiveContextSummaryPolicy::new(
-                Arc::clone(&producer) as Arc<dyn LiveContextSummarizer>,
-                8 * 1024 * 1024,
-                1024,
-                Duration::from_secs(5),
-            )
-            .expect("bounded host summary policy")
-            .with_bootstrap_mode(LiveContextBootstrapMode::Concurrent)
-            .with_pre_open_bound(pre_open_bound),
-        );
+        .with_webrtc_cleanup_state(webrtc_state);
+    let summary_policy = LiveContextSummaryPolicy::new(
+        Arc::clone(&producer) as Arc<dyn LiveContextSummarizer>,
+        8 * 1024 * 1024,
+        1024,
+        Duration::from_secs(5),
+    )
+    .expect("bounded host summary policy")
+    .with_bootstrap_mode(LiveContextBootstrapMode::Concurrent)
+    .with_pre_open_bound(pre_open_bound);
+    let member_host = member_host.with_context_summary_policy(summary_policy.clone());
     let member_host = Arc::new(member_host);
 
     let realm = meerkat_core::RealmId::parse("active-readiness").expect("realm");
@@ -657,6 +658,7 @@ async fn build_environment_with_pre_open_bound(
         authority,
         store,
         producer,
+        summary_policy,
         held_client,
         session_id,
         seeded_rows,
@@ -669,6 +671,59 @@ async fn build_environment_with_pre_open_bound(
 }
 
 impl DeferredSummaryEnvironment {
+    /// The summary the latest open staged into its startup seed and the
+    /// verbatim turns seeded after it.
+    async fn staged_summary_seed(
+        &self,
+    ) -> (
+        crate::session_runtime::live_summary::LiveContextSummary,
+        Vec<Message>,
+    ) {
+        let seed = self
+            .authority
+            .latest_initial_seed
+            .lock()
+            .await
+            .clone()
+            .and_then(|seed| seed.upgrade())
+            .expect("seed custody");
+        match &seed.lock().await.as_ref().expect("initial seed").context {
+            GptLiveSeedContext::Summary { summary, recent } => (summary.clone(), recent.clone()),
+            other => panic!(
+                "the summary must be seeded at creation, got seed context {}",
+                other.kind()
+            ),
+        }
+    }
+
+    /// Activate media, then close the channel, as a call that ends.
+    async fn activate_and_close(
+        &self,
+        opened: &crate::session_runtime::live_orchestration::ExperimentalLivePendingChannel,
+    ) {
+        tokio::time::timeout(Duration::from_secs(20), self.activate_media(opened))
+            .await
+            .expect("media activation");
+        self.member_host
+            .close_experimental_live_pending_channel(
+                self.authority.as_ref(),
+                opened.channel_id(),
+                opened.pending_receipt(),
+            )
+            .await
+            .expect("close active channel");
+    }
+
+    async fn commit_typed(&self, text: &str) {
+        self.service
+            .append_external_user_content(
+                &self.session_id,
+                meerkat_core::ContentInput::Text(text.into()),
+            )
+            .await
+            .expect("commit a typed row");
+    }
+
     async fn open(
         &self,
     ) -> (
@@ -1002,6 +1057,13 @@ async fn concurrent_open_returns_before_the_summary_source_is_read_and_covers_th
         *status == LiveContextPreparationStatus::ProviderAcknowledged
     })
     .await;
+    // The late summary this channel used is retained for the next open,
+    // naming the prefix it summarizes.
+    let retained = env
+        .member_host
+        .retained_live_context_summary(&env.session_id)
+        .expect("the delivered late summary is retained");
+    assert_eq!(retained.canonical_message_cursor(), env.seeded_rows as u64);
     tokio::time::timeout(
         Duration::from_secs(20),
         env.runtime.drain_live_context_outbox(&env.session_id),
@@ -1134,6 +1196,13 @@ async fn late_summary_is_released_by_a_queued_typed_turn_without_user_speech() {
         *status == LiveContextPreparationStatus::ProviderAcknowledged
     })
     .await;
+    // The late summary this channel used is retained for the next open,
+    // naming the prefix it summarizes.
+    let retained = env
+        .member_host
+        .retained_live_context_summary(&env.session_id)
+        .expect("the delivered late summary is retained");
+    assert_eq!(retained.canonical_message_cursor(), env.seeded_rows as u64);
     tokio::time::timeout(
         Duration::from_secs(20),
         env.runtime.drain_live_context_outbox(&env.session_id),
@@ -1456,6 +1525,429 @@ async fn concurrent_open_seeds_a_ready_summary_as_startup_input_and_appends_noth
             env.authority.as_ref(),
             opened.channel_id(),
             opened.pending_receipt(),
+        )
+        .await
+        .expect("close active channel");
+}
+
+const TYPED_WHILE_CLOSED: [&str; 2] = [
+    "Typed while the call was closed: book the hotel near the station.",
+    "Typed while the call was closed: and a table for two at eight.",
+];
+
+/// The S104 reopen: a call ends, the user types, the call reopens. The
+/// reopen seeds the summary the first call used plus every row committed
+/// since, verbatim, and opens at once: no generation starts, no preparation
+/// is requested, and nothing waits on a bound.
+#[tokio::test]
+async fn reopen_seeds_the_retained_summary_and_the_rows_committed_since_without_a_generation() {
+    let _reservation = OPEN_RESERVATION.lock().await;
+    let env = build_environment_with_pre_open_bound(Duration::from_secs(10)).await;
+    env.producer.release.notify_one();
+    env.store.set_gate(MaterializeGate::Pass);
+    let (first, _, _) = env.open().await;
+    assert_eq!(
+        env.member_host
+            .retained_live_context_summary(&env.session_id)
+            .expect("the seeded summary is retained")
+            .canonical_message_cursor(),
+        env.seeded_rows as u64
+    );
+    env.activate_and_close(&first).await;
+    for text in TYPED_WHILE_CLOSED {
+        env.commit_typed(text).await;
+    }
+
+    // No release: a fresh generation would park until the 10 s bound.
+    let (reopened, elapsed, _) = env.open().await;
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the retained reopen never waits on a generation: {elapsed:?}"
+    );
+    assert_eq!(
+        env.producer.observed().len(),
+        1,
+        "the reopen starts no generation"
+    );
+    assert_eq!(
+        env.preparation_status(&reopened).await,
+        LiveContextPreparationStatus::NotRequested,
+        "a seeded reopen needs no preparation lease"
+    );
+    let (summary, recent) = env.staged_summary_seed().await;
+    assert!(summary.summarizes_preceding_history());
+    assert_eq!(
+        summary.text(),
+        format!(
+            "Factual context summary covering {} canonical rows.",
+            env.seeded_rows
+        )
+    );
+    let typed: Vec<String> = recent
+        .iter()
+        .filter_map(|message| match message {
+            Message::User(user) => Some(user.text_content()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        typed, TYPED_WHILE_CLOSED,
+        "every row since the summary, in order"
+    );
+    // Provenance names what the text summarizes: the first call's prefix.
+    let provenance = env
+        .authority
+        .transport
+        .bound_context_summary(reopened.channel_id(), &env.session_id)
+        .await
+        .expect("seeded summary provenance");
+    assert_eq!(
+        provenance.canonical_message_cursor(),
+        env.seeded_rows as u64
+    );
+    env.activate_and_close(&reopened).await;
+}
+
+/// Rows since the retained summary that the startup input cannot carry in
+/// full: the reopen generates a fresh summary instead of dropping any of
+/// them, and the fresh one replaces the retained entry.
+#[tokio::test]
+async fn reopen_generates_a_fresh_summary_when_the_rows_since_do_not_fit() {
+    let _reservation = OPEN_RESERVATION.lock().await;
+    let env = build_environment_with_pre_open_bound(Duration::from_secs(10)).await;
+    env.producer.release.notify_one();
+    env.store.set_gate(MaterializeGate::Pass);
+    let (first, _, _) = env.open().await;
+    env.activate_and_close(&first).await;
+    // About 12,000 estimated tokens: over the 8,192-token startup budget.
+    env.commit_typed(&format!("Typed at length: {}", "notes ".repeat(6_000)))
+        .await;
+    let rows = env
+        .service
+        .export_realtime_refresh_session_snapshot(&env.session_id)
+        .await
+        .expect("snapshot")
+        .messages()
+        .len();
+
+    env.producer.release.notify_one();
+    let (reopened, _, _) = env.open().await;
+    let observed = env.producer.observed();
+    assert_eq!(observed.len(), 2, "the reopen generated a fresh summary");
+    assert_eq!(observed[1].cursor, rows as u64);
+    let (summary, _) = env.staged_summary_seed().await;
+    assert!(!summary.summarizes_preceding_history());
+    assert_eq!(
+        summary.text(),
+        format!("Factual context summary covering {rows} canonical rows.")
+    );
+    assert_eq!(
+        env.member_host
+            .retained_live_context_summary(&env.session_id)
+            .expect("the fresh summary is retained")
+            .canonical_message_cursor(),
+        rows as u64
+    );
+    env.activate_and_close(&reopened).await;
+}
+
+/// Retained summaries leave with their sessions: a sweep forgets a session
+/// the service never knew (gone) and an archived one, and a host can forget
+/// one directly.
+#[tokio::test]
+async fn retained_summaries_are_forgotten_for_archived_gone_and_forgotten_sessions() {
+    let _reservation = OPEN_RESERVATION.lock().await;
+    let env = build_environment_with_pre_open_bound(Duration::from_secs(10)).await;
+    env.producer.release.notify_one();
+    env.store.set_gate(MaterializeGate::Pass);
+    let (first, _, _) = env.open().await;
+    let (summary, _) = env.staged_summary_seed().await;
+    env.activate_and_close(&first).await;
+    let gone = SessionId::new();
+    env.summary_policy
+        .retention()
+        .retain_copy_for(gone.clone(), &summary);
+    assert!(
+        env.member_host
+            .retained_live_context_summary(&gone)
+            .is_some()
+    );
+
+    assert_eq!(
+        env.member_host
+            .prune_retained_live_context_summaries()
+            .await,
+        1
+    );
+    assert!(
+        env.member_host
+            .retained_live_context_summary(&gone)
+            .is_none()
+    );
+    assert!(
+        env.member_host
+            .retained_live_context_summary(&env.session_id)
+            .is_some(),
+        "a committed session keeps its entry"
+    );
+
+    env.service
+        .archive_with_machine_protocol(
+            &env.session_id,
+            meerkat_session::MachineSessionArchiveProtocol::from_machine(env.runtime.as_ref()),
+        )
+        .await
+        .expect("archive the session");
+    assert_eq!(
+        env.member_host
+            .prune_retained_live_context_summaries()
+            .await,
+        1
+    );
+    assert!(
+        env.member_host
+            .retained_live_context_summary(&env.session_id)
+            .is_none(),
+        "an archived session's entry is forgotten"
+    );
+
+    env.summary_policy
+        .retention()
+        .retain_copy_for(gone.clone(), &summary);
+    env.member_host.forget_live_context_summary(&gone);
+    assert!(
+        env.member_host
+            .retained_live_context_summary(&gone)
+            .is_none()
+    );
+}
+
+/// The S104 reopen with the member still committing a turn (the job result
+/// merged after the call ended): the snapshot runs past the committed
+/// boundary. The reopen still seeds the retained summary at once, covering
+/// exactly the rows up to the boundary; the turn's rows reach the channel
+/// through the live-context owner once they commit.
+#[tokio::test]
+async fn reopen_with_a_turn_still_committing_seeds_the_retained_summary_up_to_the_committed_boundary()
+ {
+    let _reservation = OPEN_RESERVATION.lock().await;
+    let env = build_environment_with_pre_open_bound(Duration::from_secs(10)).await;
+    env.producer.release.notify_one();
+    env.store.set_gate(MaterializeGate::Pass);
+    let (first, _, _) = env.open().await;
+    env.activate_and_close(&first).await;
+    env.commit_typed(TYPED_WHILE_CLOSED[0]).await;
+    let committed = env
+        .service
+        .observe_live_context_committed_boundary(&env.session_id)
+        .await
+        .expect("committed boundary")
+        .message_count();
+    // The prompt is in the actor's transcript, ahead of the committed
+    // boundary, and the turn stays parked until released.
+    let turn = env.start_held_turn().await;
+
+    let (reopened, _, _) = tokio::time::timeout(Duration::from_secs(60), env.open())
+        .await
+        .expect("the reopen never waits on the parked turn");
+    assert_eq!(env.producer.observed().len(), 1, "no generation");
+    assert_eq!(
+        env.preparation_status(&reopened).await,
+        LiveContextPreparationStatus::NotRequested
+    );
+    let (summary, recent) = env.staged_summary_seed().await;
+    assert!(summary.summarizes_preceding_history());
+    assert_eq!(summary.canonical_message_cursor(), committed);
+    let seeded: Vec<String> = recent
+        .iter()
+        .filter_map(|message| match message {
+            Message::User(user) => Some(user.text_content()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        seeded,
+        [TYPED_WHILE_CLOSED[0]],
+        "the uncommitted turn is not seeded"
+    );
+
+    // The turn commits after the seeded boundary and is delivered live.
+    env.held_client.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), turn)
+        .await
+        .expect("held turn completes once released")
+        .expect("turn task")
+        .expect("turn commits");
+    let sideband = tokio::time::timeout(Duration::from_secs(20), env.activate_media(&reopened))
+        .await
+        .expect("media activation");
+    env.runtime.notify_committed_live_context(&env.session_id);
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        env.runtime.drain_live_context_outbox(&env.session_id),
+    )
+    .await
+    .expect("drain")
+    .expect("drain the rows committed after the seed");
+    let commands = sideband.context_commands.lock().await;
+    assert!(
+        commands.iter().any(|command| matches!(
+            command,
+            LiveSidebandProviderCommand::AppendSessionContext { text, .. }
+                if text.contains(HELD_TURN_PROMPT)
+        )),
+        "the turn committed after the seeded boundary reaches the channel"
+    );
+    assert!(
+        !commands.iter().any(|command| matches!(
+            command,
+            LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                if text.contains("Factual context summary")
+        )),
+        "the seeded summary is never appended again"
+    );
+    drop(commands);
+    env.member_host
+        .close_experimental_live_pending_channel(
+            env.authority.as_ref(),
+            reopened.channel_id(),
+            reopened.pending_receipt(),
+        )
+        .await
+        .expect("close active channel");
+}
+
+/// The recent-turns window counts conversation turns, not rows: typed rows
+/// committed back to back with no reply between them are one turn, so the
+/// reopen still seeds the retained summary and all of them verbatim.
+#[tokio::test]
+async fn reopen_counts_the_recent_turns_window_in_turns_not_rows() {
+    let _reservation = OPEN_RESERVATION.lock().await;
+    let env = build_environment_with_pre_open_bound(Duration::from_secs(10)).await;
+    env.producer.release.notify_one();
+    env.store.set_gate(MaterializeGate::Pass);
+    let (first, _, _) = env.open().await;
+    env.activate_and_close(&first).await;
+    for index in 0..=LIVE_STARTUP_RECENT_TURNS {
+        env.commit_typed(&format!("Typed while the call was closed: row {index}."))
+            .await;
+    }
+    let (reopened, _, _) = env.open().await;
+    assert_eq!(env.producer.observed().len(), 1, "no fresh summary");
+    let (summary, recent) = env.staged_summary_seed().await;
+    assert!(summary.summarizes_preceding_history());
+    assert_eq!(
+        recent
+            .iter()
+            .filter(|message| matches!(message, Message::User(_)))
+            .count(),
+        LIVE_STARTUP_RECENT_TURNS + 1,
+        "five rows, one turn"
+    );
+    env.activate_and_close(&reopened).await;
+}
+
+/// A row committed after the reopen staged its seed and before the provider
+/// session was created rides the startup input (the public broker reseals the
+/// seed at creation; here the provider reports the advanced cursor itself).
+/// The production answer bind advances the staged seed over it through the
+/// generated edge, so the row's queued custody (generated and runtime) is
+/// gone, the channel binds at the advanced cursor, and the row is never
+/// appended to the channel.
+#[tokio::test]
+async fn the_production_bind_advances_a_retained_seed_over_a_row_committed_before_the_session() {
+    const COMMITTED_DURING_THE_OPEN: &str =
+        "Typed while the reopen was connecting: the room is Osprey.";
+    let _reservation = OPEN_RESERVATION.lock().await;
+    let env = build_environment_with_pre_open_bound(Duration::from_secs(10)).await;
+    env.producer.release.notify_one();
+    env.store.set_gate(MaterializeGate::Pass);
+    let (first, _, _) = env.open().await;
+    env.activate_and_close(&first).await;
+    env.commit_typed(TYPED_WHILE_CLOSED[0]).await;
+    let (reopened, _, _) = env.open().await;
+    let (summary, _) = env.staged_summary_seed().await;
+    assert!(summary.summarizes_preceding_history());
+    let staged = summary.canonical_message_cursor();
+
+    // The row commits while the open runs; the owner queues it for the
+    // staged channel.
+    env.commit_typed(COMMITTED_DURING_THE_OPEN).await;
+    env.runtime.notify_committed_live_context(&env.session_id);
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        env.runtime.drain_live_context_outbox(&env.session_id),
+    )
+    .await
+    .expect("drain")
+    .expect("queue the row for the staged channel");
+    let (generated, runtime, _) = env
+        .runtime
+        .__test_live_context_outbox_custody(&env.session_id, reopened.channel_id())
+        .await
+        .expect("outbox custody");
+    assert!(generated.contains(&(staged + 1)), "{generated:?}");
+    assert!(runtime.contains(&(staged + 1)), "{runtime:?}");
+
+    // The provider session is created seeded through that row.
+    {
+        let seed = env
+            .authority
+            .latest_initial_seed
+            .lock()
+            .await
+            .clone()
+            .and_then(|seed| seed.upgrade())
+            .expect("seed custody");
+        seed.lock()
+            .await
+            .as_mut()
+            .expect("initial seed")
+            .canonical_seed_cursor = staged + 1;
+    }
+    let sideband = tokio::time::timeout(Duration::from_secs(20), env.activate_media(&reopened))
+        .await
+        .expect("the production bind admits the advanced seed");
+    let (generated, runtime, cursor) = env
+        .runtime
+        .__test_live_context_outbox_custody(&env.session_id, reopened.channel_id())
+        .await
+        .expect("outbox custody");
+    assert!(
+        !generated.iter().any(|row| *row <= staged + 1),
+        "generated custody of the covered row is gone: {generated:?}"
+    );
+    assert!(
+        !runtime.iter().any(|row| *row <= staged + 1),
+        "runtime custody of the covered row is gone: {runtime:?}"
+    );
+    assert_eq!(cursor, Some(staged + 1), "bound at the advanced seed");
+    env.runtime.notify_committed_live_context(&env.session_id);
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        env.runtime.drain_live_context_outbox(&env.session_id),
+    )
+    .await
+    .expect("drain")
+    .expect("drain after the bind");
+    assert!(
+        !sideband
+            .context_commands
+            .lock()
+            .await
+            .iter()
+            .any(|command| matches!(
+                command,
+                LiveSidebandProviderCommand::AppendSessionContext { text, .. }
+                    if text.contains(COMMITTED_DURING_THE_OPEN)
+            )),
+        "the row the seed carried is never appended"
+    );
+    env.member_host
+        .close_experimental_live_pending_channel(
+            env.authority.as_ref(),
+            reopened.channel_id(),
+            reopened.pending_receipt(),
         )
         .await
         .expect("close active channel");

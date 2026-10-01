@@ -5674,6 +5674,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 canonical_seed_cursor: u64,
                 pending_receipt: String,
             },
+            AdvanceLiveExperimentalStagedSeed {
+                session_id: String,
+                channel_id: String,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+                previous_seed_cursor: u64,
+                next_seed_cursor: u64,
+            },
             ResolveLiveExecutionModeAdmission {
                 session_id: String,
                 channel_id: String,
@@ -24819,6 +24828,65 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // The provider session of a staged channel starts with the rows
+        // committed up to its creation, which may be past the staged seed
+        // cursor (a row committed while the open ran). Before the bind, the
+        // staged seed advances one row at a time to the cursor the provider
+        // was seeded with; a row already queued for the channel at that
+        // cursor is covered by the seed and leaves the outbox, so it is
+        // never delivered again.
+        transition AdvanceLiveExperimentalStagedSeed {
+            per_phase [Idle, Attached, Running]
+            on input AdvanceLiveExperimentalStagedSeed {
+                session_id, channel_id, runtime_id, fence_token, generation,
+                previous_seed_cursor, next_seed_cursor
+            }
+            guard "channel_binding_matches" {
+                self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+                && self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "experimental_stage_matches" {
+                self.live_experimental_staged_runtime_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_experimental_staged_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_experimental_staged_generation_by_channel.get_copied(channel_id) == Some(generation)
+                && self.live_experimental_staged_seed_cursor_by_channel.get_copied(channel_id)
+                    == Some(previous_seed_cursor)
+            }
+            guard "execution_not_bound" {
+                !self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                && !self.live_context_cursor_by_channel.contains_key(channel_id)
+            }
+            guard "seed_advances_one_row" { next_seed_cursor == previous_seed_cursor + 1 }
+            guard "channel_has_no_pending_append" {
+                !self.live_context_pending_append_by_channel.contains_key(channel_id)
+            }
+            update {
+                self.live_experimental_staged_seed_cursor_by_channel.insert(
+                    channel_id,
+                    next_seed_cursor
+                );
+                if self.live_context_queued_append_by_cursor.contains_key(next_seed_cursor) {
+                    self.live_context_queued_session_by_append.remove(
+                        self.live_context_queued_append_by_cursor.get_cloned(next_seed_cursor).get("value")
+                    );
+                    self.live_context_queued_cursor_by_append.remove(
+                        self.live_context_queued_append_by_cursor.get_cloned(next_seed_cursor).get("value")
+                    );
+                    self.live_context_queued_digest_by_append.remove(
+                        self.live_context_queued_append_by_cursor.get_cloned(next_seed_cursor).get("value")
+                    );
+                    self.live_context_queued_commit_token_by_append.remove(
+                        self.live_context_queued_append_by_cursor.get_cloned(next_seed_cursor).get("value")
+                    );
+                    self.live_context_queued_disposition_by_append.remove(
+                        self.live_context_queued_append_by_cursor.get_cloned(next_seed_cursor).get("value")
+                    );
+                    self.live_context_queued_append_by_cursor.remove(next_seed_cursor);
+                }
+            }
+            to Idle
+        }
+
         transition RegisterLivePlaybackOwner {
             per_phase [Idle, Attached, Running]
             on input RegisterLivePlaybackOwner {
@@ -28991,23 +29059,36 @@ macro_rules! meerkat_catalog_machine_dsl {
                 !self.live_revoked_execution_channels.contains(channel_id)
             }
             // Replayed runtime work output rides the quiet thinking lane and
-            // is history the model has not seen, so it is not held behind the
-            // user phase of a provider turn: it lands while the user's first
-            // utterance is still in flight, before the model answers it. Once
-            // an assistant turn has started for the turn's interaction it
-            // waits like every other row, so it can never interleave with an
+            // is history the model has not seen. On a channel whose history
+            // is still being prepared (the late path, where the summary itself
+            // is held for the conversation) it is not held behind the user
+            // phase of a provider turn: it lands while the user's first
+            // utterance is still in flight, before the model answers it. On a
+            // channel seeded at open it waits for the turn boundary like every
+            // other row: a thinking append landing mid-utterance makes the
+            // model speak over the user, so while a user turn is open (first
+            // input delta through the finished user turn) the row is held and
+            // the finished turn releases it, never an input delta. Rows
+            // committed before the provider session was created ride its
+            // startup input instead (a retained seed sealed at creation), so
+            // this path only carries rows that did not exist then. Once an
+            // assistant turn has started for the turn's interaction it waits
+            // like every other row, so it can never interleave with an
             // in-flight response. Voiced rows and reassertions of live speech
             // wait for the turn boundary.
             guard "safe_provider_turn_boundary" {
                 !self.live_provider_turn_by_channel.contains_key(channel_id)
                 || (self.live_context_queued_disposition_by_append.get_copied(append_id)
                         == Some(LiveContextRowDisposition::ReplayRuntimeWork)
+                    && self.live_context_preparation_phase_by_channel.contains_key(channel_id)
                     && for_all(assistant_turn_ref in self.live_assistant_interaction_by_turn.keys(),
                         self.live_assistant_interaction_by_turn.get_cloned(assistant_turn_ref)
                             != self.live_active_interaction_by_channel.get_cloned(channel_id)))
             }
-            // Quiet history appended into silence is still a cue to speak, so
-            // replayed runtime work output waits for the conversation to start.
+            // Quiet history appended into silence is still a cue to speak (a
+            // runtime work row released into a quiet seeded channel was read
+            // aloud over the user's first question 4/5), so replayed runtime
+            // work output waits for the conversation to start.
             guard "quiet_history_waits_for_the_conversation" {
                 self.live_context_queued_disposition_by_append.get_copied(append_id)
                     != Some(LiveContextRowDisposition::ReplayRuntimeWork)
@@ -29200,11 +29281,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                     == Some(LiveContextRowDisposition::ReassertCausalTail)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReassertAssistantOutput)
+                    // Complement of the runtime-work exemption in guard
+                    // `safe_provider_turn_boundary`: on a channel seeded at
+                    // open (no context preparation) it waits for the user's
+                    // turn to finish, and on any channel for an assistant
+                    // turn of the turn's interaction.
                     || (self.live_context_queued_disposition_by_append.get_copied(append_id)
                             == Some(LiveContextRowDisposition::ReplayRuntimeWork)
-                        && !for_all(assistant_turn_ref in self.live_assistant_interaction_by_turn.keys(),
-                            self.live_assistant_interaction_by_turn.get_cloned(assistant_turn_ref)
-                                != self.live_active_interaction_by_channel.get_cloned(channel_id))))
+                        && (!self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                            || !for_all(assistant_turn_ref in self.live_assistant_interaction_by_turn.keys(),
+                                self.live_assistant_interaction_by_turn.get_cloned(assistant_turn_ref)
+                                    != self.live_active_interaction_by_channel.get_cloned(channel_id)))))
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
             guard "provider_turn_owns_boundary" {

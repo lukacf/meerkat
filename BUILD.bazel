@@ -632,6 +632,7 @@ test_suite(
         "//crates/meerkat-machine-codegen:artifacts_semantic_model_test",
         "//crates/meerkat-machine-codegen:meerkat_machine_codegen_unit_test",
         "//crates/meerkat-machine-codegen:named_type_binding_respected_test",
+        "//crates/meerkat-machine-codegen:redacted_field_debug_test",
         "//crates/meerkat-machine-codegen:render_contracts_test",
         "//crates/meerkat-machine-codegen:routed_effect_module_shape_test",
         "//crates/meerkat-machine-codegen:runtime_alphabet_parity_test",

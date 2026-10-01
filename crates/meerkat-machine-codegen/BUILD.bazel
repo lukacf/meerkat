@@ -277,6 +277,64 @@ rust_test(
 )
 
 rust_test(
+    name = "redacted_field_debug_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "redacted_field_debug",
+    crate_root = "tests/redacted_field_debug.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ] + [
+        "//crates/meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//crates/meerkat-machine-kernels:src/generated/mob.rs",
+    ],
+    srcs = [
+        "tests/redacted_field_debug.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.49",
+        "CARGO_BIN_NAME": "redacted_field_debug",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-codegen",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-machine-codegen",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_codegen_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_schedule_agent_factory_build",
+        "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "render_contracts_test",
     aliases = aliases(
         package_name = "crates/meerkat-machine-codegen",
@@ -529,6 +587,7 @@ test_suite(
         ":artifacts_semantic_model_test",
         ":meerkat_machine_codegen_unit_test",
         ":named_type_binding_respected_test",
+        ":redacted_field_debug_test",
         ":render_contracts_test",
         ":routed_effect_module_shape_test",
         ":runtime_alphabet_parity_test",

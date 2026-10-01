@@ -55,6 +55,8 @@ pub struct FieldDef {
     pub name: Ident,
     pub ty: TypeDef,
     pub span: Span,
+    /// `#[redacted]`: generated `Debug` must not print this field's value.
+    pub redacted: bool,
 }
 
 #[derive(Debug, Clone)]

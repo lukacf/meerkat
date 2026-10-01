@@ -49,6 +49,7 @@ fn validate_rejects_schema_with_unbound_named_type() {
     schema.state.fields.push(FieldSchema {
         name: renamed.clone(),
         ty: TypeRef::Named(unbound.clone()),
+        disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
     });
     // #174: every declared `state.fields` entry must carry a `state.init.fields`
     // initializer, else `MissingInitializer` fires before the named-type check.

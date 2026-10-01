@@ -54,6 +54,7 @@ fn schema_with_single_named_type(field_name: &str, named: &str) -> MachineSchema
             fields: vec![FieldSchema {
                 name: FieldId::parse(field_name).expect("field slug"),
                 ty: TypeRef::Named(NamedTypeId::parse(named).expect("named-type slug")),
+                disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
             }],
             init: InitSchema {
                 phase: PhaseId::parse("Running").expect("phase slug"),

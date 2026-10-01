@@ -406,6 +406,19 @@ fn deep_coverage_credits_transitions_tlc_reports_as_next_disjuncts() {
 
 #[cfg(feature = "machine-authority")]
 #[test]
+fn tlc_lane_script_heap_floor_matches_the_xtask_floor() {
+    let root = repo_root().expect("repo root");
+    let script = fs::read_to_string(root.join("crates/xtask/tests/machine_verify_all_tlc_test.sh"))
+        .expect("read lane script");
+    let expected = format!("\nmin_heap_mb_per_job={MIN_HEAP_MB_PER_PARALLEL_JOB}\n");
+    assert!(
+        script.contains(&expected),
+        "the lane script's audit heap floor must equal MIN_HEAP_MB_PER_PARALLEL_JOB ({MIN_HEAP_MB_PER_PARALLEL_JOB} MiB)"
+    );
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
 fn tlc_lane_budget_split_never_exceeds_the_total_worker_budget() {
     let budget = |workers: usize| TlcRunBudget {
         workers,
@@ -462,7 +475,11 @@ fn tlc_lane_budget_split_never_exceeds_the_total_worker_budget() {
         "a lone JVM keeps the default GC threads"
     );
     let (concurrency, job) = budget(192).split_for_jobs_with_heap(35, Some(100 * floor));
-    assert_eq!(concurrency, 35);
+    assert_eq!(
+        concurrency, MAX_CONCURRENT_TLC_JOBS,
+        "a large budget runs at most MAX_CONCURRENT_TLC_JOBS JVMs, each with more workers"
+    );
+    assert_eq!(job.workers, 192 / MAX_CONCURRENT_TLC_JOBS);
     assert!(job.heap_mb.is_some_and(|mb| mb >= floor));
 }
 
@@ -492,6 +509,112 @@ fn tlc_lane_jobs_report_in_lane_order_and_failures_do_not_cancel_others() {
     assert_eq!(outputs, "job 0\njob 1\njob 2\njob 3\njob 4\njob 5\n");
     assert!(results[1].coverage.is_err());
     assert_eq!(results.iter().filter(|r| r.coverage.is_ok()).count(), 5);
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn witness_model_pruning_keeps_exactly_the_reachable_definitions() {
+    let module = [
+        "---- MODULE model ----",
+        "EXTENDS TLC, Naturals",
+        "CONSTANTS StringValues, SampleValues",
+        "VARIABLES x, y",
+        "vars == << x, y >>",
+        "Helper(a) == a + 1",
+        "Unused == 42",
+        "RECURSIVE Walk(_)",
+        "Walk(s) == IF s = {} THEN 0 ELSE Walk(s \\ {CHOOSE e \\in s : TRUE})",
+        "RECURSIVE Orphan(_)",
+        "Orphan(s) == Orphan(s)",
+        "Big == {",
+        "  Helper(1),",
+        "  Walk({})",
+        "}",
+        "Init == x = 0 /\\ y = 0",
+        "Step == x' = Helper(x) /\\ y' = Big",
+        "Spec == Init /\\ [][Step]_vars",
+        "SampleValuesWitness == {1}",
+        "Inv == x >= 0",
+        "Never == Unused = 0",
+        "Assumed == TRUE",
+        "ASSUME Assumed",
+        "THEOREM Spec => []Never",
+        "====",
+    ]
+    .join("\n");
+    let cfg = "SPECIFICATION Spec\nCONSTANTS\n  StringValues = {\"a\"}\n  SampleValues <- SampleValuesWitness\nINVARIANTS\n  Inv\n";
+    let pruned = prune_tla_module_for_cfg(&module, cfg);
+    for kept in [
+        "---- MODULE model ----",
+        "EXTENDS TLC, Naturals",
+        "VARIABLES x, y",
+        "vars ==",
+        "Helper(a) ==",
+        "RECURSIVE Walk(_)",
+        "Walk(s) ==",
+        "  Walk({})",
+        "}",
+        "Spec ==",
+        "SampleValuesWitness ==",
+        "Inv ==",
+        "Assumed ==",
+        "ASSUME Assumed",
+        "====",
+    ] {
+        assert!(
+            pruned.contains(kept),
+            "pruned module lost `{kept}`:\n{pruned}"
+        );
+    }
+    for dropped in ["Unused ==", "Never ==", "THEOREM", "Orphan"] {
+        assert!(
+            !pruned.contains(dropped),
+            "pruned module kept `{dropped}`:\n{pruned}"
+        );
+    }
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn witness_model_pruning_keeps_every_cfg_root_of_every_canonical_witness() {
+    let root = repo_root().expect("repo root");
+    for schema in meerkat_machine_schema::canonical_composition_schemas() {
+        if schema.witnesses.is_empty() {
+            continue;
+        }
+        let slug = composition_slug(&schema.name);
+        let model = fs::read_to_string(composition_model_path(&root, &slug)).expect("read model");
+        for witness in &schema.witnesses {
+            let cfg_path = composition_witness_path(&root, &slug, witness.name.as_str());
+            let cfg = fs::read_to_string(&cfg_path).expect("read witness cfg");
+            let pruned = prune_tla_module_for_cfg(&model, &cfg);
+            assert!(pruned.len() <= model.len());
+            assert!(
+                pruned.trim_end().ends_with("===="),
+                "{slug}/{}",
+                witness.name
+            );
+            for line in cfg.lines().map(str::trim) {
+                let operator = line.split("<-").nth(1).map(str::trim).unwrap_or(line);
+                if operator.is_empty()
+                    || operator.contains(' ')
+                    || operator
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !c.is_ascii_alphabetic())
+                {
+                    continue;
+                }
+                if model.contains(&format!("\n{operator} ==")) {
+                    assert!(
+                        pruned.contains(&format!("\n{operator} ==")),
+                        "{slug}/{}: pruning dropped cfg root {operator}",
+                        witness.name
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn materialize_missing_coverage_anchors(mismatches: &[String]) -> anyhow::Result<()> {

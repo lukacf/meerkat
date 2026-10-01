@@ -21221,7 +21221,10 @@ mod tests {
         meerkat_mob::MobId,
         Arc<meerkat_mob::store::InMemoryMobEventStore>,
     ) {
-        let mob_id = meerkat_mob::MobId::from("direct-session-archive-partial-destroy");
+        let mob_id = meerkat_mob::MobId::from(format!(
+            "direct-session-archive-partial-destroy-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),

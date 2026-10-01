@@ -513,7 +513,7 @@
           "FILE:@@//Cargo.toml f789ee74cf1d30edea8fa13bd90de0cce4496c2c8b074a9ab46580ee0482b45c",
           "FILE:@@//crates/meerkat/Cargo.toml 7df2786c866b9c40a156337d7889a312e825c8c31f04459d93d6782847286001",
           "FILE:@@//crates/meerkat-anthropic/Cargo.toml 4987b0d77b008da6a1e65425a75b73f7046ab9c368882d672b2503dbad0d8616",
-          "FILE:@@//crates/meerkat-auth-core/Cargo.toml 2c9ac649043943de38cd500a96b438b121be1071ed2f924f4f468a6d58c24ebe",
+          "FILE:@@//crates/meerkat-auth-core/Cargo.toml a62adf2a032686fa565f904659cc67a38710f3dd53ab81efe9fbcdd6fc632314",
           "FILE:@@//crates/meerkat-core/Cargo.toml e8b72debcc679707d845b92f4febd6d58848f744ade50514d70a85ba1210c7a7",
           "FILE:@@//crates/meerkat-machine-kernels/Cargo.toml 68fa3466e8a598eb527b2b1a267b65c0b1553c4aa3d7858fccca617e88d33a0e",
           "FILE:@@//crates/meerkat-machine-schema/Cargo.toml 2ae811fc5af99321d153546fe5b536a85d7793eda1925c63f79e7fb5b9c8029b",

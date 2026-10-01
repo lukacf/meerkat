@@ -360,6 +360,12 @@ them.
 
 ### Fixed
 
+- Shutting down an MCP router no longer leaves a still-connecting stdio
+  server process behind. `McpRouter::shutdown` now aborts and joins the
+  connect-and-enumerate tasks it spawned instead of letting them run until the
+  connect timeout, and stdio server children are spawned kill-on-drop, so a
+  dropped or aborted connection kills the child synchronously instead of
+  relying on a deferred kill task that a stopping runtime may never run.
 - `meerkat-rpc` lib tests pass under the threaded `cargo test` runner. Tests
   created live mobs with fixed ids (`test_mob` three times,
   `router-session-archive-live-retire-failure` and

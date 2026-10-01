@@ -2741,6 +2741,21 @@ mod orchestrator {
                 projection.summary = Some(summary);
                 return Ok(LivePreOpenSummary::Seeded);
             }
+            // Read before the generation takes the boundary: if the summary is
+            // not ready at open, the newest conversation turns of the prefix it
+            // will cover ride the startup input verbatim, so a question about
+            // them (a fact typed while the call was closed) is answered
+            // natively instead of racing the late summary.
+            let recent_turns = match boundary
+                .recent_conversation_rows(crate::experimental_gpt_live::LIVE_STARTUP_RECENT_TURNS)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    tracing::debug!(%error, "recent turns for an unseeded open are unavailable");
+                    Vec::new()
+                }
+            };
             let pregeneration = LiveContextSummaryPregeneration::spawn(boundary);
             let bound = policy.pre_open_bound();
             let ready = if bound.is_zero() {
@@ -2796,6 +2811,22 @@ mod orchestrator {
                 ),
             }
             pending.enable_concurrent_context()?;
+            if !recent_turns.is_empty() {
+                if meerkat_openai::public_live::recent_history_fits(&recent_turns) {
+                    tracing::info!(
+                        %session_id,
+                        recent_rows = recent_turns.len(),
+                        "seeding the most recent conversation turns verbatim; the summary follows after the first user turn"
+                    );
+                    pending.set_concurrent_recent_context(recent_turns);
+                } else {
+                    tracing::info!(
+                        %session_id,
+                        recent_rows = recent_turns.len(),
+                        "recent conversation turns exceed the startup input limits; opening without them"
+                    );
+                }
+            }
             Ok(LivePreOpenSummary::Late(pregeneration))
         }
 

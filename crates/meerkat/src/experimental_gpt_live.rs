@@ -128,6 +128,13 @@ pub trait ExperimentalLivePendingOpen: Send {
         Err(crate::session_runtime::live_summary::LiveContextSummaryError::Unsupported)
     }
 
+    /// For an unseeded (concurrent) open: the most recent conversation turns
+    /// of the prefix the late summary will cover, to ride the provider's
+    /// startup input verbatim as context only. The canonical projection stays
+    /// unseeded (cursor 0) and the late summary still covers them, so nothing
+    /// is delivered again as a new row.
+    fn set_concurrent_recent_context(&mut self, _recent: Vec<meerkat_core::types::Message>) {}
+
     #[doc(hidden)]
     fn retain_context_preparation_job(
         &mut self,
@@ -2332,7 +2339,11 @@ struct ExperimentalGptLiveInitialSeed {
 
 enum GptLiveSeedContext {
     Canonical(Vec<meerkat_core::types::Message>),
-    Concurrent,
+    /// No summary is ready at open; the most recent conversation turns (when
+    /// any fit) ride the startup input verbatim as context only.
+    Concurrent {
+        recent: Vec<meerkat_core::types::Message>,
+    },
     /// A ready summary plus canonical turns seeded verbatim after it: the
     /// most recent turns it also covers, within the startup input budget, or
     /// for a retained summary every turn committed since it.
@@ -2352,7 +2363,7 @@ impl GptLiveSeedContext {
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::Canonical(_) => "canonical",
-            Self::Concurrent => "concurrent",
+            Self::Concurrent { .. } => "concurrent",
             Self::Summary { .. } => "summary",
             Self::SeededSummary(_) => "seeded_summary",
             #[cfg(any(feature = "experimental-gpt-live", test))]
@@ -2383,7 +2394,7 @@ impl GptLiveSeedContext {
             }
             #[cfg(any(feature = "experimental-gpt-live", test))]
             Self::Commentary(commentary) => Ok(commentary),
-            Self::Canonical(_) | Self::Concurrent | Self::Summary { .. } => {
+            Self::Canonical(_) | Self::Concurrent { .. } | Self::Summary { .. } => {
                 Err(GptLiveBrokerError::Transport {
                     class: GptLiveBrokerTerminalClass::Protocol,
                 })
@@ -2740,7 +2751,12 @@ impl GptLiveBrokerOpen for PublicLiveBrokerFactory {
         // carries the same clause (the summary arrives after the user's first
         // turn) and sends nothing on any append lane at open.
         let (mut config, frames_history) = match &seed.context {
-            GptLiveSeedContext::Concurrent => (config.with_pending_context(), true),
+            GptLiveSeedContext::Concurrent { recent } if recent.is_empty() => {
+                (config.with_pending_context(), true)
+            }
+            GptLiveSeedContext::Concurrent { recent } => {
+                (config.with_pending_context_after_recent(recent), true)
+            }
             GptLiveSeedContext::Summary { summary, recent } => {
                 summary.validate_provider_source().await.map_err(|_| {
                     GptLiveBrokerError::Transport {
@@ -3297,6 +3313,8 @@ pub struct ExperimentalGptLivePendingChannel {
     /// summary is chosen over a fresh one.
     provider_seed: Arc<dyn GptLiveBrokerOpen>,
     concurrent_context: bool,
+    /// Recent conversation turns seeded verbatim into a concurrent open.
+    concurrent_recent: Vec<meerkat_core::types::Message>,
 }
 
 impl fmt::Debug for ExperimentalGptLivePendingChannel {
@@ -3351,6 +3369,7 @@ impl ExperimentalGptLivePendingChannel {
             supports_context_summary,
             provider_seed,
             concurrent_context: false,
+            concurrent_recent: Vec::new(),
         })
     }
 
@@ -3618,7 +3637,9 @@ impl RealtimeSessionFactory for ExperimentalGptLivePendingChannel {
                         .collect()
                 }),
             },
-            (None, true) => GptLiveSeedContext::Concurrent,
+            (None, true) => GptLiveSeedContext::Concurrent {
+                recent: self.concurrent_recent.clone(),
+            },
             (None, false) => GptLiveSeedContext::Canonical(conversation_messages),
             (Some(_), true) => {
                 return Err(LlmError::InvalidRequest {
@@ -5101,6 +5122,12 @@ impl ExperimentalLivePendingOpen for ExperimentalGptLivePreparedOpen {
         }
         self.pending.concurrent_context = true;
         Ok(())
+    }
+
+    fn set_concurrent_recent_context(&mut self, recent: Vec<meerkat_core::types::Message>) {
+        if self.pending.concurrent_context {
+            self.pending.concurrent_recent = recent;
+        }
     }
 
     fn set_late_summary_lane(
@@ -10004,6 +10031,7 @@ mod tests {
                 supports_context_summary: true,
                 provider_seed: Arc::new(PublicSeedRules),
                 concurrent_context: false,
+                concurrent_recent: Vec::new(),
             };
             Ok(Box::new(ExperimentalGptLivePreparedOpen::new(
                 pending,
@@ -11754,6 +11782,97 @@ mod tests {
         server.abort();
     }
 
+    /// A Late open (the summary is not ready) still seeds the newest
+    /// conversation turns verbatim as startup input, with the pending notice
+    /// in the instructions, while its canonical projection stays unseeded at
+    /// cursor 0: the late summary covers those rows and nothing is delivered
+    /// again as a new row.
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[tokio::test]
+    async fn public_broker_seeds_recent_turns_into_a_late_open_without_moving_its_cursor() {
+        let (base_url, capture, server) = public_wire::local_server_with(false).await;
+        let realm = meerkat_core::RealmId::parse("voice").expect("realm");
+        let target = public_fixture_target(&realm);
+        let identity = target.identity().clone();
+        let session_id = meerkat_core::SessionId::new();
+        let execution_profile =
+            meerkat_runtime::live_execution::LiveExecutionProfileSelection::from_public_profile(
+                GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID,
+                meerkat_core::LiveExecutionMode::ClientContext,
+                meerkat_core::LiveExecutionCapabilities {
+                    function_bridge: false,
+                    client_context: true,
+                },
+            )
+            .expect("public client-context profile");
+        let mut pending = ExperimentalGptLivePendingChannel::__from_public_target_with_base_url(
+            target,
+            execution_profile,
+            session_id.clone(),
+            "marin",
+            Some("Catalog guidance.".to_string()),
+            &base_url,
+        )
+        .expect("public pending channel");
+        pending.concurrent_context = true;
+        pending.concurrent_recent = vec![meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text(RETAINED_ROW_SINCE),
+        )];
+        let open_config = seed_open_config(identity, Vec::new());
+        assert_eq!(open_config.canonical_message_cursor(), 0);
+        pending
+            .open_live_adapter(&open_config)
+            .await
+            .expect("an unseeded open accepts context-only recent turns");
+        {
+            let seed = pending.initial_seed.lock().await;
+            let seed = seed.as_ref().expect("staged seed");
+            assert_eq!(
+                seed.canonical_seed_cursor, 0,
+                "the projection stays unseeded"
+            );
+        }
+        let channel_id = meerkat_live::LiveChannelId::new("public-live-late-recent");
+        let offer = LiveWebrtcAdmittedOffer::from_machine_admission(
+            channel_id.clone(),
+            session_id.clone(),
+            Some(meerkat_live::LiveWebrtcRuntimeBinding {
+                generation: 1,
+                fence: 1,
+            }),
+            "v=0\r\nOFFER_SDP".to_string(),
+            meerkat_live::LiveWebrtcAnswerAdmissionSeal::__from_generated_admission(
+                channel_id.clone(),
+                session_id.clone(),
+            ),
+        )
+        .into_provider_offer()
+        .expect("admitted offer lowers to the provider offer");
+        let broker = Arc::clone(&pending.registration.broker);
+        let _ = broker
+            .answer(offer)
+            .await
+            .expect("public broker answers the offer");
+        {
+            let capture = capture.lock().expect("capture lock");
+            let body = capture.create_body.as_ref().expect("create body");
+            let input = body["session"]["input"].as_array().expect("startup input");
+            assert_eq!(input.len(), 1, "{body}");
+            assert_eq!(input[0]["role"], "user");
+            assert_eq!(input[0]["content"][0]["text"], RETAINED_ROW_SINCE);
+            let instructions = body["session"]["instructions"].as_str().unwrap();
+            assert!(
+                instructions.starts_with("Catalog guidance."),
+                "{instructions}"
+            );
+            assert!(
+                instructions.contains("A summary of the earlier history is being prepared"),
+                "{instructions}"
+            );
+        }
+        server.abort();
+    }
+
     #[cfg(feature = "test-realtime-fixtures")]
     async fn run_public_broker_seed_end_to_end(seed_case: PublicSeedCase, late_tail: bool) {
         let summarized = seed_case != PublicSeedCase::Canonical;
@@ -12218,6 +12337,7 @@ mod tests {
             supports_context_summary: true,
             provider_seed: Arc::new(PublicSeedRules),
             concurrent_context: false,
+            concurrent_recent: Vec::new(),
         };
         (
             ExperimentalGptLivePreparedOpen::new(

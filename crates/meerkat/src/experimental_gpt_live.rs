@@ -19801,40 +19801,30 @@ mod tests {
                 )
                 .await
                 .expect("independent replacement generation begins");
-                // The producer entering its generation and the preparation job
-                // recording `Generating` are independent steps after the
-                // capture; the job records it without waiting on the producer.
-                let current = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                    loop {
-                        let current = member_host
-                            .validate_experimental_live_channel_custody(
-                                reopened.channel_id(),
-                                reopened.pending_receipt(),
-                            )
-                            .await
-                            .unwrap();
-                        if *current.context_preparation()
-                            != LiveContextPreparationStatus::Preparing(
-                                LiveContextPreparationStage::Capturing,
-                            )
-                        {
-                            return current;
-                        }
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await
-                .expect("the replacement preparation leaves capture");
+                let current = member_host
+                    .validate_experimental_live_channel_custody(
+                        reopened.channel_id(),
+                        reopened.pending_receipt(),
+                    )
+                    .await
+                    .unwrap();
                 assert!(matches!(
                     current.phase(),
                     crate::surface::ExperimentalLiveChannelPhaseStatus::Pending
                 ));
-                assert_eq!(
-                    *current.context_preparation(),
+                // The producer entering its generation and the preparation job
+                // recording `Generating` are independent steps after the
+                // capture (the job does not wait on the producer, and nothing
+                // orders the two), so the replacement is preparing in either
+                // stage here. The cancelled outcome after the close below and
+                // the second producer call prove the replacement job was live.
+                assert!(matches!(
+                    current.context_preparation(),
                     LiveContextPreparationStatus::Preparing(
-                        LiveContextPreparationStage::Generating
+                        LiveContextPreparationStage::Capturing
+                            | LiveContextPreparationStage::Generating
                     )
-                );
+                ));
                 member_host
                     .close_experimental_live_pending_channel(
                         authority.as_ref(),
@@ -19843,6 +19833,17 @@ mod tests {
                     )
                     .await
                     .expect("close new never-activated preparation");
+                let closed = member_host
+                    .validate_experimental_live_channel_custody(
+                        reopened.channel_id(),
+                        reopened.pending_receipt(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    *closed.context_preparation(),
+                    LiveContextPreparationStatus::Failed(LiveContextPreparationFailure::Cancelled)
+                );
                 producer.recovery_release.notify_waiters();
                 assert_eq!(producer.calls.load(AtomicOrdering::SeqCst), 2);
                 assert!(

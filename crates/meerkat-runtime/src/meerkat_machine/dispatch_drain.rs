@@ -13,6 +13,9 @@ impl MeerkatMachine {
                 expected_attachment,
                 mob_id,
             } => {
+                // Each arm builds in its own boxed frame: inline, every arm's temporaries
+                // and child futures share one poll frame at opt-level 0 (#1462).
+                crate::stack_relief::box_in_own_frame(|| async move {
                 if let Some(expected) = expected_attachment.as_ref()
                     && (!expected.belongs_to(self) || expected.session_id() != &session_id)
                 {
@@ -286,48 +289,55 @@ impl MeerkatMachine {
                     .update_peer_ingress_context_inner(&session_id, keep_alive, comms_runtime)
                     .await?;
                 Ok(MeerkatMachineCommandResult::Spawned(spawned))
+                })
+                .await
             }
             MeerkatMachineCommand::NotifyDrainExited { session_id, reason } => {
-                // D2b: a drain-exit observation arriving after the session's
-                // sessions-map entry is gone is a legitimate post-teardown
-                // interleaving (the unregister drain aborts the drain task and
-                // removes the entry; a straggling exit can still be reported).
-                // It is observation-shaped and benign — surface it as an
-                // accepted no-op, not a `Destroyed` error.
-                if !self.sessions.read().await.contains_key(&session_id) {
-                    tracing::debug!(
-                        %session_id,
-                        ?reason,
-                        "post-teardown drain-exit observation (benign no-op)"
-                    );
-                    return Ok(MeerkatMachineCommandResult::Unit);
-                }
+                // Each arm builds in its own boxed frame: inline, every arm's temporaries
+                // and child futures share one poll frame at opt-level 0 (#1462).
+                crate::stack_relief::box_in_own_frame(|| async move {
+                    // D2b: a drain-exit observation arriving after the session's
+                    // sessions-map entry is gone is a legitimate post-teardown
+                    // interleaving (the unregister drain aborts the drain task and
+                    // removes the entry; a straggling exit can still be reported).
+                    // It is observation-shaped and benign — surface it as an
+                    // accepted no-op, not a `Destroyed` error.
+                    if !self.sessions.read().await.contains_key(&session_id) {
+                        tracing::debug!(
+                            %session_id,
+                            ?reason,
+                            "post-teardown drain-exit observation (benign no-op)"
+                        );
+                        return Ok(MeerkatMachineCommandResult::Unit);
+                    }
 
-                let _gate_guard = self
-                    .lock_current_durability_ready_session_mutation_gate(&session_id)
-                    .await?;
+                    let _gate_guard = self
+                        .lock_current_durability_ready_session_mutation_gate(&session_id)
+                        .await?;
 
-                // Stage-first: NotifyDrainExited is not declared from
-                // Destroyed (DrainBindingInvariant); the machine rejects it
-                // there and the rejection is classified as the terminal
-                // `Destroyed` truth.
-                if let Err(reason) = self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::NotifyDrainExited {
-                            reason: crate::meerkat_machine::dsl::DrainExitReason::from(reason),
-                        },
-                        "NotifyDrainExited",
-                    )
-                    .await
-                {
-                    return Err(self
-                        .classify_session_dsl_rejection(&session_id, reason)
-                        .await);
-                }
-                self.notify_comms_drain_exited_inner(&session_id, reason)
-                    .await;
-                Ok(MeerkatMachineCommandResult::Unit)
+                    // Stage-first: NotifyDrainExited is not declared from
+                    // Destroyed (DrainBindingInvariant); the machine rejects it
+                    // there and the rejection is classified as the terminal
+                    // `Destroyed` truth.
+                    if let Err(reason) = self
+                        .stage_session_dsl_input(
+                            &session_id,
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::NotifyDrainExited {
+                                reason: crate::meerkat_machine::dsl::DrainExitReason::from(reason),
+                            },
+                            "NotifyDrainExited",
+                        )
+                        .await
+                    {
+                        return Err(self
+                            .classify_session_dsl_rejection(&session_id, reason)
+                            .await);
+                    }
+                    self.notify_comms_drain_exited_inner(&session_id, reason)
+                        .await;
+                    Ok(MeerkatMachineCommandResult::Unit)
+                })
+                .await
             }
             _ => unreachable!("non-drain command routed to drain handler"),
         }

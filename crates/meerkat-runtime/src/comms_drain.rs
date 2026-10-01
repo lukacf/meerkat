@@ -4133,6 +4133,9 @@ async fn try_handle_supervisor_bridge_command(
 
     match command {
         BridgeCommand::BindMember(payload) => {
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
             let supervisor = match bridge_peer_identity(&payload.supervisor, "bind member failed") {
                 Ok(supervisor) => supervisor,
                 Err((cause, reason)) => {
@@ -4374,19 +4377,29 @@ async fn try_handle_supervisor_bridge_command(
             )
             .await;
             true
+            })
+            .await
         }
         BridgeCommand::AuthorizeSupervisor(payload) => {
-            handle_authorize_supervisor_command(
-                adapter,
-                session_id,
-                comms_runtime,
-                candidate,
-                sender,
-                payload,
-            )
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
+                handle_authorize_supervisor_command(
+                    adapter,
+                    session_id,
+                    comms_runtime,
+                    candidate,
+                    sender,
+                    payload,
+                )
+                .await
+            })
             .await
         }
         BridgeCommand::RevokeSupervisor(payload) => {
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
             let authorized_supervisor = match resolve_authorized_supervisor_cleanup(
                 adapter,
                 session_id,
@@ -4579,8 +4592,13 @@ async fn try_handle_supervisor_bridge_command(
                 return true;
             }
             true
+            })
+            .await
         }
         BridgeCommand::DeliverMemberInput(payload) => {
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
             let sup_payload = BridgeSupervisorPayload {
                 supervisor: payload.supervisor.clone(),
                 epoch: payload.epoch,
@@ -4819,8 +4837,13 @@ async fn try_handle_supervisor_bridge_command(
                 }
             }
             true
+            })
+            .await
         }
         BridgeCommand::InterruptMember(payload) => {
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
             let sup_payload = BridgeSupervisorPayload {
                 supervisor: payload.supervisor.clone(),
                 epoch: payload.epoch,
@@ -4896,193 +4919,216 @@ async fn try_handle_supervisor_bridge_command(
                 }
             }
             true
+            })
+            .await
         }
         BridgeCommand::RetireMember(payload) => {
-            let supervisor_payload = BridgeSupervisorPayload {
-                supervisor: payload.supervisor.clone(),
-                epoch: payload.epoch,
-                protocol_version: payload.protocol_version,
-            };
-            if let Err((cause, reason)) = resolve_authorized_supervisor_cleanup_with_response_route(
-                adapter,
-                session_id,
-                comms_runtime,
-                sender,
-                &supervisor_payload,
-                crate::meerkat_machine::dsl::SupervisorCleanupCommandKind::Retire,
-                "retire member failed",
-            )
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
+                let supervisor_payload = BridgeSupervisorPayload {
+                    supervisor: payload.supervisor.clone(),
+                    epoch: payload.epoch,
+                    protocol_version: payload.protocol_version,
+                };
+                if let Err((cause, reason)) =
+                    resolve_authorized_supervisor_cleanup_with_response_route(
+                        adapter,
+                        session_id,
+                        comms_runtime,
+                        sender,
+                        &supervisor_payload,
+                        crate::meerkat_machine::dsl::SupervisorCleanupCommandKind::Retire,
+                        "retire member failed",
+                    )
+                    .await
+                {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                match adapter
+                    .retire_direct_member_runtime(session_id, &payload.member_fence)
+                    .await
+                {
+                    Ok(report) => {
+                        send_bridge_response(
+                            comms_runtime,
+                            candidate,
+                            meerkat_core::interaction::ResponseStatus::Completed,
+                            BridgeReply::Retire(BridgeRetireResponse {
+                                outcome: BridgeRetireOutcome::Retired {
+                                    inputs_abandoned: report.inputs_abandoned,
+                                    inputs_pending_drain: report.inputs_pending_drain,
+                                },
+                            }),
+                            None,
+                        )
+                        .await;
+                    }
+                    Err(crate::meerkat_machine::DirectMemberRetireError::Stale { current }) => {
+                        send_bridge_response(
+                            comms_runtime,
+                            candidate,
+                            meerkat_core::interaction::ResponseStatus::Completed,
+                            BridgeReply::Retire(BridgeRetireResponse {
+                                outcome: BridgeRetireOutcome::Stale {
+                                    presented: payload.member_fence.evidence(),
+                                    current,
+                                },
+                            }),
+                            None,
+                        )
+                        .await;
+                    }
+                    Err(crate::meerkat_machine::DirectMemberRetireError::Runtime(error)) => {
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            format!("retire member failed: {error}"),
+                            None,
+                        )
+                        .await;
+                    }
+                }
+                true
+            })
             .await
-            {
-                send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                return true;
-            }
-            match adapter
-                .retire_direct_member_runtime(session_id, &payload.member_fence)
-                .await
-            {
-                Ok(report) => {
-                    send_bridge_response(
-                        comms_runtime,
-                        candidate,
-                        meerkat_core::interaction::ResponseStatus::Completed,
-                        BridgeReply::Retire(BridgeRetireResponse {
-                            outcome: BridgeRetireOutcome::Retired {
-                                inputs_abandoned: report.inputs_abandoned,
-                                inputs_pending_drain: report.inputs_pending_drain,
-                            },
-                        }),
-                        None,
-                    )
-                    .await;
-                }
-                Err(crate::meerkat_machine::DirectMemberRetireError::Stale { current }) => {
-                    send_bridge_response(
-                        comms_runtime,
-                        candidate,
-                        meerkat_core::interaction::ResponseStatus::Completed,
-                        BridgeReply::Retire(BridgeRetireResponse {
-                            outcome: BridgeRetireOutcome::Stale {
-                                presented: payload.member_fence.evidence(),
-                                current,
-                            },
-                        }),
-                        None,
-                    )
-                    .await;
-                }
-                Err(crate::meerkat_machine::DirectMemberRetireError::Runtime(error)) => {
-                    send_bridge_failure(
-                        comms_runtime,
-                        candidate,
-                        BridgeRejectionCause::Internal,
-                        format!("retire member failed: {error}"),
-                        None,
-                    )
-                    .await;
-                }
-            }
-            true
         }
         BridgeCommand::DestroyMember(payload) => {
-            if let Err((cause, reason)) = resolve_authorized_supervisor_cleanup_with_response_route(
-                adapter,
-                session_id,
-                comms_runtime,
-                sender,
-                &payload,
-                crate::meerkat_machine::dsl::SupervisorCleanupCommandKind::Destroy,
-                "destroy member failed",
-            )
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
+                if let Err((cause, reason)) =
+                    resolve_authorized_supervisor_cleanup_with_response_route(
+                        adapter,
+                        session_id,
+                        comms_runtime,
+                        sender,
+                        &payload,
+                        crate::meerkat_machine::dsl::SupervisorCleanupCommandKind::Destroy,
+                        "destroy member failed",
+                    )
+                    .await
+                {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                let runtime_id = MeerkatMachine::logical_runtime_id(session_id);
+                match RuntimeControlPlane::destroy(adapter.as_ref(), &runtime_id).await {
+                    Ok(report) => {
+                        send_bridge_response(
+                            comms_runtime,
+                            candidate,
+                            meerkat_core::interaction::ResponseStatus::Completed,
+                            BridgeReply::Destroy(BridgeDestroyResponse {
+                                inputs_abandoned: report.inputs_abandoned,
+                            }),
+                            None,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            format!("destroy member failed: {error}"),
+                            None,
+                        )
+                        .await;
+                    }
+                }
+                true
+            })
             .await
-            {
-                send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                return true;
-            }
-            let runtime_id = MeerkatMachine::logical_runtime_id(session_id);
-            match RuntimeControlPlane::destroy(adapter.as_ref(), &runtime_id).await {
-                Ok(report) => {
-                    send_bridge_response(
-                        comms_runtime,
-                        candidate,
-                        meerkat_core::interaction::ResponseStatus::Completed,
-                        BridgeReply::Destroy(BridgeDestroyResponse {
-                            inputs_abandoned: report.inputs_abandoned,
-                        }),
-                        None,
-                    )
-                    .await;
-                }
-                Err(error) => {
-                    send_bridge_failure(
-                        comms_runtime,
-                        candidate,
-                        BridgeRejectionCause::Internal,
-                        format!("destroy member failed: {error}"),
-                        None,
-                    )
-                    .await;
-                }
-            }
-            true
         }
         BridgeCommand::ObserveMember(payload) => {
-            if let Err((cause, reason)) = resolve_authorized_supervisor_cleanup_with_response_route(
-                adapter,
-                session_id,
-                comms_runtime,
-                sender,
-                &payload,
-                crate::meerkat_machine::dsl::SupervisorCleanupCommandKind::Observe,
-                "observe member failed",
-            )
-            .await
-            {
-                send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                return true;
-            }
-            match crate::service_ext::SessionServiceRuntimeExt::runtime_state(
-                adapter.as_ref(),
-                session_id,
-            )
-            .await
-            {
-                Ok(state) => {
-                    let current_run_id = adapter
-                        .meerkat_machine_spine_snapshot(session_id)
-                        .await
-                        .and_then(|snapshot| {
-                            snapshot
-                                .control
-                                .current_run_id
-                                .map(|run_id| run_id.to_string())
-                        });
-                    let bridge_state = runtime_state_to_bridge(state);
-                    let lifecycle_facts =
-                        match crate::meerkat_machine::classify_runtime_lifecycle_state(state) {
-                            Ok(facts) => facts,
-                            Err(error) => {
-                                send_bridge_failure(
-                                    comms_runtime,
-                                    candidate,
-                                    BridgeRejectionCause::Internal,
-                                    format!("runtime lifecycle classification failed: {error}"),
-                                    None,
-                                )
-                                .await;
-                                return true;
-                            }
-                        };
-                    send_bridge_response(
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
+                if let Err((cause, reason)) =
+                    resolve_authorized_supervisor_cleanup_with_response_route(
+                        adapter,
+                        session_id,
                         comms_runtime,
-                        candidate,
-                        meerkat_core::interaction::ResponseStatus::Completed,
-                        BridgeReply::Observation(BridgeObservationResponse::new(
-                            bridge_state,
-                            Some(lifecycle_facts.can_accept_input()),
-                            current_run_id,
-                            Some(BridgePeerConnectivity::Reachable),
+                        sender,
+                        &payload,
+                        crate::meerkat_machine::dsl::SupervisorCleanupCommandKind::Observe,
+                        "observe member failed",
+                    )
+                    .await
+                {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                match crate::service_ext::SessionServiceRuntimeExt::runtime_state(
+                    adapter.as_ref(),
+                    session_id,
+                )
+                .await
+                {
+                    Ok(state) => {
+                        let current_run_id = adapter
+                            .meerkat_machine_spine_snapshot(session_id)
+                            .await
+                            .and_then(|snapshot| {
+                                snapshot
+                                    .control
+                                    .current_run_id
+                                    .map(|run_id| run_id.to_string())
+                            });
+                        let bridge_state = runtime_state_to_bridge(state);
+                        let lifecycle_facts =
+                            match crate::meerkat_machine::classify_runtime_lifecycle_state(state) {
+                                Ok(facts) => facts,
+                                Err(error) => {
+                                    send_bridge_failure(
+                                        comms_runtime,
+                                        candidate,
+                                        BridgeRejectionCause::Internal,
+                                        format!("runtime lifecycle classification failed: {error}"),
+                                        None,
+                                    )
+                                    .await;
+                                    return true;
+                                }
+                            };
+                        send_bridge_response(
+                            comms_runtime,
+                            candidate,
+                            meerkat_core::interaction::ResponseStatus::Completed,
+                            BridgeReply::Observation(BridgeObservationResponse::new(
+                                bridge_state,
+                                Some(lifecycle_facts.can_accept_input()),
+                                current_run_id,
+                                Some(BridgePeerConnectivity::Reachable),
+                                None,
+                                chrono::Utc::now().to_rfc3339(),
+                            )),
                             None,
-                            chrono::Utc::now().to_rfc3339(),
-                        )),
-                        None,
-                    )
-                    .await;
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            format!("observe member failed: {error}"),
+                            None,
+                        )
+                        .await;
+                    }
                 }
-                Err(error) => {
-                    send_bridge_failure(
-                        comms_runtime,
-                        candidate,
-                        BridgeRejectionCause::Internal,
-                        format!("observe member failed: {error}"),
-                        None,
-                    )
-                    .await;
-                }
-            }
-            true
+                true
+            })
+            .await
         }
         BridgeCommand::WireMember(payload) => {
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
             let sup_payload = BridgeSupervisorPayload {
                 supervisor: payload.supervisor.clone(),
                 epoch: payload.epoch,
@@ -5254,8 +5300,13 @@ async fn try_handle_supervisor_bridge_command(
                 }
             }
             true
+            })
+            .await
         }
         BridgeCommand::UnwireMember(payload) => {
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
             let sup_payload = BridgeSupervisorPayload {
                 supervisor: payload.supervisor.clone(),
                 epoch: payload.epoch,
@@ -5423,8 +5474,13 @@ async fn try_handle_supervisor_bridge_command(
                 }
             }
             true
+            })
+            .await
         }
         BridgeCommand::ObserveSupervisorRotation(payload) => {
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
             if !payload.protocol_version.supports_multi_host() {
                 send_bridge_failure(
                     comms_runtime,
@@ -5535,8 +5591,13 @@ async fn try_handle_supervisor_bridge_command(
             )
             .await;
             true
+            })
+            .await
         }
         BridgeCommand::DeclareMemberOutboundTaint(payload) => {
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
             let sup_payload = BridgeSupervisorPayload {
                 supervisor: payload.supervisor.clone(),
                 epoch: payload.epoch,
@@ -5628,77 +5689,97 @@ async fn try_handle_supervisor_bridge_command(
                 }
             }
             true
+            })
+            .await
         }
         BridgeCommand::HardCancelMember(payload) => {
-            serve_hard_cancel_member(
-                adapter,
-                session_id,
-                comms_runtime,
-                sender,
-                candidate,
-                &payload,
-            )
-            .await;
-            true
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
+                serve_hard_cancel_member(
+                    adapter,
+                    session_id,
+                    comms_runtime,
+                    sender,
+                    candidate,
+                    &payload,
+                )
+                .await;
+                true
+            })
+            .await
         }
         BridgeCommand::StopMemberRun(payload) => {
-            // Authorize and pin the residency INLINE; the stop itself awaits
-            // its contributors' terminals, so it runs on a DETACHED responder
-            // task and never head-of-line-blocks this member's drain
-            // (the `PollMemberEvents` precedent).
-            let sup_payload = BridgeSupervisorPayload {
-                supervisor: payload.supervisor.clone(),
-                epoch: payload.epoch,
-                protocol_version: payload.protocol_version,
-            };
-            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
-                adapter,
-                session_id,
-                comms_runtime,
-                sender,
-                &sup_payload,
-                "stop member run failed",
-            )
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
+                // Authorize and pin the residency INLINE; the stop itself awaits
+                // its contributors' terminals, so it runs on a DETACHED responder
+                // task and never head-of-line-blocks this member's drain
+                // (the `PollMemberEvents` precedent).
+                let sup_payload = BridgeSupervisorPayload {
+                    supervisor: payload.supervisor.clone(),
+                    epoch: payload.epoch,
+                    protocol_version: payload.protocol_version,
+                };
+                if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                    adapter,
+                    session_id,
+                    comms_runtime,
+                    sender,
+                    &sup_payload,
+                    "stop member run failed",
+                )
+                .await
+                {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                if let Err((cause, reason)) = require_registered_member_incarnation(
+                    adapter,
+                    session_id,
+                    &payload.expected_member,
+                    "stop member run",
+                ) {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                let adapter = Arc::clone(adapter);
+                let session_id = session_id.clone();
+                let comms_runtime = Arc::clone(comms_runtime);
+                let candidate = candidate.clone();
+                crate::tokio::spawn(serve_stop_member_run_delivery(
+                    adapter,
+                    session_id,
+                    comms_runtime,
+                    candidate,
+                    payload,
+                ));
+                true
+            })
             .await
-            {
-                send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                return true;
-            }
-            if let Err((cause, reason)) = require_registered_member_incarnation(
-                adapter,
-                session_id,
-                &payload.expected_member,
-                "stop member run",
-            ) {
-                send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                return true;
-            }
-            let adapter = Arc::clone(adapter);
-            let session_id = session_id.clone();
-            let comms_runtime = Arc::clone(comms_runtime);
-            let candidate = candidate.clone();
-            crate::tokio::spawn(serve_stop_member_run_delivery(
-                adapter,
-                session_id,
-                comms_runtime,
-                candidate,
-                payload,
-            ));
-            true
         }
         BridgeCommand::CancelTrackedMemberInput(payload) => {
-            serve_cancel_tracked_member_input(
-                adapter,
-                session_id,
-                comms_runtime,
-                sender,
-                candidate,
-                &payload,
-            )
-            .await;
-            true
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
+                serve_cancel_tracked_member_input(
+                    adapter,
+                    session_id,
+                    comms_runtime,
+                    sender,
+                    candidate,
+                    &payload,
+                )
+                .await;
+                true
+            })
+            .await
         }
         BridgeCommand::ReadMemberHistory(payload) => {
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
             // DEC-P6E-6: one page projection, shared with the local path
             // via `WireMemberHistoryPageBody::try_from_history_page`.
             let sup_payload = BridgeSupervisorPayload {
@@ -5797,389 +5878,420 @@ async fn try_handle_supervisor_bridge_command(
                 }
             }
             true
+            })
+            .await
         }
         BridgeCommand::PollMemberEvents(payload) => {
-            // DEC-P6E-3: authorize + resolve the substrate INLINE; the
-            // bounded long-poll wait runs on a DETACHED responder task so a
-            // poll never serializes `InterruptMember`/`RetireMember` for the
-            // same member behind its wait window (ADJ-P4-12 mirrored
-            // receiver-side). Exact outcome acknowledgements may prune
-            // durable terminal rows, but are independently idempotent and do
-            // not advance the event cursor (correlation is envelope-id).
-            let sup_payload = BridgeSupervisorPayload {
-                supervisor: payload.supervisor.clone(),
-                epoch: payload.epoch,
-                protocol_version: payload.protocol_version,
-            };
-            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
-                adapter,
-                session_id,
-                comms_runtime,
-                sender,
-                &sup_payload,
-                "poll member events failed",
-            )
-            .await
-            {
-                send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                return true;
-            }
-            if payload.outcome_acks.len() > BRIDGE_TURN_OUTCOME_ACK_MAX {
-                send_bridge_failure(
-                    comms_runtime,
-                    candidate,
-                    BridgeRejectionCause::Internal,
-                    format!(
-                        "turn-outcome acknowledgement batch has {} rows (maximum {})",
-                        payload.outcome_acks.len(),
-                        BRIDGE_TURN_OUTCOME_ACK_MAX
-                    ),
-                    None,
-                )
-                .await;
-                return true;
-            }
-            let observation = match resolve_member_observation_host(adapter) {
-                Ok(observation) => observation,
-                Err((cause, reason)) => {
-                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                    return true;
-                }
-            };
-            let cursor = match payload.cursor {
-                BridgeEventCursor::Tail => MemberObservationCursor::Tail,
-                BridgeEventCursor::At { generation, seq } => {
-                    MemberObservationCursor::At { generation, seq }
-                }
-            };
-            let max = payload
-                .max
-                .unwrap_or(MEMBER_POLL_DEFAULT_MAX_ROWS)
-                .clamp(1, MEMBER_POLL_MAX_ROWS);
-            let outcome_acks = payload.outcome_acks;
-            let max_outcomes = payload
-                .max_outcomes
-                .unwrap_or(MEMBER_POLL_DEFAULT_MAX_OUTCOMES)
-                .clamp(1, MEMBER_POLL_MAX_OUTCOMES);
-            let wait_ms = payload.wait_ms.unwrap_or(0).min(MEMBER_POLL_WAIT_MAX_MS);
-            let wait = Duration::from_millis(u64::from(wait_ms));
-            let request = MemberEventsPageRequest {
-                cursor,
-                max,
-                wait,
-                outcome_acks,
-                max_outcomes,
-                expected_member: payload.expected_member,
-            };
-            if wait_ms == 0 {
-                // Fast path: serve and reply inline.
-                serve_member_events_page(
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
+                // DEC-P6E-3: authorize + resolve the substrate INLINE; the
+                // bounded long-poll wait runs on a DETACHED responder task so a
+                // poll never serializes `InterruptMember`/`RetireMember` for the
+                // same member behind its wait window (ADJ-P4-12 mirrored
+                // receiver-side). Exact outcome acknowledgements may prune
+                // durable terminal rows, but are independently idempotent and do
+                // not advance the event cursor (correlation is envelope-id).
+                let sup_payload = BridgeSupervisorPayload {
+                    supervisor: payload.supervisor.clone(),
+                    epoch: payload.epoch,
+                    protocol_version: payload.protocol_version,
+                };
+                if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
                     adapter,
-                    &observation,
                     session_id,
                     comms_runtime,
-                    candidate,
-                    request,
+                    sender,
+                    &sup_payload,
+                    "poll member events failed",
                 )
-                .await;
-                return true;
-            }
-            let observation = Arc::clone(&observation);
-            let adapter = Arc::clone(adapter);
-            let session_id = session_id.clone();
-            let comms_runtime = Arc::clone(comms_runtime);
-            let candidate = candidate.clone();
-            crate::tokio::spawn(async move {
-                serve_member_events_page(
-                    adapter.as_ref(),
-                    &observation,
-                    &session_id,
-                    &comms_runtime,
-                    &candidate,
-                    request,
-                )
-                .await;
-            });
-            true
-        }
-        BridgeCommand::OpenMemberLiveChannel(payload) => {
-            // ADJ-P6B-1 serving arm: authorize → resolve host → reach →
-            // reply, the `serve_hard_cancel_member` order. Steps 1-2 run
-            // inline; reach+reply run on a DETACHED responder task (the
-            // `PollMemberEvents` precedent): a provider-adapter open is
-            // seconds-scale network I/O and must not head-of-line-block
-            // `InterruptMember`/`HardCancelMember` on the same drain.
-            // Correlation is envelope-id; a control verb racing an
-            // in-flight open honestly rejects `LiveChannelNotFound` (the
-            // console cannot know the channel id before the open reply).
-            let sup_payload = BridgeSupervisorPayload {
-                supervisor: payload.supervisor.clone(),
-                epoch: payload.epoch,
-                protocol_version: payload.protocol_version,
-            };
-            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
-                adapter,
-                session_id,
-                comms_runtime,
-                sender,
-                &sup_payload,
-                "open member live channel failed",
-            )
-            .await
-            {
-                send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                return true;
-            }
-            let live = match resolve_member_live_host(adapter) {
-                Ok(live) => live,
-                Err((cause, reason)) => {
+                .await
+                {
                     send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
                     return true;
                 }
-            };
-            let session_id = session_id.clone();
-            let adapter = Arc::clone(adapter);
-            let comms_runtime = Arc::clone(comms_runtime);
-            let candidate = candidate.clone();
-            let expected_member = payload.expected_member;
-            let turning_mode = payload.turning_mode;
-            let transport = payload.transport;
-            crate::tokio::spawn(async move {
+                if payload.outcome_acks.len() > BRIDGE_TURN_OUTCOME_ACK_MAX {
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        format!(
+                            "turn-outcome acknowledgement batch has {} rows (maximum {})",
+                            payload.outcome_acks.len(),
+                            BRIDGE_TURN_OUTCOME_ACK_MAX
+                        ),
+                        None,
+                    )
+                    .await;
+                    return true;
+                }
+                let observation = match resolve_member_observation_host(adapter) {
+                    Ok(observation) => observation,
+                    Err((cause, reason)) => {
+                        send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                        return true;
+                    }
+                };
+                let cursor = match payload.cursor {
+                    BridgeEventCursor::Tail => MemberObservationCursor::Tail,
+                    BridgeEventCursor::At { generation, seq } => {
+                        MemberObservationCursor::At { generation, seq }
+                    }
+                };
+                let max = payload
+                    .max
+                    .unwrap_or(MEMBER_POLL_DEFAULT_MAX_ROWS)
+                    .clamp(1, MEMBER_POLL_MAX_ROWS);
+                let outcome_acks = payload.outcome_acks;
+                let max_outcomes = payload
+                    .max_outcomes
+                    .unwrap_or(MEMBER_POLL_DEFAULT_MAX_OUTCOMES)
+                    .clamp(1, MEMBER_POLL_MAX_OUTCOMES);
+                let wait_ms = payload.wait_ms.unwrap_or(0).min(MEMBER_POLL_WAIT_MAX_MS);
+                let wait = Duration::from_millis(u64::from(wait_ms));
+                let request = MemberEventsPageRequest {
+                    cursor,
+                    max,
+                    wait,
+                    outcome_acks,
+                    max_outcomes,
+                    expected_member: payload.expected_member,
+                };
+                if wait_ms == 0 {
+                    // Fast path: serve and reply inline.
+                    serve_member_events_page(
+                        adapter,
+                        &observation,
+                        session_id,
+                        comms_runtime,
+                        candidate,
+                        request,
+                    )
+                    .await;
+                    return true;
+                }
+                let observation = Arc::clone(&observation);
+                let adapter = Arc::clone(adapter);
+                let session_id = session_id.clone();
+                let comms_runtime = Arc::clone(comms_runtime);
+                let candidate = candidate.clone();
+                crate::tokio::spawn(async move {
+                    serve_member_events_page(
+                        adapter.as_ref(),
+                        &observation,
+                        &session_id,
+                        &comms_runtime,
+                        &candidate,
+                        request,
+                    )
+                    .await;
+                });
+                true
+            })
+            .await
+        }
+        BridgeCommand::OpenMemberLiveChannel(payload) => {
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
+                // ADJ-P6B-1 serving arm: authorize → resolve host → reach →
+                // reply, the `serve_hard_cancel_member` order. Steps 1-2 run
+                // inline; reach+reply run on a DETACHED responder task (the
+                // `PollMemberEvents` precedent): a provider-adapter open is
+                // seconds-scale network I/O and must not head-of-line-block
+                // `InterruptMember`/`HardCancelMember` on the same drain.
+                // Correlation is envelope-id; a control verb racing an
+                // in-flight open honestly rejects `LiveChannelNotFound` (the
+                // console cannot know the channel id before the open reply).
+                let sup_payload = BridgeSupervisorPayload {
+                    supervisor: payload.supervisor.clone(),
+                    epoch: payload.epoch,
+                    protocol_version: payload.protocol_version,
+                };
+                if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                    adapter,
+                    session_id,
+                    comms_runtime,
+                    sender,
+                    &sup_payload,
+                    "open member live channel failed",
+                )
+                .await
+                {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                let live = match resolve_member_live_host(adapter) {
+                    Ok(live) => live,
+                    Err((cause, reason)) => {
+                        send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                        return true;
+                    }
+                };
+                let session_id = session_id.clone();
+                let adapter = Arc::clone(adapter);
+                let comms_runtime = Arc::clone(comms_runtime);
+                let candidate = candidate.clone();
+                let expected_member = payload.expected_member;
+                let turning_mode = payload.turning_mode;
+                let transport = payload.transport;
+                crate::tokio::spawn(async move {
+                    let effect_authority = match acquire_registered_member_live_authority(
+                        adapter.as_ref(),
+                        &session_id,
+                        &expected_member,
+                        "open member live channel",
+                    )
+                    .await
+                    {
+                        Ok(authority) => authority,
+                        Err((cause, reason)) => {
+                            send_bridge_failure(&comms_runtime, &candidate, cause, reason, None)
+                                .await;
+                            return;
+                        }
+                    };
+                    let result = live.open(&session_id, turning_mode, transport).await;
+                    drop(effect_authority);
+                    match result {
+                        Ok(open) => {
+                            send_bridge_response(
+                                &comms_runtime,
+                                &candidate,
+                                meerkat_core::interaction::ResponseStatus::Completed,
+                                BridgeReply::MemberLiveChannelOpened(BridgeLiveOpenedResponse {
+                                    open,
+                                }),
+                                None,
+                            )
+                            .await;
+                        }
+                        Err(error) => {
+                            let (cause, reason) = member_live_error_to_bridge_rejection(&error);
+                            send_bridge_failure(&comms_runtime, &candidate, cause, reason, None)
+                                .await;
+                        }
+                    }
+                });
+                true
+            })
+            .await
+        }
+        BridgeCommand::CloseMemberLiveChannel(payload) => {
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
+                // Inline: close is a local host/machine operation (no provider
+                // round-trip). Close-what-you-name: an unknown channel is a
+                // typed `LiveChannelNotFound` — idempotent-safe for the
+                // caller-driven reply-loss reconciliation (DEC-P6B-C9).
+                let sup_payload = BridgeSupervisorPayload {
+                    supervisor: payload.supervisor.clone(),
+                    epoch: payload.epoch,
+                    protocol_version: payload.protocol_version,
+                };
+                if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                    adapter,
+                    session_id,
+                    comms_runtime,
+                    sender,
+                    &sup_payload,
+                    "close member live channel failed",
+                )
+                .await
+                {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                let live = match resolve_member_live_host(adapter) {
+                    Ok(live) => live,
+                    Err((cause, reason)) => {
+                        send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                        return true;
+                    }
+                };
                 let effect_authority = match acquire_registered_member_live_authority(
-                    adapter.as_ref(),
-                    &session_id,
-                    &expected_member,
-                    "open member live channel",
+                    adapter,
+                    session_id,
+                    &payload.expected_member,
+                    "close member live channel",
                 )
                 .await
                 {
                     Ok(authority) => authority,
                     Err((cause, reason)) => {
-                        send_bridge_failure(&comms_runtime, &candidate, cause, reason, None).await;
-                        return;
+                        send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                        return true;
                     }
                 };
-                let result = live.open(&session_id, turning_mode, transport).await;
+                let result = live.close(session_id, &payload.channel_id).await;
                 drop(effect_authority);
                 match result {
-                    Ok(open) => {
+                    Ok(status) => {
                         send_bridge_response(
-                            &comms_runtime,
-                            &candidate,
+                            comms_runtime,
+                            candidate,
                             meerkat_core::interaction::ResponseStatus::Completed,
-                            BridgeReply::MemberLiveChannelOpened(BridgeLiveOpenedResponse { open }),
+                            BridgeReply::MemberLiveChannelClosed { status },
                             None,
                         )
                         .await;
                     }
                     Err(error) => {
                         let (cause, reason) = member_live_error_to_bridge_rejection(&error);
-                        send_bridge_failure(&comms_runtime, &candidate, cause, reason, None).await;
+                        send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
                     }
                 }
-            });
-            true
-        }
-        BridgeCommand::CloseMemberLiveChannel(payload) => {
-            // Inline: close is a local host/machine operation (no provider
-            // round-trip). Close-what-you-name: an unknown channel is a
-            // typed `LiveChannelNotFound` — idempotent-safe for the
-            // caller-driven reply-loss reconciliation (DEC-P6B-C9).
-            let sup_payload = BridgeSupervisorPayload {
-                supervisor: payload.supervisor.clone(),
-                epoch: payload.epoch,
-                protocol_version: payload.protocol_version,
-            };
-            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
-                adapter,
-                session_id,
-                comms_runtime,
-                sender,
-                &sup_payload,
-                "close member live channel failed",
-            )
+                true
+            })
             .await
-            {
-                send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                return true;
-            }
-            let live = match resolve_member_live_host(adapter) {
-                Ok(live) => live,
-                Err((cause, reason)) => {
-                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                    return true;
-                }
-            };
-            let effect_authority = match acquire_registered_member_live_authority(
-                adapter,
-                session_id,
-                &payload.expected_member,
-                "close member live channel",
-            )
-            .await
-            {
-                Ok(authority) => authority,
-                Err((cause, reason)) => {
-                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                    return true;
-                }
-            };
-            let result = live.close(session_id, &payload.channel_id).await;
-            drop(effect_authority);
-            match result {
-                Ok(status) => {
-                    send_bridge_response(
-                        comms_runtime,
-                        candidate,
-                        meerkat_core::interaction::ResponseStatus::Completed,
-                        BridgeReply::MemberLiveChannelClosed { status },
-                        None,
-                    )
-                    .await;
-                }
-                Err(error) => {
-                    let (cause, reason) = member_live_error_to_bridge_rejection(&error);
-                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                }
-            }
-            true
         }
         BridgeCommand::MemberLiveChannelStatus(payload) => {
-            // Inline read-only point read. Absent `channel_id` ⇒ the host
-            // resolves `live_active_channel_by_session` for this bound
-            // session; none active ⇒ typed `LiveChannelNotFound`
-            // (ADJ-P6B-2 — the reply-loss discovery primitive).
-            let sup_payload = BridgeSupervisorPayload {
-                supervisor: payload.supervisor.clone(),
-                epoch: payload.epoch,
-                protocol_version: payload.protocol_version,
-            };
-            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
-                adapter,
-                session_id,
-                comms_runtime,
-                sender,
-                &sup_payload,
-                "member live channel status failed",
-            )
-            .await
-            {
-                send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                return true;
-            }
-            let live = match resolve_member_live_host(adapter) {
-                Ok(live) => live,
-                Err((cause, reason)) => {
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
+                // Inline read-only point read. Absent `channel_id` ⇒ the host
+                // resolves `live_active_channel_by_session` for this bound
+                // session; none active ⇒ typed `LiveChannelNotFound`
+                // (ADJ-P6B-2 — the reply-loss discovery primitive).
+                let sup_payload = BridgeSupervisorPayload {
+                    supervisor: payload.supervisor.clone(),
+                    epoch: payload.epoch,
+                    protocol_version: payload.protocol_version,
+                };
+                if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                    adapter,
+                    session_id,
+                    comms_runtime,
+                    sender,
+                    &sup_payload,
+                    "member live channel status failed",
+                )
+                .await
+                {
                     send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
                     return true;
                 }
-            };
-            let effect_authority = match acquire_registered_member_live_authority(
-                adapter,
-                session_id,
-                &payload.expected_member,
-                "member live channel status",
-            )
+                let live = match resolve_member_live_host(adapter) {
+                    Ok(live) => live,
+                    Err((cause, reason)) => {
+                        send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                        return true;
+                    }
+                };
+                let effect_authority = match acquire_registered_member_live_authority(
+                    adapter,
+                    session_id,
+                    &payload.expected_member,
+                    "member live channel status",
+                )
+                .await
+                {
+                    Ok(authority) => authority,
+                    Err((cause, reason)) => {
+                        send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                        return true;
+                    }
+                };
+                let result = live.status(session_id, payload.channel_id).await;
+                drop(effect_authority);
+                match result {
+                    Ok(report) => {
+                        send_bridge_response(
+                            comms_runtime,
+                            candidate,
+                            meerkat_core::interaction::ResponseStatus::Completed,
+                            BridgeReply::MemberLiveChannelStatusReport {
+                                channel_id: report.channel_id,
+                                status: report.status,
+                            },
+                            None,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        let (cause, reason) = member_live_error_to_bridge_rejection(&error);
+                        send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    }
+                }
+                true
+            })
             .await
-            {
-                Ok(authority) => authority,
-                Err((cause, reason)) => {
-                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                    return true;
-                }
-            };
-            let result = live.status(session_id, payload.channel_id).await;
-            drop(effect_authority);
-            match result {
-                Ok(report) => {
-                    send_bridge_response(
-                        comms_runtime,
-                        candidate,
-                        meerkat_core::interaction::ResponseStatus::Completed,
-                        BridgeReply::MemberLiveChannelStatusReport {
-                            channel_id: report.channel_id,
-                            status: report.status,
-                        },
-                        None,
-                    )
-                    .await;
-                }
-                Err(error) => {
-                    let (cause, reason) = member_live_error_to_bridge_rejection(&error);
-                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                }
-            }
-            true
         }
         BridgeCommand::ControlMemberLiveChannel(payload) => {
-            // Inline: turn-level control verbs are local host/machine
-            // operations (DL10's closed verb set). Live `Interrupt` is
-            // media-plane barge-in through the facade pipeline's
-            // `LiveAdapterHost::send_command_observed` — NOT
-            // `hard_cancel_current_run`; no effect-authority reach is added
-            // here (DEC-P6B-L7).
-            let sup_payload = BridgeSupervisorPayload {
-                supervisor: payload.supervisor.clone(),
-                epoch: payload.epoch,
-                protocol_version: payload.protocol_version,
-            };
-            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
-                adapter,
-                session_id,
-                comms_runtime,
-                sender,
-                &sup_payload,
-                "control member live channel failed",
-            )
-            .await
-            {
-                send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                return true;
-            }
-            let live = match resolve_member_live_host(adapter) {
-                Ok(live) => live,
-                Err((cause, reason)) => {
+            // Each arm builds in its own boxed frame: inline, every arm's temporaries
+            // and child futures share one poll frame at opt-level 0 (#1462).
+            crate::stack_relief::box_in_own_frame(|| async move {
+                // Inline: turn-level control verbs are local host/machine
+                // operations (DL10's closed verb set). Live `Interrupt` is
+                // media-plane barge-in through the facade pipeline's
+                // `LiveAdapterHost::send_command_observed` — NOT
+                // `hard_cancel_current_run`; no effect-authority reach is added
+                // here (DEC-P6B-L7).
+                let sup_payload = BridgeSupervisorPayload {
+                    supervisor: payload.supervisor.clone(),
+                    epoch: payload.epoch,
+                    protocol_version: payload.protocol_version,
+                };
+                if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                    adapter,
+                    session_id,
+                    comms_runtime,
+                    sender,
+                    &sup_payload,
+                    "control member live channel failed",
+                )
+                .await
+                {
                     send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
                     return true;
                 }
-            };
-            let effect_authority = match acquire_registered_member_live_authority(
-                adapter,
-                session_id,
-                &payload.expected_member,
-                "control member live channel",
-            )
-            .await
-            {
-                Ok(authority) => authority,
-                Err((cause, reason)) => {
-                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                    return true;
-                }
-            };
-            let result = live
-                .control(session_id, &payload.channel_id, payload.verb)
-                .await;
-            drop(effect_authority);
-            match result {
-                Ok(outcome) => {
-                    send_bridge_response(
-                        comms_runtime,
-                        candidate,
-                        meerkat_core::interaction::ResponseStatus::Completed,
-                        BridgeReply::MemberLiveChannelControlled(BridgeLiveControlledResponse {
-                            outcome,
-                        }),
-                        None,
-                    )
+                let live = match resolve_member_live_host(adapter) {
+                    Ok(live) => live,
+                    Err((cause, reason)) => {
+                        send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                        return true;
+                    }
+                };
+                let effect_authority = match acquire_registered_member_live_authority(
+                    adapter,
+                    session_id,
+                    &payload.expected_member,
+                    "control member live channel",
+                )
+                .await
+                {
+                    Ok(authority) => authority,
+                    Err((cause, reason)) => {
+                        send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                        return true;
+                    }
+                };
+                let result = live
+                    .control(session_id, &payload.channel_id, payload.verb)
                     .await;
+                drop(effect_authority);
+                match result {
+                    Ok(outcome) => {
+                        send_bridge_response(
+                            comms_runtime,
+                            candidate,
+                            meerkat_core::interaction::ResponseStatus::Completed,
+                            BridgeReply::MemberLiveChannelControlled(
+                                BridgeLiveControlledResponse { outcome },
+                            ),
+                            None,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        let (cause, reason) = member_live_error_to_bridge_rejection(&error);
+                        send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    }
                 }
-                Err(error) => {
-                    let (cause, reason) = member_live_error_to_bridge_rejection(&error);
-                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
-                }
-            }
-            true
+                true
+            })
+            .await
         }
         _ => {
             send_bridge_failure(

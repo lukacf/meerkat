@@ -239,6 +239,20 @@ them.
   in another connection's id space. On connection close the server now fails
   pending callbacks before its graceful request shutdown, so a session waiting
   on a gone client gets the typed failure immediately.
+- Debug worker-stack headroom (#1462): four more chains no longer reserve
+  their callees' futures and every section's temporaries in one poll frame.
+  Large child futures are built in their own boxed frames
+  (`box_in_own_frame` / the actor's `boxed_arm_future`), and the comms-drain
+  dispatchers box each command arm, with bodies unchanged:
+  - the mob spawn-provisioning chain;
+  - the mob actor loop (`run`, `wait_for_actor_wake`, `finalize_spawn_admit`);
+  - `execute_meerkat_machine_drain_command`;
+  - the comms drain task's `try_handle_supervisor_bridge_command`.
+
+  Measured on the stack canary (debug), the spawn-provisioning chain went
+  from 913,880 B to 530,824 B, and the canary now passes at 1024 KiB. The
+  next bound is the `SetPeerIngressContext` drain arm (#1466). No behaviour
+  change.
 
 ## [0.8.50] - 2026-10-01
 

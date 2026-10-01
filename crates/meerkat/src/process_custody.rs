@@ -17,6 +17,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(feature = "session-store")]
 use meerkat_core::tool_process::{
     InterruptedToolEvidence, InterruptedToolEvidenceError, InterruptedToolEvidenceSource,
 };
@@ -62,17 +63,21 @@ pub(crate) async fn open_session_custody(
 /// The runtime's source of interrupted-run evidence: settles a session's
 /// earlier-incarnation tool processes when the runtime attaches the session,
 /// before anything recovered is served, even when no agent has been built
-/// for it yet (for example an RPC on-demand attach).
+/// for it yet (for example an RPC on-demand attach). Only the runtime-backed
+/// surface installs it, so it exists under the same `session-store` gate.
+#[cfg(feature = "session-store")]
 pub(crate) struct CustodyEvidenceSource {
     runtime_root: PathBuf,
 }
 
+#[cfg(feature = "session-store")]
 impl CustodyEvidenceSource {
     pub(crate) fn new(runtime_root: PathBuf) -> Self {
         Self { runtime_root }
     }
 }
 
+#[cfg(feature = "session-store")]
 #[async_trait::async_trait]
 impl InterruptedToolEvidenceSource for CustodyEvidenceSource {
     async fn settle_session(

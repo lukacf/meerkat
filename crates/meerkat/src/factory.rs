@@ -3402,24 +3402,31 @@ impl AgentFactory {
                 .map_err(|error| BuildAgentError::Config(error.to_string()))?,
         );
 
-        let executor: Arc<dyn meerkat_llm_core::WebSearchExecutor> = match search_provider {
+        // An Option rather than an early return in the fallback arm: with no
+        // provider feature enabled the fallback is the only arm, and a
+        // diverging match would make everything after it unreachable.
+        let executor: Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>> = match search_provider {
             #[cfg(feature = "openai")]
-            Provider::OpenAI => {
-                Arc::new(meerkat_openai::OpenAiWebSearchExecutor::new(model, adapted))
-            }
-            #[cfg(feature = "gemini")]
-            Provider::Gemini => {
-                Arc::new(meerkat_gemini::GeminiWebSearchExecutor::new(model, adapted))
-            }
-            #[cfg(feature = "anthropic")]
-            Provider::Anthropic => Arc::new(meerkat_anthropic::AnthropicWebSearchExecutor::new(
+            Provider::OpenAI => Some(Arc::new(meerkat_openai::OpenAiWebSearchExecutor::new(
                 model, adapted,
+            ))),
+            #[cfg(feature = "gemini")]
+            Provider::Gemini => Some(Arc::new(meerkat_gemini::GeminiWebSearchExecutor::new(
+                model, adapted,
+            ))),
+            #[cfg(feature = "anthropic")]
+            Provider::Anthropic => Some(Arc::new(
+                meerkat_anthropic::AnthropicWebSearchExecutor::new(model, adapted),
             )),
             _ => {
-                return unavailable(format!(
-                    "no web-search executor adapter for provider {search_provider:?}"
-                ));
+                drop(adapted);
+                None
             }
+        };
+        let Some(executor) = executor else {
+            return unavailable(format!(
+                "no web-search executor adapter for provider {search_provider:?}"
+            ));
         };
         Ok(Some(executor))
     }

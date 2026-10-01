@@ -36,3 +36,12 @@ All four reviewers accepted the exact [keyed request amendment](owner-compositio
 | Meerkat Toolkit | 02:19:28 | Bounded protocol source accepted; recovery single-flight lifetime through cancellation and exact phase authentication still require implementation evidence. |
 
 The reviews closed specific design gaps: a realm-wide control mutex, ambiguous background retry behavior, recovery depending on rare control mutations, and phase envelopes conflicting despite binding the same mutation. Generated keyed joins, canonical owner transitions, physical transactions, retention, antirollback custody and actual protected-entry tests remain required. These verdicts do not accept a deployment or the complete ADR implementation.
+
+## Post-fence time clarification
+
+The lead conditionally accepted the explicit distinction between a fresh
+post-fence witness decision and its later historical durable reply. The
+[time clarification](owner-composition-time-clarification.md) records the
+required final release checks, fresh retry observations, uncertainty refusal
+and actual cleanup tests. GL4 remains open until those conditions are executed;
+no fsync-time expiry or production trusted-clock claim is made.

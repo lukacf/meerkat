@@ -85,14 +85,28 @@ impl meerkat::experimental_gpt_live::ExperimentalLivePublicObservationPublisher
         if observation.output().channel_id != *binding.channel_id() {
             return Err(ExperimentalLivePublicObservationDeliveryError::Rejected);
         }
+        let kind = observation.kind();
         let output = observation.into_output();
-        let params = meerkat_contracts::LiveAssistantOutputAvailableParams {
-            channel_id: output.channel_id.to_string(),
-            output_id: output.output_id,
-            content_index: output.content_index,
-        };
-        let notification = RpcNotification::try_new("live/assistant_output_available", &params)
-            .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
+        let notification = match kind {
+            meerkat::experimental_gpt_live::ExperimentalLivePublicObservationKind::MediaHealthRequested => {
+                RpcNotification::try_new(
+                    "live/media_health_requested",
+                    &meerkat_contracts::LiveMediaHealthRequestedParams {
+                        channel_id: output.channel_id.to_string(),
+                        output_id: output.output_id,
+                    },
+                )
+            }
+            _ => RpcNotification::try_new(
+                "live/assistant_output_available",
+                &meerkat_contracts::LiveAssistantOutputAvailableParams {
+                    channel_id: output.channel_id.to_string(),
+                    output_id: output.output_id,
+                    content_index: output.content_index,
+                },
+            ),
+        }
+        .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
         let (delivery_tx, delivery_rx) = oneshot::channel();
         self.tx
             .send(ExperimentalLiveRpcNotification::new(

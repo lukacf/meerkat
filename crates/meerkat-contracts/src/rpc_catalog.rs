@@ -738,12 +738,20 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
     }
 
     if options.runtime_available && options.live_enabled && options.live_webrtc_enabled {
-        methods.extend([RpcMethodDescriptor::typed(
-            "live/webrtc/answer",
-            "Answer a browser WebRTC offer for an already-open live channel",
-            "LiveWebrtcAnswerParams",
-            "LiveWebrtcAnswerResult",
-        )]);
+        methods.extend([
+            RpcMethodDescriptor::typed(
+                "live/webrtc/answer",
+                "Answer a browser WebRTC offer for an already-open live channel",
+                "LiveWebrtcAnswerParams",
+                "LiveWebrtcAnswerResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "live/media_health",
+                "Report decoded-audio counters for the output a live/media_health_requested notification named",
+                "LiveMediaHealthParams",
+                "LiveMediaHealthResult",
+            ),
+        ]);
     }
 
     if options.mob_enabled {

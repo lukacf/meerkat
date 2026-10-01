@@ -2694,7 +2694,10 @@ mod tests {
         .await
         .expect("open_channel");
         let close_observation = host
-            .reserve_channel_close_observation(&channel_id)
+            .reserve_channel_close_observation(
+                &channel_id,
+                meerkat_core::LiveChannelCloseReason::ClientRequested,
+            )
             .await
             .expect("reserve close observation");
         let authority = machine

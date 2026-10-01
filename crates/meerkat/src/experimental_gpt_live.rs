@@ -10141,6 +10141,11 @@ mod tests {
             &self,
             observation: ExperimentalLivePublicObservation,
         ) -> Result<(), ExperimentalLivePublicObservationDeliveryError> {
+            if observation.kind() == ExperimentalLivePublicObservationKind::MediaHealthRequested {
+                // A media-health request is no playback handle: the matrix
+                // records only actionable outputs.
+                return Ok(());
+            }
             if self.fail_once.swap(false, Ordering::AcqRel) {
                 return Err(ExperimentalLivePublicObservationDeliveryError::Rejected);
             }

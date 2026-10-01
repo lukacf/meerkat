@@ -500,6 +500,7 @@ pub fn live_media_health_rms_micros(max_rms: f64) -> u64 {
 }
 
 /// A `live/media_health` report that could not be judged or acted on.
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ExperimentalLiveMediaHealthError {
@@ -2610,6 +2611,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
 
     /// [`Self::close_live_channel`] naming why the channel closes (carried
     /// to the committed close's `AgentEvent::LiveChannelClosed`).
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     pub async fn close_live_channel_for(
         &self,
         authority: Option<&dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider>,

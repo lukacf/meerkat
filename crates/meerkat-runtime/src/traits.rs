@@ -122,6 +122,25 @@ pub enum RuntimeDriverError {
     Internal(String),
 }
 
+impl RuntimeDriverError {
+    /// The typed retryable session error for a teardown that outlived the
+    /// caller's bounded wait (`UnregisterInProgress`, `RuntimeStopInProgress`),
+    /// or `None` for any other error. Surfaces use it instead of reporting
+    /// a saga that is still completing as an internal error.
+    pub fn teardown_in_progress_session_error(&self) -> Option<meerkat_core::SessionError> {
+        let (runtime_id, teardown) = match self {
+            Self::UnregisterInProgress { runtime_id } => (runtime_id, "unregister"),
+            Self::RuntimeStopInProgress { runtime_id } => (runtime_id, "stop"),
+            _ => return None,
+        };
+        Some(meerkat_core::SessionError::runtime_teardown_in_progress(
+            self.to_string(),
+            runtime_id.to_string(),
+            teardown,
+        ))
+    }
+}
+
 /// Errors from RuntimeControlPlane operations.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -327,6 +346,40 @@ mod tests {
     // Verify traits are object-safe
     fn _assert_driver_object_safe(_: &dyn RuntimeDriver) {}
     fn _assert_control_plane_object_safe(_: &dyn RuntimeControlPlane) {}
+
+    #[test]
+    fn teardown_in_progress_maps_to_typed_retryable_session_error() {
+        let runtime_id = LogicalRuntimeId::new("runtime-teardown");
+        for (error, teardown) in [
+            (
+                RuntimeDriverError::UnregisterInProgress {
+                    runtime_id: runtime_id.clone(),
+                },
+                "unregister",
+            ),
+            (
+                RuntimeDriverError::RuntimeStopInProgress {
+                    runtime_id: runtime_id.clone(),
+                },
+                "stop",
+            ),
+        ] {
+            let session_error = error
+                .teardown_in_progress_session_error()
+                .expect("a teardown in progress has a typed session error");
+            assert!(session_error.is_runtime_teardown_in_progress());
+            let data = session_error.structured_data().expect("typed data");
+            assert_eq!(data["teardown"], teardown);
+            assert_eq!(data["runtime_id"], "runtime-teardown");
+            assert_eq!(data["code"], "SESSION_BUSY");
+            assert_eq!(data["retryable"], true);
+        }
+        assert!(
+            RuntimeDriverError::Internal("boom".to_string())
+                .teardown_in_progress_session_error()
+                .is_none()
+        );
+    }
 
     #[test]
     fn runtime_driver_error_display() {

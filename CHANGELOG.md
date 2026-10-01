@@ -37,6 +37,26 @@ them.
 
 ### Breaking
 
+- `meerkat_rest::ApiError` gains `SessionBusyWithData { message, details }`
+  (HTTP 409, code `SESSION_BUSY`, typed `details`). Exhaustive matches must
+  handle it.
+- Behaviour-only (not measured by the gate): a runtime teardown that outlived
+  the caller's bounded wait (`RuntimeDriverError::UnregisterInProgress`,
+  `RuntimeStopInProgress`) reaching a surface's generic error mapping is now
+  the retryable busy class instead of an internal error:
+  - RPC answers `SESSION_BUSY` (-32002) with typed data, through
+    `runtime_driver_error_to_rpc`, `session_error_to_rpc` and the mob
+    session-service mapping.
+  - REST answers 409 `SESSION_BUSY` with `details` from runtime executor
+    attach, session create and archive.
+  - The MCP server keeps its `FailedWithData` convention, now carrying the
+    typed data.
+  - The data is `{"kind": "runtime_teardown_in_progress", "code":
+    "SESSION_BUSY", "teardown": "unregister" | "stop", "runtime_id",
+    "retryable": true, "authority_retained": true}`.
+  - The error code itself is unchanged in meaning ("busy, retry"). It now
+    also covers a teardown that is still completing, which used to surface
+    as `INTERNAL_ERROR` / HTTP 500.
 - `meerkat_contracts::wire::LiveStatusResult` gains the public field
   `provider_input_latency: Option<WireLiveProviderInputLatency>`; struct
   literals must set it (`None` when no measurement exists). The JSON shape is
@@ -166,6 +186,11 @@ them.
 
 ### Added
 
+- `meerkat_core::SessionError::runtime_teardown_in_progress` builds the
+  typed retryable error above (with `RUNTIME_TEARDOWN_IN_PROGRESS_KIND`), and
+  `SessionError::is_runtime_teardown_in_progress` recognizes it.
+  `meerkat_runtime::RuntimeDriverError::teardown_in_progress_session_error`
+  converts `UnregisterInProgress` / `RuntimeStopInProgress` into it.
 - `meerkat_mob::store::MobRunStore` gains
   `flow_authority_validation_boundary`, a `#[doc(hidden)]` method with a
   default body. Not a break: existing implementations compile unchanged. Its

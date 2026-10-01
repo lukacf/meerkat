@@ -47,6 +47,9 @@ use tokio::sync::mpsc;
 use futures::StreamExt;
 
 fn runtime_driver_error_to_session_error(err: meerkat_runtime::RuntimeDriverError) -> SessionError {
+    if let Some(in_progress) = err.teardown_in_progress_session_error() {
+        return in_progress;
+    }
     SessionError::Agent(meerkat_core::error::AgentError::InternalError(
         err.to_string(),
     ))

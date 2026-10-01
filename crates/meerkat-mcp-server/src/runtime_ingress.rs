@@ -1946,6 +1946,9 @@ fn explicit_resume_required(session_id: &SessionId, missing: &str) -> SessionErr
 fn runtime_driver_error_to_session_error(
     error: meerkat_runtime::RuntimeDriverError,
 ) -> SessionError {
+    if let Some(in_progress) = error.teardown_in_progress_session_error() {
+        return in_progress;
+    }
     SessionError::Agent(AgentError::InternalError(error.to_string()))
 }
 

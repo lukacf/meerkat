@@ -905,12 +905,22 @@ fn runtime_driver_error_from_session_error(
 }
 
 fn runtime_executor_attach_error_to_api(error: meerkat_runtime::RuntimeDriverError) -> ApiError {
+    if let Some(busy) = error
+        .teardown_in_progress_session_error()
+        .as_ref()
+        .and_then(session_busy_api_error)
+    {
+        return busy;
+    }
     ApiError::Internal(format!("failed to attach REST runtime executor: {error}"))
 }
 
 fn runtime_driver_error_to_session_error(
     error: meerkat_runtime::RuntimeDriverError,
 ) -> SessionError {
+    if let Some(in_progress) = error.teardown_in_progress_session_error() {
+        return in_progress;
+    }
     SessionError::Agent(meerkat_core::AgentError::InternalError(error.to_string()))
 }
 
@@ -5192,6 +5202,9 @@ fn help_request_to_create_session(
 }
 
 fn create_session_error_to_api(err: SessionError) -> ApiError {
+    if let Some(busy) = session_busy_api_error(&err) {
+        return busy;
+    }
     let message = err.to_string();
     match &err {
         SessionError::NotFound { .. } => ApiError::NotFound(message),
@@ -6152,6 +6165,9 @@ async fn archive_session(
 }
 
 fn archive_session_error_to_api_error(id: &str, error: SessionError) -> ApiError {
+    if let Some(busy) = session_busy_api_error(&error) {
+        return busy;
+    }
     match error {
         SessionError::NotFound { .. } => ApiError::NotFound(format!("Session not found: {id}")),
         SessionError::FailedWithData { message, data } => ApiError::InternalWithData {
@@ -8254,6 +8270,28 @@ pub enum ApiError {
     },
     ServiceUnavailable(String),
     Gone(String),
+    /// Retryable `SESSION_BUSY` (409) with typed details, e.g. a runtime
+    /// teardown still completing past the caller's bounded wait.
+    SessionBusyWithData {
+        message: String,
+        details: Value,
+    },
+}
+
+/// `ApiError::SessionBusyWithData` for a typed retryable runtime teardown
+/// still in progress (`SessionError::runtime_teardown_in_progress`).
+fn session_busy_api_error(error: &SessionError) -> Option<ApiError> {
+    match error {
+        SessionError::FailedWithData { message, data }
+            if error.is_runtime_teardown_in_progress() =>
+        {
+            Some(ApiError::SessionBusyWithData {
+                message: message.clone(),
+                details: data.clone(),
+            })
+        }
+        _ => None,
+    }
 }
 
 fn api_error_message(error: &ApiError) -> String {
@@ -8268,7 +8306,8 @@ fn api_error_message(error: &ApiError) -> String {
         | ApiError::ServiceUnavailable(message)
         | ApiError::Gone(message) => message.clone(),
         ApiError::BadRequestWithData { message, .. }
-        | ApiError::InternalWithData { message, .. } => message.clone(),
+        | ApiError::InternalWithData { message, .. }
+        | ApiError::SessionBusyWithData { message, .. } => message.clone(),
         ApiError::DuplicateInput { existing_id } => {
             format!("duplicate input: {existing_id}")
         }
@@ -8356,6 +8395,12 @@ impl IntoResponse for ApiError {
                 None,
             ),
             ApiError::Gone(msg) => (StatusCode::GONE, "GONE".to_string(), msg, None),
+            ApiError::SessionBusyWithData { message, details } => (
+                StatusCode::CONFLICT,
+                "SESSION_BUSY".to_string(),
+                message,
+                Some(details),
+            ),
         };
 
         let body = Json(ErrorResponse {
@@ -15490,6 +15535,27 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             details.get("structured_output").is_none(),
             "finalization failure must not expose non-durable structured_output"
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_teardown_in_progress_surfaces_as_retryable_session_busy() {
+        use http_body_util::BodyExt as _;
+        let in_progress = runtime_driver_error_to_session_error(
+            meerkat_runtime::RuntimeDriverError::UnregisterInProgress {
+                runtime_id: meerkat_runtime::LogicalRuntimeId::new("rest-teardown"),
+            },
+        );
+        let response =
+            archive_session_error_to_api_error("rest-teardown", in_progress).into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["code"], json!("SESSION_BUSY"));
+        assert_eq!(
+            payload["details"]["kind"],
+            json!(SessionError::RUNTIME_TEARDOWN_IN_PROGRESS_KIND)
+        );
+        assert_eq!(payload["details"]["retryable"], json!(true));
     }
 
     #[test]

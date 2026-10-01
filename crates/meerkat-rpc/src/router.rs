@@ -98,6 +98,12 @@ fn mob_session_service_error_response(
             error::SESSION_BUSY,
             format!("Session is busy: {session_id}"),
         ),
+        ref in_progress @ SessionError::FailedWithData {
+            ref message,
+            ref data,
+        } if in_progress.is_runtime_teardown_in_progress() => {
+            RpcResponse::error_with_data(id, error::SESSION_BUSY, message.clone(), data.clone())
+        }
         SessionError::FailedWithData { message, data } => {
             RpcResponse::error_with_data(id, error::INTERNAL_ERROR, message, data)
         }

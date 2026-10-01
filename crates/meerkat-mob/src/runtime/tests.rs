@@ -57650,6 +57650,9 @@ struct RuntimeBackedRealCommsSessionService {
     applied_runtime_contributing_input_ids:
         RwLock<HashMap<SessionId, Vec<Vec<meerkat_core::InputId>>>>,
     turn_finalization_gate: std::sync::RwLock<Option<Arc<tokio::sync::Mutex<()>>>>,
+    /// Calls to `acquire_runtime_turn_finalization_guard`, published before
+    /// the call waits on the gate.
+    turn_finalization_guard_requests: tokio::sync::watch::Sender<u64>,
     active_runtime_runs: RwLock<HashMap<SessionId, meerkat_core::RunId>>,
 }
 
@@ -57689,6 +57692,7 @@ impl RuntimeBackedRealCommsSessionService {
             runtime_event_delta_count: AtomicU64::new(1),
             applied_runtime_contributing_input_ids: RwLock::new(HashMap::new()),
             turn_finalization_gate: std::sync::RwLock::new(None),
+            turn_finalization_guard_requests: tokio::sync::watch::channel(0).0,
             active_runtime_runs: RwLock::new(HashMap::new()),
         }
     }
@@ -58461,6 +58465,8 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         _session_id: &SessionId,
     ) -> Result<Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>, SessionError>
     {
+        self.turn_finalization_guard_requests
+            .send_modify(|requests| *requests += 1);
         let gate = self
             .turn_finalization_gate
             .read()
@@ -82079,6 +82085,126 @@ async fn test_member_turn_llm_reconfigure_does_not_reacquire_held_finalization_b
         .await
         .expect("turn completion must not remain blocked on a nested guard")
         .expect("turn should complete successfully");
+}
+
+/// Wait until `requests` counts more than `seen` turn-finalization guard
+/// requests; the count is published before the request waits on the gate.
+async fn wait_for_turn_finalization_guard_request(
+    requests: &mut tokio::sync::watch::Receiver<u64>,
+    seen: u64,
+    what: &str,
+) -> u64 {
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        requests.wait_for(|requests| *requests > seen),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{what} never requested the turn-finalization boundary"))
+    .map(|requests| *requests)
+    .expect("the turn-finalization request counter outlives the test")
+}
+
+/// Regression (MobKit #512 trace: `control_run=None queue_len=1` at retire):
+/// an input admitted before retire but not yet opened as a run must be
+/// resolved typed by retire's pre-boundary step. Before the fix the step read
+/// "no bound run" as nothing to cancel; the queued input then opened a run
+/// whose turn held the turn-finalization boundary, and retire waited on that
+/// boundary until its deadline (`RetirementInProgress`).
+///
+/// Deterministic sequencing: the test holds the service's turn-finalization
+/// gate, which the runtime loop acquires before it stages queued work, so the
+/// admitted input stays Queued. Retire then queues behind the loop on that
+/// gate, and only then does the test release it.
+#[tokio::test]
+async fn retire_resolves_an_admitted_unopened_input_before_the_turn_boundary() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-retire-queued-unopened");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn turn-driven lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let prompts_before = service.applied_runtime_prompts(&session_id).await.len();
+
+    // Any turn that does open blocks inside apply while holding the gate.
+    service.set_block_runtime_turns(true);
+    let gate = service.install_non_reentrant_turn_finalization_gate();
+    let mut requests = service.turn_finalization_guard_requests.subscribe();
+    let held = gate.lock().await;
+    let seen = *requests.borrow_and_update();
+
+    let turn = handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .start_turn(
+            ContentInput::Text("admitted before retire, never opened".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("the turn is admitted while the loop waits on the gate");
+    let seen =
+        wait_for_turn_finalization_guard_request(&mut requests, seen, "the runtime loop").await;
+    let snapshot = service
+        .runtime_adapter
+        .meerkat_machine_archive_snapshot(&session_id)
+        .await
+        .expect("runtime snapshot");
+    assert!(
+        snapshot.control.current_run_id.is_none() && snapshot.queue.len() == 1,
+        "the admitted input is queued, not opened: run={:?} queue={}",
+        snapshot.control.current_run_id,
+        snapshot.queue.len()
+    );
+
+    let retire_handle = handle.clone();
+    let retire_identity = identity.clone();
+    let retire = tokio::spawn(async move { retire_handle.retire(retire_identity).await });
+    wait_for_turn_finalization_guard_request(&mut requests, seen, "retire").await;
+    // The loop queued on the gate first, so it runs before retire's boundary.
+    drop(held);
+
+    let retired = tokio::time::timeout(Duration::from_secs(10), retire)
+        .await
+        .expect("retire settles within its own deadline")
+        .expect("retire task joins");
+    retired.expect("retire completes without waiting on the turn-finalization boundary");
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        turn.wait_bounded(
+            BoundedResultSpec::new("retire-queued-unopened", 256).expect("valid result spec"),
+        ),
+    )
+    .await
+    .expect("the admitted turn reaches a terminal");
+    let failure = outcome
+        .expect_err("the queued turn never completes")
+        .into_parts()
+        .1;
+    assert!(
+        matches!(
+            &failure,
+            BoundedTurnFailure::RuntimeTerminated { reason, .. } if reason == "member retire"
+        ),
+        "the queued input ends typed through its exact retire cancellation: {failure:?}"
+    );
+    assert_eq!(
+        service.applied_runtime_prompts(&session_id).await.len(),
+        prompts_before,
+        "the queued input never reached the agent"
+    );
 }
 
 #[tokio::test]

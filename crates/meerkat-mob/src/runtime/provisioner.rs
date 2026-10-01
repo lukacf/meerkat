@@ -3525,6 +3525,10 @@ impl MemberSessionDisposalArc {
             CoreRunId,
             oneshot::Receiver<Result<bool, meerkat_runtime::RuntimeDriverError>>,
         )> = None;
+        // Queued inputs this retirement already resolved through their exact
+        // cancellation; one still queued afterwards fails closed instead of
+        // being retried in a loop.
+        let mut cancelled_queued_inputs = std::collections::HashSet::new();
 
         loop {
             tracing::info!(
@@ -3550,7 +3554,24 @@ impl MemberSessionDisposalArc {
                 "SessionBackend::cancel_active_runtime_turn_before_retire observed snapshot"
             );
             if !Self::runtime_run_bound(&snapshot) {
-                return Ok(());
+                if snapshot.queue.is_empty() && snapshot.steer_queue.is_empty() {
+                    return Ok(());
+                }
+                // An input admitted before retirement but not yet opened as a
+                // run would open one mid-retire, and that turn would hold the
+                // turn-finalization boundary this retirement acquires next.
+                // New admission is already fenced (the durable Retiring state
+                // and the member's ingress detach), so resolve every queued
+                // input typed through its exact cancellation, then re-observe.
+                Self::cancel_queued_runtime_inputs_before_retire(
+                    adapter,
+                    session_id,
+                    &snapshot,
+                    &mut cancelled_queued_inputs,
+                    deadline,
+                )
+                .await?;
+                continue;
             }
             let Some(active_run_id) = snapshot.control.current_run_id.clone() else {
                 return Err(Self::runtime_archive_error(format!(
@@ -3762,6 +3783,45 @@ impl MemberSessionDisposalArc {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// Resolve the snapshot's queued-but-unopened inputs through the exact
+    /// input cancellation authority: a still-queued input is abandoned typed
+    /// (`Cancelled`) and its waiter resolved; one that a run already staged is
+    /// cancelled on that exact run.
+    async fn cancel_queued_runtime_inputs_before_retire(
+        adapter: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+        snapshot: &meerkat_runtime::MeerkatArchiveSnapshot,
+        cancelled: &mut std::collections::HashSet<meerkat_core::lifecycle::InputId>,
+        deadline: Instant,
+    ) -> Result<(), SessionError> {
+        for input_id in snapshot.queue.iter().chain(snapshot.steer_queue.iter()) {
+            if !cancelled.insert(input_id.clone()) {
+                return Err(Self::runtime_archive_error(format!(
+                    "queued input {input_id} of {session_id} stayed queued after its exact cancellation during retire"
+                )));
+            }
+            let remaining =
+                Self::retirement_remaining(session_id, deadline, "queued_input_cancel")?;
+            tracing::info!(
+                session_id = %session_id,
+                input_id = %input_id,
+                "SessionBackend::cancel_active_runtime_turn_before_retire cancelling queued input"
+            );
+            tokio::time::timeout(
+                remaining,
+                adapter.cancel_input_if_present(session_id, input_id, "member retire"),
+            )
+            .await
+            .map_err(|_| Self::runtime_retirement_in_progress(session_id, "queued_input_cancel"))?
+            .map_err(|error| {
+                Self::runtime_archive_error(format!(
+                    "queued input {input_id} cancellation before retire failed for {session_id}: {error}"
+                ))
+            })?;
+        }
+        Ok(())
     }
 
     async fn wait_for_runtime_retire_drain(

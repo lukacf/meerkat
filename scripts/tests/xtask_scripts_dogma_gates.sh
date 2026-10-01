@@ -305,13 +305,18 @@ fi
 # succeeds.
 tlc_env_tmp="$(mktemp -d "${TMPDIR:-/tmp}/machine-verify-java-options.XXXXXX")"
 trap 'rm -rf "$tlc_env_tmp"' EXIT
-# The fake reports TLC's success line: the lane's direct audit runner
-# (durable_in_turn_steer_audit.sh) requires it before it accepts a run.
+# The fake reports TLC's success line: the lane's direct audit runners
+# (durable_in_turn_steer_audit.sh, live_context_outbox_audit.sh) require it
+# before they accept a run. live_context_outbox_audit.sh also requires each of
+# its goals to be reported violated, so the fake reports those too.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
   'printf "%s\n" "$JDK_JAVA_OPTIONS" > "$TLC_JDK_JAVA_OPTIONS_CAPTURE"' \
   'echo "Model checking completed. No error has been found."' \
+  'echo "Error: Action property AuditNeverCloseEndsALeftover is violated."' \
+  'echo "Error: Action property AuditNeverRecoveryEndsCarriedRows is violated."' \
+  'echo "Error: Invariant AuditReplacementNeverReceivesALaterRow is violated."' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
 

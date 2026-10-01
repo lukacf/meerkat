@@ -125,6 +125,24 @@ fi
 echo "running bounded durable in-turn steer TLC audit"
 TLC_WORKERS="${tlc_workers}" "${durable_steer_audit}" "${DURABLE_STEER_AUDIT_MAX_STEPS:-16}"
 
+# The live-context outbox invariants (no closed channel leaves a queued row;
+# no queued row is one a channel's provider session already carries) are
+# model-checked by a second bounded audit over the same generated model: one
+# session's outbox across two channels through enqueue, staging and seed
+# advance, bind, append authorization and resolution, close, abandoned
+# admission and ambiguity recovery, under every generated invariant. It then
+# requires TLC to reach each goal (a close ending a leftover, a recovery
+# authorization ending the rows its seed carries, a row queued after the
+# authorization reaching the replacement), so the invariants are not vacuous.
+# 20 steps reach the deepest goal; deeper bounds run by hand.
+live_context_outbox_audit="${workspace_root}/specs/machines/meerkat_machine/live_context_outbox_audit.sh"
+if [[ ! -x "${live_context_outbox_audit}" ]]; then
+  echo "error: live-context outbox audit runner is missing from workspace runfiles: ${live_context_outbox_audit}" >&2
+  exit 1
+fi
+echo "running bounded live-context outbox TLC audit"
+TLC_WORKERS="${tlc_workers}" "${live_context_outbox_audit}" "${LIVE_CONTEXT_OUTBOX_AUDIT_MAX_STEPS:-20}"
+
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
 # codegen defects. `machine-verify` still validates drift and the generated
 # ci.cfg structural-invariant contract before honoring these skips. The earlier

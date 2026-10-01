@@ -329,6 +329,19 @@ them.
   memory on 32 GiB machines. TLC metadirs are unique per run. State counts are
   identical to the sequential lane; on a 192-core host the lane takes 267 s
   instead of 889 s, and 634 s with TLC_WORKERS=8.
+- Live structural mob event subscriptions no longer fall back to reading the
+  event store when appends race. `InMemoryMobEventStore` released its write
+  lock before broadcasting an append, so a preempted append was overtaken by
+  a later one. A subscriber then saw a cursor gap and caught up from the
+  store. The store now broadcasts under the lock (`send` never blocks), so
+  live delivery is in cursor order, as the SQLite store already ensured with
+  its publisher-side cursor. `MobEventsView::subscribe_with_config` also
+  subscribes before reading the latest cursor, so an append in between is
+  live-delivered or skipped as covered, never a gap.
+  `test_mob_events_view_subscribe_streams_structural_events` asserts the
+  subscription's own catch-up reads instead of the store-wide poll count. It
+  failed 400/400 at 40 copies per core because the mob's remote-turn
+  reconciler reads new events from the store on every structural append.
 - Expired OAuth attempts now retire their private persisted payloads when the
   native owner prunes them, including late callbacks and cancelled MCP login.
   Cleanup preserves concurrent live attempts and their deadlines; a failed

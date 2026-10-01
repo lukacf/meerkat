@@ -5913,8 +5913,10 @@ impl MobEventStore for FaultInjectedMobEventStore {
             kind: event.kind,
         };
         events.push(stored.clone());
-        drop(events);
+        // Broadcast under the write lock so live subscribers see appends in
+        // cursor order, like the production stores.
         let _ = self.event_tx.send(stored.clone());
+        drop(events);
         if terminal_event_identity(&stored.kind).is_some() {
             let gate = self.terminal_append_gate.read().await.clone();
             if let Some(gate) = gate {
@@ -5979,8 +5981,10 @@ impl MobEventStore for FaultInjectedMobEventStore {
             kind: event.kind,
         };
         events.push(stored.clone());
-        drop(events);
+        // Broadcast under the write lock so live subscribers see appends in
+        // cursor order, like the production stores.
         let _ = self.event_tx.send(stored.clone());
+        drop(events);
         Ok(Some(stored))
     }
 
@@ -67409,7 +67413,6 @@ async fn test_mob_events_view_latest_cursor_uses_store_cursor_without_replay() {
 async fn test_mob_events_view_subscribe_streams_structural_events() {
     let events = Arc::new(FaultInjectedMobEventStore::new());
     let (handle, _service) = create_test_mob_with_events(sample_definition(), events.clone()).await;
-    let poll_calls_before = events.poll_calls();
     let mut subscription = handle
         .events()
         .subscribe_with_config(MobEventsSubscriptionConfig {
@@ -67419,10 +67422,14 @@ async fn test_mob_events_view_subscribe_streams_structural_events() {
         })
         .await
         .expect("subscribe to structural mob events");
+    // The subscription's own store catch-up reads, not the store-wide poll
+    // count: the mob's remote-turn reconciler reads new events from the store
+    // on every structural append (and once at startup), which a loaded run
+    // schedules inside this window.
     assert_eq!(
-        events.poll_calls(),
-        poll_calls_before,
-        "live structural subscription should not poll to start at the latest cursor"
+        subscription.catch_up_reads(),
+        0,
+        "live structural subscription should not read the store to start at the latest cursor"
     );
 
     handle
@@ -67444,8 +67451,8 @@ async fn test_mob_events_view_subscribe_streams_structural_events() {
 
     assert!(observed.cursor > 0);
     assert_eq!(
-        events.poll_calls(),
-        poll_calls_before,
+        subscription.catch_up_reads(),
+        0,
         "live structural subscription should receive append notifications without polling"
     );
 }

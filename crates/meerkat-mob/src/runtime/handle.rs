@@ -5256,11 +5256,35 @@ impl Default for MobEventsSubscriptionConfig {
 pub struct MobEventsSubscription {
     pub event_rx: mpsc::Receiver<crate::event::MobEvent>,
     cancel: CancellationToken,
+    catch_up_reads: StructuralCatchUpReads,
+}
+
+/// Store catch-up reads a structural subscription performed. Live delivery
+/// takes none; a start after an explicit cursor, a cursor gap or a lagged
+/// broadcast takes one. Counted only in tests.
+#[derive(Clone, Default)]
+struct StructuralCatchUpReads {
+    #[cfg(test)]
+    count: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl StructuralCatchUpReads {
+    fn record(&self) {
+        #[cfg(test)]
+        self.count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 impl MobEventsSubscription {
     pub fn cancel(&self) {
         self.cancel.cancel();
+    }
+
+    #[cfg(test)]
+    pub(super) fn catch_up_reads(&self) -> u64 {
+        self.catch_up_reads
+            .count
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -5827,6 +5851,11 @@ impl MobEventsView {
             ..config
         };
         let explicit_after_cursor = config.after_cursor.is_some();
+        // Subscribe to live appends before reading the latest cursor: an
+        // append landing between the two is then in `source_rx` (and skipped
+        // as already covered when its cursor is not past the start), instead
+        // of becoming a gap that forces a catch-up read from the store.
+        let source_rx = self.handle.events.subscribe().map_err(MobError::from)?;
         let latest_cursor = self.latest_cursor().await?;
         let after_cursor = config.after_cursor.unwrap_or(latest_cursor);
         let batch_limit = u64::try_from(config.batch_limit).map_err(|_| {
@@ -5851,7 +5880,6 @@ impl MobEventsView {
             .await?;
         let (after_cursor, explicit_after_cursor, config) =
             MobHandle::structural_event_subscription_authority_from_effects(effects)?;
-        let source_rx = self.handle.events.subscribe().map_err(MobError::from)?;
         Ok(spawn_structural_event_subscription(
             self.clone(),
             source_rx,
@@ -5929,11 +5957,19 @@ fn spawn_structural_event_subscription(
     let (event_tx, event_rx) = mpsc::channel(config.channel_capacity);
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
+    let catch_up_reads = StructuralCatchUpReads::default();
+    let task_catch_up_reads = catch_up_reads.clone();
 
     tokio::spawn(async move {
         if catch_up_on_start
-            && !catch_up_structural_events(&events, &event_tx, &mut cursor, config.batch_limit)
-                .await
+            && !catch_up_structural_events(
+                &events,
+                &event_tx,
+                &mut cursor,
+                config.batch_limit,
+                &task_catch_up_reads,
+            )
+            .await
         {
             return;
         }
@@ -5950,6 +5986,7 @@ fn spawn_structural_event_subscription(
                                     &event_tx,
                                     &mut cursor,
                                     config.batch_limit,
+                                    &task_catch_up_reads,
                                 )
                                 .await
                             {
@@ -5968,6 +6005,7 @@ fn spawn_structural_event_subscription(
                                 &event_tx,
                                 &mut cursor,
                                 config.batch_limit,
+                                &task_catch_up_reads,
                             )
                             .await
                             {
@@ -5981,7 +6019,11 @@ fn spawn_structural_event_subscription(
         }
     });
 
-    MobEventsSubscription { event_rx, cancel }
+    MobEventsSubscription {
+        event_rx,
+        cancel,
+        catch_up_reads,
+    }
 }
 
 async fn catch_up_structural_events(
@@ -5989,7 +6031,9 @@ async fn catch_up_structural_events(
     event_tx: &mpsc::Sender<crate::event::MobEvent>,
     cursor: &mut u64,
     batch_limit: usize,
+    reads: &StructuralCatchUpReads,
 ) -> bool {
+    reads.record();
     loop {
         let batch = match events.poll(*cursor, batch_limit).await {
             Ok(batch) => batch,

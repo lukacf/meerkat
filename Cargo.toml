@@ -96,6 +96,8 @@ tempfile = "3.14"
 meerkat-agent-build-authority = { version = "0.8.50", path = "crates/meerkat-agent-build-authority" }
 meerkat-sqlite = { version = "0.8.50", path = "crates/meerkat-sqlite" }
 meerkat-core = { version = "0.8.50", path = "crates/meerkat-core" }
+meerkat-authorization-contracts = { version = "0.8.50", path = "crates/meerkat-authorization-contracts" }
+meerkat-authorization = { version = "0.8.50", path = "crates/meerkat-authorization" }
 meerkat-atif = { version = "0.8.50", path = "crates/meerkat-atif" }
 meerkat-models = { version = "0.8.50", path = "crates/meerkat-models" }
 meerkat-capabilities = { version = "0.8.50", path = "crates/meerkat-capabilities" }

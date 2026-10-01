@@ -80,6 +80,13 @@ if scripts/machine-authority-changed -- docs/reference/machine-authority.mdx >/d
 else
   bad "machine-authority-changed did not flag machine-authority docs"
 fi
+for grant_input in crates/meerkat-authorization/src/grants/mod.rs crates/meerkat-authorization-contracts/src/constraints.rs; do
+  if scripts/machine-authority-changed -- "$grant_input" >/dev/null; then
+    ok "machine-authority-changed protects grant authority input $grant_input"
+  else
+    bad "machine-authority-changed ignored grant authority input $grant_input"
+  fi
+done
 for poster_input in scripts/machine-posters/generate-machine-posters.mjs docs/internal/machine-posters/mob_machine.html crates/xtask/src/machine_alphabet.rs scripts/machine-posters-changed; do
   if scripts/machine-posters-changed -- "$poster_input" >/dev/null; then
     ok "machine-posters-changed routes poster input $poster_input to the poster gate"

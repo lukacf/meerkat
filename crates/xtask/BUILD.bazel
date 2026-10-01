@@ -657,6 +657,8 @@ rust_test(
         "//crates/meerkat-anthropic:package_runfiles",
         "//crates/meerkat-atif:package_runfiles",
         "//crates/meerkat-auth-core:package_runfiles",
+        "//crates/meerkat-authorization-contracts:package_runfiles",
+        "//crates/meerkat-authorization:package_runfiles",
         "//crates/meerkat-capabilities:package_runfiles",
         "//crates/meerkat-cli:package_runfiles",
         "//crates/meerkat-client:package_runfiles",

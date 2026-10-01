@@ -50,6 +50,7 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             // lifecycle and gets its own canonical machine per
             // dogma §1 "one semantic fact, one owner".
             "AuthMachine",
+            "GrantAuthorityMachine",
             // Approval lifecycle owns approval status/result truth.
             "ApprovalLifecycleMachine",
             // Detached jobs own fenced attempt, lease, retry/loss,
@@ -2752,4 +2753,117 @@ fn recoverable_failure_transition_revalidates_recoverability_and_exhaustion() {
         "RecoverableFailure must guard on retry exhaustion (retry_attempt <= max_retries); \
          found guards: {guard_names:?}"
     );
+}
+
+#[cfg(test)]
+mod grant_candidate_wire {
+    use meerkat_authorization_contracts::constraints::ExecutionRestrictions;
+    use meerkat_authorization_contracts::evidence::EvidenceId;
+    use meerkat_core::auth::{PrincipalKind, PrincipalRef, TrustDomainId};
+    use meerkat_machine_schema::catalog::dsl::grant_authority::{
+        GrantAuthorityMachineAuthority,
+        types::{GrantPrincipal, GrantRecord},
+    };
+    use serde_json::json;
+
+    // Compile-time negative controls: candidate decoding must not give the
+    // generated live authority a serialization or reconstruction interface.
+    const _: fn() = || {
+        trait Ambiguous<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> Ambiguous<()> for T {}
+        struct Serializable;
+        impl<T: ?Sized + serde::Serialize> Ambiguous<Serializable> for T {}
+        let _ = <GrantAuthorityMachineAuthority as Ambiguous<_>>::check;
+    };
+    const _: fn() = || {
+        trait Ambiguous<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> Ambiguous<()> for T {}
+        struct Deserializable;
+        impl<T: for<'de> serde::Deserialize<'de>> Ambiguous<Deserializable> for T {}
+        let _ = <GrantAuthorityMachineAuthority as Ambiguous<_>>::check;
+    };
+
+    fn principal() -> GrantPrincipal {
+        GrantPrincipal::new(
+            PrincipalRef::in_domain(
+                PrincipalKind::ServiceAccount,
+                "candidate-actor",
+                TrustDomainId::new("candidate-domain").expect("domain"),
+            )
+            .expect("qualified principal"),
+        )
+        .expect("candidate principal")
+    }
+
+    #[test]
+    fn qualified_candidate_uses_canonical_wire_and_protected_debug() {
+        let candidate = principal();
+        let wire = serde_json::to_value(&candidate).expect("candidate wire");
+        assert_eq!(
+            wire,
+            serde_json::to_value(candidate.principal()).expect("canonical wire")
+        );
+        assert_eq!(
+            serde_json::from_value::<GrantPrincipal>(wire).expect("decode qualified"),
+            candidate
+        );
+        assert_eq!(format!("{candidate:?}"), "GrantPrincipal([protected])");
+    }
+
+    #[test]
+    fn candidate_principal_refuses_unqualified_and_malformed_wire() {
+        let valid = serde_json::to_value(principal()).expect("qualified wire");
+        let mut malformed_id = valid.clone();
+        malformed_id["id"] = json!("");
+        let mut malformed_domain = valid.clone();
+        malformed_domain["qualification"]["trust_domain_id"] = json!(" ");
+        let mut unknown_qualification = valid;
+        unknown_qualification["qualification"]["kind"] = json!("future");
+        for wire in [
+            json!({"kind":"service_account", "id":"legacy"}),
+            json!({"kind":"service_account", "id":"legacy", "qualification":{"kind":"unqualified"}}),
+            json!({"kind":"service_account", "id":"legacy", "qualification":{"kind":"unqualified", "trust_domain_id":null}}),
+            malformed_id,
+            malformed_domain,
+            unknown_qualification,
+        ] {
+            assert!(serde_json::from_value::<GrantPrincipal>(wire).is_err());
+        }
+    }
+
+    #[test]
+    fn candidate_record_roundtrips_and_refuses_unknown_duplicate_or_bad_principal() {
+        let record = GrantRecord {
+            id: EvidenceId::new("candidate-record").expect("id"),
+            parent: None,
+            issuer: principal(),
+            grantee: principal(),
+            represented_subject: None,
+            issued_revision: 1,
+            restrictions: ExecutionRestrictions::unrestricted(),
+        };
+        let wire = serde_json::to_string(&record).expect("record wire");
+        assert_eq!(
+            serde_json::from_str::<GrantRecord>(&wire).expect("record decode"),
+            record
+        );
+        assert_eq!(format!("{record:?}"), "GrantRecord([protected])");
+        let duplicate = wire.replacen(
+            "\"issued_revision\":1",
+            "\"issued_revision\":1,\"issued_revision\":2",
+            1,
+        );
+        assert_ne!(duplicate, wire, "duplicate control must alter the wire");
+        assert!(serde_json::from_str::<GrantRecord>(&duplicate).is_err());
+        let mut unknown = serde_json::to_value(&record).expect("record value");
+        unknown["authenticated"] = json!(true);
+        assert!(serde_json::from_value::<GrantRecord>(unknown).is_err());
+        let mut bad_principal = serde_json::to_value(&record).expect("record value");
+        bad_principal["grantee"] = json!({"kind":"service_account", "id":"legacy"});
+        assert!(serde_json::from_value::<GrantRecord>(bad_principal).is_err());
+    }
 }

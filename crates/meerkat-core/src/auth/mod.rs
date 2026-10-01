@@ -53,8 +53,8 @@ pub use metadata::{
 };
 pub use principal::{
     ActingOnBehalfOf, AuthGrant, GrantAction, GrantScope, PrincipalContractError, PrincipalId,
-    PrincipalKind, PrincipalRef, VisibilityClass, can_observe_visibility,
-    metadata_grants_no_visibility,
+    PrincipalKind, PrincipalQualification, PrincipalRef, TrustDomainId, VisibilityClass,
+    can_observe_visibility, metadata_grants_no_visibility,
 };
 pub use status::{AuthErrorSummary, AuthStatus, AuthStatusPhase};
 pub use token_store::{

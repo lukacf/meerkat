@@ -2968,6 +2968,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-authorization"
+version = "0.8.50"
+dependencies = [
+ "indexmap",
+ "meerkat-authorization-contracts",
+ "meerkat-core",
+ "meerkat-machine-dsl",
+ "meerkat-machine-schema",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "meerkat-authorization-contracts"
+version = "0.8.50"
+dependencies = [
+ "meerkat-core",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "meerkat-capabilities"
 version = "0.8.50"
 dependencies = [
@@ -3317,6 +3341,7 @@ name = "meerkat-machine-kernels"
 version = "0.8.50"
 dependencies = [
  "indexmap",
+ "meerkat-authorization-contracts",
  "meerkat-core",
  "meerkat-machine-schema",
  "serde",
@@ -3329,6 +3354,7 @@ name = "meerkat-machine-schema"
 version = "0.8.50"
 dependencies = [
  "indexmap",
+ "meerkat-authorization-contracts",
  "meerkat-core",
  "meerkat-machine-dsl",
  "serde",

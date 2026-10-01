@@ -35,6 +35,39 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat_core::auth::PrincipalRef` gains the public `qualification` field
+  (`PrincipalQualification`), also re-exported through `meerkat_core` and
+  `meerkat_contracts`. Rust struct literals must supply it. Use
+  `PrincipalRef::new` for explicitly unqualified trusted-embedded identity or
+  `PrincipalRef::in_domain` with a validated `TrustDomainId` for qualified
+  identity. `PrincipalContractError` gains `EmptyTrustDomainId`,
+  `InvalidTrustDomainId` and `UnqualifiedPrincipal`; exhaustive matches must
+  handle them.
+- Behaviour-only (not measured by the gate): principal equality, private
+  visibility and `AuthGrant::allows` distinguish trust-domain qualification.
+  Missing qualification on old wire records remains `Unqualified` and is
+  omitted when serialized, preserving legacy bytes. Qualified records validate
+  their principal and domain IDs through validated constructors and
+  deserialization. Governed admission must call `PrincipalRef::validate_qualified`
+  to recheck public-field construction and separately establish authority. Legacy
+  unqualified `PrincipalId` deserialization remains permissive: existing
+  persisted IDs require an explicit validation/migration before governed use;
+  this change does not silently reject or qualify them.
+
+### Added
+
+- Portable authorization restriction contracts and a generated process-local
+  grant authority with qualified identities, exact attenuation, ancestor
+  revocation and current full-lineage resolution. These crates provide the
+  foundation for governed operations; native enforcement and durable grant
+  recovery are not enabled by this addition.
+
+- Canonical principal, trust-domain, grant and visibility contracts are now
+  emitted as schema roots and generated Python and TypeScript SDK types.
+  Their Rust vocabulary remains available without a feature gate.
+
 ## [0.8.50] - 2026-10-01
 
 ### Breaking

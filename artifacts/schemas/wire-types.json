@@ -1,4 +1,144 @@
 {
+  "ActingOnBehalfOf": {
+    "$defs": {
+      "PrincipalId": {
+        "description": "Stable, caller-visible principal id.\n\nLegacy deserialization preserves previously persisted strings, including\nthose rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization\nvalidates the id; migrating unqualified persisted ids is a separate step.",
+        "type": "string"
+      },
+      "PrincipalKind": {
+        "description": "Generic principal categories. Product-specific role names belong outside\ncore and may be mapped to these typed categories by clients.",
+        "enum": [
+          "human",
+          "personal_agent",
+          "shared_agent",
+          "runtime_host",
+          "service_account"
+        ],
+        "type": "string"
+      },
+      "PrincipalQualification": {
+        "description": "Whether an identity has an explicit trust-domain namespace.\n\nUnqualified identity preserves trusted-embedded and legacy wire contracts;\nit must not be silently assigned a domain for governed use. Qualification\nis identity vocabulary, not proof of authentication or authorization.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unqualified",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "qualified",
+                "type": "string"
+              },
+              "trust_domain_id": {
+                "$ref": "#/$defs/TrustDomainId"
+              }
+            },
+            "required": [
+              "kind",
+              "trust_domain_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PrincipalRef": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "qualification": {
+                  "properties": {
+                    "kind": {
+                      "const": "qualified"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                }
+              },
+              "required": [
+                "qualification"
+              ]
+            },
+            "then": {
+              "properties": {
+                "id": {
+                  "allOf": [
+                    {
+                      "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+                    },
+                    {
+                      "not": {
+                        "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "description": "Typed principal reference.\n\nPublic fields preserve the existing data contract, so an in-memory value\nis not proof of valid or authenticated identity. Governed admission must\ncall [`Self::validate_qualified`] and separately establish caller authority.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/PrincipalId"
+          },
+          "kind": {
+            "$ref": "#/$defs/PrincipalKind"
+          },
+          "qualification": {
+            "$ref": "#/$defs/PrincipalQualification"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "TrustDomainId": {
+        "allOf": [
+          {
+            "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          },
+          {
+            "not": {
+              "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+            }
+          }
+        ],
+        "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Explicit acting-on-behalf-of relationship for audit and policy checks.",
+    "properties": {
+      "actor": {
+        "$ref": "#/$defs/PrincipalRef"
+      },
+      "subject": {
+        "$ref": "#/$defs/PrincipalRef"
+      }
+    },
+    "required": [
+      "actor",
+      "subject"
+    ],
+    "title": "ActingOnBehalfOf",
+    "type": "object"
+  },
   "AgentEventEnvelope": {
     "$defs": {
       "AgentErrorClass": {
@@ -10333,6 +10473,318 @@
       "expected_revision"
     ],
     "title": "AttentionResumeRequest",
+    "type": "object"
+  },
+  "AuthGrant": {
+    "$defs": {
+      "ActingOnBehalfOf": {
+        "description": "Explicit acting-on-behalf-of relationship for audit and policy checks.",
+        "properties": {
+          "actor": {
+            "$ref": "#/$defs/PrincipalRef"
+          },
+          "subject": {
+            "$ref": "#/$defs/PrincipalRef"
+          }
+        },
+        "required": [
+          "actor",
+          "subject"
+        ],
+        "type": "object"
+      },
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
+      "GrantAction": {
+        "description": "Actions that grants may allow. Enforcement sites decide which action is\nneeded for a specific operation.",
+        "oneOf": [
+          {
+            "enum": [
+              "observe",
+              "replay_events",
+              "request_approval",
+              "decide_approval",
+              "use_tool",
+              "manage_runtime"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "use_auth_binding",
+            "description": "Use one exact realm credential binding on behalf of a durable target.\n\nThe enforcement seam also requires an exact\n[`ActingOnBehalfOf`] match. Binding existence alone never grants this\naction.",
+            "type": "string"
+          }
+        ]
+      },
+      "GrantScope": {
+        "description": "Generic scope for grants and shared visibility.",
+        "oneOf": [
+          {
+            "properties": {
+              "realm_id": {
+                "type": "string"
+              },
+              "scope_type": {
+                "const": "realm",
+                "type": "string"
+              }
+            },
+            "required": [
+              "scope_type",
+              "realm_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "scope_type": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "scope_type",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "mob_id": {
+                "type": "string"
+              },
+              "scope_type": {
+                "const": "mob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "scope_type",
+              "mob_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Exact realm credential binding authorized for use. The optional\nprofile is part of the scope so a grant for the binding's default auth\nprofile cannot authorize a caller-selected override profile.",
+            "properties": {
+              "binding_id": {
+                "$ref": "#/$defs/BindingId"
+              },
+              "profile_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ProfileId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "realm_id": {
+                "$ref": "#/$defs/RealmId"
+              },
+              "scope_type": {
+                "const": "auth_binding",
+                "type": "string"
+              }
+            },
+            "required": [
+              "scope_type",
+              "realm_id",
+              "binding_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Product-neutral extension point. The typed namespace/id pair is policy\ninput; labels/app context are still not authority.",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "namespace": {
+                "type": "string"
+              },
+              "scope_type": {
+                "const": "application",
+                "type": "string"
+              }
+            },
+            "required": [
+              "scope_type",
+              "namespace",
+              "id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PrincipalId": {
+        "description": "Stable, caller-visible principal id.\n\nLegacy deserialization preserves previously persisted strings, including\nthose rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization\nvalidates the id; migrating unqualified persisted ids is a separate step.",
+        "type": "string"
+      },
+      "PrincipalKind": {
+        "description": "Generic principal categories. Product-specific role names belong outside\ncore and may be mapped to these typed categories by clients.",
+        "enum": [
+          "human",
+          "personal_agent",
+          "shared_agent",
+          "runtime_host",
+          "service_account"
+        ],
+        "type": "string"
+      },
+      "PrincipalQualification": {
+        "description": "Whether an identity has an explicit trust-domain namespace.\n\nUnqualified identity preserves trusted-embedded and legacy wire contracts;\nit must not be silently assigned a domain for governed use. Qualification\nis identity vocabulary, not proof of authentication or authorization.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unqualified",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "qualified",
+                "type": "string"
+              },
+              "trust_domain_id": {
+                "$ref": "#/$defs/TrustDomainId"
+              }
+            },
+            "required": [
+              "kind",
+              "trust_domain_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PrincipalRef": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "qualification": {
+                  "properties": {
+                    "kind": {
+                      "const": "qualified"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                }
+              },
+              "required": [
+                "qualification"
+              ]
+            },
+            "then": {
+              "properties": {
+                "id": {
+                  "allOf": [
+                    {
+                      "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+                    },
+                    {
+                      "not": {
+                        "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "description": "Typed principal reference.\n\nPublic fields preserve the existing data contract, so an in-memory value\nis not proof of valid or authenticated identity. Governed admission must\ncall [`Self::validate_qualified`] and separately establish caller authority.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/PrincipalId"
+          },
+          "kind": {
+            "$ref": "#/$defs/PrincipalKind"
+          },
+          "qualification": {
+            "$ref": "#/$defs/PrincipalQualification"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "ProfileId": {
+        "description": "Opaque slug identifying an auth profile override on a connection.",
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
+        "type": "string"
+      },
+      "TrustDomainId": {
+        "allOf": [
+          {
+            "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          },
+          {
+            "not": {
+              "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+            }
+          }
+        ],
+        "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A typed grant issued to a principal for a single scope.",
+    "properties": {
+      "acting_on_behalf_of": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ActingOnBehalfOf"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "actions": {
+        "items": {
+          "$ref": "#/$defs/GrantAction"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "principal": {
+        "$ref": "#/$defs/PrincipalRef"
+      },
+      "scope": {
+        "$ref": "#/$defs/GrantScope"
+      }
+    },
+    "required": [
+      "principal",
+      "scope",
+      "actions"
+    ],
+    "title": "AuthGrant",
     "type": "object"
   },
   "BlobPayload": {
@@ -93888,6 +94340,150 @@
     "title": "GoalTerminalStatus",
     "type": "string"
   },
+  "GrantAction": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Actions that grants may allow. Enforcement sites decide which action is\nneeded for a specific operation.",
+    "oneOf": [
+      {
+        "enum": [
+          "observe",
+          "replay_events",
+          "request_approval",
+          "decide_approval",
+          "use_tool",
+          "manage_runtime"
+        ],
+        "type": "string"
+      },
+      {
+        "const": "use_auth_binding",
+        "description": "Use one exact realm credential binding on behalf of a durable target.\n\nThe enforcement seam also requires an exact\n[`ActingOnBehalfOf`] match. Binding existence alone never grants this\naction.",
+        "type": "string"
+      }
+    ],
+    "title": "GrantAction"
+  },
+  "GrantScope": {
+    "$defs": {
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
+      "ProfileId": {
+        "description": "Opaque slug identifying an auth profile override on a connection.",
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Generic scope for grants and shared visibility.",
+    "oneOf": [
+      {
+        "properties": {
+          "realm_id": {
+            "type": "string"
+          },
+          "scope_type": {
+            "const": "realm",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope_type",
+          "realm_id"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "scope_type": {
+            "const": "session",
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope_type",
+          "session_id"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "mob_id": {
+            "type": "string"
+          },
+          "scope_type": {
+            "const": "mob",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope_type",
+          "mob_id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Exact realm credential binding authorized for use. The optional\nprofile is part of the scope so a grant for the binding's default auth\nprofile cannot authorize a caller-selected override profile.",
+        "properties": {
+          "binding_id": {
+            "$ref": "#/$defs/BindingId"
+          },
+          "profile_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "realm_id": {
+            "$ref": "#/$defs/RealmId"
+          },
+          "scope_type": {
+            "const": "auth_binding",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope_type",
+          "realm_id",
+          "binding_id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Product-neutral extension point. The typed namespace/id pair is policy\ninput; labels/app context are still not authority.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "scope_type": {
+            "const": "application",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope_type",
+          "namespace",
+          "id"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "GrantScope"
+  },
   "HelpExecutionMode": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Execution posture requested by a help caller.\n\nToday all help surfaces are advisory. `plan_execution` is a forward-compatible\nhook for callers that want an executable plan without permitting Meerkat to\nperform the execution yet.",
@@ -124059,6 +124655,202 @@
     "title": "PortableToolConfig",
     "type": "object"
   },
+  "PrincipalId": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Stable, caller-visible principal id.\n\nLegacy deserialization preserves previously persisted strings, including\nthose rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization\nvalidates the id; migrating unqualified persisted ids is a separate step.",
+    "title": "PrincipalId",
+    "type": "string"
+  },
+  "PrincipalKind": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Generic principal categories. Product-specific role names belong outside\ncore and may be mapped to these typed categories by clients.",
+    "enum": [
+      "human",
+      "personal_agent",
+      "shared_agent",
+      "runtime_host",
+      "service_account"
+    ],
+    "title": "PrincipalKind",
+    "type": "string"
+  },
+  "PrincipalQualification": {
+    "$defs": {
+      "TrustDomainId": {
+        "allOf": [
+          {
+            "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          },
+          {
+            "not": {
+              "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+            }
+          }
+        ],
+        "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Whether an identity has an explicit trust-domain namespace.\n\nUnqualified identity preserves trusted-embedded and legacy wire contracts;\nit must not be silently assigned a domain for governed use. Qualification\nis identity vocabulary, not proof of authentication or authorization.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "unqualified",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "qualified",
+            "type": "string"
+          },
+          "trust_domain_id": {
+            "$ref": "#/$defs/TrustDomainId"
+          }
+        },
+        "required": [
+          "kind",
+          "trust_domain_id"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "PrincipalQualification"
+  },
+  "PrincipalRef": {
+    "$defs": {
+      "PrincipalId": {
+        "description": "Stable, caller-visible principal id.\n\nLegacy deserialization preserves previously persisted strings, including\nthose rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization\nvalidates the id; migrating unqualified persisted ids is a separate step.",
+        "type": "string"
+      },
+      "PrincipalKind": {
+        "description": "Generic principal categories. Product-specific role names belong outside\ncore and may be mapped to these typed categories by clients.",
+        "enum": [
+          "human",
+          "personal_agent",
+          "shared_agent",
+          "runtime_host",
+          "service_account"
+        ],
+        "type": "string"
+      },
+      "PrincipalQualification": {
+        "description": "Whether an identity has an explicit trust-domain namespace.\n\nUnqualified identity preserves trusted-embedded and legacy wire contracts;\nit must not be silently assigned a domain for governed use. Qualification\nis identity vocabulary, not proof of authentication or authorization.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unqualified",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "qualified",
+                "type": "string"
+              },
+              "trust_domain_id": {
+                "$ref": "#/$defs/TrustDomainId"
+              }
+            },
+            "required": [
+              "kind",
+              "trust_domain_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "TrustDomainId": {
+        "allOf": [
+          {
+            "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          },
+          {
+            "not": {
+              "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+            }
+          }
+        ],
+        "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "allOf": [
+      {
+        "if": {
+          "properties": {
+            "qualification": {
+              "properties": {
+                "kind": {
+                  "const": "qualified"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            }
+          },
+          "required": [
+            "qualification"
+          ]
+        },
+        "then": {
+          "properties": {
+            "id": {
+              "allOf": [
+                {
+                  "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+                },
+                {
+                  "not": {
+                    "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "description": "Typed principal reference.\n\nPublic fields preserve the existing data contract, so an in-memory value\nis not proof of valid or authenticated identity. Governed admission must\ncall [`Self::validate_qualified`] and separately establish caller authority.",
+    "properties": {
+      "id": {
+        "$ref": "#/$defs/PrincipalId"
+      },
+      "kind": {
+        "$ref": "#/$defs/PrincipalKind"
+      },
+      "qualification": {
+        "$ref": "#/$defs/PrincipalQualification"
+      }
+    },
+    "required": [
+      "kind",
+      "id"
+    ],
+    "title": "PrincipalRef",
+    "type": "object"
+  },
   "ProjectedAttentionAuthority": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
@@ -137828,6 +138620,300 @@
       }
     ],
     "title": "TranscriptRewriteSelection"
+  },
+  "TrustDomainId": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "allOf": [
+      {
+        "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+      },
+      {
+        "not": {
+          "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+        }
+      }
+    ],
+    "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+    "title": "TrustDomainId",
+    "type": "string"
+  },
+  "VisibilityClass": {
+    "$defs": {
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
+      "GrantScope": {
+        "description": "Generic scope for grants and shared visibility.",
+        "oneOf": [
+          {
+            "properties": {
+              "realm_id": {
+                "type": "string"
+              },
+              "scope_type": {
+                "const": "realm",
+                "type": "string"
+              }
+            },
+            "required": [
+              "scope_type",
+              "realm_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "scope_type": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "scope_type",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "mob_id": {
+                "type": "string"
+              },
+              "scope_type": {
+                "const": "mob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "scope_type",
+              "mob_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Exact realm credential binding authorized for use. The optional\nprofile is part of the scope so a grant for the binding's default auth\nprofile cannot authorize a caller-selected override profile.",
+            "properties": {
+              "binding_id": {
+                "$ref": "#/$defs/BindingId"
+              },
+              "profile_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ProfileId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "realm_id": {
+                "$ref": "#/$defs/RealmId"
+              },
+              "scope_type": {
+                "const": "auth_binding",
+                "type": "string"
+              }
+            },
+            "required": [
+              "scope_type",
+              "realm_id",
+              "binding_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Product-neutral extension point. The typed namespace/id pair is policy\ninput; labels/app context are still not authority.",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "namespace": {
+                "type": "string"
+              },
+              "scope_type": {
+                "const": "application",
+                "type": "string"
+              }
+            },
+            "required": [
+              "scope_type",
+              "namespace",
+              "id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PrincipalId": {
+        "description": "Stable, caller-visible principal id.\n\nLegacy deserialization preserves previously persisted strings, including\nthose rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization\nvalidates the id; migrating unqualified persisted ids is a separate step.",
+        "type": "string"
+      },
+      "PrincipalKind": {
+        "description": "Generic principal categories. Product-specific role names belong outside\ncore and may be mapped to these typed categories by clients.",
+        "enum": [
+          "human",
+          "personal_agent",
+          "shared_agent",
+          "runtime_host",
+          "service_account"
+        ],
+        "type": "string"
+      },
+      "PrincipalQualification": {
+        "description": "Whether an identity has an explicit trust-domain namespace.\n\nUnqualified identity preserves trusted-embedded and legacy wire contracts;\nit must not be silently assigned a domain for governed use. Qualification\nis identity vocabulary, not proof of authentication or authorization.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unqualified",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "qualified",
+                "type": "string"
+              },
+              "trust_domain_id": {
+                "$ref": "#/$defs/TrustDomainId"
+              }
+            },
+            "required": [
+              "kind",
+              "trust_domain_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PrincipalRef": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "qualification": {
+                  "properties": {
+                    "kind": {
+                      "const": "qualified"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                }
+              },
+              "required": [
+                "qualification"
+              ]
+            },
+            "then": {
+              "properties": {
+                "id": {
+                  "allOf": [
+                    {
+                      "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+                    },
+                    {
+                      "not": {
+                        "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "description": "Typed principal reference.\n\nPublic fields preserve the existing data contract, so an in-memory value\nis not proof of valid or authenticated identity. Governed admission must\ncall [`Self::validate_qualified`] and separately establish caller authority.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/PrincipalId"
+          },
+          "kind": {
+            "$ref": "#/$defs/PrincipalKind"
+          },
+          "qualification": {
+            "$ref": "#/$defs/PrincipalQualification"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "ProfileId": {
+        "description": "Opaque slug identifying an auth profile override on a connection.",
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
+        "type": "string"
+      },
+      "TrustDomainId": {
+        "allOf": [
+          {
+            "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          },
+          {
+            "not": {
+              "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+            }
+          }
+        ],
+        "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed visibility class for events, artifacts, approvals, or future records.",
+    "oneOf": [
+      {
+        "properties": {
+          "principal": {
+            "$ref": "#/$defs/PrincipalRef"
+          },
+          "visibility": {
+            "const": "private",
+            "type": "string"
+          }
+        },
+        "required": [
+          "visibility",
+          "principal"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "scope": {
+            "$ref": "#/$defs/GrantScope"
+          },
+          "visibility": {
+            "const": "scoped",
+            "type": "string"
+          }
+        },
+        "required": [
+          "visibility",
+          "scope"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "VisibilityClass"
   },
   "WireAssistantBlock": {
     "$defs": {

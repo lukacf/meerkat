@@ -1,0 +1,27 @@
+[package]
+name = "meerkat-authorization"
+description = "Process-local generated grant authority for Meerkat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+indexmap.workspace = true
+meerkat-core.workspace = true
+meerkat-machine-schema.workspace = true
+meerkat-machine-dsl.workspace = true
+meerkat-authorization-contracts.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

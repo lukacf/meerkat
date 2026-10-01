@@ -8,12 +8,14 @@ printf '%s\n' \
   meerkat-machine-dsl-core \
   meerkat-agent-build-authority \
   meerkat-core \
+  meerkat-authorization-contracts \
   meerkat-atif \
   meerkat-store-conformance \
   meerkat-models \
   meerkat-capabilities \
   meerkat-machine-dsl \
   meerkat-machine-schema \
+  meerkat-authorization \
   meerkat-machine-kernels \
   meerkat-skills \
   meerkat-schedule \

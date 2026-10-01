@@ -150,9 +150,9 @@ pub use artifact::{
 pub use auth::{
     ActingOnBehalfOf, AuthBindingUseDecision, AuthBindingUseDenial, AuthBindingUseGateError,
     AuthBindingUseRequest, AuthBindingUseWitness, AuthGrant, GrantAction, GrantScope,
-    PrincipalContractError, PrincipalId, PrincipalKind, PrincipalRef, VisibilityClass,
-    authorize_explicit_auth_binding_use, authorize_then_materialize_auth_binding,
-    can_observe_visibility, metadata_grants_no_visibility,
+    PrincipalContractError, PrincipalId, PrincipalKind, PrincipalQualification, PrincipalRef,
+    TrustDomainId, VisibilityClass, authorize_explicit_auth_binding_use,
+    authorize_then_materialize_auth_binding, can_observe_visibility, metadata_grants_no_visibility,
 };
 pub use blob::{
     BlobAddressAttestation, BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError,

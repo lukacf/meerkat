@@ -660,6 +660,24 @@ SKILL_LIST_RPC_CONTRACT_ALIAS_TYPES = [
     "SourceUuid",
 ]
 
+# Canonical core principal vocabulary re-exported by the wire contracts.
+# These are identity/policy inputs, not evidence of authenticated authority.
+AUTH_PRINCIPAL_OBJECT_TYPES = [
+    "PrincipalRef",
+    "ActingOnBehalfOf",
+    "AuthGrant",
+]
+
+AUTH_PRINCIPAL_ALIAS_TYPES = [
+    "PrincipalId",
+    "TrustDomainId",
+    "PrincipalKind",
+    "PrincipalQualification",
+    "GrantScope",
+    "GrantAction",
+    "VisibilityClass",
+]
+
 # K8a: canonical typed tool identity. `ToolName` is a transparent string
 # newtype on the wire; promote and alias it so `PublicTurnToolOverlay`
 # (and the deferred-catalog delta event payloads) keep `string`-shaped SDK
@@ -912,6 +930,8 @@ def _promote_nested_schema_def(name: str) -> bool:
         *SKILL_LIST_RPC_CONTRACT_HELPER_TYPES,
         *SKILL_LIST_RPC_CONTRACT_ALIAS_TYPES,
         *TOOL_IDENTITY_ALIAS_TYPES,
+        *AUTH_PRINCIPAL_OBJECT_TYPES,
+        *AUTH_PRINCIPAL_ALIAS_TYPES,
         *WORKGRAPH_RPC_CONTRACT_TYPES,
         *WORKGRAPH_RPC_CONTRACT_ALIAS_TYPES,
         *WORKGRAPH_RPC_CONTRACT_HELPER_TYPES,
@@ -1555,6 +1575,8 @@ def _sdk_contract_type_roster() -> list[str]:
     """Every schema-named contract type emitted by the SDK generators."""
     roster: list[str] = []
     for group in (
+        AUTH_PRINCIPAL_OBJECT_TYPES,
+        AUTH_PRINCIPAL_ALIAS_TYPES,
         K20_CATALOG_CONTRACT_TYPES,
         MCP_LIVE_CONTRACT_TYPES,
         MCP_CONFIG_HELPER_TYPES,
@@ -3582,6 +3604,10 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         types_content += f"\n{doc_block}\n{name} = {alias_type}\n"
         emitted_python_named_types.add(name)
 
+    for name in AUTH_PRINCIPAL_ALIAS_TYPES:
+        append_python_alias(name, wire_schema, f"Canonical principal contract for {name}.")
+    for name in AUTH_PRINCIPAL_OBJECT_TYPES:
+        append_python_contract_dataclass(name)
     for name in MCP_CONFIG_HELPER_TYPES:
         append_python_contract_dataclass(name)
     types_content += "\nclass McpStdioServerConfig(TypedDict, total=False):\n"
@@ -4370,6 +4396,10 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         types_content += f"\nexport type {name} = {alias_type};\n"
         emitted_typescript_named_types.add(name)
 
+    for name in AUTH_PRINCIPAL_ALIAS_TYPES:
+        append_typescript_alias(name, wire_schema)
+    for name in AUTH_PRINCIPAL_OBJECT_TYPES:
+        append_typescript_contract_interface(name)
     for name in MCP_CONFIG_HELPER_TYPES:
         append_typescript_contract_interface(name)
     types_content += (

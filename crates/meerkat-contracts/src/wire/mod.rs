@@ -85,8 +85,8 @@ pub use artifact::{
     ArtifactListResult,
 };
 pub use auth::{
-    ActingOnBehalfOf, AuthGrant, GrantAction, GrantScope, PrincipalId, PrincipalKind, PrincipalRef,
-    VisibilityClass,
+    ActingOnBehalfOf, AuthGrant, GrantAction, GrantScope, PrincipalId, PrincipalKind,
+    PrincipalQualification, PrincipalRef, TrustDomainId, VisibilityClass,
 };
 pub use error::{
     WireConversionError, WireHostUnavailableDetail, WireMobErrorDetail, WireStaleCursorDetail,

@@ -76,6 +76,7 @@ fn canonical_machine_slug_snapshot() {
             "AuthMachine".to_string(),
             "DetachedJobMachine".to_string(),
             "ForkedParticipantLifecycleMachine".to_string(),
+            "GrantAuthorityMachine".to_string(),
             "MeerkatMachine".to_string(),
             "MobMachine".to_string(),
             "OccurrenceLifecycleMachine".to_string(),

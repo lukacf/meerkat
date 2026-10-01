@@ -173,6 +173,106 @@ def _expect_wire_const(value: Any, expected: Any, context: str) -> Any:
 
 
 
+# Stable, caller-visible principal id.
+#
+# Legacy deserialization preserves previously persisted strings, including
+# those rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization
+# validates the id; migrating unqualified persisted ids is a separate step.
+PrincipalId = str
+
+# Exact, opaque trust-domain namespace for a qualified principal id.
+#
+# Domain ids are not inferred from hostnames or normalized. Constructing one
+# validates its syntax, not the caller's authority to assert that domain.
+TrustDomainId = str
+
+# Generic principal categories. Product-specific role names belong outside
+# core and may be mapped to these typed categories by clients.
+PrincipalKind = Literal['human', 'personal_agent', 'shared_agent', 'runtime_host', 'service_account']
+
+# Whether an identity has an explicit trust-domain namespace.
+#
+# Unqualified identity preserves trusted-embedded and legacy wire contracts;
+# it must not be silently assigned a domain for governed use. Qualification
+# is identity vocabulary, not proof of authentication or authorization.
+class PrincipalQualificationUnqualified(TypedDict, total=False):
+    kind: Required[Literal['unqualified']]
+
+class PrincipalQualificationQualified(TypedDict, total=False):
+    kind: Required[Literal['qualified']]
+    trust_domain_id: Required[TrustDomainId]
+
+PrincipalQualification = PrincipalQualificationUnqualified | PrincipalQualificationQualified
+
+# Generic scope for grants and shared visibility.
+class GrantScopeRealm(TypedDict, total=False):
+    realm_id: Required[str]
+    scope_type: Required[Literal['realm']]
+
+class GrantScopeSession(TypedDict, total=False):
+    scope_type: Required[Literal['session']]
+    session_id: Required[str]
+
+class GrantScopeMob(TypedDict, total=False):
+    mob_id: Required[str]
+    scope_type: Required[Literal['mob']]
+
+class GrantScopeAuthBinding(TypedDict, total=False):
+    binding_id: Required[BindingId]
+    profile_id: NotRequired[Optional[ProfileId]]
+    realm_id: Required[RealmId]
+    scope_type: Required[Literal['auth_binding']]
+
+class GrantScopeApplication(TypedDict, total=False):
+    id: Required[str]
+    namespace: Required[str]
+    scope_type: Required[Literal['application']]
+
+GrantScope = GrantScopeRealm | GrantScopeSession | GrantScopeMob | GrantScopeAuthBinding | GrantScopeApplication
+
+# Actions that grants may allow. Enforcement sites decide which action is
+# needed for a specific operation.
+GrantAction = Literal['observe', 'replay_events', 'request_approval', 'decide_approval', 'use_tool', 'manage_runtime'] | Literal['use_auth_binding']
+
+# Typed visibility class for events, artifacts, approvals, or future records.
+class VisibilityClassPrivate(TypedDict, total=False):
+    principal: Required[PrincipalRef]
+    visibility: Required[Literal['private']]
+
+class VisibilityClassScoped(TypedDict, total=False):
+    scope: Required[GrantScope]
+    visibility: Required[Literal['scoped']]
+
+VisibilityClass = VisibilityClassPrivate | VisibilityClassScoped
+
+@dataclass
+class PrincipalRef:
+    """Typed principal reference.
+
+Public fields preserve the existing data contract, so an in-memory value
+is not proof of valid or authenticated identity. Governed admission must
+call [`Self::validate_qualified`] and separately establish caller authority."""
+    id: PrincipalId
+    kind: PrincipalKind
+    qualification: Optional[PrincipalQualification] = None
+
+
+@dataclass
+class ActingOnBehalfOf:
+    """Explicit acting-on-behalf-of relationship for audit and policy checks."""
+    actor: PrincipalRef
+    subject: PrincipalRef
+
+
+@dataclass
+class AuthGrant:
+    """A typed grant issued to a principal for a single scope."""
+    actions: list[GrantAction]
+    principal: PrincipalRef
+    scope: GrantScope
+    acting_on_behalf_of: Optional[ActingOnBehalfOf] = None
+
+
 @dataclass
 class McpStdioConfig:
     """Stdio transport configuration"""

@@ -36,6 +36,7 @@ pub mod approval_lifecycle;
 pub mod auth_machine;
 pub mod detached_job;
 pub mod forked_participant_lifecycle;
+pub mod grant_authority;
 pub mod meerkat_machine;
 pub mod mob_host_binding_authority;
 pub mod mob_machine;
@@ -103,6 +104,8 @@ impl MachineSchemaMetadata {
 }
 
 pub const AUTH_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
+pub const GRANT_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-authorization";
+pub const GRANT_AUTHORITY_PRODUCTION_RUST_MODULE: &str = "grants::dsl";
 pub const AUTH_MACHINE_PRODUCTION_RUST_MODULE: &str = "auth_machine::dsl";
 pub const APPROVAL_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
 pub const APPROVAL_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "generated::approval_lifecycle";
@@ -5043,4 +5046,17 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
         vec![],
     )
     .with_ci_step_limit(5)
+}
+
+pub fn dsl_grant_authority_machine() -> MachineSchema {
+    grant_authority::schema_metadata()
+        .attach_to(grant_authority::GrantAuthorityMachineState::schema())
+}
+
+pub fn dsl_grant_authority_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_grant_authority_machine(),
+        GRANT_AUTHORITY_PRODUCTION_RUST_CRATE,
+        GRANT_AUTHORITY_PRODUCTION_RUST_MODULE,
+    )
 }

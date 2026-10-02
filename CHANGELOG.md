@@ -373,7 +373,9 @@ them.
   MemberStopRun, MemberRunStarts, NotHoldableReason}`): what a mob Stop did to
   each member's run (`NoRun`, `CancelledAtBoundary`, `RunEndedBeforeCancel`,
   `LeftRunning`, `Interrupted`) and whether its run starts are held (`Held`,
-  or `NotHoldable` with the reason).
+  `NotHoldable` with the reason, or `NotBound` for a member the mob cannot
+  reach right now: a placed member whose host carrier is dormant, or an
+  unbound remote peer, which is held on its next bind).
 - `meerkat_runtime::MeerkatMachine::hold_run_starts` (returns
   `RunStartsHold { current_run }`) and `release_run_starts`.
 - Supervisor bridge: `BridgeCommand::HoldRunStarts` /
@@ -766,7 +768,14 @@ them.
     notice, which a held orchestrator could only read after Resume; the
     existing resume notice tells it the mob resumed.
   - A remote member that was not bound when Resume released holds gets its
-    release on its next bind.
+    release on its next bind, and one that was not bound when Stop held them
+    gets the hold on its next bind. A placed member whose host carrier is
+    dormant (for example after a cleanup-backed host revoke) is reported
+    `NotBound` instead of failing the Stop; MobMachine re-activates a placed
+    carrier only while Running.
+  - A spawn that completes into a Stopped mob leaves it Stopped and holds
+    its members, the new one included. Before, MobMachine's spawn completion
+    moved a Stopped mob back to Running. Only Resume leaves Stopped.
 - The runtime store test `contended_unregister_finalization_does_not_starve_runtime_worker`
   no longer fails on a loaded host. Its two 1 s wall-clock waits are replaced
   by typed handoffs. The heartbeat now fires on a test-only signal sent when

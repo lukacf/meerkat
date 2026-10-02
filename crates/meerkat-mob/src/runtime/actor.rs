@@ -16992,6 +16992,18 @@ impl MobActor {
         Ok(())
     }
 
+    /// A placed member whose host carrier is dormant (its host is unbound or
+    /// was revoked): no host command reaches it, and MobMachine re-activates
+    /// a placed carrier only while Running, so nothing reaches it before
+    /// Resume (#1500).
+    fn placed_member_carrier_dormant(&self, identity: &AgentIdentity) -> bool {
+        let state = self.dsl_authority.state();
+        super::member_runtime_is_host_owned(state, identity)
+            && !state.placed_carrier_binding_active_for_identity(
+                &mob_dsl::AgentIdentity::from_domain(identity),
+            )
+    }
+
     fn autonomous_stop_interrupt_incarnation(
         &self,
         entry: &RosterEntry,
@@ -17526,6 +17538,16 @@ impl MobActor {
         };
         let mut outcomes = BTreeMap::new();
         for entry in &entries {
+            if self.placed_member_carrier_dormant(&entry.agent_identity) {
+                outcomes.insert(
+                    entry.agent_identity.clone(),
+                    super::stop_report::MemberStopOutcome {
+                        run: super::stop_report::MemberStopRun::NoRun,
+                        starts: super::stop_report::MemberRunStarts::NotBound,
+                    },
+                );
+                continue;
+            }
             let incarnation = self.autonomous_stop_interrupt_incarnation(entry)?;
             let outcome = converge_autonomous_stop_member_result(
                 self.provisioner
@@ -18910,9 +18932,6 @@ impl MobActor {
         self.apply_dsl_input(input(attempt), context)
     }
 
-    /// A resume that released the members' run-start holds and then failed
-    /// leaves the mob Stopped: hold them again (#1500), so their queued input
-    /// still waits for a resume that succeeds.
     /// Realize MobMachine's `HoldMemberRunStarts` on a member provisioned by
     /// a spawn that completed into a Stopped mob (#1500).
     async fn hold_spawned_member_run_starts(&self, member_ref: &MemberRef) {
@@ -18928,6 +18947,9 @@ impl MobActor {
         }
     }
 
+    /// Hold every member of a Stopped mob again (#1500): after a resume that
+    /// released the holds and then failed, so queued input still waits for a
+    /// resume that succeeds, and after a spawn completed into the Stopped mob.
     async fn hold_member_run_starts_while_stopped(&mut self) {
         if self.state() != MobState::Stopped {
             return;
@@ -18937,6 +18959,9 @@ impl MobActor {
             roster.list().cloned().collect::<Vec<_>>()
         };
         for entry in &entries {
+            if self.placed_member_carrier_dormant(&entry.agent_identity) {
+                continue;
+            }
             let held = match self.autonomous_stop_interrupt_incarnation(entry) {
                 Ok(incarnation) => self
                     .provisioner

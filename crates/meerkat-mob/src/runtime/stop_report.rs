@@ -28,7 +28,7 @@ impl MobStopReport {
             .iter()
             .filter_map(|(identity, outcome)| match &outcome.starts {
                 MemberRunStarts::NotHoldable { reason } => Some((identity, reason)),
-                MemberRunStarts::Held => None,
+                MemberRunStarts::Held | MemberRunStarts::NotBound => None,
             })
     }
 }
@@ -71,6 +71,12 @@ pub enum MemberRunStarts {
     /// The member's runtime could not be held: it may start a turn while the
     /// mob is Stopped.
     NotHoldable { reason: NotHoldableReason },
+    /// The member is not bound to this mob right now, so the hold did not
+    /// reach it, and nothing from the mob reaches it either: a placed member
+    /// whose host carrier is dormant (MobMachine re-activates it only while
+    /// Running), or a remote peer that is unbound (a bind while the mob is
+    /// Stopped delivers the hold first).
+    NotBound,
 }
 
 /// Why a member's run starts could not be held.

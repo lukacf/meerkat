@@ -83,6 +83,116 @@ them.
   settlement companions. Local permission feedback, unavailable authorization
   and failed audit recording are distinct outcomes; infrastructure failures must
   not be presented as permission denials or provider retry/fallback triggers.
+- `meerkat_core::LiveToolResult` also gains
+  `settlement_failures: Vec<ToolDispatchSettlementFailure>`. Explicit literals
+  must initialize it, normally with `Vec::new()`; wire decoding defaults to an
+  empty list and encoding omits it when empty. Preserve nonempty companions
+  alongside the physical result instead of replacing that result or retrying
+  its effect. `meerkat_llm_core::LlmEvent::OperationObservationFailed` reports
+  the same kind of nonterminal observation failure beside streamed output.
+  Exhaustive event consumers must handle it without inventing a failed or
+  successful physical operation.
+- Exhaustive error handling must also add
+  `meerkat_core::AgentErrorClass::OperationRefused`,
+  `meerkat_tools::BuiltinToolError::OperationObservationUnavailable` and
+  `BuiltinToolError::OperationAuthorizationUnavailable`.
+  `meerkat::factory::BuildAgentError::ControllerUnavailable` is a setup refusal
+  when the selected client cannot supply the required runnable controller;
+  do not fall back to an ungoverned client. The added
+  `PendingPromotionCleanupMode::RetainUnresolved` keeps the actual staged
+  promotion unavailable after uncertain admission. Match it separately from
+  `Restore` and `Finish`; uncertainty must not restore a possibly admitted seed.
+- Credential mutation APIs now require the exact lease guard:
+  `rehydrate_durable_predecessor_for_mutation` and
+  `rehydrate_durable_predecessor_for_mutation_for_identity` take a fifth
+  argument, `guard: &AuthLoginLifecycleGuard`, after `now`. This applies to
+  their `meerkat_core`, `auth` and `auth::lifecycle` exports. Acquire the guard
+  for the same `LeaseKey` within the existing exclusive credential coordinator
+  and retain it through mutation and compensation, not only the predecessor
+  read. Exhaustive matches must handle
+  `TokenLifecycleClearError::LeaseGuardMismatch` and
+  `AuthStatusRehydrateError::LeaseGuardMismatch`, plus
+  `CredentialMutationError::StalePreparation`, `RefreshError::StalePreparation`
+  and `meerkat_auth_core::McpOAuthError::StalePreparation`. A mismatched guard
+  or stale preparation does not authorize using cached credentials or
+  replaying an effect; re-establish current credential custody before preparing
+  another operation.
+- `meerkat_session::ephemeral::SessionAgentTurnInput` gains
+  `work_authorization: Option<WorkAuthorizationContext>`.
+  `SessionAgent::run_pending_with_events` gains the same parameter immediately
+  before `event_tx`; update both implementations and call sites. Use `None`
+  for the ordinary ungoverned path. Governed implementations must forward the
+  actual admitted context and clear their active reference on completion or
+  cancellation, or reject unsupported input; silently dropping it is not a
+  compatibility path.
+- The retained process-local owner contexts remove `UnwindSafe` and
+  `RefUnwindSafe` from these public carrier types:
+  - `meerkat_core::{StartTurnRequest, StagedRunInput, RunPrimitive}`;
+  - In `meerkat_runtime`: `PreparedRecoveryInputSnapshot`, `PromptInput`,
+    `PreparedRecoveryEvidence`, `ExactInputStateObservation`, `OperationInput`,
+    `FlowStepInput`, `PreparedRuntimeSessionCommit`, `UnregisterFinalizationCommit`,
+    `CommittedRecoveryBoundary`, `ContinuationInput`, `InputState`, `StoredInputState`,
+    `PeerInput`, `InputStatePersistenceRecord`, `InputLedger`, `ExternalEventInput`,
+    `InputStateRow`, `RecoveryInputStateMutation`, `AcceptOutcome` and `Input`;
+  - `meerkat_session::ephemeral::SessionAgentTurnInput` and
+    `meerkat::surface::RuntimeBackedInitialTurn`.
+  Review callers that place these values behind `catch_unwind` or require
+  those bounds. Choose an unwind boundary that preserves owner cleanup;
+  blanket trait implementations or an unchecked `AssertUnwindSafe` wrapper
+  do not establish safe recovery.
+- Generated native admission types gain explicit association facts.
+  `MeerkatMachineState` in
+  `meerkat_machine_schema::catalog::dsl::meerkat_machine` and
+  `meerkat_runtime::meerkat_machine::dsl`, plus
+  `meerkat_machine_kernels::generated::meerkat::State` gain
+  `input_authority_bindings`, `input_authority_batch_keys`,
+  `authority_staged_run` and `authority_staged_batch`. Initialize fresh state
+  with the generated constructor, or empty maps and `None` for these fields;
+  do not erase retained associations when reconstructing existing state.
+  `MeerkatMachineInput::ResolveAdmissionPlan` and the generated kernel's
+  `ResolveAdmissionPlan` struct gain `authority_binding` and
+  `authority_batch_key`, both `Option<String>`. `None` is the unbound path;
+  governed callers carry the exact native-owner facts, not caller-authored
+  permission. Exhaustive matches on `MeerkatMachineInput`,
+  `MeerkatMachineInputVariant`, generated `Input` and `InputKind` must add
+  `BindInputAuthority`. Generated `TransitionId` adds
+  `BindInputAuthorityIdle`, `BindInputAuthorityAttached`,
+  `BindInputAuthorityRunning`, `BindInputAuthorityRetired` and
+  `BindInputAuthorityStopped`.
+- Generated Rust enum ordinals change when `BindInputAuthority` is inserted.
+  Migrate consumers of `MeerkatMachineInput::*`,
+  `MeerkatMachineInputVariant::*`,
+  `meerkat_machine_kernels::generated::meerkat::InputKind::*` and
+  `TransitionId::*` by symbolic variant, not old numeric casts or table offsets:
+  - The 291 existing input variants from `ResolveAdmissionPlan` through
+    `ResolveAbandonedCompletionResult` shift discriminants 101-391 to 102-392.
+    This applies to the schema and runtime input enums and kernel `InputKind`.
+    Their schema/runtime `MeerkatMachineInputVariant` declaration positions
+    shift 102-392 to 103-393, affecting derived ordering relative to the newly
+    inserted variant. Do not use derived `PartialOrd` as a stable protocol order.
+  - The 1,762 existing `TransitionId` variants from
+    `ResolveAdmissionPlanRequestedTerminalQueueIdle` through
+    `ResolveCheckpointCompletionResultFailedStopped` shift discriminants
+    741-2502 to 746-2507 after the five new transitions.
+  Regenerate ordinal-indexed tables and explicitly migrate any downstream
+  numeric persistence. Existing named Serde representations are separate from
+  these implicit Rust discriminants; they do not make raw ordinals stable.
+- The native error/event additions also shift implicit Rust discriminants in
+  `ToolDispatchTerminalErrorKind::*`, `LlmProviderErrorKind::*`,
+  `AgentErrorClass::*`, `meerkat_llm_core::LlmError::*` and `LlmEvent::*`.
+  Affected existing ranges are `PolicyDenied` through `CallbackPending` (+3),
+  `AuthorizationRouteChanged` through `IncompleteResponse` (+3), `Store`
+  through `NoPendingBoundary` (+1), and `RateLimited` through
+  `IncompleteResponse` (+3), respectively; `LlmEvent::WireLiveness` and
+  `LlmEvent::Done` move from 8/9 to 9/10. Update numeric mappings and stored
+  ordinal assumptions explicitly; continue using named variants for matching
+  and the documented wire representation for serialization.
+- `meerkat_rpc::session_runtime::SessionRuntime::set_callback_channel` is
+  deprecated. Use `init_callback_channel` to pre-initialize the single-client
+  stdio/embedded default route. Multi-connection servers retain each
+  connection's `CallbackRoute` on its own router instead of replacing a
+  process-default callback channel; do not silence the warning by restoring
+  the former shared-channel ownership.
 - `TurnFailureSourceKind::from_agent_error` and
   `TurnFailureSource::from_agent_error` now return
   `Result<_, OperationRefused>`. Callers must preserve a refused operation as local

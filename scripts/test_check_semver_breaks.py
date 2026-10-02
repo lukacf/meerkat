@@ -326,6 +326,89 @@ Failed in:
         self.assertEqual(parsed.summary_lines, 2)
 
 
+class ObservedCallableShapeTests(unittest.TestCase):
+    """Callable shapes from the 0.8.51 publication gate's real report."""
+
+    FUNCTIONS = (
+        "clear_tokens_and_publish_lifecycle_released_for_identity",
+        "clear_tokens_and_publish_lifecycle_released",
+    )
+    DEPRECATED_REPORT = """\
+    Checking meerkat-rpc v0.8.50 -> v0.8.50 (assume patch change)
+--- failure type_method_marked_deprecated: type method #[deprecated] added ---
+Failed in:
+  method meerkat_rpc::session_runtime::SessionRuntime::set_callback_channel in crates/meerkat-rpc/src/session_runtime.rs:6397
+     Summary semver requires new minor version: 0 major and 1 minor checks failed
+    Finished [   0.190s] meerkat-rpc
+"""
+
+    def removed_report(self) -> "gate.ReportParse":
+        # All six fully lowercase paths were reported, including public reexports.
+        items = "\n".join(
+            f"  function {prefix}::{name}"
+            for name in self.FUNCTIONS
+            for prefix in (
+                "meerkat_core::auth::lifecycle",
+                "meerkat_core::auth",
+                "meerkat_core",
+            )
+        )
+        return gate.parse_report(
+            "    Checking meerkat-core v0.8.50 -> v0.8.51\n"
+            "--- failure function_missing: public function removed ---\n"
+            f"Failed in:\n{items}\n"
+            "     Summary semver requires new major version\n"
+            "    Finished [ 0.1s] meerkat-core\n"
+        )
+
+    def section(self, declaration: str) -> "gate.Section":
+        return gate.Section(
+            "## [0.8.51] - 2026-10-02", "0.8.51", " - 2026-10-02",
+            "\n### Breaking\n\n- " + declaration + "\n",
+        )
+
+    def test_lowercase_removed_functions_have_exact_structural_names(self) -> None:
+        findings = self.removed_report().findings
+        self.assertEqual(len(findings), 6)
+        self.assertEqual([f.symbols for f in findings], [(name,) for name in self.FUNCTIONS for _ in range(3)])
+        self.assertTrue(all(f.structural for f in findings))
+
+    def test_removed_functions_require_each_exact_name(self) -> None:
+        parsed = self.removed_report()
+        declared = ", ".join(f"`{name}`" for name in self.FUNCTIONS) + " removed."
+        self.assertEqual(gate.check_named(parsed, self.section(declared)), [])
+        for name in self.FUNCTIONS:
+            with self.subTest(missing=name):
+                # A longer identifier must not accidentally cover the removed one.
+                errors = gate.check_named(parsed, self.section(declared.replace(f"`{name}`", f"`{name}_replacement`")))
+                self.assertEqual(len(errors), 3)
+                self.assertTrue(all(f"missing: `{name}`" in error for error in errors))
+
+    def test_deprecated_method_keeps_owner_and_exact_method_name(self) -> None:
+        findings = gate.parse_report(self.DEPRECATED_REPORT).findings
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].symbols, ("SessionRuntime", "set_callback_channel"))
+        self.assertTrue(findings[0].structural)
+
+    def test_deprecated_method_cannot_be_declared_by_owner_alone(self) -> None:
+        parsed = gate.parse_report(self.DEPRECATED_REPORT)
+        for declaration in (
+            "`SessionRuntime` changed.",
+            "`SessionRuntime::set_callback_channel_v2` changed.",
+        ):
+            with self.subTest(declaration=declaration):
+                errors = gate.check_named(parsed, self.section(declaration))
+                self.assertEqual(len(errors), 1)
+                self.assertIn("missing: `set_callback_channel`", errors[0])
+        owner_missing = gate.check_named(parsed, self.section("`set_callback_channel` deprecated."))
+        self.assertEqual(len(owner_missing), 1)
+        self.assertIn("missing: `SessionRuntime`", owner_missing[0])
+        self.assertEqual(
+            gate.check_named(parsed, self.section("`SessionRuntime::set_callback_channel` deprecated.")),
+            [],
+        )
+
+
 class NamingTests(unittest.TestCase):
     """Hole A: reported breaks must be NAMED, not merely accompanied by a heading."""
 

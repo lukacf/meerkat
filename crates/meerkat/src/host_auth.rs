@@ -180,16 +180,88 @@ pub fn mcp_login_disposition_to_wire(
     }
 }
 
-/// Parse a wire MCP target (`auth/login/*`, `auth/status/get`) into the
-/// native identity, validating the selected account at the boundary.
-pub fn mcp_auth_target_from_wire(
-    target: &meerkat_contracts::WireMcpAuthTarget,
-) -> Result<McpServerIdentity, McpOAuthError> {
-    let identity = McpServerIdentity::from_server_config(&target.server_name, &target.server_url);
-    match target.oauth_account.as_deref() {
-        Some(account) => identity.with_expected_account(account),
-        None => Ok(identity),
+/// Why a host-requested MCP target was refused. Login and status only ever
+/// address configured servers: a client-supplied name or URL is never an
+/// authority for discovery, client registration or credential storage.
+#[derive(Debug, thiserror::Error)]
+pub enum HostMcpTargetRefusal {
+    #[error("MCP server '{server_name}' is not configured")]
+    UnknownServer { server_name: String },
+    #[error("MCP server '{server_name}' is configured with a different URL")]
+    UrlMismatch { server_name: String },
+    #[error("MCP server '{server_name}' is configured for a different OAuth account")]
+    AccountMismatch { server_name: String },
+    #[error(
+        "MCP server '{server_name}' does not use OAuth login (streamable HTTP without a static Authorization header)"
+    )]
+    NotOAuthCapable { server_name: String },
+    #[error("MCP configuration could not be read")]
+    ConfigUnavailable(#[source] meerkat_core::mcp_config::McpConfigError),
+}
+
+impl HostMcpTargetRefusal {
+    /// Whether this refuses the caller's request rather than reporting an
+    /// unreadable configuration.
+    pub fn is_refusal(&self) -> bool {
+        !matches!(self, Self::ConfigUnavailable(_))
     }
+}
+
+/// Resolve a wire MCP target against the configured MCP servers at the
+/// host's convention roots (project wins over user, as for sessions and the
+/// CLI). The server name must be configured, `server_url` must equal its
+/// configured URL, the server must use OAuth login, and a requested
+/// `oauth_account` must equal the configured one. The identity is built from
+/// the configuration, never from the request.
+pub async fn resolve_configured_mcp_target(
+    target: &meerkat_contracts::WireMcpAuthTarget,
+    context_root: Option<&std::path::Path>,
+    user_config_root: Option<&std::path::Path>,
+) -> Result<McpServerIdentity, HostAuthError> {
+    use meerkat_core::mcp_config::{McpConfig, McpTransportConfig, McpTransportKind};
+    let server_name = || target.server_name.clone();
+    let config = McpConfig::load_from_roots(context_root, user_config_root)
+        .await
+        .map_err(HostMcpTargetRefusal::ConfigUnavailable)?;
+    let server = config
+        .servers
+        .into_iter()
+        .find(|server| server.name == target.server_name)
+        .ok_or_else(|| HostMcpTargetRefusal::UnknownServer {
+            server_name: server_name(),
+        })?;
+    let McpTransportConfig::Http(http) = &server.transport else {
+        return Err(HostMcpTargetRefusal::NotOAuthCapable {
+            server_name: server_name(),
+        }
+        .into());
+    };
+    if http.url != target.server_url {
+        return Err(HostMcpTargetRefusal::UrlMismatch {
+            server_name: server_name(),
+        }
+        .into());
+    }
+    if !matches!(server.transport_kind(), McpTransportKind::StreamableHttp)
+        || http
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("authorization"))
+    {
+        return Err(HostMcpTargetRefusal::NotOAuthCapable {
+            server_name: server_name(),
+        }
+        .into());
+    }
+    if let Some(requested) = target.oauth_account.as_deref()
+        && http.oauth_account.as_deref() != Some(requested)
+    {
+        return Err(HostMcpTargetRefusal::AccountMismatch {
+            server_name: server_name(),
+        }
+        .into());
+    }
+    Ok(McpServerIdentity::from_config(&server)?)
 }
 
 /// Wire projection of a native MCP target.
@@ -231,6 +303,8 @@ pub enum HostAuthError {
     DeviceFlowUnsupported(OAuthProviderIdentity),
     #[error(transparent)]
     McpOAuth(#[from] McpOAuthError),
+    #[error(transparent)]
+    McpTarget(#[from] HostMcpTargetRefusal),
 }
 
 /// Injectable native-host authentication facade.
@@ -889,5 +963,108 @@ mod tests {
         assert!(json.get("primary_secret").is_none());
         assert!(json.get("refresh_token").is_none());
         assert!(json.get("id_token").is_none());
+    }
+
+    fn write_project_mcp(root: &std::path::Path, toml: &str) {
+        let dir = root.join(".rkat");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mcp.toml"), toml).unwrap();
+    }
+
+    fn wire_target(
+        name: &str,
+        url: &str,
+        account: Option<&str>,
+    ) -> meerkat_contracts::WireMcpAuthTarget {
+        meerkat_contracts::WireMcpAuthTarget {
+            server_name: name.into(),
+            server_url: url.into(),
+            oauth_account: account.map(Into::into),
+        }
+    }
+
+    const CONFIGURED_MCP: &str = r#"
+[[servers]]
+name = "glean"
+url = "https://glean.example/mcp"
+oauth_account = "subject-7"
+
+[[servers]]
+name = "static"
+url = "https://static.example/mcp"
+headers = { Authorization = "Bearer fixed" }
+
+[[servers]]
+name = "local"
+command = "true"
+"#;
+
+    #[tokio::test]
+    async fn configured_mcp_target_resolves_from_config_not_request() {
+        let root = tempfile::tempdir().unwrap();
+        write_project_mcp(root.path(), CONFIGURED_MCP);
+        for account in [None, Some("subject-7")] {
+            let target = resolve_configured_mcp_target(
+                &wire_target("glean", "https://glean.example/mcp", account),
+                Some(root.path()),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(target.server_url(), "https://glean.example/mcp");
+            assert_eq!(target.expected_account(), Some("subject-7"));
+        }
+    }
+
+    #[tokio::test]
+    async fn unconfigured_or_mismatched_mcp_targets_are_refused() {
+        let root = tempfile::tempdir().unwrap();
+        write_project_mcp(root.path(), CONFIGURED_MCP);
+        let refusal = |target| {
+            let root = root.path().to_path_buf();
+            async move {
+                match resolve_configured_mcp_target(&target, Some(&root), None).await {
+                    Err(HostAuthError::McpTarget(refusal)) => refusal,
+                    other => panic!("expected a typed MCP target refusal, got {other:?}"),
+                }
+            }
+        };
+        assert!(matches!(
+            refusal(wire_target("unknown", "https://glean.example/mcp", None)).await,
+            HostMcpTargetRefusal::UnknownServer { .. }
+        ));
+        assert!(matches!(
+            refusal(wire_target("glean", "https://attacker.example/mcp", None)).await,
+            HostMcpTargetRefusal::UrlMismatch { .. }
+        ));
+        assert!(matches!(
+            refusal(wire_target(
+                "glean",
+                "https://glean.example/mcp",
+                Some("other")
+            ))
+            .await,
+            HostMcpTargetRefusal::AccountMismatch { .. }
+        ));
+        assert!(matches!(
+            refusal(wire_target("static", "https://static.example/mcp", None)).await,
+            HostMcpTargetRefusal::NotOAuthCapable { .. }
+        ));
+        assert!(matches!(
+            refusal(wire_target("local", "true", None)).await,
+            HostMcpTargetRefusal::NotOAuthCapable { .. }
+        ));
+        let empty = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            resolve_configured_mcp_target(
+                &wire_target("glean", "https://glean.example/mcp", None),
+                Some(empty.path()),
+                None,
+            )
+            .await,
+            Err(HostAuthError::McpTarget(
+                HostMcpTargetRefusal::UnknownServer { .. }
+            ))
+        ));
     }
 }

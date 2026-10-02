@@ -102,6 +102,8 @@ fn host_auth_error_response(id: Option<RpcId>, error_value: meerkat::HostAuthErr
         | meerkat::HostAuthError::StatusRehydrate(_) => error::INTERNAL_ERROR,
         meerkat::HostAuthError::McpOAuth(mcp) if mcp.is_refusal() => error::INVALID_PARAMS,
         meerkat::HostAuthError::McpOAuth(_) => error::INTERNAL_ERROR,
+        meerkat::HostAuthError::McpTarget(refusal) if refusal.is_refusal() => error::INVALID_PARAMS,
+        meerkat::HostAuthError::McpTarget(_) => error::INTERNAL_ERROR,
     };
     RpcResponse::error(id, code, error_value.to_string())
 }
@@ -1498,8 +1500,14 @@ pub async fn handle_auth_profile_delete(
 
 // --- OAuth login ------------------------------------------------------
 
-fn invalid_mcp_target(id: Option<RpcId>, error_value: meerkat::McpOAuthError) -> RpcResponse {
-    RpcResponse::error(id, error::INVALID_PARAMS, error_value.to_string())
+/// Resolve a requested MCP target against this runtime's configured MCP
+/// servers; a client-supplied name or URL is never an authority.
+async fn configured_mcp_target(
+    runtime: &SessionRuntime,
+    mcp: &meerkat_contracts::WireMcpAuthTarget,
+) -> Result<meerkat::McpServerIdentity, meerkat::HostAuthError> {
+    let (context_root, user_root) = runtime.skill_identity_roots();
+    meerkat::resolve_configured_mcp_target(mcp, context_root.as_deref(), user_root.as_deref()).await
 }
 
 pub async fn handle_auth_login_start(
@@ -1518,9 +1526,9 @@ pub async fn handle_auth_login_start(
     let provider_target = match parsed.target {
         WireLoginTarget::Provider(target) => target,
         WireLoginTarget::Mcp(WireMcpLoginTarget { mcp }) => {
-            let target = match meerkat::mcp_auth_target_from_wire(&mcp) {
+            let target = match configured_mcp_target(runtime, &mcp).await {
                 Ok(target) => target,
-                Err(error_value) => return invalid_mcp_target(id, error_value),
+                Err(error_value) => return host_auth_error_response(id, error_value),
             };
             // Discovery falls back to the server's well-known metadata.
             let started = match service
@@ -1601,9 +1609,9 @@ pub async fn handle_auth_login_complete(
             client_id,
             resource_metadata_url,
         }) => {
-            let target = match meerkat::mcp_auth_target_from_wire(&mcp) {
+            let target = match configured_mcp_target(runtime, &mcp).await {
                 Ok(target) => target,
-                Err(error_value) => return invalid_mcp_target(id, error_value),
+                Err(error_value) => return host_auth_error_response(id, error_value),
             };
             let completed = match service
                 .mcp_login_complete(
@@ -1979,9 +1987,9 @@ pub async fn handle_auth_status_get(
     let parsed = match parsed {
         AuthStatusParams::Binding(parsed) => parsed,
         AuthStatusParams::Mcp(WireMcpLoginTarget { mcp }) => {
-            let target = match meerkat::mcp_auth_target_from_wire(&mcp) {
+            let target = match configured_mcp_target(runtime, &mcp).await {
                 Ok(target) => target,
-                Err(error_value) => return invalid_mcp_target(id, error_value),
+                Err(error_value) => return host_auth_error_response(id, error_value),
             };
             let service = match host_auth_service(runtime) {
                 Ok(service) => service,
@@ -3025,6 +3033,74 @@ mod tests {
             "azure_api_key is not in the Anthropic matrix and must not resolve"
         );
         assert_eq!(persisted_auth_mode_for_profile(&profile), None);
+    }
+
+    /// A loopback listener that only counts connections: any discovery or
+    /// client registration against a client-supplied URL would register here.
+    async fn connection_recorder() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        tokio::spawn(async move {
+            while let Ok((_stream, _)) = listener.accept().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        (url, hits)
+    }
+
+    #[tokio::test]
+    async fn mcp_auth_refuses_unconfigured_or_mismatched_targets_without_network() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".rkat")).unwrap();
+        std::fs::write(
+            root.path().join(".rkat/mcp.toml"),
+            "[[servers]]\nname = \"glean\"\nurl = \"https://glean.example/mcp\"\noauth_account = \"subject-7\"\n",
+        )
+        .unwrap();
+        let runtime = test_runtime();
+        runtime.set_skill_identity_roots(Some(root.path().to_path_buf()), None);
+        let (recorder_url, hits) = connection_recorder().await;
+
+        for (name, expected) in [("unknown", "is not configured"), ("glean", "different URL")] {
+            let mcp = serde_json::json!({
+                "server_name": name,
+                "server_url": recorder_url,
+                "oauth_account": "subject-7",
+            });
+            let start = raw_params(serde_json::json!({
+                "mcp": mcp,
+                "redirect_uri": "http://127.0.0.1:1/mcp/oauth/callback",
+            }));
+            assert_invalid_params_message(
+                handle_auth_login_start(Some(RpcId::Num(1)), Some(start.as_ref()), &runtime).await,
+                expected,
+            );
+            let complete = raw_params(serde_json::json!({
+                "mcp": mcp,
+                "client_id": "client-123",
+                "code": "code",
+                "state": "state",
+                "redirect_uri": "http://127.0.0.1:1/mcp/oauth/callback",
+            }));
+            assert_invalid_params_message(
+                handle_auth_login_complete(Some(RpcId::Num(2)), Some(complete.as_ref()), &runtime)
+                    .await,
+                expected,
+            );
+            let status = raw_params(serde_json::json!({ "mcp": mcp }));
+            assert_invalid_params_message(
+                handle_auth_status_get(Some(RpcId::Num(3)), Some(status.as_ref()), &runtime).await,
+                expected,
+            );
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a refused target must cause no discovery, registration or exchange"
+        );
     }
 
     #[tokio::test]

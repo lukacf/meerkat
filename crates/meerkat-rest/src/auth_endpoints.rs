@@ -230,6 +230,10 @@ fn host_auth_error_response(error: meerkat::HostAuthError) -> axum::response::Re
         | meerkat::HostAuthError::StatusRehydrate(_) => StatusCode::INTERNAL_SERVER_ERROR,
         meerkat::HostAuthError::McpOAuth(mcp) if mcp.is_refusal() => StatusCode::BAD_REQUEST,
         meerkat::HostAuthError::McpOAuth(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        meerkat::HostAuthError::McpTarget(refusal) if refusal.is_refusal() => {
+            StatusCode::BAD_REQUEST
+        }
+        meerkat::HostAuthError::McpTarget(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (
         status,
@@ -1269,9 +1273,15 @@ pub async fn start_login(
     let provider_target = match body.target {
         WireLoginTarget::Provider(target) => target,
         WireLoginTarget::Mcp(WireMcpLoginTarget { mcp }) => {
-            let target = match meerkat::mcp_auth_target_from_wire(&mcp) {
+            let target = match meerkat::resolve_configured_mcp_target(
+                &mcp,
+                state.context_root.as_deref(),
+                state.user_config_root.as_deref(),
+            )
+            .await
+            {
                 Ok(target) => target,
-                Err(error) => return bad_request(error),
+                Err(error) => return host_auth_error_response(error),
             };
             return match host_auth_service(&state)
                 .mcp_login_start(&target, &body.redirect_uri, None)
@@ -1352,9 +1362,15 @@ pub async fn complete_login(
             client_id,
             resource_metadata_url,
         }) => {
-            let target = match meerkat::mcp_auth_target_from_wire(&mcp) {
+            let target = match meerkat::resolve_configured_mcp_target(
+                &mcp,
+                state.context_root.as_deref(),
+                state.user_config_root.as_deref(),
+            )
+            .await
+            {
                 Ok(target) => target,
-                Err(error) => return bad_request(error),
+                Err(error) => return host_auth_error_response(error),
             };
             return match host_auth_service(&state)
                 .mcp_login_complete(
@@ -2859,6 +2875,79 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("auth_method 'api_key'")
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_mcp_login_refuses_unconfigured_or_mismatched_targets_without_network() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".rkat")).unwrap();
+        std::fs::write(
+            project.path().join(".rkat/mcp.toml"),
+            "[[servers]]\nname = \"glean\"\nurl = \"https://glean.example/mcp\"\noauth_account = \"subject-7\"\n",
+        )
+        .unwrap();
+        state.context_root = Some(project.path().to_path_buf());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let recorder_url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        tokio::spawn(async move {
+            while let Ok((_stream, _)) = listener.accept().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        for (name, expected) in [("unknown", "is not configured"), ("glean", "different URL")] {
+            let mcp = meerkat_contracts::WireMcpAuthTarget {
+                server_name: name.to_string(),
+                server_url: recorder_url.clone(),
+                oauth_account: Some("subject-7".to_string()),
+            };
+            let start = start_login(
+                State(state.clone()),
+                Json(LoginStartBody {
+                    target: WireLoginTarget::Mcp(WireMcpLoginTarget { mcp: mcp.clone() }),
+                    redirect_uri: "http://127.0.0.1:1/mcp/oauth/callback".to_string(),
+                }),
+            )
+            .await
+            .into_response();
+            let complete = complete_login(
+                State(state.clone()),
+                Json(LoginCompleteBody {
+                    target: WireLoginCompleteTarget::Mcp(WireMcpLoginCompleteTarget {
+                        mcp,
+                        client_id: "client-123".to_string(),
+                        resource_metadata_url: None,
+                    }),
+                    code: "code".to_string(),
+                    state: "state".to_string(),
+                    redirect_uri: "http://127.0.0.1:1/mcp/oauth/callback".to_string(),
+                }),
+            )
+            .await
+            .into_response();
+            for response in [start, complete] {
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert!(
+                    error["error"].as_str().unwrap().contains(expected),
+                    "expected `{expected}`, got {error}"
+                );
+            }
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a refused target must cause no discovery, registration or exchange"
         );
     }
 

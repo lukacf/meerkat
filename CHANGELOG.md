@@ -241,7 +241,8 @@ them.
   - `meerkat::AgentBuildConfig` gains the public field `mcp_auth_resolver`
     (feature `mcp`, native only); struct literals must set it (`None` keeps
     today's behaviour).
-  - `meerkat::HostAuthError` gains `McpOAuth(McpOAuthError)`.
+  - `meerkat::HostAuthError` gains `McpOAuth(McpOAuthError)` and
+    `McpTarget(HostMcpTargetRefusal)`.
 - `auth/login/start`, `auth/login/complete` and `auth/status/get` accept an MCP
   server target. Provider JSON is unchanged, but the Rust and SDK types change:
   - `meerkat_contracts::LoginStartParams` replaces `provider`, `realm_id`,
@@ -310,8 +311,13 @@ them.
   `mcp_login_complete`,
   `mcp_login_cancel`, `mcp_status`, `mcp_oauth_authority` and
   `with_mcp_account_strategy`; `meerkat::HostMcpAuthStatus` and
-  `HostMcpAuthPhase`; `meerkat::mcp_auth_target_from_wire`,
-  `mcp_auth_target_to_wire` and `mcp_login_disposition_to_wire`. The facade re-exports the MCP OAuth host types.
+  `HostMcpAuthPhase`; `meerkat::resolve_configured_mcp_target` and
+  `HostMcpTargetRefusal`; `mcp_auth_target_to_wire` and
+  `mcp_login_disposition_to_wire`. RPC and REST MCP login and status resolve
+  the requested server against the configured MCP servers: an unknown name, a
+  different URL or account, or a server without OAuth login is refused
+  (invalid params / 400) before any discovery, registration or credential
+  write. The facade re-exports the MCP OAuth host types.
   The `host_auth` docs state the host obligation: the browser context must be
   unobservable by agent tools.
 - `meerkat::AgentFactory::mcp_auth_resolver` installs the default MCP

@@ -283,7 +283,10 @@ ask its user.
   ```
 
   Completion echoes the `client_id` and `resource_metadata_url` returned by
-  start, together with the callback's `code` and `state`.
+  start, together with the callback's `code` and `state`. The server must be
+  configured (project or user `mcp.toml` of the host): `server_url` must equal
+  its configured URL and `oauth_account`, if given, its configured account.
+  Anything else is refused before any network request.
 
 <Warning>
 The authorize URL and `state`, and the callback's `code` and `state`, let

@@ -1109,8 +1109,9 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         // The public contract owns what a caller may define: host-only
-        // fields (profile MCP server configs, Rust bundles) have no input.
-        let definition = crate::decode_public_mob_definition(args.definition)
+        // fields (profile MCP server configs, Rust bundles) have no input,
+        // and a model may not name a host path as a skill source.
+        let definition = crate::agent_input::decode_agent_mob_definition(args.definition)
             .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
 
         // Compute the operator grant from the *intended* mob id (the definition
@@ -1205,6 +1206,12 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = MobId::from(args.mob_id.clone());
+        let initial_message = args
+            .initial_message
+            .clone()
+            .map(crate::agent_input::decode_agent_content_input)
+            .transpose()
+            .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
 
         self.ensure_spawn_member_scope_boxed(call.name, &mob_id, &args)
             .await?;
@@ -1222,11 +1229,7 @@ impl AgentMobToolSurface {
             ProfileName::from(args.profile),
             AgentIdentity::from(args.member_id),
         );
-        spec.initial_message = args
-            .initial_message
-            .map(ContentInput::try_from)
-            .transpose()
-            .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
+        spec.initial_message = initial_message;
         spec.objective_id = objective_id;
         spec.runtime_mode = args.runtime_mode;
         spec.backend = args.backend;
@@ -7122,6 +7125,47 @@ mod tests {
             "no implicit mob is created for a refused delegate"
         );
         assert!(!marker.exists(), "the model-supplied server never launched");
+    }
+
+    #[tokio::test]
+    async fn mob_create_refuses_a_host_path_skill_source() {
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(Arc::clone(&state));
+        let error = dispatch_err(
+            &surface,
+            "mob_create",
+            json!({ "definition": {
+                "id": "path-skill",
+                "profiles": { "worker": { "model": "claude-sonnet-4-5", "skills": ["s"] } },
+                "skills": { "s": { "source": "path", "path": "/etc/passwd" } }
+            } }),
+        )
+        .await;
+        assert_refused_as_argument_error(&error, "host filesystem path");
+        assert!(
+            state.handle_for(&MobId::from("path-skill")).await.is_err(),
+            "no mob is created"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_member_refuses_a_stored_blob_image_reference() {
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(Arc::clone(&state));
+        let error = dispatch_err(
+            &surface,
+            "mob_spawn_member",
+            json!({
+                "mob_id": "any",
+                "profile": "worker",
+                "member_id": "w1",
+                "initial_message": [
+                    { "type": "image", "media_type": "image/png", "source": "blob", "blob_id": "sha256:abc" }
+                ],
+            }),
+        )
+        .await;
+        assert_refused_as_argument_error(&error, "stored blob");
     }
 
     #[tokio::test]

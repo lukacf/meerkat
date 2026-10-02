@@ -5,6 +5,7 @@
     clippy::redundant_clone
 )]
 
+mod agent_input;
 mod agent_tools;
 pub mod council_relink;
 pub mod detached_delivery;
@@ -6027,7 +6028,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: MobCreateArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                let definition = decode_public_mob_definition(args.definition)
+                let definition = agent_input::decode_agent_mob_definition(args.definition)
                     .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
                 let mob_id = self
                     .state
@@ -6161,7 +6162,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         let mut s = SpawnMemberSpec::new(spec.profile, spec.agent_identity);
                         s.initial_message = spec
                             .initial_message
-                            .map(ContentInput::try_from)
+                            .map(agent_input::decode_agent_content_input)
                             .transpose()
                             .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
                         s.runtime_mode = spec.runtime_mode;
@@ -6267,7 +6268,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 let initial_message = args
                     .initial_message
-                    .map(ContentInput::try_from)
+                    .map(agent_input::decode_agent_content_input)
                     .transpose()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
                 match self

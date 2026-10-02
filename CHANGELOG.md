@@ -146,10 +146,18 @@ them.
     profile as `MobProfileInput`.
   - `mob_spawn_member`'s `initial_message`, and the `MobMcpDispatcher` spawn
     and respawn messages, take `WireContentInput`.
+  - Two refusals apply on the agent surface only (host-facing surfaces are
+    unchanged): a definition's skill source may not be a host filesystem
+    `path` (inline skill content still works), and an image may not
+    reference a stored blob by `blob_id` (inline image bytes still work),
+    because the blob store has no fact showing the calling session may read
+    it (#1543).
   Behaviour change: a model-supplied definition or profile that names an
   internal-only field (`mcp_servers`, `rust_bundles`, `is_implicit`,
-  `session_cleanup_policy`, ...) is now refused with `InvalidArguments`
-  before anything is created; previously such fields were accepted.
+  `session_cleanup_policy`, ...), a host-path skill source, or a blob image
+  reference is now refused with `InvalidArguments` before anything is
+  created; previously such input was accepted.
+- `meerkat_contracts::wire` now re-exports `WireImageData`.
 
 ### Added
 

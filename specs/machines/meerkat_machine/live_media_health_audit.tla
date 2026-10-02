@@ -225,11 +225,18 @@ GoalReRegisteredSilentReopen ==
     /\ AuditFirstChannel \notin DOMAIN live_channel_session_by_channel
     /\ AuditSecondChannel \in DOMAIN live_media_fault_reopen_recommended_by_channel
     /\ live_media_fault_reopen_recommended_by_channel[AuditSecondChannel] = TRUE
+\* A session unregisters after a media fault was recommended: the state in
+\* which the generated invariant requires every media map to be empty, so its
+\* unregistered-session clause is checked on a reachable state, not vacuously.
+GoalUnregisteredAfterFault ==
+    /\ session_id = None
+    /\ audit_recommended_reopens >= 1
 NotGoalAudible == ~GoalAudible
 NotGoalSilentReopen == ~GoalSilentReopen
 NotGoalSilentExhausted == ~GoalSilentExhausted
 NotGoalFaultedChannelReportsClosed == ~GoalFaultedChannelReportsClosed
 NotGoalReRegisteredSilentReopen == ~GoalReRegisteredSilentReopen
+NotGoalUnregisteredAfterFault == ~GoalUnregisteredAfterFault
 
 \* Firing: each new transition must fire in the explored space. The script
 \* checks every action property below and requires TLC to report it

@@ -8918,6 +8918,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.live_close_status_by_channel.contains_key(verdict_channel))
             && for_all(judged_channel in self.live_media_health_judged_channels,
                 self.live_media_health_requested_output_by_channel.contains_key(judged_channel))
+            // An unregistered session holds no media-health state: every
+            // UnregisterSession* transition clears the four maps, so the
+            // close tombstones and the reopen budget end with the session.
+            && (self.session_id != None
+                || (self.live_media_health_requested_output_by_channel == EmptyMap
+                    && self.live_media_health_judged_channels == EmptySet
+                    && self.live_media_fault_reopen_recommended_by_channel == EmptyMap
+                    && self.live_media_fault_reopens_by_session == EmptyMap))
         }
 
         invariant fence_requires_bound_runtime {

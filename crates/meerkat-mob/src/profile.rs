@@ -72,8 +72,9 @@ pub struct ToolConfig {
     /// in a tool vocabulary: the built-in families' tools (whether compiled or
     /// enabled or not), the mob operator tools (`spawn_member`,
     /// `wire_members`, ...), the agent mob tools (`mob_spawn_member`,
-    /// `mob_wire`, `mob_create`, ...), and the exposed names this profile's
-    /// [`Self::mcp_servers`] map. A known name the member does not mount is
+    /// `mob_wire`, `mob_create`, ...), the exposed names this profile's
+    /// [`Self::mcp_servers`] map, and the tools of its own registered
+    /// [`Self::rust_bundles`]. A known name the member does not mount is
     /// inert. While the profile declares an MCP server that maps no tool
     /// names, any other name is deferred to the execution gate (logged at
     /// build); otherwise it fails the member's build with a typed error naming

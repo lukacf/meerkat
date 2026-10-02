@@ -397,6 +397,46 @@ impl AgentToolDispatcher for McpProvenanceFilter {
 // Mob tool dispatcher
 // ---------------------------------------------------------------------------
 
+/// The tool names of each bundle `profile` resolves to, from the same
+/// registered bundles [`compose_external_tools_for_profile`] composes.
+pub(crate) fn resolve_profile_bundle_tools(
+    profile: &crate::profile::Profile,
+    tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
+) -> BTreeMap<String, meerkat_core::ToolNameSet> {
+    profile
+        .tools
+        .rust_bundles
+        .iter()
+        .filter_map(|name| {
+            tool_bundles.get(name).map(|dispatcher| {
+                (
+                    name.clone(),
+                    dispatcher
+                        .tools()
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Record a build's resolved bundle tools as bundle vocabularies on its
+/// declared tool restriction, so the profile's deny list may name them.
+pub(crate) fn attach_declared_bundle_tools(
+    config: &mut meerkat::AgentBuildConfig,
+    bundle_tools: BTreeMap<String, meerkat_core::ToolNameSet>,
+) {
+    if let Some(restriction) = config.declared_tool_restriction.as_mut() {
+        restriction.vocabulary.extend(
+            bundle_tools
+                .into_iter()
+                .map(|(bundle, names)| (meerkat_core::ToolVocabularySource::Bundle(bundle), names)),
+        );
+    }
+}
+
 pub(super) fn compose_external_tools_for_profile(
     profile: &crate::profile::Profile,
     tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,

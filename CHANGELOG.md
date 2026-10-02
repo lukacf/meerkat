@@ -230,6 +230,28 @@ them.
   `CloseInFlight(String)`, `SessionBusy(String)` and `Permanent(String)`
   (see Fixed). The default `retire_bound_channel_after_pump_exit` reports
   `Permanent`.
+- Security fix (behaviour, managed hosts): members of mobs that callers of the
+  mob tools create (agent `mob_create` and public `meerkat_mob_create`) no
+  longer run without the host's application tool policy. Previously a member
+  constrained by a host consequence policy could create a child mob whose
+  members were unmanaged, because the child builder received neither the
+  host's policy registry nor any binding. Now:
+  - `MobMcpState::with_tool_consequence_policy_registry` installs the host
+    registry, which is forwarded to every child mob builder.
+  - `MobMcpState::with_child_application_tool_policy(binding)` is the host's
+    explicit choice for child members, applied to every spawn into a child
+    mob and never settable by callers. An explicit
+    `ApplicationToolPolicyBinding::Unmanaged` is a valid opt-out.
+  - A managed host (registry installed) with no child policy refuses child mob
+    creation, and spawns into existing child mobs, with the typed
+    `ChildToolPolicyRefused::PolicyRequired`, whose message names the fix.
+    A provider child policy without a registry refuses with `RegistryMissing`,
+    and `Inherit` with `InheritNotAllowed`. A host without a registry keeps
+    today's behaviour (unmanaged children).
+- `meerkat_contracts::wire::MobToolConfigInput` gains `rust_bundles:
+  Vec<String>` (ids only, omitted when empty); struct literals must set it,
+  usually through `..Default::default()`.
+
 - `meerkat_runtime::EphemeralRuntimeDriver` is no longer `UnwindSafe` or
   `RefUnwindSafe`: it now holds the runtime admission signal added with the
   typed admission wait (#1431). Callers that relied on these auto traits (for
@@ -911,6 +933,21 @@ them.
   unregister, after its durability transaction, and never on a resume or a
   rolled-back unregister. The surface's publisher releases the session's
   host tombstones there.
+- Host tool bundles for child mobs: `MobMcpState::with_child_tool_bundles`
+  takes a `ChildToolBundles` set in which each host bundle is
+  `ChildToolBundleAvailability::HostOnly` (the default) or `ChildAvailable`.
+  A child profile from `mob_create` or `meerkat_mob_create` may name bundle
+  ids in `tools.rust_bundles`, but only child-available ones; it never
+  supplies an implementation. Any other id is refused with
+  `ChildToolBundleRefused` before anything is created, and host-only and
+  unregistered ids read identically. Child mob builders receive only the
+  child-available bundles, so a bundle the host later withdraws fails the
+  member build on resume through meerkat-mob's missing-bundle refusal.
+- A profile's `tools.deny` may name the tools of its own registered
+  `rust_bundles`: each resolved bundle is a `ToolVocabularySource::Bundle`
+  vocabulary on the declared restriction, so a bundle tool the member does not
+  mount is inert and the gate refuses a mounted one by name.
+
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a
@@ -1032,8 +1069,9 @@ them.
     skills, web search, brain swap, image generation, memory, workgraph,
     schedule; whether compiled or enabled or not), the mob operator tools
     (`spawn_member`, `spawn_many_members`, `wire_members`, ...), the agent mob
-    tools (`mob_spawn_member`, `mob_wire`, `mob_create`, ...) and the exposed
-    tool names the profile's declared MCP servers map. A known name the member
+    tools (`mob_spawn_member`, `mob_wire`, `mob_create`, ...), the exposed
+    tool names the profile's declared MCP servers map, and the tools of its
+    registered `rust_bundles`. A known name the member
     does not mount is inert, so one deny set works on every composition and
     build. While the profile declares an MCP server that maps no tool names,
     any other name is deferred to the execution gate and logged at build

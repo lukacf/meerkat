@@ -315,12 +315,15 @@ impl MobActor {
                 "resume recipe lost its launch mode".to_string(),
             ));
         };
+        let bundle_tools =
+            super::super::tools::resolve_profile_bundle_tools(&profile, &self.tool_bundles);
         Ok(Box::new(DeferredResumeProvision {
             definition: Arc::clone(&self.definition),
             profile_name: entry.role.clone(),
             agent_identity: entry.agent_identity.clone(),
             profile,
             external_tools,
+            bundle_tools,
             compaction_curator_override: work
                 .rebuild
                 .restore_spec

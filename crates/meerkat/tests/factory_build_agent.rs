@@ -4839,3 +4839,97 @@ async fn declared_deny_rejects_external_tool_names() {
         "got: {err:?}"
     );
 }
+
+fn bundle_restriction(
+    deny: &[&str],
+    bundle: &str,
+    bundle_tools: &[&str],
+) -> meerkat_core::ops::DeclaredToolRestriction {
+    let mut restriction = declared_restriction(deny, false);
+    restriction.vocabulary.insert(
+        meerkat_core::ToolVocabularySource::Bundle(bundle.to_string()),
+        bundle_tools.iter().copied().collect(),
+    );
+    restriction
+}
+
+/// A tool of the profile's own resolved bundle that the build composed is
+/// deniable by name, and the gate refuses it.
+#[tokio::test]
+async fn declared_deny_may_name_a_composed_bundle_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                external_tools: Some(Arc::new(PolicyProbeDispatcher::new(
+                    &["bundle_write", "bundle_read"],
+                    Arc::clone(&dispatched),
+                ))),
+                declared_tool_restriction: Some(bundle_restriction(
+                    &["bundle_write"],
+                    "probe",
+                    &["bundle_write", "bundle_read"],
+                )),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .expect("a composed bundle tool is deniable");
+    assert!(!gate_admits(&mut agent, "bundle_write").await);
+    assert!(gate_admits(&mut agent, "bundle_read").await);
+}
+
+/// A bundle tool in the restriction's vocabulary that the build did not
+/// mount (for example a bundle whose registration changed) is an inert deny
+/// entry, while a name in no vocabulary fails the build and the error names
+/// the bundle vocabulary it checked.
+#[tokio::test]
+async fn declared_deny_of_an_unmounted_bundle_tool_is_inert_and_unknown_names_fail() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let build = |deny: &'static [&'static str]| AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        external_tools: Some(Arc::new(PolicyProbeDispatcher::new(
+            &["bundle_read"],
+            Arc::clone(&dispatched),
+        ))),
+        declared_tool_restriction: Some(bundle_restriction(
+            deny,
+            "probe",
+            &["bundle_ghost", "bundle_read"],
+        )),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+    let mut agent = temp_factory(&temp)
+        .build_agent(build(&["bundle_ghost"]), &Config::default())
+        .await
+        .expect("a known bundle tool the build did not mount is inert");
+    assert!(gate_admits(&mut agent, "bundle_read").await);
+
+    let err = temp_factory(&temp)
+        .build_agent(build(&["bundle_typo"]), &Config::default())
+        .await
+        .err()
+        .expect("a name in no vocabulary must fail");
+    match &err {
+        BuildAgentError::DeclaredToolUnknown {
+            tool, vocabulary, ..
+        } => {
+            assert_eq!(tool, "bundle_typo");
+            assert!(
+                vocabulary
+                    .iter()
+                    .any(|source| source == "tool bundle 'probe'"),
+                "{vocabulary:?}"
+            );
+        }
+        other => panic!("expected DeclaredToolUnknown, got: {other:?}"),
+    }
+    let message = err.to_string();
+    for needle in ["'bundle_typo'", "tool bundle 'probe'", "builtins, comms"] {
+        assert!(message.contains(needle), "{needle} missing from: {message}");
+    }
+}

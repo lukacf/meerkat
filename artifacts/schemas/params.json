@@ -26903,7 +26903,7 @@
             "type": "boolean"
           },
           "deny": {
-            "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; each name must\nbelong to the profile's composed tool families.",
+            "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; each name must\nbelong to the profile's composed tool families or to one of its own\n`rust_bundles`.",
             "items": {
               "type": "string"
             },
@@ -26931,6 +26931,13 @@
             "default": false,
             "description": "Declare the profile read-only: the execution gate admits only tools\ntheir owning dispatcher declares read-only, and a spawn cannot widen\nit. Enforcement, not prompt guidance.",
             "type": "boolean"
+          },
+          "rust_bundles": {
+            "description": "Ids of host-registered Rust tool bundles the profile uses. The host\nmust have made each one available to child mobs; callers name bundles,\nthey never supply them. Omitted when empty.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "schedule": {
             "default": false,
@@ -30094,7 +30101,7 @@
             "type": "boolean"
           },
           "deny": {
-            "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; each name must\nbelong to the profile's composed tool families.",
+            "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; each name must\nbelong to the profile's composed tool families or to one of its own\n`rust_bundles`.",
             "items": {
               "type": "string"
             },
@@ -30122,6 +30129,13 @@
             "default": false,
             "description": "Declare the profile read-only: the execution gate admits only tools\ntheir owning dispatcher declares read-only, and a spawn cannot widen\nit. Enforcement, not prompt guidance.",
             "type": "boolean"
+          },
+          "rust_bundles": {
+            "description": "Ids of host-registered Rust tool bundles the profile uses. The host\nmust have made each one available to child mobs; callers name bundles,\nthey never supply them. Omitted when empty.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "schedule": {
             "default": false,
@@ -31315,7 +31329,7 @@
             "type": "boolean"
           },
           "deny": {
-            "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; each name must\nbelong to the profile's composed tool families.",
+            "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; each name must\nbelong to the profile's composed tool families or to one of its own\n`rust_bundles`.",
             "items": {
               "type": "string"
             },
@@ -31343,6 +31357,13 @@
             "default": false,
             "description": "Declare the profile read-only: the execution gate admits only tools\ntheir owning dispatcher declares read-only, and a spawn cannot widen\nit. Enforcement, not prompt guidance.",
             "type": "boolean"
+          },
+          "rust_bundles": {
+            "description": "Ids of host-registered Rust tool bundles the profile uses. The host\nmust have made each one available to child mobs; callers name bundles,\nthey never supply them. Omitted when empty.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "schedule": {
             "default": false,

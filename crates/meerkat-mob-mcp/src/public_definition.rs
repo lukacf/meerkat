@@ -147,7 +147,9 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
             deny: input.tools.deny,
             mcp: input.tools.mcp,
             mcp_servers: vec![],
-            rust_bundles: Vec::new(),
+            // Ids only; MobMcpState::admit_child_tool_bundles refuses any the
+            // host has not made available to child mobs.
+            rust_bundles: input.tools.rust_bundles,
         },
         peer_description: input.peer_description,
         external_addressable: input.external_addressable,

@@ -133,6 +133,25 @@ them.
   `McpConnection::close`, `McpProtocol::close`, `McpRouter::shutdown`, and to
   server remove, reload and replace. On Unix the whole process group of the
   server is killed (see Fixed).
+- `meerkat_core::TranscriptEditError` gains the variant
+  `TranscriptRevisionRetired { revision, oldest_retained_revision,
+  retired_rewrites }`, the typed refusal for a revision older than the
+  transcript-history retention window (see Fixed). Exhaustive matches must
+  handle it.
+- `meerkat_core::CompactionConfig` and
+  `meerkat_core::config::CompactionRuntimeConfig` gain the public field
+  `history_retained_rewrites: usize` (default 4). Struct literals must set it
+  or use `..Default::default()`.
+- `meerkat_core::TranscriptHistoryState::commits` returns the named iterator
+  `TranscriptRewriteCommits` (`ExactSizeIterator + DoubleEndedIterator`)
+  instead of an opaque `impl ExactSizeIterator`.
+- Behaviour-only (not measured by the gate): a session's transcript graph is
+  re-anchored after each compaction. On a re-anchored
+  `TranscriptHistoryState`, `anchor()` is the oldest retained rewrite child,
+  not the pre-rewrite transcript. `edges()` and `materialize_revision_bodies()`
+  cover the retained occurrences only, and `materialize_revision` of a retired
+  revision returns `TranscriptRevisionRetired`. `commits()`, `commit_count()`,
+  `commit(i)`, `rewrite_prefix()` and `graph_prefix()` are unchanged.
 
 ### Added
 
@@ -246,6 +265,18 @@ them.
   `CoverageValidationMode::RequireClaims` additionally requires every entry to
   name a code anchor and a scenario. `xtask` now calls the library, and every
   refusal keeps its previous message.
+- `[compaction] history_retained_rewrites` (realm config, default 4;
+  `CompactionConfig::history_retained_rewrites` in Rust) bounds how many
+  recent transcript rewrites keep their bodies in the session document. The
+  pieces behind it:
+  - `Session::retire_transcript_history`;
+  - `TranscriptHistoryRetention`;
+  - `RetiredTranscriptPrefix`;
+  - `TranscriptHistoryState::{retired_count, retired_prefix,
+    oldest_retained_revision, is_retired_revision, retired_revision_refusal}`;
+  - the defaulted `Compactor::transcript_history_retention`, which
+    `DefaultCompactor` reads from its config.
+
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a
@@ -386,6 +417,33 @@ them.
   to name the tag commit. Tag pushes and dispatches on the tag ref keep the
   exact-tag check.
 
+- A session document no longer grows without bound. The transcript rewrite
+  graph in session metadata kept one full pre-rewrite transcript plus every
+  message appended between rewrites, forever. Compaction shrank the live
+  transcript, but the document kept every message the session ever produced.
+  A blob-persisted session writes that whole document at every turn boundary,
+  so cost per turn grew with lifetime history: one OB3 coordinator reached
+  286 MB and was rewritten in full at each boundary.
+  - After each compaction the graph now re-anchors at the oldest of the most
+    recent `history_retained_rewrites` rewrites. The new anchor is that
+    rewrite's re-proved child plus its row-lineage token.
+  - Every commit stays, together with the rewrite- and graph-prefix
+    accumulators at the cut. The rolling graph identity is byte-identical, so
+    physical heads and save guards that bind it still verify.
+  - Documents written before this change load unchanged and re-anchor on
+    their next compaction.
+  - Reads of a retired revision (fork, rewind, restore, revision reads,
+    projections, and suffix proofs that would start before the cut) fail with
+    the typed `TranscriptRevisionRetired` naming the oldest retained revision.
+    They never return a wrong anchor.
+  - Head-canonical stores still keep the full history out of line. Their
+    revision reads can serve retired revisions, and cold loads replay the
+    whole graph. A re-anchored graph cannot be laid out as head-canonical
+    strands (blob-to-SQLite conversion), which is refused typed.
+  - Residual: each retained commit is about 640 B, so the document still
+    grows by about 640 KB per 1,000 compactions. Missing-receipt repair
+    writes those commit values, so they stay; folding them below an
+    audit-coverage watermark is tracked in #1534.
 - The machine TLA generator parenthesizes a field's pending value when a
   later expression in the same update block reads it. A conditionally
   updated field was spliced bare as `IF c THEN a ELSE b`, so TLA+ precedence

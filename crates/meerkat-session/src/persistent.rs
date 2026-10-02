@@ -1478,33 +1478,21 @@ fn transcript_rewrite_audit_receipt_for_commits(
                 "transcript rewrite receipt session has no sealed graph".to_string(),
             ))
         })?;
-    let suffix = history
-        .prove_commit_suffix_starting_with(first)
+    // Receipts carry commits and rewrite prefixes only, so this proof also
+    // covers occurrences whose bodies the graph has retired.
+    let receipt = history
+        .audit_receipt_starting_with(first)
         .map_err(|error| {
             SessionError::Agent(AgentError::InternalError(format!(
-                "transcript rewrite receipt suffix is invalid: {error}"
+                "failed to seal transcript rewrite receipt: {error}"
             )))
         })?;
-    let proved = suffix.commits();
-    if proved.len() != commits.len()
-        || !proved
-            .zip(commits)
-            .all(|(proved, supplied)| proved == supplied)
-    {
+    if receipt.commits() != commits {
         return Err(SessionError::Agent(AgentError::InternalError(
             "transcript rewrite receipt commits are not the exact sealed graph suffix".to_string(),
         )));
     }
-    meerkat_core::TranscriptRewriteAuditReceiptBatch::new(
-        suffix.start_prefix().clone(),
-        commits.to_vec(),
-        suffix.end_prefix().clone(),
-    )
-    .map_err(|error| {
-        SessionError::Agent(AgentError::InternalError(format!(
-            "failed to seal transcript rewrite receipt: {error}"
-        )))
-    })
+    Ok(receipt)
 }
 
 async fn append_prepared_transcript_rewrite_receipt(
@@ -13872,6 +13860,13 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for PersistentSe
             match fallback {
                 Some(messages) => messages,
                 None => {
+                    if let Some(history) = history.as_ref()
+                        && history.is_retired_revision(&revision)
+                    {
+                        return Err(history
+                            .retired_revision_refusal(&revision)
+                            .into_session_error());
+                    }
                     return Err(SessionError::Agent(
                         meerkat_core::error::AgentError::ConfigError(format!(
                             "transcript revision {revision} not found for session {id}",

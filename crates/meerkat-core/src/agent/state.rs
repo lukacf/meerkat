@@ -2972,11 +2972,21 @@ where
                             // session value. Its exact TranscriptRewriteCommit
                             // becomes the identity of any paired memory stage.
                             let mut compacted_session = self.session.clone();
+                            let retention = compactor.transcript_history_retention();
                             let prepared_rewrite = compacted_session
                                 .replace_messages_for_compaction_internal(
                                     outcome.new_messages,
                                     &outcome.rewrite_authority,
-                                );
+                                )
+                                .and_then(|commit| {
+                                    // Bound the graph in the same prepared
+                                    // value: retired bodies never reach a
+                                    // persisted document.
+                                    if commit.is_some() {
+                                        compacted_session.retire_transcript_history(retention)?;
+                                    }
+                                    Ok(commit)
+                                });
                             let compacted_session = match prepared_rewrite {
                                 Ok(Some(commit)) => Some((compacted_session, commit)),
                                 Ok(None) => {

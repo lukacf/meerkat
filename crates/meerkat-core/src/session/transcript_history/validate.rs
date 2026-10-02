@@ -444,14 +444,30 @@ pub(crate) fn validate_transcript_history_state(
             state.anchor().revision()
         )));
     }
-    let anchor_row_prefix =
-        crate::SessionMessageRowPrefixAccumulator::from_messages(state.anchor().messages())
-            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
-    if &anchor_row_prefix != state.anchor().row_prefix() {
-        return Err(TranscriptEditError::HistoryStateMalformed(
-            "transcript graph anchor exact row prefix does not bind its messages".to_string(),
-        ));
-    }
+    // A whole graph's anchor is the pre-rewrite transcript, whose row prefix
+    // is the flat append lineage of its rows. A re-anchored graph's anchor is
+    // a rewrite child: its row prefix is that child's splice lineage, which
+    // only the retired history could re-derive, so it is carried (bound to
+    // the anchor by row count here and by the edge chain below).
+    let anchor_row_prefix = if state.retired_prefix().is_some() {
+        if state.anchor().row_prefix().row_count() != state.anchor().messages().len() as u64 {
+            return Err(TranscriptEditError::HistoryStateMalformed(
+                "re-anchored transcript graph row prefix does not count its anchor rows"
+                    .to_string(),
+            ));
+        }
+        state.anchor().row_prefix().clone()
+    } else {
+        let derived =
+            crate::SessionMessageRowPrefixAccumulator::from_messages(state.anchor().messages())
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        if &derived != state.anchor().row_prefix() {
+            return Err(TranscriptEditError::HistoryStateMalformed(
+                "transcript graph anchor exact row prefix does not bind its messages".to_string(),
+            ));
+        }
+        derived
+    };
     let mut expected_base = state.anchor().revision();
     // The anchor's exact row prefix was just re-derived from its messages and
     // proved equal to the stored one; the endpoint witness binds that same
@@ -461,9 +477,53 @@ pub(crate) fn validate_transcript_history_state(
         anchor_row_prefix,
     )
     .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
-    let mut rewrite_prefix = TranscriptRewritePrefixAccumulator::empty();
+    // A re-anchored graph resumes after its retired prefix: the retired
+    // commits must be the contiguous generations 1..=n, recompute the carried
+    // rewrite prefix, and end at the anchor. The carried graph prefix cannot
+    // be recomputed (it covers the dropped edge bytes); it seeds the rolling
+    // identity the retained edges are re-proved against below.
+    let (mut rewrite_prefix, generation_offset) = match state.retired_prefix() {
+        None => (TranscriptRewritePrefixAccumulator::empty(), 0usize),
+        Some(retired) => {
+            let commits = retired.commits();
+            let last = commits.last().ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(
+                    "retired transcript prefix carries no commit".to_string(),
+                )
+            })?;
+            for (index, commit) in commits.iter().enumerate() {
+                if u64::try_from(index + 1).ok() != Some(commit.rewrite_generation) {
+                    return Err(TranscriptEditError::HistoryStateMalformed(format!(
+                        "retired rewrite generation {} is not the expected contiguous occurrence {}",
+                        commit.rewrite_generation,
+                        index + 1
+                    )));
+                }
+            }
+            let recomputed = TranscriptRewritePrefixAccumulator::from_commits(commits)
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+            if &recomputed != retired.rewrite_prefix() {
+                return Err(TranscriptEditError::HistoryStateMalformed(
+                    "retired rewrite-prefix accumulator does not bind its commits".to_string(),
+                ));
+            }
+            if retired.graph_prefix().occurrence_count() != commits.len() as u64 {
+                return Err(TranscriptEditError::HistoryStateMalformed(
+                    "retired graph prefix does not count its commits".to_string(),
+                ));
+            }
+            if last.revision != state.anchor().revision()
+                || last.messages_after != state.anchor().messages().len()
+            {
+                return Err(TranscriptEditError::HistoryStateMalformed(
+                    "re-anchored transcript graph anchor is not the last retired child".to_string(),
+                ));
+            }
+            (recomputed, commits.len())
+        }
+    };
     for (index, edge) in state.edges().iter().enumerate() {
-        let expected = u64::try_from(index)
+        let expected = u64::try_from(generation_offset + index)
             .ok()
             .and_then(|index| index.checked_add(1))
             .ok_or_else(|| {
@@ -496,8 +556,16 @@ pub(crate) fn validate_transcript_history_state(
             state.commit_count()
         )));
     }
-    let graph_prefix = super::graph::TranscriptGraphPrefixAccumulator::from_graph(
-        state.anchor(),
+    let graph_base = match state.retired_prefix() {
+        Some(retired) => retired.graph_prefix().clone(),
+        None => super::graph::TranscriptGraphPrefixAccumulator::from_graph(
+            state.anchor(),
+            std::iter::empty(),
+        )
+        .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?,
+    };
+    let graph_prefix = super::graph::TranscriptGraphPrefixAccumulator::extend_all(
+        graph_base,
         state.edges().iter().map(AsRef::as_ref),
     )
     .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;

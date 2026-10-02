@@ -11,9 +11,10 @@ pub(crate) mod validate;
 
 pub use audit_receipt::TranscriptRewriteAuditReceiptBatch;
 pub use graph::{
-    ProvenReleased0810RewriteRemap, TRANSCRIPT_HISTORY_FORMAT_CURRENT, TranscriptEndpointWitness,
-    TranscriptGraphPrefixAccumulator, TranscriptHistoryState, TranscriptParentAdvance,
-    TranscriptRevisionBody, TranscriptRevisionEdge, TranscriptRewriteCommit,
+    ProvenReleased0810RewriteRemap, RetiredTranscriptPrefix, TRANSCRIPT_HISTORY_FORMAT_CURRENT,
+    TranscriptEndpointWitness, TranscriptGraphPrefixAccumulator, TranscriptHistoryRetention,
+    TranscriptHistoryState, TranscriptParentAdvance, TranscriptRevisionBody,
+    TranscriptRevisionEdge, TranscriptRewriteCommit, TranscriptRewriteCommits,
     TranscriptRewriteParentTransition, TranscriptRewritePatch, TranscriptRewritePrefixAccumulator,
     TranscriptRewriteRecord, extend_transcript_rewrite_prefix_accumulator,
     remap_proven_released_0810_rewrite_record, transcript_history_full_body_materializations,

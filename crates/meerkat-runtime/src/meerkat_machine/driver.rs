@@ -4483,12 +4483,12 @@ impl DriverEntry {
     ) -> Result<(), RuntimeDriverError> {
         match self {
             Self::Ephemeral(driver) => driver.authenticate_work_with_credential(input, custody),
-            Self::Persistent(_) if custody.governed() => {
-                Err(super::credential_custody::unavailable(
-                    crate::traits::ControllerReadinessFailure::UnsupportedScope,
-                ))
+            Self::Persistent(driver) => {
+                driver.require_durability_ready()?;
+                driver
+                    .inner_ref()
+                    .authenticate_work_with_credential(input, custody)
             }
-            Self::Persistent(_) => Ok(()),
         }
     }
 
@@ -4503,7 +4503,11 @@ impl DriverEntry {
             Self::Ephemeral(driver) => {
                 driver.accept_resolved_input_with_credential(input, resolved, custody)
             }
-            Self::Persistent(driver) => driver.accept_resolved_input(input, resolved).await,
+            Self::Persistent(driver) => {
+                driver
+                    .accept_resolved_input_with_credential(input, resolved, custody)
+                    .await
+            }
         }
     }
 

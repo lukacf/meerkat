@@ -1003,6 +1003,10 @@ mod ops_persistence_worker_tests {
             Arc::clone(&store),
             runtime_id.clone(),
             persist_rx,
+            store
+                .execution_custody()
+                .map(|owner| owner.try_acquire_shared().map(Arc::new))
+                .transpose(),
         )
         .expect("persistence worker");
 
@@ -1033,6 +1037,10 @@ mod ops_persistence_worker_tests {
             Arc::clone(&store),
             runtime_id.clone(),
             persist_rx,
+            store
+                .execution_custody()
+                .map(|owner| owner.try_acquire_shared().map(Arc::new))
+                .transpose(),
         )
         .expect("persistence worker");
         registry.set_persistence_channel(persist_tx, epoch_id.clone(), cursor_state);
@@ -1172,12 +1180,18 @@ fn spawn_ops_lifecycle_persistence_worker(
     store: Arc<dyn RuntimeStore>,
     runtime_id: LogicalRuntimeId,
     mut persist_rx: OpsLifecyclePersistenceReceiver,
+    execution_custody: Result<
+        Option<Arc<crate::store::RuntimeStoreExecutionClaim>>,
+        crate::store::RuntimeStoreExecutionCustodyError,
+    >,
 ) -> Result<OpsLifecyclePersistenceWorker, RuntimeDriverError> {
+    let execution_custody = execution_custody.map_err(super::execution_custody_error)?;
     let thread_name = format!("ops-lifecycle-persist-{runtime_id}");
     let worker_runtime_id = runtime_id.clone();
     let handle = std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
+            let _execution_custody = execution_custody;
             let runtime = match crate::tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -1211,8 +1225,14 @@ fn spawn_ops_lifecycle_persistence_worker(
     store: Arc<dyn RuntimeStore>,
     runtime_id: LogicalRuntimeId,
     mut persist_rx: OpsLifecyclePersistenceReceiver,
+    execution_custody: Result<
+        Option<Arc<crate::store::RuntimeStoreExecutionClaim>>,
+        crate::store::RuntimeStoreExecutionCustodyError,
+    >,
 ) -> Result<OpsLifecyclePersistenceWorker, RuntimeDriverError> {
+    let execution_custody = execution_custody.map_err(super::execution_custody_error)?;
     let handle = crate::tokio::spawn(async move {
+        let _execution_custody = execution_custody;
         while let Some(request) = persist_rx.recv().await {
             persist_ops_lifecycle_request(&store, &runtime_id, request).await;
         }
@@ -1477,6 +1497,7 @@ impl MeerkatMachine {
         ),
         RuntimeDriverError,
     > {
+        self.require_execution_custody()?;
         if self.store.is_some() {
             self.recover_or_create_ops_state(session_id, runtime_id)
                 .await
@@ -1552,6 +1573,11 @@ impl MeerkatMachine {
         observed: RuntimeSessionLifecycleObservation,
         write_fence: Arc<dyn crate::store::RuntimeStoreWriteFence>,
     ) -> RuntimeSessionRegistrationOutcome {
+        if let Err(error) = self.require_execution_custody() {
+            return RuntimeSessionRegistrationOutcome::Backoff {
+                reason: error.to_string(),
+            };
+        }
         let RuntimeSessionLifecycleObservation {
             session_id,
             runtime_id,
@@ -2701,6 +2727,7 @@ impl MeerkatMachine {
                 Arc::clone(store),
                 runtime_id.clone(),
                 receiver,
+                self.execution_custody.clone(),
             )?),
             (None, None) => None,
             _ => {
@@ -4581,6 +4608,7 @@ impl MeerkatMachine {
                     Arc::clone(store),
                     runtime_id,
                     persist_rx,
+                    self.execution_custody.clone(),
                 )?;
                 let previous_worker = {
                     let mut sessions = self.sessions.write().await;
@@ -5933,6 +5961,7 @@ impl MeerkatMachine {
                     Arc::clone(store),
                     recovered_runtime_id.clone(),
                     receiver,
+                    self.execution_custody.clone(),
                 )?),
                 (None, None) => None,
                 _ => {

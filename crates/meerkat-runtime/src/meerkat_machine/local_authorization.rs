@@ -2,7 +2,9 @@
 //!
 //! No input, session, identity or grant registry is copied here. App invocation
 //! and resource decisions remain explicitly installed trusted owners. This
-//! first concrete adapter supports attached storeless native sessions only.
+//! adapter supports attached storeless sessions and live memory-backed persistent
+//! sessions with exclusive backend execution custody. Restart and unloaded
+//! administrative controller scope are not established by this adapter.
 
 use std::sync::{Arc, Weak};
 
@@ -65,8 +67,9 @@ impl std::fmt::Debug for NativeGrantWorkConfiguration {
 impl MeerkatMachine {
     /// Install the actual native/grant composition before sharing the machine.
     /// Exclusive ownership is checked before constructing any Weak reference.
-    /// An empty but already shared machine is not eligible. Persistent scope
-    /// needs actual restore/client custody and is not implicitly supported.
+    /// An empty but already shared machine is not eligible. A persistent backend
+    /// must atomically upgrade its sole actual execution claim before setup;
+    /// current support is live process-local work, not restored client custody.
     pub fn with_local_grant_authorization(
         mut self,
         configuration: NativeGrantWorkConfiguration,
@@ -74,12 +77,12 @@ impl MeerkatMachine {
         {
             let shared =
                 Arc::get_mut(&mut self.shared).ok_or_else(crate::input_authority::unavailable)?;
-            if shared.store.is_some()
-                || !shared.sessions.get_mut().is_empty()
+            if !shared.sessions.get_mut().is_empty()
                 || shared.native_work_authorization_host.get().is_some()
             {
                 return Err(crate::input_authority::unavailable());
             }
+            shared.upgrade_execution_custody()?;
         }
         // Admission checks the installed owners before an accepted batch
         // exists. Operation preparation gets a separate adapter over that
@@ -215,13 +218,16 @@ impl AdmittedWorkPolicyOwner for NativeAcceptedWorkOwner {
         now_ms: u64,
     ) -> Result<WorkOwnerAllowance, meerkat_core::OperationAuthorizationError> {
         self.run.check_binding(binding)?;
+        self.run.check_durability()?;
         let machine = self
             .run
             .machine
             .upgrade()
             .ok_or(meerkat_core::OperationAuthorizationError::Unavailable)?;
-        if machine.store.is_some()
-            || association.candidate().target.logical_runtime.as_str() != self.runtime_id.as_str()
+        machine
+            .require_governed_execution_custody()
+            .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
+        if association.candidate().target.logical_runtime.as_str() != self.runtime_id.as_str()
             || !self.associations.contains(association)
         {
             return Err(malformed().into());
@@ -282,6 +288,7 @@ struct NativeRunCustody {
     run_id: dsl::RunId,
     execution_scope: OperationExecutionScope,
     domain_run_id: meerkat_core::RunId,
+    durability_health: Option<super::DurabilityHealthHandle>,
 }
 
 impl NativeRunCustody {
@@ -309,6 +316,7 @@ impl NativeRunCustody {
             run_id: dsl::RunId::from_domain(batch.run_id()),
             execution_scope: batch.execution_scope().clone(),
             domain_run_id: batch.run_id().clone(),
+            durability_health: batch.durability_health.clone(),
         })
     }
 
@@ -336,11 +344,21 @@ impl NativeRunCustody {
         Ok(())
     }
 
+    fn check_durability(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        if let Some(health) = self.durability_health.as_ref() {
+            health
+                .require_ready()
+                .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
+        }
+        Ok(())
+    }
+
     fn check(
         &self,
         binding: &PreparedAuthorizationBinding,
     ) -> Result<(), meerkat_core::OperationAuthorizationError> {
         self.check_binding(binding)?;
+        self.check_durability()?;
         let _machine = self
             .machine
             .upgrade()
@@ -2390,4 +2408,7 @@ mod tests {
         );
         assert_memory_persistent_registration(&machine).await;
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod memory_persistence;
 }

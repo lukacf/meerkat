@@ -50,6 +50,10 @@ struct RuntimeCompactionCommitCoordinator {
 struct RuntimeStickyModelFallbackCommitCoordinator {
     session_id: SessionId,
     store: Option<Arc<dyn crate::store::RuntimeStore>>,
+    execution_custody: Result<
+        Option<Arc<crate::store::RuntimeStoreExecutionClaim>>,
+        crate::store::RuntimeStoreExecutionCustodyError,
+    >,
 }
 
 struct RuntimeStickyModelFallbackCommitOperation {
@@ -97,6 +101,10 @@ impl meerkat_core::handles::StickyModelFallbackCommitCoordinator
         Arc<dyn meerkat_core::handles::StickyModelFallbackCommitOperation>,
         meerkat_core::handles::StickyModelFallbackCommitError,
     > {
+        let execution_custody = self
+            .execution_custody
+            .clone()
+            .map_err(|_| meerkat_core::handles::StickyModelFallbackCommitError::SupervisorLost)?;
         let Some(store) = self.store.clone() else {
             // Ephemeral runtimes have no recovery boundary to split. Consume
             // the generated one-shot commit synchronously and return the same
@@ -113,6 +121,9 @@ impl meerkat_core::handles::StickyModelFallbackCommitCoordinator
         let session_id = self.session_id.clone();
         let (result_tx, result_rx) = crate::tokio::sync::watch::channel(None);
         crate::tokio::spawn(async move {
+            // Keep this exact execution owner through save and compensation,
+            // even if the facade and its coordinator are dropped by the waiter.
+            let _execution_custody = execution_custody;
             let result =
                 run_sticky_model_fallback_commit(session_id, store, machine_commit, control_delta)
                     .await;
@@ -1105,6 +1116,10 @@ mod sticky_model_fallback_commit_tests {
     ) -> RuntimeStickyModelFallbackCommitCoordinator {
         RuntimeStickyModelFallbackCommitCoordinator {
             session_id: session_id.clone(),
+            execution_custody: store
+                .execution_custody()
+                .map(|owner| owner.try_acquire_shared().map(Arc::new))
+                .transpose(),
             store: Some(store),
         }
     }
@@ -1444,6 +1459,7 @@ impl MeerkatMachine {
                 Arc::new(RuntimeStickyModelFallbackCommitCoordinator {
                     session_id: session_id.clone(),
                     store: self.store.clone(),
+                    execution_custody: self.execution_custody.clone(),
                 }),
                 self.generated_auth_lease_handle(),
                 Arc::new(crate::handles::RuntimeMcpServerLifecycleHandle::new(

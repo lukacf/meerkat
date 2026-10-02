@@ -4,6 +4,11 @@
 //! atomically with their session and input-state effects.
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+mod execution_custody;
+pub use execution_custody::{
+    RuntimeStoreExecutionClaim, RuntimeStoreExecutionCustody, RuntimeStoreExecutionCustodyError,
+};
+
 pub mod memory;
 #[cfg(feature = "sqlite-store")]
 pub mod sqlite;
@@ -8006,6 +8011,13 @@ pub async fn load_input_states_for_recovery(
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait RuntimeSessionAuthorityOps: Send + Sync {
+    /// Mechanical lifetime custody of this actual backend. Decorators forward
+    /// this carrier; a backend without this capability cannot enable governed
+    /// execution. Ordinary operation on unsupported backends is unchanged.
+    fn execution_custody(&self) -> Option<&RuntimeStoreExecutionCustody> {
+        None
+    }
+
     fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile;
 
     fn session_boundary_authority_read_cost(&self) -> RuntimeSessionAuthorityReadCost;
@@ -8246,6 +8258,11 @@ pub trait RuntimeStore: Send + Sync {
     /// a runtime `Unsupported` surprise.
     #[doc(hidden)]
     fn session_authority_ops(&self) -> &dyn RuntimeSessionAuthorityOps;
+
+    /// Actual backend execution owner, never the wrapper's pointer identity.
+    fn execution_custody(&self) -> Option<&RuntimeStoreExecutionCustody> {
+        self.session_authority_ops().execution_custody()
+    }
 
     /// Durable session representation owned by this store.
     ///
@@ -9761,6 +9778,37 @@ mod runtime_store_write_fence_tests {
         )
         .expect_err("only snapshot boundaries may carry an external write fence");
         assert!(matches!(error, RuntimeStoreError::Unsupported(_)));
+    }
+
+    #[test]
+    fn decorator_forwards_same_backend_execution_custody_in_both_orders() {
+        let inner = InMemoryRuntimeStore::new();
+        let decorated = DefaultFenceDecorator {
+            inner: inner.clone(),
+        };
+        let direct_owner = RuntimeStore::execution_custody(&inner).unwrap();
+        let decorated_owner = RuntimeStore::execution_custody(&decorated).unwrap();
+        let direct = direct_owner.try_acquire_shared().unwrap();
+        let mut wrapped = decorated_owner.try_acquire_shared().unwrap();
+        assert_eq!(
+            wrapped.try_upgrade_to_governed(),
+            Err(RuntimeStoreExecutionCustodyError::Busy)
+        );
+        drop(direct);
+        wrapped.try_upgrade_to_governed().unwrap();
+        assert!(matches!(
+            direct_owner.try_acquire_shared(),
+            Err(RuntimeStoreExecutionCustodyError::Busy)
+        ));
+        drop(wrapped);
+        let mut direct = direct_owner.try_acquire_shared().unwrap();
+        direct.try_upgrade_to_governed().unwrap();
+        assert!(matches!(
+            decorated_owner.try_acquire_shared(),
+            Err(RuntimeStoreExecutionCustodyError::Busy)
+        ));
+        drop(direct);
+        decorated_owner.try_acquire_shared().unwrap();
     }
 
     #[tokio::test]

@@ -47,6 +47,7 @@ impl NativeWorkAuthorizationAttachment {
             .owner
             .upgrade()
             .ok_or_else(|| unavailable(ControllerReadinessFailure::AuthorityUnavailable))?;
+        owner.require_governed_execution_custody()?;
         let authority = owner
             .auth_lease
             .read()
@@ -103,14 +104,11 @@ impl NativeCredentialCustody {
     pub(crate) async fn acquire(
         slot: &NativeWorkAuthorizationSlot,
         input: &Input,
-        persistent: bool,
+        _persistent: bool,
     ) -> Result<Self, RuntimeDriverError> {
         let Some((host, authority, key)) = Self::selected(slot, input)? else {
             return Ok(Self::Ungoverned);
         };
-        if persistent {
-            return Err(unavailable(ControllerReadinessFailure::UnsupportedScope));
-        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             #[cfg(not(test))]

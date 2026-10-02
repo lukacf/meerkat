@@ -730,3 +730,6 @@ mod a2_resource_specificity;
 
 #[path = "e1_policy_control/a3_queued_work.rs"]
 mod a3_queued_work;
+
+#[path = "e1_policy_control/stock_persistent.rs"]
+mod stock_persistent;

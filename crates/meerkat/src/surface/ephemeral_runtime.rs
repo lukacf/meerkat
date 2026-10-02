@@ -120,6 +120,13 @@ async fn materialize_ephemeral_runtime_session_inner<B: SessionAgentBuilder + 's
         MaterializationCommitTestBarrier,
     >,
 ) -> Result<RunResult, EphemeralRuntimeError> {
+    if machine.has_runtime_persistence() {
+        return Err(SessionError::Unsupported(
+            "ephemeral session materialization requires a machine without runtime persistence"
+                .into(),
+        )
+        .into());
+    }
     if request.initial_turn != InitialTurnPolicy::Defer {
         return Err(SessionError::Unsupported(
             "runtime materialization requires a deferred initial turn; submit the prompt through runtime admission after creation".into(),
@@ -495,6 +502,22 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutorPostStopCleanupHandle
         meerkat_core::lifecycle::core_executor::CoreDurabilityReloadCleanupCapability::ProcessLocalNonTerminal
     }
 
+    async fn prepare_durability_reload_cleanup(&self) -> Result<(), CoreExecutorError> {
+        // This slot is published once by the service before attachment. Bind
+        // that actor incarnation, never a later lookup by logical SessionId.
+        let actor = self.actor.witness().ok_or_else(|| {
+            CoreExecutorError::control_failed_runtime(
+                "ephemeral runtime cleanup has no published actor witness",
+            )
+        })?;
+        if actor.session_id() != &self.session_id || !actor.is_live() {
+            return Err(CoreExecutorError::control_failed_runtime(
+                "ephemeral runtime cleanup has no live exact-session actor witness",
+            ));
+        }
+        Ok(())
+    }
+
     async fn cleanup_after_runtime_stop_terminalized(&self) -> Result<(), CoreExecutorError> {
         let _boundary = self
             .service
@@ -517,7 +540,24 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutorPostStopCleanupHandle
     }
 
     async fn cleanup_after_durability_reload_required(&self) -> Result<(), CoreExecutorError> {
-        self.cleanup_after_runtime_stop_terminalized().await
+        let actor = self.actor.witness().ok_or_else(|| {
+            CoreExecutorError::control_failed_runtime(
+                "ephemeral runtime cleanup has no published actor witness",
+            )
+        })?;
+        if actor.session_id() != &self.session_id {
+            return Err(CoreExecutorError::control_failed_runtime(
+                "ephemeral runtime cleanup actor witness belongs to another session",
+            ));
+        }
+        // The degraded-registration caller may already hold the outer turn
+        // boundary. Exact discard removes only process-local actor material,
+        // signals shutdown without joining it, and cannot remove a successor.
+        self.service
+            .discard_live_session_actor(&actor)
+            .await
+            .map(|_| ())
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 }
 
@@ -679,6 +719,7 @@ mod tests {
     use super::*;
     use crate::{AgentFactory, Config, FactoryAgentBuilder};
     use meerkat_core::service::SessionServiceHistoryExt;
+    use meerkat_runtime::SessionServiceRuntimeExt;
 
     struct CaptureRequestClient {
         inner: meerkat_client::TestClient,
@@ -750,6 +791,320 @@ mod tests {
             build: None,
             labels: None,
         }
+    }
+
+    #[tokio::test]
+    async fn ephemeral_materialization_rejects_persistent_machine_before_effects() {
+        use meerkat_runtime::RuntimeStore;
+
+        struct BuildProbe {
+            inner: FactoryAgentBuilder,
+            attempted: Arc<std::sync::Mutex<Vec<SessionId>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl SessionAgentBuilder for BuildProbe {
+            type Agent = <FactoryAgentBuilder as SessionAgentBuilder>::Agent;
+
+            async fn build_agent(
+                &self,
+                request: &CreateSessionRequest,
+                event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+            ) -> Result<Self::Agent, SessionError> {
+                let id = request
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.resume_session.as_ref())
+                    .expect("materializer must seat the real Agent on its exact session")
+                    .id()
+                    .clone();
+                self.attempted.lock().expect("build attempts").push(id);
+                self.inner.build_agent(request, event_tx).await
+            }
+        }
+
+        let client = Arc::new(CaptureRequestClient {
+            inner: meerkat_client::TestClient::for_provider(meerkat_core::Provider::OpenAI),
+            messages: std::sync::Mutex::new(Vec::new()),
+        });
+        let factory =
+            AgentFactory::new(std::env::temp_dir().join("meerkat-ephemeral-store-mismatch"));
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(client.clone());
+        let attempted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let service = Arc::new(EphemeralSessionService::new(
+            BuildProbe {
+                inner: builder,
+                attempted: attempted.clone(),
+            },
+            1,
+        ));
+        let store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let machine = Arc::new(MeerkatMachine::persistent(
+            store.clone(),
+            Arc::new(crate::MemoryBlobStore::new()),
+        ));
+        assert!(machine.has_runtime_persistence());
+        let mut materialization = Box::pin(materialize_ephemeral_runtime_session(
+            &service,
+            &machine,
+            request(),
+            false,
+        ));
+        let (ready_without_suspending, outcome) = match futures::poll!(materialization.as_mut()) {
+            std::task::Poll::Ready(outcome) => (true, Ok(outcome)),
+            std::task::Poll::Pending => (
+                false,
+                tokio::time::timeout(std::time::Duration::from_secs(10), materialization.as_mut())
+                    .await,
+            ),
+        };
+        drop(materialization);
+        let builds = attempted.lock().expect("build attempts").clone();
+        let live = service.list(Default::default()).await;
+        let catalog = store
+            .list_runtime_session_catalog_entries(Default::default())
+            .await;
+        let provider_calls = client.messages.lock().expect("request capture").len();
+
+        // The old implementation materializes successfully. Retire any actual
+        // actor/registration before the intended negative assertion fails.
+        let mut cleanup_ids = builds.clone();
+        if let Ok(Ok(created)) = &outcome {
+            if !cleanup_ids.contains(&created.session_id) {
+                cleanup_ids.push(created.session_id.clone());
+            }
+        }
+        if let Ok(summaries) = &live {
+            for summary in summaries {
+                if !cleanup_ids.contains(&summary.session_id) {
+                    cleanup_ids.push(summary.session_id.clone());
+                }
+            }
+        }
+        let mut cleanup_results = Vec::new();
+        for id in &cleanup_ids {
+            if machine.contains_session(id).await {
+                cleanup_results.push(
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        machine.unregister_session(id),
+                    )
+                    .await,
+                );
+            }
+            if let Some(actor) = service.live_session_actor_witness(id).await {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    service.discard_live_session_actor(&actor),
+                )
+                .await
+                .expect("bounded unexpected-actor cleanup")
+                .expect("retire exact unexpected actor");
+            }
+        }
+        for result in cleanup_results {
+            result
+                .expect("bounded unexpected-registration cleanup")
+                .expect("exact registration cleanup");
+        }
+
+        assert!(
+            matches!(&outcome, Ok(Err(EphemeralRuntimeError::Session(SessionError::Unsupported(reason))))
+            if reason == "ephemeral session materialization requires a machine without runtime persistence"),
+            "wrong owner must fail as configuration, before a turn or store commit; error={:?}, built={builds:?}",
+            outcome.as_ref().map(|result| result.as_ref().err())
+        );
+        assert!(
+            ready_without_suspending,
+            "reject before any materialization await or task handoff"
+        );
+        assert!(
+            builds.is_empty(),
+            "no actor construction or native bindings reach the real builder"
+        );
+        assert!(live.expect("actual service view").is_empty());
+        assert!(catalog.expect("actual store catalog").is_empty());
+        assert_eq!(
+            provider_calls, 0,
+            "no model effect may precede configuration refusal"
+        );
+
+        // The same real builder, service capacity and client remain usable on
+        // the supported storeless machine; no rejecting fixture substitutes.
+        let ephemeral = Arc::new(MeerkatMachine::ephemeral());
+        let created = materialize_ephemeral_runtime_session(&service, &ephemeral, request(), false)
+            .await
+            .expect("ordinary ephemeral materialization");
+        let id = created.session_id;
+        let outcome =
+            run_ephemeral_runtime_turn(&ephemeral, &id, "supported ephemeral turn".into(), None)
+                .await;
+        let cleanup = ephemeral.unregister_session(&id).await;
+        let completed =
+            ephemeral_runtime_completion_result(outcome.expect("ordinary native admission"))
+                .expect("ordinary ephemeral turn completes");
+        cleanup.expect("ordinary ephemeral cleanup");
+        assert_eq!(completed.session_id, id);
+        assert_eq!(
+            attempted.lock().expect("build attempts").as_slice(),
+            std::slice::from_ref(&id)
+        );
+        assert!(!client.messages.lock().expect("request capture").is_empty());
+        assert!(!ephemeral.contains_session(&id).await);
+        assert!(!service.live_session_actor_registered(&id).await);
+    }
+
+    #[tokio::test]
+    async fn ephemeral_reload_cleanup_is_exact_nonterminal_and_keeps_held_outer_boundary() {
+        let (service, machine) = service();
+        let created = materialize_ephemeral_runtime_session(&service, &machine, request(), false)
+            .await
+            .expect("real actor materialization");
+        let id = created.session_id;
+        let actor = service
+            .live_session_actor_witness(&id)
+            .await
+            .expect("actual actor witness");
+        let slot = LiveSessionActorWitnessSlot::default();
+        slot.publish(actor.clone())
+            .expect("bind immutable exact actor slot");
+        let missing = EphemeralRuntimeHandles {
+            service: service.clone(),
+            session_id: id.clone(),
+            actor: LiveSessionActorWitnessSlot::default(),
+        };
+        let wrong_session = EphemeralRuntimeHandles {
+            service: service.clone(),
+            session_id: SessionId::new(),
+            actor: slot.clone(),
+        };
+        assert!(missing.prepare_durability_reload_cleanup().await.is_err());
+        assert!(
+            wrong_session
+                .prepare_durability_reload_cleanup()
+                .await
+                .is_err()
+        );
+        let handles = EphemeralRuntimeHandles {
+            service: service.clone(),
+            session_id: id.clone(),
+            actor: slot,
+        };
+        let prepared = handles.prepare_durability_reload_cleanup().await;
+        if prepared.is_err() {
+            machine
+                .unregister_session(&id)
+                .await
+                .expect("cleanup failed preparation control");
+        }
+        prepared.expect("advertised capability must bind the real published actor");
+        let before = machine
+            .runtime_state(&id)
+            .await
+            .expect("nonterminal runtime before");
+        let outer = service.acquire_runtime_turn_finalization_guard(&id).await;
+        let discarded = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            handles.cleanup_after_durability_reload_required().await?;
+            handles.cleanup_after_durability_reload_required().await
+        })
+        .await;
+        drop(outer);
+        let after = machine.runtime_state(&id).await;
+        let still_registered = service.live_session_actor_registered(&id).await;
+        let cleanup = machine.unregister_session(&id).await;
+        discarded
+            .expect("reload cleanup must not reacquire the already-held outer boundary")
+            .expect("exact process-local cleanup is idempotent");
+        assert!(!still_registered);
+        assert!(!actor.is_live());
+        assert_eq!(
+            after.expect("runtime survives process-local cleanup"),
+            before,
+            "reload cleanup must not publish a terminal runtime lifecycle"
+        );
+        cleanup.expect("final native teardown");
+    }
+
+    #[tokio::test]
+    async fn ephemeral_reload_cleanup_cannot_retire_replacement_actor() {
+        let (service, _) = service();
+        let slot = LiveSessionActorWitnessSlot::default();
+        let (created, _) = service
+            .create_session_with_admission_and_witness(request(), None, Some(&slot))
+            .await
+            .expect("actual first Agent actor");
+        let id = created.session_id;
+        let original = slot.witness().expect("first actor published by service");
+        let handles = EphemeralRuntimeHandles {
+            service: service.clone(),
+            session_id: id.clone(),
+            actor: slot,
+        };
+        let prepared = handles.prepare_durability_reload_cleanup().await;
+        if prepared.is_err() {
+            service
+                .discard_live_session_actor(&original)
+                .await
+                .expect("cleanup failed preparation");
+        }
+        prepared.expect("prepare exact first-actor cleanup authority");
+        let initialized_session = service
+            .export_session(&id)
+            .await
+            .expect("export the actual initialized first Agent before retirement");
+        assert_eq!(initialized_session.id(), &id);
+        assert!(
+            initialized_session.session_metadata().is_some(),
+            "replacement must resume the real factory-produced metadata"
+        );
+        assert!(
+            service
+                .discard_live_session_actor(&original)
+                .await
+                .expect("retire original actor")
+        );
+        let mut replacement_request = request();
+        replacement_request
+            .build
+            .get_or_insert_with(Default::default)
+            .resume_existing_session(initialized_session);
+        let replacement_slot = LiveSessionActorWitnessSlot::default();
+        let (replacement, _) = service
+            .create_session_with_admission_and_witness(
+                replacement_request,
+                None,
+                Some(&replacement_slot),
+            )
+            .await
+            .expect("actual same-session replacement Agent");
+        assert_eq!(replacement.session_id, id);
+        let replacement_actor = replacement_slot
+            .witness()
+            .expect("replacement actor publication");
+        assert!(replacement_actor != original);
+        let stale_preparation = handles.prepare_durability_reload_cleanup().await;
+        let first = handles.cleanup_after_durability_reload_required().await;
+        let second = handles.cleanup_after_durability_reload_required().await;
+        let current = service.live_session_actor_witness(&id).await;
+        let retained_live = replacement_actor.is_live();
+        let replacement_view = service.read(&id).await;
+        let cleanup = service.discard_live_session_actor(&replacement_actor).await;
+        stale_preparation.expect_err(
+            "retired immutable actor slot cannot prepare replacement cleanup authority",
+        );
+        first.expect("stale cleanup is harmless");
+        second.expect("stale cleanup remains idempotent");
+        assert!(current.as_ref() == Some(&replacement_actor));
+        assert!(retained_live);
+        assert_eq!(
+            replacement_view
+                .expect("replacement remains addressable")
+                .state
+                .session_id,
+            id
+        );
+        assert!(cleanup.expect("cleanup actual replacement"));
     }
 
     #[tokio::test]

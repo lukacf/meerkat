@@ -219,6 +219,23 @@ struct RealmSubsystemStores {
 }
 
 impl PersistenceBundle {
+    /// Configure native governance on this bundle's actual persistent machine
+    /// before sharing its adapter. Currently only the memory backend exposes
+    /// execution-lifetime custody; other backends refuse this setup.
+    #[cfg(all(feature = "session-store", feature = "local-authorization"))]
+    pub fn with_local_grant_authorization(
+        mut self,
+        configuration: meerkat_runtime::meerkat_machine::NativeGrantWorkConfiguration,
+    ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
+        let machine = Arc::try_unwrap(self.runtime_adapter).map_err(|_| {
+            meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                reason: meerkat_runtime::traits::ControllerReadinessFailure::Busy,
+            }
+        })?;
+        self.runtime_adapter = Arc::new(machine.with_local_grant_authorization(configuration)?);
+        Ok(self)
+    }
+
     #[cfg(feature = "session-store")]
     pub fn new(
         session_store: Arc<dyn SessionStore>,
@@ -3194,3 +3211,11 @@ mod tests {
         assert!(matches!(refusal, PersistenceError::FirstStart(_)));
     }
 }
+
+#[cfg(all(
+    test,
+    feature = "session-store",
+    feature = "local-authorization",
+    not(target_arch = "wasm32")
+))]
+mod governed_memory_tests;

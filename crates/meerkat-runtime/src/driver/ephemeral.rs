@@ -142,6 +142,7 @@ pub(crate) struct EphemeralDriverRollbackSnapshot {
 pub struct EphemeralRuntimeDriver {
     work_authorization_host: crate::input_authority::NativeWorkAuthorizationSlot,
     executor_supports_work_authorization: bool,
+    work_durability_health: Option<crate::meerkat_machine::DurabilityHealthHandle>,
     runtime_id: LogicalRuntimeId,
     /// Shared coarse runtime projection owned by the machine/session entry.
     ///
@@ -276,6 +277,7 @@ impl EphemeralRuntimeDriver {
         Self {
             work_authorization_host: Arc::new(std::sync::OnceLock::new()),
             executor_supports_work_authorization: false,
+            work_durability_health: None,
             runtime_id,
             control,
             ledger: InputLedger::new(),
@@ -301,6 +303,13 @@ impl EphemeralRuntimeDriver {
         host: crate::input_authority::NativeWorkAuthorizationSlot,
     ) {
         self.work_authorization_host = host;
+    }
+
+    pub(crate) fn set_work_durability_health(
+        &mut self,
+        health: crate::meerkat_machine::DurabilityHealthHandle,
+    ) {
+        self.work_durability_health = Some(health);
     }
 
     pub(crate) fn set_executor_work_authorization_support(&mut self, supported: bool) {
@@ -524,6 +533,7 @@ impl EphemeralRuntimeDriver {
             controller_client: selected.controller_client.clone(),
             authority,
             audit_sink,
+            durability_health: self.work_durability_health.clone(),
         };
         host.host()
             .work_context(&batch)
@@ -3769,10 +3779,12 @@ impl EphemeralRuntimeDriver {
         let control = self.control.clone();
         let work_host = self.work_authorization_host.clone();
         let work_supported = self.executor_supports_work_authorization;
+        let work_health = self.work_durability_health.clone();
 
         *self = Self::new_with_control(runtime_id, control);
         self.work_authorization_host = work_host;
         self.executor_supports_work_authorization = work_supported;
+        self.work_durability_health = work_health;
         self.ledger = ledger;
         self.dsl = preserved_dsl;
         self.admission_order = preserved_admission_order;
@@ -4430,6 +4442,17 @@ impl EphemeralRuntimeDriver {
         custody: &crate::meerkat_machine::credential_custody::NativeCredentialCustody,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
         self.authenticate_work_with_credential(&input, custody)?;
+        self.accept_authenticated_resolved_input(input, resolved)
+    }
+
+    /// Same-owner continuation of the immediately preceding authentication.
+    /// The persistent caller retains driver and exact credential custody and
+    /// performs no await or external effect between that check and this apply.
+    pub(super) fn accept_authenticated_resolved_input(
+        &mut self,
+        input: Input,
+        resolved: crate::accept::ResolvedAdmission,
+    ) -> Result<AcceptOutcome, RuntimeDriverError> {
         let runtime_phase = self.runtime_phase_snapshot();
         let lifecycle_facts = crate::meerkat_machine::classify_runtime_lifecycle_state(
             runtime_phase,

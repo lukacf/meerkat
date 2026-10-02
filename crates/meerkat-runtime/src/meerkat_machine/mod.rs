@@ -2539,6 +2539,7 @@ impl MeerkatMachine {
             if !shared.sessions.get_mut().is_empty() {
                 return Err(crate::input_authority::unavailable());
             }
+            shared.upgrade_execution_custody()?;
         }
         // Establish exclusive installation before constructing the Weak owner.
         let attachment = credential_custody::NativeWorkAuthorizationAttachment::new(host, &self);
@@ -8676,6 +8677,13 @@ pub struct MeerkatMachineShared {
         StdMutex<HashMap<SessionId, PendingDirectMemberBindAdmission>>,
     /// Optional RuntimeStore for persistent drivers.
     store: Option<Arc<dyn RuntimeStore>>,
+    /// Same actual backend claim retained by every driver and owned task. An
+    /// infallible legacy constructor records a failed attempt here; it cannot
+    /// register or mutate runtime state until a fresh owner is constructed.
+    execution_custody: Result<
+        Option<Arc<crate::store::RuntimeStoreExecutionClaim>>,
+        crate::store::RuntimeStoreExecutionCustodyError,
+    >,
     /// Blob store used by persistent drivers for durable input externalization.
     blob_store: Option<Arc<dyn BlobStore>>,
     /// Runtime-owned shell seam for live session LLM reconfiguration I/O.
@@ -10267,6 +10275,7 @@ impl MeerkatMachine {
                 pending_session_archive_lease_preparations: StdMutex::new(HashMap::new()),
                 pending_direct_member_bind_admissions: StdMutex::new(HashMap::new()),
                 store: None,
+                execution_custody: Ok(None),
                 blob_store: None,
                 llm_reconfigure_host: StdRwLock::new(None),
                 reconfigure_host_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -10342,13 +10351,28 @@ impl MeerkatMachine {
     /// runtime ids, but must not concurrently register the same session. Share
     /// this machine (normally through `Arc`) when composing multiple surfaces.
     pub fn persistent(store: Arc<dyn RuntimeStore>, blob_store: Arc<dyn BlobStore>) -> Self {
+        let execution_custody = store
+            .execution_custody()
+            .map(|owner| owner.try_acquire_shared().map(Arc::new))
+            .transpose();
         #[cfg(not(target_arch = "wasm32"))]
-        let (auth_lease, oauth_flows) = {
+        let (auth_lease, oauth_flows) = if execution_custody.is_ok() {
             let authorities = persistent_auth_authorities(&store);
             (
                 Arc::clone(&authorities.auth_lease),
                 Arc::clone(&authorities.oauth_flows),
             )
+        } else {
+            // Preserve this infallible constructor without touching a backend
+            // whose execution owner refused this machine. Registration returns
+            // the retained custody error; these handles have no store binding.
+            let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
+            let oauth_flows =
+                Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
+                    std::time::Duration::from_secs(10 * 60),
+                    Arc::clone(&auth_lease),
+                ));
+            (auth_lease, oauth_flows)
         };
         #[cfg(target_arch = "wasm32")]
         let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
@@ -10366,6 +10390,7 @@ impl MeerkatMachine {
                 pending_session_archive_lease_preparations: StdMutex::new(HashMap::new()),
                 pending_direct_member_bind_admissions: StdMutex::new(HashMap::new()),
                 store: Some(store),
+                execution_custody,
                 blob_store: Some(blob_store),
                 llm_reconfigure_host: StdRwLock::new(None),
                 reconfigure_host_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -10441,13 +10466,28 @@ impl MeerkatMachine {
     /// supplied. As with [`Self::persistent`], one logical runtime id must have
     /// exactly one live machine authority.
     pub fn persistent_without_blobs(store: Arc<dyn RuntimeStore>) -> Self {
+        let execution_custody = store
+            .execution_custody()
+            .map(|owner| owner.try_acquire_shared().map(Arc::new))
+            .transpose();
         #[cfg(not(target_arch = "wasm32"))]
-        let (auth_lease, oauth_flows) = {
+        let (auth_lease, oauth_flows) = if execution_custody.is_ok() {
             let authorities = persistent_auth_authorities(&store);
             (
                 Arc::clone(&authorities.auth_lease),
                 Arc::clone(&authorities.oauth_flows),
             )
+        } else {
+            // Preserve this infallible constructor without touching a backend
+            // whose execution owner refused this machine. Registration returns
+            // the retained custody error; these handles have no store binding.
+            let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
+            let oauth_flows =
+                Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
+                    std::time::Duration::from_secs(10 * 60),
+                    Arc::clone(&auth_lease),
+                ));
+            (auth_lease, oauth_flows)
         };
         #[cfg(target_arch = "wasm32")]
         let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
@@ -10465,6 +10505,7 @@ impl MeerkatMachine {
                 pending_session_archive_lease_preparations: StdMutex::new(HashMap::new()),
                 pending_direct_member_bind_admissions: StdMutex::new(HashMap::new()),
                 store: Some(store),
+                execution_custody,
                 blob_store: Some(Arc::new(UnavailableBlobStore)),
                 llm_reconfigure_host: StdRwLock::new(None),
                 reconfigure_host_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -10938,6 +10979,7 @@ impl MeerkatMachine {
         initial_runtime_state: RuntimeState,
         durability_health: Option<DurabilityHealthHandle>,
     ) -> Result<DriverEntry, RuntimeDriverError> {
+        self.require_execution_custody()?;
         let control_projection = Arc::new(StdRwLock::new(
             crate::driver::ephemeral::RuntimeControlProjection {
                 phase: initial_runtime_state,
@@ -10952,14 +10994,16 @@ impl MeerkatMachine {
                         "persistent runtime driver construction requires the registration cold-install durability handle"
                             .to_string(),
                     ))?;
-                let mut driver = PersistentRuntimeDriver::new_with_control_and_durability_health(
-                    runtime_id,
-                    store.clone(),
-                    blob_store.clone(),
-                    control_projection,
-                    dsl_authority,
-                    durability_health,
-                );
+                let mut driver =
+                    PersistentRuntimeDriver::new_with_control_health_and_execution_custody(
+                        runtime_id,
+                        store.clone(),
+                        blob_store.clone(),
+                        control_projection,
+                        dsl_authority,
+                        durability_health,
+                        self.execution_custody.clone(),
+                    );
                 driver
                     .inner_mut()
                     .set_work_authorization_host(Arc::clone(&self.native_work_authorization_host));
@@ -11212,3 +11256,68 @@ mod terminal_receipt_tests;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod oauth_pair_tests;
+
+impl MeerkatMachineShared {
+    fn require_execution_custody(&self) -> Result<(), RuntimeDriverError> {
+        self.execution_custody
+            .as_ref()
+            .map(|_| ())
+            .map_err(|error| execution_custody_error(*error))
+    }
+
+    fn require_governed_execution_custody(&self) -> Result<(), RuntimeDriverError> {
+        self.require_execution_custody()?;
+        if self.store.is_none()
+            || self
+                .execution_custody
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .is_some_and(|claim| claim.is_governed())
+        {
+            Ok(())
+        } else {
+            Err(execution_custody_error(
+                crate::store::RuntimeStoreExecutionCustodyError::Unsupported,
+            ))
+        }
+    }
+
+    fn upgrade_execution_custody(&mut self) -> Result<(), RuntimeDriverError> {
+        if self.store.is_none() {
+            return Ok(());
+        }
+        let claim = self
+            .execution_custody
+            .as_mut()
+            .map_err(|error| execution_custody_error(*error))?
+            .as_mut()
+            .ok_or_else(|| {
+                execution_custody_error(
+                    crate::store::RuntimeStoreExecutionCustodyError::Unsupported,
+                )
+            })?;
+        Arc::get_mut(claim)
+            .ok_or_else(|| {
+                execution_custody_error(crate::store::RuntimeStoreExecutionCustodyError::Busy)
+            })?
+            .try_upgrade_to_governed()
+            .map_err(execution_custody_error)
+    }
+}
+
+pub(crate) fn execution_custody_error(
+    error: crate::store::RuntimeStoreExecutionCustodyError,
+) -> RuntimeDriverError {
+    use crate::store::RuntimeStoreExecutionCustodyError;
+    let reason = match error {
+        RuntimeStoreExecutionCustodyError::Busy => crate::traits::ControllerReadinessFailure::Busy,
+        RuntimeStoreExecutionCustodyError::Unsupported => {
+            crate::traits::ControllerReadinessFailure::UnsupportedScope
+        }
+        RuntimeStoreExecutionCustodyError::Unavailable => {
+            crate::traits::ControllerReadinessFailure::AuthorityUnavailable
+        }
+    };
+    RuntimeDriverError::ControllerReadinessUnavailable { reason }
+}

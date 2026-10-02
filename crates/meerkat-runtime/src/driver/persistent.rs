@@ -47,6 +47,12 @@ pub struct PersistentRuntimeDriver {
     /// supplies this handle; direct constructor users retain compatibility
     /// rollback behavior but cannot participate in fail-stop rehydration.
     durability_health: Option<crate::meerkat_machine::DurabilityHealthHandle>,
+    // Retain the machine's exact backend lifetime claim, or this direct
+    // driver's independently acquired ordinary claim.
+    execution_custody: Result<
+        Option<Arc<crate::store::RuntimeStoreExecutionClaim>>,
+        crate::store::RuntimeStoreExecutionCustodyError,
+    >,
     /// Exact durable writer epoch retained from conditional registration.
     ///
     /// Multi-writer stores never consume this capability. An
@@ -515,6 +521,10 @@ impl PersistentRuntimeDriver {
         control: Arc<StdRwLock<crate::driver::ephemeral::RuntimeControlProjection>>,
         dsl: SharedIngressDslAuthority,
     ) -> Self {
+        let execution_custody = store
+            .execution_custody()
+            .map(|owner| owner.try_acquire_shared().map(Arc::new))
+            .transpose();
         Self {
             inner: EphemeralRuntimeDriver::new_with_control_and_dsl(
                 runtime_id.clone(),
@@ -524,6 +534,7 @@ impl PersistentRuntimeDriver {
             store,
             blob_store,
             runtime_id,
+            execution_custody,
             durability_health: None,
             input_state_write_fence: None,
             #[cfg(test)]
@@ -539,12 +550,39 @@ impl PersistentRuntimeDriver {
         dsl: SharedIngressDslAuthority,
         durability_health: crate::meerkat_machine::DurabilityHealthHandle,
     ) -> Self {
+        let custody = store
+            .execution_custody()
+            .map(|owner| owner.try_acquire_shared().map(Arc::new))
+            .transpose();
+        Self::new_with_control_health_and_execution_custody(
+            runtime_id,
+            store,
+            blob_store,
+            control,
+            dsl,
+            durability_health,
+            custody,
+        )
+    }
+
+    pub(crate) fn new_with_control_health_and_execution_custody(
+        runtime_id: LogicalRuntimeId,
+        store: Arc<dyn RuntimeStore>,
+        blob_store: Arc<dyn BlobStore>,
+        control: Arc<StdRwLock<crate::driver::ephemeral::RuntimeControlProjection>>,
+        dsl: SharedIngressDslAuthority,
+        durability_health: crate::meerkat_machine::DurabilityHealthHandle,
+        execution_custody: Result<
+            Option<Arc<crate::store::RuntimeStoreExecutionClaim>>,
+            crate::store::RuntimeStoreExecutionCustodyError,
+        >,
+    ) -> Self {
+        let mut inner =
+            EphemeralRuntimeDriver::new_with_control_and_dsl(runtime_id.clone(), control, dsl);
+        inner.set_work_durability_health(durability_health.clone());
         Self {
-            inner: EphemeralRuntimeDriver::new_with_control_and_dsl(
-                runtime_id.clone(),
-                control,
-                dsl,
-            ),
+            inner,
+            execution_custody,
             store,
             blob_store,
             runtime_id,
@@ -563,6 +601,9 @@ impl PersistentRuntimeDriver {
     }
 
     pub(crate) fn require_durability_ready(&self) -> Result<(), RuntimeDriverError> {
+        self.execution_custody
+            .as_ref()
+            .map_err(|error| crate::meerkat_machine::execution_custody_error(*error))?;
         match self.durability_health.as_ref() {
             Some(health) => health.require_ready().map_err(|required| {
                 RuntimeDriverError::RecoveryRepairBlocked {
@@ -1675,6 +1716,7 @@ impl PersistentRuntimeDriver {
         &mut self,
         run_id: RunId,
     ) -> Result<(), RuntimeDriverError> {
+        self.require_durability_ready()?;
         self.inner.contract_begin_run_authority(run_id)
     }
 
@@ -1775,12 +1817,21 @@ impl PersistentRuntimeDriver {
         input: Input,
         resolved: crate::accept::ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
-        if input.header().authority_association.is_some() {
-            return Err(crate::meerkat_machine::credential_custody::unavailable(
-                crate::traits::ControllerReadinessFailure::UnsupportedScope,
-            ));
-        }
         self.require_durability_ready()?;
+        let custody = self.inner.try_credential_custody(&input)?;
+        self.accept_resolved_input_with_credential(input, resolved, &custody)
+            .await
+    }
+
+    pub(crate) async fn accept_resolved_input_with_credential(
+        &mut self,
+        input: Input,
+        resolved: crate::accept::ResolvedAdmission,
+        custody: &crate::meerkat_machine::credential_custody::NativeCredentialCustody,
+    ) -> Result<AcceptOutcome, RuntimeDriverError> {
+        self.require_durability_ready()?;
+        self.inner
+            .authenticate_work_with_credential(&input, custody)?;
         self.inner.ensure_contract_session_authority()?;
         if let Some((existing_id, existing_seed)) = self
             .durable_idempotency_duplicate(&input, resolved.replay_policy())
@@ -1803,7 +1854,9 @@ impl PersistentRuntimeDriver {
             ..
         } = preview
         else {
-            return self.inner.accept_resolved_input(input, resolved).await;
+            return self
+                .inner
+                .accept_resolved_input_with_credential(input, resolved, custody);
         };
 
         let flags = resolved.coarse_flags();
@@ -1821,8 +1874,13 @@ impl PersistentRuntimeDriver {
         // either commit the exact one/two-row admission delta or degrade the
         // shared entry to ReloadRequired. Direct/test constructors retain one
         // compatibility checkpoint.
+        self.inner
+            .authenticate_work_with_credential(&input, custody)?;
         let checkpoint = self.persistence_rollback_checkpoint();
-        let mut outcome = match self.inner.accept_resolved_input(input, resolved).await {
+        let mut outcome = match self
+            .inner
+            .accept_authenticated_resolved_input(input, resolved)
+        {
             Ok(outcome) => outcome,
             Err(error) => {
                 return Err(self.post_transition_failure(
@@ -2019,6 +2077,7 @@ impl PersistentRuntimeDriver {
         input_id: &InputId,
         run_id: &meerkat_core::lifecycle::RunId,
     ) -> Result<(), crate::traits::RuntimeDriverError> {
+        self.require_durability_ready()?;
         self.inner.apply_input(input_id, run_id)
     }
 
@@ -2036,6 +2095,7 @@ impl PersistentRuntimeDriver {
         &mut self,
         input_ids: &[InputId],
     ) -> Result<(), crate::traits::RuntimeDriverError> {
+        self.require_durability_ready()?;
         self.inner.rollback_staged(input_ids)
     }
 
@@ -3043,6 +3103,7 @@ impl PersistentRuntimeDriver {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl RuntimeDriver for PersistentRuntimeDriver {
     async fn accept_input(&mut self, input: Input) -> Result<AcceptOutcome, RuntimeDriverError> {
+        self.require_durability_ready()?;
         let resolved = self.resolve_admission(&input)?;
         self.accept_resolved_input(input, resolved).await
     }

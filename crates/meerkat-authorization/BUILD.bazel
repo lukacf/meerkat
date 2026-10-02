@@ -194,6 +194,7 @@ rust_test(
         "tests/native_governed_loop/e1_policy_control/a2_resource_specificity.rs",
         "tests/native_governed_loop/e1_policy_control/a3_queued_work.rs",
         "tests/native_governed_loop/e1_policy_control/a8_requester_revocation.rs",
+        "tests/native_governed_loop/e1_policy_control/stock_persistent.rs",
         "tests/native_governed_loop/e3_tool_settlement.rs",
         "tests/native_governed_loop/observation_deferred_siblings.rs",
     ],

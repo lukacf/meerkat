@@ -472,8 +472,19 @@ fn apply_prepared_memory_input_state_mutations(
 /// In-memory runtime store. Thread-safe via `tokio::sync::Mutex`.
 #[derive(Debug, Clone)]
 pub struct InMemoryRuntimeStore {
+    // Created once with the actual shared memory backend. Derived Clone keeps
+    // this same mechanical owner along with the same row-state Inner.
+    execution_custody: super::RuntimeStoreExecutionCustody,
     inner: Arc<Mutex<Inner>>,
     auth_oauth_flow_snapshot: Arc<StdMutex<Option<Vec<u8>>>>,
+    #[cfg(test)]
+    auth_oauth_flow_store_calls: Arc<AtomicUsize>,
+    #[cfg(test)]
+    machine_lifecycle_fenced_cas_calls: Arc<AtomicUsize>,
+    #[cfg(test)]
+    ops_lifecycle_persist_before: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
+    #[cfg(test)]
+    atomic_input_persist_before: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
     #[cfg(test)]
     input_state_batch_cas_before: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
     #[cfg(test)]
@@ -507,6 +518,35 @@ pub struct InMemoryRuntimeStore {
 }
 
 impl InMemoryRuntimeStore {
+    #[cfg(test)]
+    pub(crate) fn auth_oauth_flow_store_calls(&self) -> usize {
+        self.auth_oauth_flow_store_calls.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn machine_lifecycle_fenced_cas_calls(&self) -> usize {
+        self.machine_lifecycle_fenced_cas_calls
+            .load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn block_next_ops_lifecycle_persist(
+        &self,
+        entered: Arc<crate::tokio::sync::Notify>,
+        release: Arc<crate::tokio::sync::Notify>,
+    ) {
+        *self.ops_lifecycle_persist_before.lock().unwrap() = Some((entered, release));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn block_next_atomic_input_persist(
+        &self,
+        entered: Arc<crate::tokio::sync::Notify>,
+        release: Arc<crate::tokio::sync::Notify>,
+    ) {
+        *self.atomic_input_persist_before.lock().unwrap() = Some((entered, release));
+    }
+
     /// Install committed WholeBlob body bytes verbatim, bypassing every
     /// writer-side guard, so recovery tests can start from a document the
     /// current decoder refuses. The authority advances exactly as a real
@@ -535,8 +575,17 @@ impl InMemoryRuntimeStore {
 
     pub fn new() -> Self {
         Self {
+            execution_custody: super::RuntimeStoreExecutionCustody::new(),
             inner: Arc::new(Mutex::new(Inner::default())),
             auth_oauth_flow_snapshot: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            auth_oauth_flow_store_calls: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            machine_lifecycle_fenced_cas_calls: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            ops_lifecycle_persist_before: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            atomic_input_persist_before: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             input_state_batch_cas_before: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
@@ -1676,6 +1725,10 @@ fn ensure_compaction_intents_already_outboxed_list(
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl super::RuntimeSessionAuthorityOps for InMemoryRuntimeStore {
+    fn execution_custody(&self) -> Option<&super::RuntimeStoreExecutionCustody> {
+        Some(&self.execution_custody)
+    }
+
     fn session_persistence_profile(&self) -> super::RuntimeSessionPersistenceProfile {
         super::RuntimeSessionPersistenceProfile::WholeBlobV1
     }
@@ -2493,6 +2546,9 @@ impl RuntimeStore for InMemoryRuntimeStore {
         &self,
         snapshot_json: &[u8],
     ) -> Result<(), RuntimeStoreError> {
+        #[cfg(test)]
+        self.auth_oauth_flow_store_calls
+            .fetch_add(1, Ordering::AcqRel);
         *self
             .auth_oauth_flow_snapshot
             .lock()
@@ -2502,6 +2558,9 @@ impl RuntimeStore for InMemoryRuntimeStore {
     }
 
     fn load_auth_oauth_flow_snapshot(&self) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+        #[cfg(test)]
+        self.auth_oauth_flow_store_calls
+            .fetch_add(1, Ordering::AcqRel);
         self.auth_oauth_flow_snapshot
             .lock()
             .map(|snapshot| snapshot.clone())
@@ -2512,6 +2571,9 @@ impl RuntimeStore for InMemoryRuntimeStore {
         &self,
         update: &mut AuthOAuthFlowSnapshotUpdate<'_>,
     ) -> Result<(), RuntimeStoreError> {
+        #[cfg(test)]
+        self.auth_oauth_flow_store_calls
+            .fetch_add(1, Ordering::AcqRel);
         let mut snapshot = self
             .auth_oauth_flow_snapshot
             .lock()
@@ -2913,6 +2975,14 @@ impl RuntimeStore for InMemoryRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         records: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError> {
+        #[cfg(test)]
+        {
+            let gate = self.atomic_input_persist_before.lock().unwrap().take();
+            if let Some((entered, release)) = gate {
+                entered.notify_one();
+                release.notified().await;
+            }
+        }
         let mut inner = self.inner.lock().await;
         let updates = records
             .iter()
@@ -3408,6 +3478,9 @@ impl RuntimeStore for InMemoryRuntimeStore {
         replacement: MachineLifecycleCommit,
         write_fence: Arc<dyn RuntimeStoreWriteFence>,
     ) -> Result<FencedMachineLifecycleCasOutcome, RuntimeStoreError> {
+        #[cfg(test)]
+        self.machine_lifecycle_fenced_cas_calls
+            .fetch_add(1, Ordering::AcqRel);
         let replacement = prepare_machine_lifecycle_replacement(replacement)?;
         let mut inner = self.inner.lock().await;
         let current_raw = inner.runtime_lifecycle.get(&runtime_id.0).cloned();
@@ -3589,6 +3662,14 @@ impl RuntimeStore for InMemoryRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         snapshot: &PersistedOpsSnapshot,
     ) -> Result<(), RuntimeStoreError> {
+        #[cfg(test)]
+        {
+            let gate = self.ops_lifecycle_persist_before.lock().unwrap().take();
+            if let Some((entered, release)) = gate {
+                entered.notify_one();
+                release.notified().await;
+            }
+        }
         let mut inner = self.inner.lock().await;
         if inner
             .retired_ops_epochs

@@ -230,6 +230,7 @@ pub struct NativeWorkBatch {
     pub(crate) selected_input_bindings: std::collections::BTreeMap<String, (String, String)>,
     pub(crate) controller_client: Option<meerkat_core::ControllerModelClient>,
     pub(crate) authority: crate::driver::ephemeral::SharedIngressDslAuthority,
+    pub(crate) durability_health: Option<crate::meerkat_machine::DurabilityHealthHandle>,
     pub(crate) audit_sink: Arc<dyn meerkat_authorization_contracts::audit::AuthorizationAuditSink>,
 }
 

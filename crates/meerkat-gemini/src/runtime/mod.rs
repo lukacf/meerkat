@@ -9,7 +9,7 @@ use async_trait::async_trait;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_core::AuthError;
-#[cfg(all(not(target_arch = "wasm32"), any(feature = "adc", feature = "oauth")))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
 use meerkat_core::HttpAuthorizer;
 use meerkat_core::{AuthLease, AuthMetadata, Provider};
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]

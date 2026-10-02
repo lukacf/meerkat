@@ -276,9 +276,16 @@ struct SubmissionEnvelope {
     submission: RuntimeDeliverySubmission,
 }
 
+/// Durable, ordered runtime delivery inbox over one [`RuntimeStore`].
+///
+/// Clones share one in-process commit signal ([`Self::subscribe_commits`]).
+/// A process should hold one inbox per runtime store and hand out clones, so
+/// every consumer observes every commit made through it; the persistence
+/// bundle owns that instance.
 #[derive(Clone)]
 pub struct RuntimeDeliveryInbox {
     store: Arc<dyn RuntimeStore>,
+    commits: Arc<crate::tokio::sync::watch::Sender<u64>>,
 }
 
 impl std::fmt::Debug for RuntimeDeliveryInbox {
@@ -290,7 +297,31 @@ impl std::fmt::Debug for RuntimeDeliveryInbox {
 
 impl RuntimeDeliveryInbox {
     pub fn new(store: Arc<dyn RuntimeStore>) -> Self {
-        Self { store }
+        let (commits, _) = crate::tokio::sync::watch::channel(0);
+        Self {
+            store,
+            commits: Arc::new(commits),
+        }
+    }
+
+    /// Observe newly committed deliveries made through this inbox or any of
+    /// its clones.
+    ///
+    /// The value is a monotonically increasing commit generation; it advances
+    /// once per newly inserted row, after the store commit. An exact replay
+    /// (deduplicated submit) does not advance it. The signal is in-process
+    /// only: rows committed by another process or another inbox instance are
+    /// not observed and must be found by reading delivery authority (for
+    /// example [`Self::runtimes_with_pending_deliveries`]).
+    pub fn subscribe_commits(&self) -> crate::tokio::sync::watch::Receiver<u64> {
+        self.commits.subscribe()
+    }
+
+    /// Whether `other` shares this inbox's commit signal, i.e. is the same
+    /// owned instance (or a clone of it) rather than a second inbox over the
+    /// same store.
+    pub fn shares_commit_signal_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.commits, &other.commits)
     }
 
     pub async fn submit(
@@ -371,6 +402,8 @@ impl RuntimeDeliveryInbox {
                 .await?
             {
                 RuntimeDeliveryAuthorityCasOutcome::Applied(_) => {
+                    self.commits
+                        .send_modify(|generation| *generation = generation.wrapping_add(1));
                     return Ok(RuntimeDeliveryReceipt {
                         delivery_id,
                         sequence,

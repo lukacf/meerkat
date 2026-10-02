@@ -2887,8 +2887,7 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let job_store = persistence.job_store();
-        let runtime_delivery_inbox =
-            meerkat_runtime::RuntimeDeliveryInbox::new(persistence.runtime_store());
+        let runtime_delivery_inbox = persistence.runtime_delivery_inbox();
         let schedule_service = ScheduleService::new(persistence.schedule_store());
         let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();
@@ -3035,8 +3034,7 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let job_store = persistence.job_store();
-        let runtime_delivery_inbox =
-            meerkat_runtime::RuntimeDeliveryInbox::new(persistence.runtime_store());
+        let runtime_delivery_inbox = persistence.runtime_delivery_inbox();
         let schedule_service = ScheduleService::new(persistence.schedule_store());
         let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();

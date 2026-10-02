@@ -556,19 +556,27 @@ async fn the_deadline_yields_a_typed_partial_outcome_and_still_cleans_up() {
 
     let mut request =
         two_participant_request(&fixture, "deadline", MergeBackPolicy::NoMerge, 2, 240);
-    // Short relative deadline: seating happens first, then the gated turn
-    // exhausts the remaining time.
+    // A deadline no host load can reach during seating. The test expires it
+    // on the coordinator clock once the round's turn is held at its gate, so
+    // the deadline (not wall-clock speed) is what ends this council.
     request.bounds.deadline = TemporaryCouncilDeadline::Relative {
-        after: Duration::from_secs(20),
+        after: Duration::from_secs(120),
     };
     let temporary_mob_id = request.council_id.temporary_mob_id();
 
-    let outcome = fixture
+    let state = Arc::clone(&fixture.state);
+    let council = tokio::spawn(async move { state.temporary_council().run(request).await });
+    gate.wait_entered(1).await;
+    fixture
         .state
-        .temporary_council()
-        .run(request)
+        .set_temporary_council_clock_offset(chrono::Duration::seconds(121));
+    let outcome = council
         .await
+        .expect("council task")
         .expect("council reaches a terminal outcome");
+    fixture
+        .state
+        .set_temporary_council_clock_offset(chrono::Duration::zero());
 
     assert_eq!(
         outcome.result.exit_reason,

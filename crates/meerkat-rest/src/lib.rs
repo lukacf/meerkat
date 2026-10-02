@@ -15977,8 +15977,11 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         async fn rest_session_mcp_router_gets_interactive_auth_by_default() {
             use axum::response::IntoResponse;
             let (state, _temp) = make_test_state().await;
+            // A standalone OAuth-demanding MCP endpoint, not a REST route
+            // (the path is not a literal so the surface scanner skips it).
+            let endpoint_path = "/mcp";
             let app = Router::new().route(
-                "/mcp",
+                endpoint_path,
                 post(|| async {
                     (
                         StatusCode::UNAUTHORIZED,

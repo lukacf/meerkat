@@ -1008,9 +1008,9 @@ meerkat = { version = "=0.8.50", features = [
 Shipping facade features: `anthropic`, `openai`, `openai-realtime`, `openai-live`,
 `gemini`, `copilot`, `all-providers`, `native-keyring`, `jsonl-store`,
 `memory-store`, `sqlite-store`, `session-store`, `session-compaction`,
-`memory-store-session`, `atif`, `comms`, `mcp`, `skills`, `schedule`, `workgraph`,
-`live`, and `live-webrtc`. `all-providers` includes `copilot`; disable defaults
-for a genuinely single-provider build. `openai-live` is opt-in public GPT Live
+`memory-store-session`, `local-authorization`, `atif`, `comms`, `mcp`, `skills`,
+`schedule`, `workgraph`, `live`, and `live-webrtc`. `all-providers` includes
+`copilot`; disable defaults for a genuinely single-provider build. `openai-live` is opt-in public GPT Live
 and pulls `openai`, `live-webrtc`, `session-store`, and the provider's `live`
 feature; its host/auth/execution-profile prerequisites are described above.
 Keep deprecated private `experimental-gpt-live` and non-shipping

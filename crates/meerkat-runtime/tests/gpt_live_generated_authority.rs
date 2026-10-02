@@ -6050,6 +6050,23 @@ fn live_bridge_is_prefinal_fail_closed_and_submission_recovery_never_resends() {
         }
     )));
 
+    issue_and_consume_live_bridge_effect(
+        &mut authority,
+        "running-tool",
+        mm::LiveBridgeEffectKind::ToolDispatch,
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RecordLiveBridgeEffectOutcome {
+            channel_id: CHANNEL.to_string(),
+            operation_id: bridge_operation_id(),
+            authority_id: "running-tool".to_string(),
+            kind: mm::LiveBridgeEffectKind::ToolDispatch,
+            outcome: mm::LiveBridgeEffectOutcome::Committed,
+        },
+    )
+    .expect("a tool dispatched during execution records its physical outcome");
+
     let terminal = apply(
         &mut authority,
         mm::MeerkatMachineInput::RecordLiveBridgeExecutionTerminal {
@@ -6068,6 +6085,39 @@ fn live_bridge_is_prefinal_fail_closed_and_submission_recovery_never_resends() {
         effect,
         mm::MeerkatMachineEffect::LiveBridgeExecutionTerminalRecorded { replay: false, .. }
     )));
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::AuthorizeLiveBridgeEffect {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                interaction_id: INTERACTION.to_string(),
+                operation_id: bridge_operation_id(),
+                authority_id: "late-tool".to_string(),
+                kind: mm::LiveBridgeEffectKind::ToolDispatch,
+            },
+        )
+        .is_err(),
+        "execution terminal closes new effect authority"
+    );
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::ConsumeLiveBridgeEffectAuthority {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                operation_id: bridge_operation_id(),
+                authority_id: "final-tool".to_string(),
+                kind: mm::LiveBridgeEffectKind::ToolDispatch,
+            },
+        )
+        .is_err(),
+        "execution terminal fences authority issued before execution started"
+    );
     let terminal_replay = apply(
         &mut authority,
         mm::MeerkatMachineInput::RecordLiveBridgeExecutionTerminal {

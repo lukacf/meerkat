@@ -16359,11 +16359,17 @@ mod tests {
 
         let inner = Arc::new(RecordingDispatcher {
             tools: Arc::from([
-                Arc::new(ToolDef::new(
-                    "blocked_tool",
-                    "denied by the execution policy",
-                    serde_json::json!({ "type": "object" }),
-                )),
+                Arc::new(
+                    ToolDef::new(
+                        "blocked_tool",
+                        "denied by the execution policy",
+                        serde_json::json!({ "type": "object" }),
+                    )
+                    .with_provenance(crate::ToolProvenance {
+                        kind: crate::ToolSourceKind::Callback,
+                        source_id: "denial-fixture".into(),
+                    }),
+                ),
                 Arc::new(ToolDef::new(
                     "open_tool",
                     "not denied",
@@ -16389,16 +16395,21 @@ mod tests {
             observed_messages: Mutex::new(Vec::new()),
             observed_tools: Mutex::new(Vec::new()),
         });
-        let mut builder = with_test_turn_state_handle(AgentBuilder::new())
-            .with_tool_visibility_owner(explicit_test_visibility_owner());
-        if hide_blocked_tool {
-            builder = builder.with_capability_base_filter(ToolFilter::Deny(
-                ["blocked_tool".to_string()].into_iter().collect(),
-            ));
-        }
-        let mut agent = builder
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
             .build_standalone(client.clone(), gated, Arc::new(NoopStore))
             .await;
+        if hide_blocked_tool {
+            // Stage operator visibility through its generated owner. Model
+            // capability filters belong to the resolved capability surface.
+            agent
+                .tool_scope
+                .handle()
+                .stage_external_filter(ToolFilter::Deny(
+                    ["blocked_tool".to_string()].into_iter().collect(),
+                ))
+                .expect("catalog-backed blocked tool must accept a visibility filter");
+        }
 
         let (tx, mut rx) = mpsc::channel(64);
         let result = tokio::time::timeout(

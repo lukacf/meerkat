@@ -29000,6 +29000,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                         || kind == LiveBridgeEffectKind::ReadOnlyMemorySnapshot))
                 || self.live_bridge_phase_by_operation.get_copied(operation_id)
                     == Some(LiveBridgeOperationPhase::FinalInputAuthorized)
+                || self.live_bridge_phase_by_operation.get_copied(operation_id)
+                    == Some(LiveBridgeOperationPhase::ExecutionRunning)
             }
             guard "one_read_and_one_model_computation" {
                 (kind != LiveBridgeEffectKind::ModelComputation
@@ -29058,7 +29060,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                         && (kind == LiveBridgeEffectKind::ModelComputation
                             || kind == LiveBridgeEffectKind::ReadOnlyMemorySnapshot))
                     || self.live_bridge_phase_by_operation.get_copied(operation_id)
-                        == Some(LiveBridgeOperationPhase::FinalInputAuthorized))
+                        == Some(LiveBridgeOperationPhase::FinalInputAuthorized)
+                    || self.live_bridge_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveBridgeOperationPhase::ExecutionRunning))
             }
             update {
                 self.live_bridge_consumed_effect_authorities.insert(authority_id);

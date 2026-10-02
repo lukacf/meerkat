@@ -536,8 +536,12 @@ async fn exercise_expiry(case: CredentialCase) {
             .await
             .expect("preflight denial is bounded");
             assert!(
-                matches!(result, Err(RuntimeDriverError::ValidationFailed { .. })),
-                "actual current ingress permission must refuse before refresh"
+                matches!(
+                    &result,
+                    Err(RuntimeDriverError::InputRefused { refusal })
+                        if refusal.kind() == OperationRefusalKind::Denied
+                ),
+                "actual current ingress permission must refuse before refresh: {result:?}"
             );
             assert!(
                 endpoint.ingress_inputs.lock().unwrap().contains(&input_id),
@@ -622,8 +626,12 @@ async fn exercise_expiry(case: CredentialCase) {
                     .expect("final current-policy check is bounded")
                     .unwrap();
                 assert!(
-                    matches!(result, Err(RuntimeDriverError::ValidationFailed { .. })),
-                    "requester removed during HTTP must fail final native admission"
+                    matches!(
+                        &result,
+                        Err(RuntimeDriverError::InputRefused { refusal })
+                            if refusal.kind() == OperationRefusalKind::Denied
+                    ),
+                    "requester removed during HTTP must fail final native admission: {result:?}"
                 );
                 assert!(
                     endpoint

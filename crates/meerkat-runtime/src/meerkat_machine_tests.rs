@@ -14562,6 +14562,45 @@ async fn held_run_starts_park_the_loop_and_release_runs_the_input_once() {
     assert_eq!(applies.load(Ordering::SeqCst), 1, "it runs exactly once");
 }
 
+/// #1500: without a hold nothing parks. A Held arm firing when run starts are
+/// not held would park the loop until a release that never comes.
+#[tokio::test]
+async fn unheld_run_starts_never_park_the_loop() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let (session_id, applies, applied) = counting_executor_session(&machine).await;
+    let parks = machine.run_start_held_parks();
+
+    let ran = applied.notified();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("runs at once"))
+        .await
+        .expect("admit");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("the input runs");
+    assert_eq!(applies.load(Ordering::SeqCst), 1);
+    assert_eq!(*parks.borrow(), 0, "an unheld loop never parks");
+
+    // A hold then release with nothing queued leaves later input unaffected.
+    machine.hold_run_starts(&session_id).await.expect("hold");
+    machine
+        .release_run_starts(&session_id)
+        .await
+        .expect("release");
+    let ran = applied.notified();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("after the release"))
+        .await
+        .expect("admit after the release");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("the input runs after the release");
+    assert_eq!(applies.load(Ordering::SeqCst), 2);
+    assert_eq!(*parks.borrow(), 0);
+}
+
 /// #1500: a hold that lands after the runtime loop woke for an input but
 /// before it took the input into a run parks the loop; it is not an error.
 #[tokio::test]

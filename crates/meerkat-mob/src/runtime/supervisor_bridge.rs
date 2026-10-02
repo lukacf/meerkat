@@ -153,6 +153,8 @@ pub(crate) struct MobSupervisorBridge {
     /// it binds again, and an unknown peer is offered the hold with the typed
     /// `Unsupported` rejection as the fallback.
     rotation_observe_hold: StdMutex<HashMap<String, bool>>,
+    /// Peers' advertised run-start hold support (#1500), by peer id.
+    run_start_hold: StdMutex<HashMap<String, bool>>,
 }
 
 /// Linear owner for one bridge request correlation.
@@ -550,6 +552,7 @@ impl MobSupervisorBridge {
             controlling_reply_endpoint: StdRwLock::new(controlling_reply_endpoint),
             shutdown_complete: std::sync::atomic::AtomicBool::new(false),
             rotation_observe_hold: StdMutex::new(HashMap::new()),
+            run_start_hold: StdMutex::new(HashMap::new()),
         })
     }
 
@@ -560,6 +563,24 @@ impl MobSupervisorBridge {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(peer_id.to_string(), supported);
+    }
+
+    /// Record whether `peer_id` supports the run-start hold (#1500).
+    pub(crate) fn record_peer_run_start_hold(&self, peer_id: &str, supported: bool) {
+        self.run_start_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(peer_id.to_string(), supported);
+    }
+
+    /// Whether `peer_id` supports the run-start hold; `None` when it has not
+    /// advertised capabilities to this process.
+    pub(crate) fn peer_run_start_hold(&self, peer_id: &str) -> Option<bool> {
+        self.run_start_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(peer_id)
+            .copied()
     }
 
     /// Whether `peer_id` supports held rotation observation; `None` when it

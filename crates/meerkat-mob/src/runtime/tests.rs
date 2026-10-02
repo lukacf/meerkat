@@ -7794,6 +7794,11 @@ struct LiveExternalPeerHarness {
     drop_next_authorize_response: Arc<AtomicBool>,
     reject_next_rotation: Arc<AtomicBool>,
     advertise_rotation_observe_hold: Arc<AtomicBool>,
+    /// Whether the bind reply advertises the run-start hold (#1500).
+    advertise_run_start_hold: Arc<AtomicBool>,
+    /// `cancel_current_run` of every HoldRunStarts received.
+    run_start_holds: Arc<RwLock<Vec<bool>>>,
+    run_start_releases: Arc<AtomicUsize>,
     reject_held_rotation_observes: Arc<AtomicBool>,
     held_rotation_observes: Arc<AtomicUsize>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
@@ -7922,6 +7927,19 @@ impl LiveExternalPeerHarness {
     }
 
     /// Whether the next bind reply advertises held rotation observation.
+    fn advertise_run_start_hold(&self, advertise: bool) {
+        self.advertise_run_start_hold
+            .store(advertise, Ordering::Relaxed);
+    }
+
+    async fn run_start_holds(&self) -> Vec<bool> {
+        self.run_start_holds.read().await.clone()
+    }
+
+    fn run_start_releases(&self) -> usize {
+        self.run_start_releases.load(Ordering::Relaxed)
+    }
+
     fn advertise_rotation_observe_hold(&self, advertise: bool) {
         self.advertise_rotation_observe_hold
             .store(advertise, Ordering::Relaxed);
@@ -8257,6 +8275,12 @@ async fn spawn_live_external_peer_with_transport(
     let responder_reject_next_rotation = reject_next_rotation.clone();
     let advertise_rotation_observe_hold = Arc::new(AtomicBool::new(true));
     let responder_advertise_rotation_observe_hold = advertise_rotation_observe_hold.clone();
+    let advertise_run_start_hold = Arc::new(AtomicBool::new(false));
+    let responder_advertise_run_start_hold = advertise_run_start_hold.clone();
+    let run_start_holds = Arc::new(RwLock::new(Vec::new()));
+    let responder_run_start_holds = run_start_holds.clone();
+    let run_start_releases = Arc::new(AtomicUsize::new(0));
+    let responder_run_start_releases = run_start_releases.clone();
     let reject_held_rotation_observes = Arc::new(AtomicBool::new(false));
     let responder_reject_held_rotation_observes = reject_held_rotation_observes.clone();
     let held_rotation_observes = Arc::new(AtomicUsize::new(0));
@@ -8745,6 +8769,9 @@ async fn spawn_live_external_peer_with_transport(
                                                                     rotation_observe_hold:
                                                                         responder_advertise_rotation_observe_hold
                                                                             .load(Ordering::Relaxed),
+                                                                    run_start_hold:
+                                                                        responder_advertise_run_start_hold
+                                                                            .load(Ordering::Relaxed),
                                                                     retire_member: true,
                                                                     destroy_member: true,
                                                                     wire_member: true,
@@ -8937,6 +8964,27 @@ async fn spawn_live_external_peer_with_transport(
                                         )
                                         .expect("revoke ack")
                                     }
+                                }
+                                super::bridge_protocol::BridgeCommand::HoldRunStarts(payload) => {
+                                    responder_run_start_holds
+                                        .write()
+                                        .await
+                                        .push(payload.cancel_current_run);
+                                    serde_json::to_value(
+                                        super::bridge_protocol::BridgeReply::RunStartsHeld(
+                                            super::bridge_protocol::BridgeRunStartHoldResponse {
+                                                run: super::bridge_protocol::BridgeHeldRun::NoRun,
+                                            },
+                                        ),
+                                    )
+                                    .expect("run starts held")
+                                }
+                                super::bridge_protocol::BridgeCommand::ReleaseRunStarts(_) => {
+                                    responder_run_start_releases.fetch_add(1, Ordering::Relaxed);
+                                    serde_json::to_value(super::bridge_protocol::BridgeReply::Ack(
+                                        super::bridge_protocol::BridgeAck { ok: true },
+                                    ))
+                                    .expect("release ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::InterruptMember(_) => {
                                     responder_interrupt_count.fetch_add(1, Ordering::Relaxed);
@@ -9484,6 +9532,9 @@ async fn spawn_live_external_peer_with_transport(
         drop_next_authorize_response,
         reject_next_rotation,
         advertise_rotation_observe_hold,
+        advertise_run_start_hold,
+        run_start_holds,
+        run_start_releases,
         reject_held_rotation_observes,
         held_rotation_observes,
         supervisor_state,
@@ -19236,6 +19287,98 @@ async fn test_rotate_supervisor_converges_with_one_held_observation() {
         external.held_rotation_observes(),
         1,
         "one held attempted-authority read answers at the terminal transition"
+    );
+}
+
+/// #1500: a remote member whose host supports the run-start hold is held by
+/// Stop through its host and released by Resume; the report says it is held.
+#[tokio::test]
+async fn test_stop_holds_a_capable_remote_member_and_resume_releases_it() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "stop-holds-capable-remote-member",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    external.advertise_run_start_hold(true);
+    let identity = AgentIdentity::from("w-ext");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+
+    let report = handle.stop().await.expect("stop the mob");
+    assert_eq!(
+        report.members.get(&identity).map(|outcome| &outcome.starts),
+        Some(&crate::MemberRunStarts::Held),
+        "{report:?}"
+    );
+    assert!(
+        !external.run_start_holds().await.is_empty(),
+        "the host received the hold"
+    );
+    assert_eq!(report.not_holdable().count(), 0);
+
+    handle.resume().await.expect("resume the mob");
+    assert!(
+        external.run_start_releases() >= 1,
+        "resume released the host's hold"
+    );
+}
+
+/// #1500: a remote member whose host predates the run-start hold cannot be
+/// held; Stop reports it as not holdable instead of returning a bare Ok.
+#[tokio::test]
+async fn test_stop_reports_a_remote_member_without_the_hold_as_not_holdable() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "stop-reports-not-holdable-remote-member",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    let identity = AgentIdentity::from("w-ext");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+
+    let report = handle.stop().await.expect("stop the mob");
+    assert_eq!(
+        report.not_holdable().collect::<Vec<_>>(),
+        vec![(&identity, &crate::NotHoldableReason::PeerLacksCapability)],
+        "{report:?}"
+    );
+    assert!(
+        external.run_start_holds().await.is_empty(),
+        "a host without the capability is never sent the hold"
     );
 }
 

@@ -13565,6 +13565,46 @@ type PeerOnlyBindingParts<'a> = (&'a str, &'a str, Option<&'a str>, [u8; 32]);
 
 #[cfg(feature = "runtime-adapter")]
 impl MultiBackendProvisioner {
+    /// Authorize the supervisor at a remote member host and return the peer
+    /// and the supervisor payload for a member-addressed command.
+    async fn authorized_remote_member_peer(
+        &self,
+        peer_id: &str,
+        address: &str,
+        pubkey: [u8; 32],
+        bootstrap_token: Option<&super::bridge_protocol::BridgeBootstrapToken>,
+        context: &str,
+    ) -> Result<
+        (
+            TrustedPeerDescriptor,
+            super::bridge_protocol::BridgeSupervisorPayload,
+        ),
+        MobError,
+    > {
+        let peer = Self::peer_only_spec_from_parts(peer_id, address, pubkey)?;
+        let authorization = self
+            .ensure_supervisor_authorized(
+                &peer,
+                Some((
+                    peer_id,
+                    address,
+                    bootstrap_token.map(super::bridge_protocol::BridgeBootstrapToken::as_str),
+                    pubkey,
+                )),
+                None,
+            )
+            .await?;
+        if let Some(observation) = authorization.rebind_required {
+            return Err(MobError::BridgeCommandRejected {
+                cause: observation.rejection_cause,
+                reason: format!("peer-only {context} was rejected by the remote member"),
+            });
+        }
+        let peer = authorization.peer;
+        let supervisor = self.bridge_supervisor_payload_for_recipient(&peer).await?;
+        Ok((peer, supervisor))
+    }
+
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: Option<Arc<MeerkatMachine>>,
@@ -14542,6 +14582,10 @@ impl MultiBackendProvisioner {
                 self.supervisor_bridge.record_peer_rotation_observe_hold(
                     &payload.peer_id,
                     payload.capabilities.rotation_observe_hold,
+                );
+                self.supervisor_bridge.record_peer_run_start_hold(
+                    &payload.peer_id,
+                    payload.capabilities.run_start_hold,
                 );
                 Ok((payload, install))
             }
@@ -16034,18 +16078,86 @@ impl MobProvisioner for MultiBackendProvisioner {
         expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
         cancel_current_run: bool,
     ) -> Result<super::stop_report::MemberStopOutcome, MobError> {
+        use super::stop_report::{MemberRunStarts, MemberStopOutcome, MemberStopRun};
         match member_ref {
-            MemberRef::BackendPeer { session_id, .. }
-                if expected_member.is_some() || session_id.is_none() =>
-            {
-                // A remote member: interrupt it as before and report that its
-                // run starts are not held.
+            MemberRef::BackendPeer {
+                peer_id,
+                address,
+                pubkey,
+                bootstrap_token,
+                session_id,
+                ..
+            } if expected_member.is_some() || session_id.is_none() => {
+                // A remote member is held through its host when the host
+                // supports it (#1500); otherwise it is interrupted as before
+                // and reported as not holdable.
+                if self.supervisor_bridge.peer_run_start_hold(peer_id) != Some(false) {
+                    let (peer, supervisor) = self
+                        .authorized_remote_member_peer(
+                            peer_id,
+                            address,
+                            *pubkey,
+                            bootstrap_token.as_ref(),
+                            "run-start hold",
+                        )
+                        .await?;
+                    let command = super::bridge_protocol::BridgeCommand::HoldRunStarts(
+                        super::bridge_protocol::BridgeRunStartHoldPayload {
+                            supervisor: supervisor.supervisor,
+                            epoch: supervisor.epoch,
+                            protocol_version: supervisor.protocol_version,
+                            expected_member: expected_member.cloned(),
+                            cancel_current_run,
+                        },
+                    );
+                    match self
+                        .send_bridge_command_typed::<super::bridge_protocol::BridgeRunStartHoldResponse>(
+                            &peer,
+                            &command,
+                            Duration::from_secs(5),
+                        )
+                        .await
+                    {
+                        Ok(response) => {
+                            let run = match response.run {
+                                super::bridge_protocol::BridgeHeldRun::NoRun => MemberStopRun::NoRun,
+                                super::bridge_protocol::BridgeHeldRun::CancelledAtBoundary {
+                                    run_id,
+                                } => MemberStopRun::CancelledAtBoundary { run_id },
+                                super::bridge_protocol::BridgeHeldRun::RunEndedBeforeCancel {
+                                    run_id,
+                                } => MemberStopRun::RunEndedBeforeCancel { run_id },
+                                super::bridge_protocol::BridgeHeldRun::LeftRunning { run_id } => {
+                                    MemberStopRun::LeftRunning { run_id }
+                                }
+                                other => {
+                                    return Err(MobError::Internal(format!(
+                                        "remote member returned an unknown held-run outcome: {other:?}"
+                                    )));
+                                }
+                            };
+                            return Ok(MemberStopOutcome {
+                                run,
+                                starts: MemberRunStarts::Held,
+                            });
+                        }
+                        // A host that predates the command rejects it.
+                        Err(MobError::BridgeCommandRejected {
+                            cause: super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                            ..
+                        }) => {
+                            self.supervisor_bridge
+                                .record_peer_run_start_hold(peer_id, false);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
                 if cancel_current_run {
                     self.interrupt_member(member_ref, expected_member).await?;
                 }
-                Ok(super::stop_report::MemberStopOutcome {
-                    run: super::stop_report::MemberStopRun::Interrupted,
-                    starts: super::stop_report::MemberRunStarts::NotHoldable {
+                Ok(MemberStopOutcome {
+                    run: MemberStopRun::Interrupted,
+                    starts: MemberRunStarts::NotHoldable {
                         reason: super::stop_report::NotHoldableReason::PeerLacksCapability,
                     },
                 })
@@ -16064,10 +16176,54 @@ impl MobProvisioner for MultiBackendProvisioner {
         expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
     ) -> Result<(), MobError> {
         match member_ref {
-            MemberRef::BackendPeer { session_id, .. }
-                if expected_member.is_some() || session_id.is_none() =>
-            {
-                Ok(())
+            MemberRef::BackendPeer {
+                peer_id,
+                address,
+                pubkey,
+                bootstrap_token,
+                session_id,
+                ..
+            } if expected_member.is_some() || session_id.is_none() => {
+                if self.supervisor_bridge.peer_run_start_hold(peer_id) == Some(false) {
+                    // Never held.
+                    return Ok(());
+                }
+                let (peer, supervisor) = self
+                    .authorized_remote_member_peer(
+                        peer_id,
+                        address,
+                        *pubkey,
+                        bootstrap_token.as_ref(),
+                        "run-start release",
+                    )
+                    .await?;
+                let command = super::bridge_protocol::BridgeCommand::ReleaseRunStarts(
+                    super::bridge_protocol::BridgeRunStartReleasePayload {
+                        supervisor: supervisor.supervisor,
+                        epoch: supervisor.epoch,
+                        protocol_version: supervisor.protocol_version,
+                        expected_member: expected_member.cloned(),
+                    },
+                );
+                match self
+                    .send_bridge_command_typed::<super::bridge_protocol::BridgeAck>(
+                        &peer,
+                        &command,
+                        Duration::from_secs(5),
+                    )
+                    .await
+                {
+                    Ok(_ack) => Ok(()),
+                    Err(MobError::BridgeCommandRejected {
+                        cause: super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                        ..
+                    }) => {
+                        self.supervisor_bridge
+                            .record_peer_run_start_hold(peer_id, false);
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
             }
             _ => {
                 self.session

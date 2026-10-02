@@ -442,9 +442,12 @@ case "${lane}" in
     configure_nested_cargo_workspace
     export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
     export_mcp_test_server_fixture
+    # Profile ci-integration: `fast` plus a kill bound (see .config/nextest.toml),
+    # so a hang fails as a named TIMEOUT instead of eating the SLO; status level
+    # slow keeps the slow tests visible in the submitter log.
     "${CARGO_NEXTEST}" nextest run --workspace \
-      --profile fast -E 'kind(test)' --no-tests=fail --no-fail-fast \
-      --show-progress none --status-level none --final-status-level fail
+      --profile ci-integration -E 'kind(test)' --no-tests=fail --no-fail-fast \
+      --show-progress none --status-level slow --final-status-level slow
     ;;
   release-validate)
     configure_rust "${host_rust_toolchain}"

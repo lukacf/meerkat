@@ -87,6 +87,35 @@ slow-timeout = { period = "60s", terminate-after = 8 }
 filter = 'test(=drift_check_reports_missing_and_stale_generated_files_for_canonical_selection)'
 slow-timeout = { period = "60s", terminate-after = 8 }
 
+[profile.ci-integration]
+# The BuildBuddy Native integration-fast lane (tools/buildbuddy/full_lane_test.sh):
+# fast's selection plus a kill bound. fast only reports a test still running
+# each minute, so a hang there ran until the 3000 s GCP SLO watchdog killed the
+# batch and named nothing. Four slow periods (240 s), eight for the tests below.
+#
+# inherits carries neither default-filter (restated below; measured: without it
+# 30 e2e lane tests joined the run) nor fast's own overrides; every fast
+# override is mirrored in the default profile, whose overrides apply to all
+# profiles. With both, this profile selects exactly fast's 2849 tests.
+#
+# Sizing (the lane's exact command, 30 threads, 2026-10-02): 9 slow tests, the
+# count the BuildBuddy lane reports. The four below take 132-159 s locally and
+# compile nested Cargo projects or audit the whole workspace (CPU-bound, so
+# slower on the shared remote executor); the mob tests that wait out 120 s or
+# 60 s by design fit the default bound.
+inherits = "fast"
+default-filter = 'not binary(e2e_auth_lane) and not binary(e2e_build_lane) and not binary(e2e_fast_lane) and not binary(e2e_system_lane) and not binary(e2e_live_lane) and not binary(e2e_smoke_lane) and not binary(e2e_models_lane)'
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+[[profile.ci-integration.overrides]]
+filter = '''
+test(=downstream_unsafe_code_cannot_enter_factory_policy_finalizer)
+or test(=downstream_public_cargo_facade_agentbuilder_links_without_repo_cfg)
+or (binary(compile_fail_tests) and test(=compile_fail))
+or test(=live_workspace_rmat_audit_is_strictly_clean)
+'''
+slow-timeout = { period = "60s", terminate-after = 8 }
+
 [profile.fast]
 # Cargo's default fast lane: unit + integration-fast, with dedicated e2e lane
 # wrappers left behind explicit `cargo e2e-*` aliases. Report every test still
@@ -105,6 +134,33 @@ slow-timeout = { period = "60s" }
 max-threads = 1
 
 [[profile.fast.overrides]]
+filter = '''
+binary(cross_host_events)
+or binary(cross_host_flows)
+or binary(cross_host_live)
+or binary(cross_host_wiring)
+or binary(host_actor_persistence)
+or binary(host_bind_ceremony)
+or binary(host_materialize_serving)
+or binary(host_member_release)
+or binary(host_member_revival)
+or binary(host_orphan_reconciliation)
+or binary(host_resume_recovery)
+or binary(member_upcall_lane)
+or binary(placed_member_respawn)
+or binary(remote_spawn_ladder)
+or binary(remote_spawn_materialization)
+or (binary(scope_matrix) and (
+    test(live_granted_principal_opens_end_to_end)
+    or test(live_family_denies_without_live_scope_and_mutates_nothing)
+))
+'''
+platform = 'cfg(target_os = "macos")'
+test-group = 'mob-real-comms-macos'
+
+[[profile.default.overrides]]
+# Mirrors the fast override above: inherits does not carry a parent profile's
+# overrides, the default profile's apply to every profile (ci-pr, ci-integration).
 filter = '''
 binary(cross_host_events)
 or binary(cross_host_flows)
@@ -255,6 +311,12 @@ filter = 'binary(cold_restart_resume_after_compaction) or (binary(host_bind_cere
 threads-required = "num-cpus"
 
 [[profile.default.overrides]]
+# Mirrors the fast override above: inherits does not carry a parent profile's
+# overrides, the default profile's apply to every profile (ci-pr, ci-integration).
+filter = 'binary(cold_restart_resume_after_compaction) or (binary(host_bind_ceremony) and test(=rebind_same_supervisor_identity_replaces_stale_address))'
+threads-required = "num-cpus"
+
+[[profile.default.overrides]]
 filter = 'test(~test_turn_driven_submit_work_steer_queues_when_exact_boundary_is_unavailable) or test(~test_member_send_steer_queues_when_exact_boundary_is_unavailable)'
 threads-required = "num-cpus"
 
@@ -275,6 +337,12 @@ threads-required = "num-cpus"
 # can consume their terminal-state wait budget without surfacing a product
 # failure. Keep each case isolated in the fast profile; the tests still execute
 # their branch/join concurrency internally.
+filter = 'test(~test_branch_winner_and_join_any_behavior) or test(~test_branch_winner_is_selected_only_after_success_allowing_fallback)'
+threads-required = "num-cpus"
+
+[[profile.default.overrides]]
+# Mirrors the fast override above: inherits does not carry a parent profile's
+# overrides, the default profile's apply to every profile (ci-pr, ci-integration).
 filter = 'test(~test_branch_winner_and_join_any_behavior) or test(~test_branch_winner_is_selected_only_after_success_allowing_fallback)'
 threads-required = "num-cpus"
 

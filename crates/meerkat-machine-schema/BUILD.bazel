@@ -54,6 +54,7 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -85,6 +86,7 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -124,6 +126,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -187,6 +190,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/auth_machine_oauth_flow.rs",
@@ -239,6 +243,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/auth_machine_release.rs",
@@ -291,6 +296,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/catalog_typed_round_trip.rs",
@@ -343,6 +349,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/defer_input_totality.rs",
@@ -395,6 +402,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/docs_machine_authority_alignment.rs",
@@ -453,6 +461,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/draining_registration_fence.rs",
@@ -505,6 +514,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/forked_participant_lifecycle_machine.rs",
@@ -557,6 +567,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/gpt_live_authority_contract.rs",
@@ -609,6 +620,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/identity_roundtrip.rs",
@@ -661,6 +673,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/model_routing_handoff_lifecycle.rs",
@@ -713,6 +726,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/named_type_binding_covers_catalog.rs",
@@ -765,6 +779,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/peer_endpoint_structural_equivalence.rs",
@@ -817,6 +832,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/placed_lifecycle_origin_fence.rs",
@@ -869,6 +885,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/runtime_authority_reconciliation_totality.rs",
@@ -921,6 +938,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/schema_construction_cache.rs",
@@ -973,6 +991,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/schema_contracts.rs",
@@ -1029,6 +1048,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/stopped_phase_revival_lattice.rs",
@@ -1081,6 +1101,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
     ],
     srcs = [
         "tests/temporary_council_lifecycle_machine.rs",

@@ -5,6 +5,7 @@
     clippy::redundant_clone
 )]
 
+mod agent_input;
 mod agent_tools;
 pub mod council_relink;
 pub mod detached_delivery;
@@ -28,7 +29,7 @@ pub use detached_delivery::{
     deliver_detached_completion_to_member, deliver_detached_completion_to_member_when_revivable,
     deliver_detached_completion_to_session, detached_completion_notice,
 };
-pub use public_definition::decode_public_mob_definition;
+pub use public_definition::{decode_public_mob_definition, decode_public_profile};
 pub use public_mcp::{
     handle_public_tools_call, public_tool_names, public_tools_list,
     public_tools_list_without_workgraph, wrap_public_tool_payload,
@@ -60,8 +61,9 @@ use async_trait::async_trait;
 
 use meerkat_client::LlmClient;
 use meerkat_contracts::{
-    MobDefinitionInput, MobLifecycleParams, MobSpawnManyResultEntry, WireMemberRef,
-    WireMobLifecycleAction, WireMobLifecycleStatus, WireMobRespawnOutcome, WireMobWireAction,
+    MobDefinitionInput, MobLifecycleParams, MobSpawnManyResultEntry, WireContentInput,
+    WireMemberRef, WireMobLifecycleAction, WireMobLifecycleStatus, WireMobRespawnOutcome,
+    WireMobWireAction,
 };
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
@@ -5789,7 +5791,7 @@ struct MobSpawnMeerkatArgs {
     profile: String,
     agent_identity: String,
     #[serde(default)]
-    initial_message: Option<ContentInput>,
+    initial_message: Option<WireContentInput>,
     #[serde(default)]
     backend: Option<MobBackendKind>,
     #[serde(default)]
@@ -5970,7 +5972,7 @@ struct RespawnArgs {
     mob_id: String,
     agent_identity: String,
     #[serde(default)]
-    initial_message: Option<ContentInput>,
+    initial_message: Option<WireContentInput>,
 }
 #[derive(Deserialize)]
 struct ForceCancelArgs {
@@ -6026,7 +6028,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: MobCreateArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                let definition = decode_public_mob_definition(args.definition)
+                let definition = agent_input::decode_agent_mob_definition(args.definition)
                     .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
                 let mob_id = self
                     .state
@@ -6158,7 +6160,11 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .into_iter()
                     .map(|spec| {
                         let mut s = SpawnMemberSpec::new(spec.profile, spec.agent_identity);
-                        s.initial_message = spec.initial_message;
+                        s.initial_message = spec
+                            .initial_message
+                            .map(agent_input::decode_agent_content_input)
+                            .transpose()
+                            .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
                         s.runtime_mode = spec.runtime_mode;
                         s.backend = spec.backend;
                         s.binding = spec
@@ -6260,12 +6266,17 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: RespawnArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let initial_message = args
+                    .initial_message
+                    .map(agent_input::decode_agent_content_input)
+                    .transpose()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
                 match self
                     .state
                     .mob_respawn(
                         &MobId::from(args.mob_id),
                         AgentIdentity::from(args.agent_identity.as_str()),
-                        args.initial_message,
+                        initial_message,
                     )
                     .await
                 {

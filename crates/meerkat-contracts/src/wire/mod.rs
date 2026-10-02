@@ -257,10 +257,11 @@ pub use session::{
     RevisionSelector, RewriteSessionTranscriptParams, SessionStreamCloseParams,
     SessionStreamCloseResult, SessionStreamOpenParams, SessionStreamOpenResult,
     TranscriptRewriteMessage, UpdateSystemPromptParams, WireAssistantBlock, WireContentBlock,
-    WireContentInput, WireInterruptOutcome, WirePromptInput, WireProviderMeta, WireSessionHistory,
-    WireSessionInfo, WireSessionMessage, WireSessionSummary, WireSessionTranscriptRevision,
-    WireSessionTranscriptRevisionEntry, WireSessionTranscriptRevisionList, WireStopReason,
-    WireSystemMessageIdentity, WireToolResult, WireToolResultContent, WireTranscriptSource,
+    WireContentInput, WireImageData, WireInterruptOutcome, WirePromptInput, WireProviderMeta,
+    WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
+    WireSessionTranscriptRevision, WireSessionTranscriptRevisionEntry,
+    WireSessionTranscriptRevisionList, WireStopReason, WireSystemMessageIdentity, WireToolResult,
+    WireToolResultContent, WireTranscriptSource, WireVideoData,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
 pub use spec_digest::{SpecDigestError, portable_member_spec_digest};

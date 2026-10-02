@@ -164,6 +164,14 @@ them.
   alive. `SubmitWork` is now routed inline, so the receiver closes the moment
   the caller drops (3/30 failures at 10 copies on two cores before, 60/60
   after).
+- The tag release's BuildBuddy Native test-unit lane runs nextest's `ci-unit`
+  profile instead of the default one, which has no slow-timeout. On v0.8.50
+  (run 36941270028) a lib test kept that lane running past 2680 s remote
+  until the 3000 s SLO watchdog killed the batch without naming anything,
+  while the same command finishes its 12,164 tests in 356 s locally. A hung
+  test now fails after four slow periods as a named TIMEOUT in the submitter
+  log, and the lane prints its slow tests.
+
 - Tests that need the `mcp-test-server` fixture binary no longer pass
   without running when it is missing. Each test hand-rolled a
   `target/debug/mcp-test-server` lookup and returned early when nothing was

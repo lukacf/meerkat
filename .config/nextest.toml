@@ -20,8 +20,10 @@ archive.include = [
 [profile.ci-unit]
 # CI unit shards normally finish in a few minutes total. Bound any single test
 # that stops making progress so nextest reports its name instead of leaving an
-# anonymous shard running until a human cancels the workflow. Integration and
-# e2e lanes intentionally do not select this profile.
+# anonymous shard running until a human cancels the workflow. The archived
+# main-unit lanes (scripts/ci-nextest-archive.sh) and the BuildBuddy Native
+# test-unit lane (tools/buildbuddy/full_lane_test.sh) select it. Integration
+# and e2e lanes intentionally do not.
 inherits = "default"
 slow-timeout = { period = "60s", terminate-after = 4 }
 

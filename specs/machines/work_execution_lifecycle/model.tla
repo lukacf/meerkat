@@ -414,7 +414,7 @@ ClassifyRetryEligibilityLiveWorkClosureRequested ==
 
 
 Next ==
-    \/ \E arg_binding_id \in StringValues : \E arg_run_id \in StringValues : BindExecution(arg_binding_id, arg_run_id)
+    \/ (phase = "Absent") /\ \E arg_binding_id \in StringValues : \E arg_run_id \in StringValues : BindExecution(arg_binding_id, arg_run_id)
     \/ RecoverLaunchRequest
     \/ RecoverUncertainLaunch
     \/ RecoverQuarantinedLaunch
@@ -432,19 +432,19 @@ Next ==
     \/ AcceptFlowLaunch
     \/ ObserveRunningFlow
     \/ ObserveCompletedFlow
-    \/ \E detail \in OptionStringValues : ObserveFailedFlow(detail)
-    \/ \E detail \in OptionStringValues : ObserveCanceledFlow(detail)
-    \/ \E detail \in StringValues : ObserveLostRun(detail)
-    \/ \E detail \in StringValues : ObserveLostCompletedRunBeforeEvidence(detail)
-    \/ \E detail \in StringValues : RecordUncertainLaunch(detail)
-    \/ \E detail \in StringValues : QuarantineLaunch(detail)
-    \/ \E detail \in StringValues : FailLaunch(detail)
+    \/ (phase = "Running" \/ phase = "LaunchRequested" \/ phase = "LaunchUncertain" \/ phase = "LaunchQuarantined") /\ \E detail \in OptionStringValues : ObserveFailedFlow(detail)
+    \/ (phase = "Running" \/ phase = "LaunchRequested" \/ phase = "LaunchUncertain" \/ phase = "LaunchQuarantined") /\ \E detail \in OptionStringValues : ObserveCanceledFlow(detail)
+    \/ (phase = "Running") /\ \E detail \in StringValues : ObserveLostRun(detail)
+    \/ (phase = "EvidenceProjectionRequested") /\ \E detail \in StringValues : ObserveLostCompletedRunBeforeEvidence(detail)
+    \/ (phase = "LaunchRequested") /\ \E detail \in StringValues : RecordUncertainLaunch(detail)
+    \/ (phase = "LaunchRequested" \/ phase = "LaunchUncertain") /\ \E detail \in StringValues : QuarantineLaunch(detail)
+    \/ (phase = "LaunchRequested" \/ phase = "LaunchUncertain") /\ \E detail \in StringValues : FailLaunch(detail)
     \/ CommitLaunchFailureEvidenceProjection
     \/ CommitEvidenceProjection
     \/ CommitFlowFailureEvidenceProjection
     \/ CommitFlowCancellationEvidenceProjection
     \/ CommitWorkClosure
-    \/ \E detail \in StringValues : RecordWorkClosureRefusal(detail)
+    \/ (phase = "WorkClosureRequested") /\ \E detail \in StringValues : RecordWorkClosureRefusal(detail)
     \/ ClassifyRetryEligibilityTerminalFlowFailed
     \/ ClassifyRetryEligibilityTerminalFlowCanceled
     \/ ClassifyRetryEligibilityTerminalEvidenceProjected

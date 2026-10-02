@@ -355,6 +355,12 @@ them.
 
 ### Changed
 
+- Generated machine TLA models lead each quantified `Next` disjunct with its
+  transition's source-phase guard. The meaning is unchanged (the guard is also
+  the first conjunct of the action), but TLC no longer enumerates every
+  parameter tuple of every transition in every state: work_graph_lifecycle's
+  ci sweep drops from 276 s to 161 s and occurrence_lifecycle's from 143 s to
+  90 s, with identical generated and distinct state counts on every machine.
 - Supervisor rotation no longer polls a member for convergence. A member
   advertising `rotation_observe_hold` answers a held
   `ObserveSupervisorRotation` when the operation is terminal, waking on a

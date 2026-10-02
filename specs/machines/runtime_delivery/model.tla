@@ -83,10 +83,10 @@ ObserveAlreadyAppliedDelivery(delivery_id, delivery_sequence) ==
 
 
 Next ==
-    \/ \E delivery_id \in StringValues : \E source_sequence \in 0..2 : CommitNewDelivery(delivery_id, source_sequence)
-    \/ \E delivery_id \in StringValues : \E source_sequence \in 0..2 : ReuseCommittedDelivery(delivery_id, source_sequence)
-    \/ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : ApplyNextDelivery(delivery_id, delivery_sequence)
-    \/ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : ObserveAlreadyAppliedDelivery(delivery_id, delivery_sequence)
+    \/ (phase = "Active") /\ \E delivery_id \in StringValues : \E source_sequence \in 0..2 : CommitNewDelivery(delivery_id, source_sequence)
+    \/ (phase = "Active") /\ \E delivery_id \in StringValues : \E source_sequence \in 0..2 : ReuseCommittedDelivery(delivery_id, source_sequence)
+    \/ (phase = "Active") /\ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : ApplyNextDelivery(delivery_id, delivery_sequence)
+    \/ (phase = "Active") /\ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : ObserveAlreadyAppliedDelivery(delivery_id, delivery_sequence)
 
 applied_cursor_does_not_pass_committed_sequence == (applied_cursor <= next_sequence)
 empty_delivery_set_has_zero_sequence == (IF (Cardinality(delivery_ids) # 0) THEN TRUE ELSE (next_sequence = 0))

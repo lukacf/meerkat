@@ -148,6 +148,14 @@ debug = 0
 incremental = false
 split-debuginfo = "off"
 
+# The generated machine catalog is the largest single rustc in a release
+# build: 8.7 GB peak RSS at opt-level 3 (6m40s), 6.3 GB at opt-level 1 (5m0s),
+# unchanged by codegen-units=256 (measured 2026-10-02, x86_64, -j4). Beside
+# meerkat-mob (9.0 GB) that overlap OOM-killed the 16 GB GitHub-hosted
+# aarch64 release runner. Catalog construction is not on a hot path.
+[profile.release.package.meerkat-machine-schema]
+opt-level = 1
+
 [profile.test.package.meerkat-machine-schema]
 codegen-units = 16
 strip = "symbols"

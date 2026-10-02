@@ -2475,7 +2475,8 @@ mod tests {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new())
                 as Arc<dyn meerkat_runtime::RuntimeStore>,
             Arc::new(MemoryBlobStore::new()),
-        ))
+        )
+        .expect("construct runtime authority"))
     }
 
     async fn build_test_service(

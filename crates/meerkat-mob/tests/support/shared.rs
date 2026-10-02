@@ -239,9 +239,12 @@ pub async fn spawn_production_external_tcp_target(peer_name: &str) -> Production
     // and the supervisor trust publish is rejected ("minted by a different
     // generated owner"). A real session-backed external member gets this wiring
     // from its SessionRuntimeBindings; this simulation installs it explicitly.
-    let adapter = Arc::new(MeerkatMachine::persistent_without_blobs(Arc::new(
-        meerkat_runtime::InMemoryRuntimeStore::default(),
-    )));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent_without_blobs(Arc::new(
+            meerkat_runtime::InMemoryRuntimeStore::default(),
+        ))
+        .expect("construct runtime authority"),
+    );
     adapter
         .register_session(session_id.clone())
         .await
@@ -1080,8 +1083,14 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
         self.inner.supports_persistent_sessions()
     }
 
-    fn runtime_adapter(&self) -> Option<Arc<MeerkatMachine>> {
-        self.inner.runtime_adapter()
+    fn acquire_runtime_adapter(
+        &self,
+        explicit: Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+    ) -> Result<
+        Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+        meerkat_runtime::RuntimeDriverError,
+    > {
+        self.inner.acquire_runtime_adapter(explicit)
     }
 
     fn supports_runtime_turn_apply(&self) -> bool {
@@ -2069,7 +2078,8 @@ pub async fn spawn_host_daemon_fixture(
             let service: Arc<dyn meerkat_mob::MobSessionService> =
                 Arc::new(meerkat_session::EphemeralSessionService::new(builder, 32));
             let adapter = service
-                .runtime_adapter()
+                .acquire_runtime_adapter(None)
+                .expect("acquire runtime authority")
                 .expect("ephemeral member service exposes a runtime adapter");
             if opts.stop_first_executor_after_ensure {
                 adapter.test_stop_next_executor_after_ensure();
@@ -2139,7 +2149,8 @@ pub async fn spawn_host_daemon_fixture(
                 mob_service
             };
             let adapter = mob_service
-                .runtime_adapter()
+                .acquire_runtime_adapter(None)
+                .expect("acquire runtime authority")
                 .expect("persistent member service exposes a runtime adapter");
             if opts.stop_first_executor_after_ensure {
                 adapter.test_stop_next_executor_after_ensure();
@@ -4021,7 +4032,8 @@ async fn create_controlling_mob_composed_with_client(
 
     let mob_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
     let runtime_adapter = mob_service
-        .runtime_adapter()
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime authority")
         .expect("persistent service exposes a runtime adapter");
     let controlling_acceptor = meerkat_mob::ControllingAcceptorConfig::for_session_service(
         "127.0.0.1:0".parse().expect("loopback acceptor address"),
@@ -4369,7 +4381,8 @@ impl ControllingMob {
         .with_forked_participant_store(Some(Arc::clone(&storage_forked_participants)));
         let mob_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
         let runtime_adapter = mob_service
-            .runtime_adapter()
+            .acquire_runtime_adapter(None)
+            .expect("acquire runtime authority")
             .expect("persistent service exposes a runtime adapter");
         let controlling_acceptor_address = distinct_callback_reservation.as_ref().map_or_else(
             || "127.0.0.1:0".parse().expect("loopback acceptor address"),

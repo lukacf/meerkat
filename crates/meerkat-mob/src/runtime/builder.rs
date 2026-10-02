@@ -2590,18 +2590,10 @@ fn canonical_runtime_adapter_for_session_service(
     session_service: &Arc<dyn MobSessionService>,
     runtime_adapter: RuntimeAdapterOption,
 ) -> Result<RuntimeAdapterOption, MobError> {
-    let service_adapter = session_service.runtime_adapter();
-    match (runtime_adapter, service_adapter) {
-        (Some(adapter), Some(service_adapter))
-            if !adapter.shares_runtime_persistence_with(&service_adapter) =>
-        {
-            Err(MobError::Internal(
-                "explicit mob runtime adapter does not share the session service runtime persistence authority".to_string(),
-            ))
-        }
-        (Some(adapter), _) => Ok(Some(adapter)),
-        (None, service_adapter) => Ok(service_adapter),
-    }
+    session_service
+        .acquire_runtime_adapter(runtime_adapter)
+        .map_err(super::session_service::runtime_acquisition_session_error)
+        .map_err(MobError::from)
 }
 
 fn inline_external_addressable(definition: &MobDefinition, role: &ProfileName) -> bool {
@@ -6884,14 +6876,10 @@ impl MobBuilder {
     /// Set the session service for creating meerkat sessions.
     ///
     /// The service must implement both `SessionService` and `MobSessionService`
-    /// to provide comms runtime access for wiring operations. If no explicit
-    /// runtime adapter override has been set yet, the builder seeds its
-    /// canonical runtime adapter from `service.runtime_adapter()`.
+    /// to provide comms runtime access for wiring operations. Runtime authority
+    /// is acquired during fallible build or resume, after any explicit adapter
+    /// has been supplied.
     pub fn with_session_service(mut self, service: Arc<dyn MobSessionService>) -> Self {
-        #[cfg(feature = "runtime-adapter")]
-        if self.runtime_adapter.is_none() {
-            self.runtime_adapter = service.runtime_adapter();
-        }
         self.session_service = Some(service);
         self
     }
@@ -7135,7 +7123,7 @@ impl MobBuilder {
                     return Err(MobError::Internal(
                     "definition contains AutonomousHost profiles but no runtime adapter is available; \
                      provide one via with_runtime_adapter() or use a session service that implements \
-                     runtime_adapter()"
+                     acquire_runtime_adapter()"
                         .to_string(),
                 ));
                 }

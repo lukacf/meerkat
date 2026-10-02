@@ -59,6 +59,22 @@ impl RuntimeStoreExecutionCustody {
             governed: false,
         })
     }
+
+    /// Attempt exclusive execution custody before constructing a governed owner.
+    /// A failed attempt leaves every existing claim unchanged.
+    pub fn try_acquire_governed(
+        &self,
+    ) -> Result<RuntimeStoreExecutionClaim, RuntimeStoreExecutionCustodyError> {
+        let mut current = self.inner.try_lock().map_err(custody_lock_error)?;
+        if current.governed || current.shared != 0 {
+            return Err(RuntimeStoreExecutionCustodyError::Busy);
+        }
+        current.governed = true;
+        Ok(RuntimeStoreExecutionClaim {
+            owner: Arc::clone(&self.inner),
+            governed: true,
+        })
+    }
 }
 
 fn custody_lock_error<T>(error: TryLockError<T>) -> RuntimeStoreExecutionCustodyError {

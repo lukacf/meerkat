@@ -840,10 +840,10 @@ mod tests {
             1,
         ));
         let store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-        let machine = Arc::new(MeerkatMachine::persistent(
-            store.clone(),
-            Arc::new(crate::MemoryBlobStore::new()),
-        ));
+        let machine = Arc::new(
+            MeerkatMachine::persistent(store.clone(), Arc::new(crate::MemoryBlobStore::new()))
+                .expect("construct runtime authority"),
+        );
         assert!(machine.has_runtime_persistence());
         let mut materialization = Box::pin(materialize_ephemeral_runtime_session(
             &service,

@@ -960,7 +960,8 @@ mod ops_persistence_worker_tests {
         let machine = MeerkatMachine::persistent(
             Arc::clone(&store),
             Arc::new(meerkat_store::MemoryBlobStore::new()),
-        );
+        )
+        .expect("persistent machine");
         let session_id = SessionId::new();
         machine
             .register_session(session_id.clone())
@@ -1498,7 +1499,6 @@ impl MeerkatMachine {
         ),
         RuntimeDriverError,
     > {
-        self.require_execution_custody()?;
         if self.store.is_some() {
             self.recover_or_create_ops_state(session_id, runtime_id)
                 .await
@@ -1574,11 +1574,6 @@ impl MeerkatMachine {
         observed: RuntimeSessionLifecycleObservation,
         write_fence: Arc<dyn crate::store::RuntimeStoreWriteFence>,
     ) -> RuntimeSessionRegistrationOutcome {
-        if let Err(error) = self.require_execution_custody() {
-            return RuntimeSessionRegistrationOutcome::Backoff {
-                reason: error.to_string(),
-            };
-        }
         let RuntimeSessionLifecycleObservation {
             session_id,
             runtime_id,
@@ -2728,7 +2723,7 @@ impl MeerkatMachine {
                 Arc::clone(store),
                 runtime_id.clone(),
                 receiver,
-                self.execution_custody.clone(),
+                Ok(self.execution_custody.clone()),
             )?),
             (None, None) => None,
             _ => {
@@ -4642,7 +4637,7 @@ impl MeerkatMachine {
                     Arc::clone(store),
                     runtime_id,
                     persist_rx,
-                    self.execution_custody.clone(),
+                    Ok(self.execution_custody.clone()),
                 )?;
                 let previous_worker = {
                     let mut sessions = self.sessions.write().await;
@@ -6090,7 +6085,7 @@ impl MeerkatMachine {
                     Arc::clone(store),
                     recovered_runtime_id.clone(),
                     receiver,
-                    self.execution_custody.clone(),
+                    Ok(self.execution_custody.clone()),
                 )?),
                 (None, None) => None,
                 _ => {

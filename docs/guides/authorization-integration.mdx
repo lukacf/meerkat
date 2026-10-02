@@ -107,6 +107,9 @@ Map typed errors before rendering text:
   observation failed. Preserve that infrastructure classification through tool,
   provider, callback, live, and SDK adapters. Do not give the model a misleading
   policy refusal, mark it retryable, or switch providers to hide the failure.
+- `SessionError::RuntimeUnavailable { reason }` means a session operation could
+  not acquire its runtime owner. Preserve the typed readiness reason and retained
+  work; do not fall back to direct store mutation or report a policy denial.
 - When an effect already returned, preserve its actual result and any separate
   observation or settlement failure. An uncertain effect requires its existing
   reconciliation or idempotency contract before another attempt.

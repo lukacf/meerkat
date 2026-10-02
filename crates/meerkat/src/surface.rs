@@ -1388,7 +1388,6 @@ pub fn native_admission_error_detail(
     };
     use meerkat_core::OperationRefusalKind;
     use meerkat_runtime::RuntimeDriverError;
-    use meerkat_runtime::traits::ControllerReadinessFailure;
 
     let reason = match error {
         RuntimeDriverError::InputRefused { refusal } => {
@@ -1407,26 +1406,7 @@ pub fn native_admission_error_detail(
         RuntimeDriverError::ControllerReadinessUnavailable { reason } => reason,
         _ => return None,
     };
-    let reason = match *reason {
-        ControllerReadinessFailure::PolicyUnavailable => WireReady::PolicyUnavailable {},
-        ControllerReadinessFailure::ExecutorUnavailable => WireReady::ExecutorUnavailable {},
-        ControllerReadinessFailure::FactsUnavailable => WireReady::FactsUnavailable {},
-        ControllerReadinessFailure::Busy => WireReady::Busy {},
-        ControllerReadinessFailure::AuthorityUnavailable => WireReady::AuthorityUnavailable {},
-        ControllerReadinessFailure::AuthorityChanged => WireReady::AuthorityChanged {},
-        ControllerReadinessFailure::UnsupportedScope => WireReady::UnsupportedScope {},
-        ControllerReadinessFailure::CredentialUnusable { disposition } => {
-            WireReady::CredentialUnusable {
-                disposition: disposition.into(),
-            }
-        }
-        ControllerReadinessFailure::CredentialPreparationFailed { kind } => {
-            WireReady::CredentialPreparationFailed { cause: kind }
-        }
-        ControllerReadinessFailure::PolicyChanged => WireReady::PolicyChanged {},
-        ControllerReadinessFailure::ReplacementNotEmpty => WireReady::ReplacementNotEmpty {},
-        _ => WireReady::Unknown {},
-    };
+    let reason = (*reason).into();
     Some(WireDetail::NotReady { reason })
 }
 

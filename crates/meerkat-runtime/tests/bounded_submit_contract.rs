@@ -204,7 +204,8 @@ async fn settle(machine: &Arc<MeerkatMachine>, session_id: &SessionId) {
 
 async fn persistent_session(log: &DeliveryLog, gate: &RunGate) -> (Arc<MeerkatMachine>, SessionId) {
     let store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
-    let machine = Arc::new(MeerkatMachine::persistent_without_blobs(store));
+    let machine =
+        Arc::new(MeerkatMachine::persistent_without_blobs(store).expect("persistent machine"));
     let session_id = SessionId::new();
     machine
         .register_session_with_executor(

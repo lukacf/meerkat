@@ -868,7 +868,8 @@ async fn unknown_input_reads_the_same_through_read_and_wait_with_or_without_regi
     // Persistent machine: the same store read registered and unregistered.
     let store: Arc<dyn crate::store::RuntimeStore> =
         Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let attached = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+    let attached =
+        MeerkatMachine::persistent_without_blobs(Arc::clone(&store)).expect("persistent machine");
     let session_id = SessionId::new();
     attached
         .register_session(session_id.clone())
@@ -892,7 +893,8 @@ async fn unknown_input_reads_the_same_through_read_and_wait_with_or_without_regi
             .is_none()
     );
 
-    let detached = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+    let detached =
+        MeerkatMachine::persistent_without_blobs(Arc::clone(&store)).expect("persistent machine");
     assert!(
         read(&detached, &session_id, &unknown)
             .await
@@ -937,7 +939,8 @@ async fn finalized_receipt_is_read_from_the_store_after_restart() {
         MeerkatMachine::persistent(
             Arc::clone(&store),
             Arc::new(meerkat_store::MemoryBlobStore::new()),
-        ),
+        )
+        .expect("persistent machine"),
         Vec::new(),
     )
     .await;
@@ -955,7 +958,8 @@ async fn finalized_receipt_is_read_from_the_store_after_restart() {
     let restarted = MeerkatMachine::persistent(
         restarted_store,
         Arc::new(meerkat_store::MemoryBlobStore::new()),
-    );
+    )
+    .expect("persistent machine");
     let read = restarted
         .input_terminal_receipt(
             &session_id,

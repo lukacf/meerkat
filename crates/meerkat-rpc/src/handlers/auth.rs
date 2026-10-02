@@ -2208,7 +2208,8 @@ mod tests {
                 store,
                 Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
                 blob_store,
-            ),
+            )
+            .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         );
         runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
@@ -2244,7 +2245,8 @@ mod tests {
                 store,
                 Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
                 blob_store,
-            ),
+            )
+            .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         );
         runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
@@ -4533,11 +4535,13 @@ mod tests {
     #[tokio::test]
     async fn real_device_consume_failure_releases_credential_lifecycle() {
         let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
-        let auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
-        runtime
-            .runtime_adapter()
-            .set_runtime_auth_lease_handle(Arc::clone(&auth_lease))
-            .expect("initial runtime authority installation");
+        let generated = runtime.runtime_adapter().generated_auth_lease_handle();
+        let auth_lease = Arc::new(
+            (generated.as_handle() as &dyn std::any::Any)
+                .downcast_ref::<RuntimeAuthLeaseHandle>()
+                .expect("actual installed runtime AuthMachine owner")
+                .clone(),
+        );
         let store = runtime
             .token_store()
             .expect("token store open")
@@ -4593,11 +4597,13 @@ mod tests {
     #[tokio::test]
     async fn real_browser_missing_consume_releases_credential_lifecycle() {
         let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
-        let auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
-        runtime
-            .runtime_adapter()
-            .set_runtime_auth_lease_handle(Arc::clone(&auth_lease))
-            .expect("initial runtime authority installation");
+        let generated = runtime.runtime_adapter().generated_auth_lease_handle();
+        let auth_lease = Arc::new(
+            (generated.as_handle() as &dyn std::any::Any)
+                .downcast_ref::<RuntimeAuthLeaseHandle>()
+                .expect("actual installed runtime AuthMachine owner")
+                .clone(),
+        );
         let store = runtime
             .token_store()
             .expect("token store open")
@@ -4737,11 +4743,13 @@ mod tests {
     #[tokio::test]
     async fn terminal_consume_failure_preserves_other_browser_flow() {
         let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
-        let auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
-        runtime
-            .runtime_adapter()
-            .set_runtime_auth_lease_handle(Arc::clone(&auth_lease))
-            .expect("initial runtime authority installation");
+        let generated = runtime.runtime_adapter().generated_auth_lease_handle();
+        let auth_lease = Arc::new(
+            (generated.as_handle() as &dyn std::any::Any)
+                .downcast_ref::<RuntimeAuthLeaseHandle>()
+                .expect("actual installed runtime AuthMachine owner")
+                .clone(),
+        );
         let store = runtime
             .token_store()
             .expect("token store open")

@@ -21,7 +21,6 @@ use meerkat_core::{
 };
 use meerkat_llm_core::LlmClient;
 use meerkat_runtime::input_authority::{NativeAdmissionError, NativeIngressContext};
-use meerkat_runtime::meerkat_machine::NativeGrantWorkConfiguration;
 use meerkat_runtime::{RuntimeDriverError, identifiers::LogicalRuntimeId, input::Input};
 use serde_json::value::RawValue;
 use std::sync::Arc;
@@ -114,12 +113,11 @@ impl GovernedConnection {
     }
 }
 
-/// Trusted fixed recipe. The factory is constructed internally as minimal;
-/// sharing the supplied bundle before installation is rejected by its owner.
+/// Trusted fixed recipe with an already governed persistence owner.
+/// The factory is constructed internally as minimal.
 pub struct GovernedJsonlSetup {
     pub config: Config,
     pub persistence: PersistenceBundle,
-    pub authorization: NativeGrantWorkConfiguration,
     pub client: Arc<dyn LlmClient>,
     pub connection: GovernedConnection,
     pub tools: Vec<ToolDef>,
@@ -166,7 +164,6 @@ where
     let GovernedJsonlSetup {
         config,
         persistence,
-        authorization,
         client,
         connection,
         mut tools,
@@ -213,7 +210,12 @@ where
             source_id: "callback".into(),
         });
     }
-    let persistence = persistence.with_local_grant_authorization(authorization)?;
+    if !persistence
+        .runtime_adapter()
+        .has_native_work_authorization_host()
+    {
+        return Err(unsupported().into());
+    }
     let max_sessions = config.max_sessions();
     let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
         config.clone(),
@@ -231,7 +233,7 @@ where
     runtime.set_realm_context(Some(connection.realm.clone()), None, None);
     runtime.set_default_llm_client(Some(client));
     let runtime = Arc::new(runtime);
-    let server = RpcServer::new(reader, writer, runtime.clone(), config_store)
+    let server = RpcServer::new(reader, writer, runtime.clone(), config_store)?
         .with_governed_connection(Arc::new(connection), tools)?;
     Ok((server, runtime))
 }

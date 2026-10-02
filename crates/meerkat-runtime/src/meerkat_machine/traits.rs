@@ -3454,7 +3454,8 @@ mod tests {
         let expired = MeerkatMachine::persistent(
             store.clone(),
             Arc::new(meerkat_store::MemoryBlobStore::new()),
-        );
+        )
+        .expect("persistent machine");
         let expired_error = match expired
             .prepare_session_archive_lease_before(
                 &session_id,
@@ -3477,10 +3478,13 @@ mod tests {
         );
         drop(expired);
         store.block_next_machine_lifecycle_load(Arc::clone(&entered), Arc::clone(&release));
-        let restarted = Arc::new(MeerkatMachine::persistent(
-            store.clone(),
-            Arc::new(meerkat_store::MemoryBlobStore::new()),
-        ));
+        let restarted = Arc::new(
+            MeerkatMachine::persistent(
+                store.clone(),
+                Arc::new(meerkat_store::MemoryBlobStore::new()),
+            )
+            .expect("persistent machine"),
+        );
         let first_machine = Arc::clone(&restarted);
         let first_session_id = session_id.clone();
         let first_prepare = crate::tokio::spawn(async move {
@@ -3568,7 +3572,8 @@ mod tests {
         let restarted = MeerkatMachine::persistent(
             store.clone(),
             Arc::new(meerkat_store::MemoryBlobStore::new()),
-        );
+        )
+        .expect("persistent machine");
         let baseline_load_calls = store.machine_lifecycle_load_calls();
         store.panic_next_machine_lifecycle_load();
         let panic_error = match restarted
@@ -3624,10 +3629,13 @@ mod tests {
     #[tokio::test]
     async fn archive_retry_joins_before_wedged_publication_receipt_cas() {
         let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-        let machine = Arc::new(MeerkatMachine::persistent(
-            store.clone(),
-            Arc::new(meerkat_store::MemoryBlobStore::new()),
-        ));
+        let machine = Arc::new(
+            MeerkatMachine::persistent(
+                store.clone(),
+                Arc::new(meerkat_store::MemoryBlobStore::new()),
+            )
+            .expect("persistent machine"),
+        );
         let session_id = SessionId::new();
         machine
             .register_session(session_id.clone())

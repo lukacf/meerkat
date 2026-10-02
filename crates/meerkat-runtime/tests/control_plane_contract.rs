@@ -323,9 +323,10 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
 #[tokio::test]
 async fn control_plane_contract_stop_runtime_executor_persists_stopped_state_without_loop() {
     let store = Arc::new(InMemoryRuntimeStore::new());
-    let adapter = Arc::new(MeerkatMachine::persistent_without_blobs(
-        Arc::clone(&store) as Arc<dyn RuntimeStore>
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent_without_blobs(Arc::clone(&store) as Arc<dyn RuntimeStore>)
+            .expect("persistent machine"),
+    );
     let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
 

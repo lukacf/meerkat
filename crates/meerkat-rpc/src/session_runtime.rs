@@ -1527,8 +1527,24 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         true
     }
 
-    fn runtime_adapter(&self) -> Option<Arc<MeerkatMachine>> {
-        Some(Arc::clone(&self.runtime_adapter))
+    fn acquire_runtime_adapter(
+        &self,
+        explicit: Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+    ) -> Result<
+        Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+        meerkat_runtime::RuntimeDriverError,
+    > {
+        let owner = Some(Arc::clone(&self.runtime_adapter));
+        if let (Some(owner), Some(requested)) = (owner.as_ref(), explicit.as_ref())
+            && !owner.shares_runtime_execution_owner_with(requested)
+        {
+            return Err(
+                meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                    reason: meerkat_runtime::traits::ControllerReadinessFailure::AuthorityChanged,
+                },
+            );
+        }
+        Ok(owner.or(explicit))
     }
 
     fn supports_runtime_turn_apply(&self) -> bool {
@@ -11979,6 +11995,13 @@ fn instruction_activation_host_error_to_rpc(
 }
 
 pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
+    if let SessionError::RuntimeUnavailable { .. } = &err {
+        return RpcError {
+            code: meerkat_contracts::ErrorCode::SessionRuntimeUnavailable.jsonrpc_code(),
+            message: err.to_string(),
+            data: meerkat_contracts::error::session_error_details(&err),
+        };
+    }
     let code = match &err {
         SessionError::NotFound { .. } => error::SESSION_NOT_FOUND,
         SessionError::Busy { .. } => error::SESSION_BUSY,
@@ -14199,7 +14222,8 @@ mod tests {
                 factory,
                 Config::default(),
                 max_sessions,
-                meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store),
+                meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store)
+                    .expect("construct runtime authority"),
                 crate::router::NotificationSink::noop(),
             )),
             runtime_store,
@@ -14218,7 +14242,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             1,
-            meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store),
+            meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         let session_id = SessionId::new();
@@ -14483,7 +14508,8 @@ mod tests {
             factory,
             config,
             max_sessions,
-            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ))
     }
@@ -14503,7 +14529,8 @@ mod tests {
                 store,
                 Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
                 blob_store,
-            ),
+            )
+            .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ))
     }
@@ -14521,7 +14548,8 @@ mod tests {
             factory,
             Config::default(),
             max_sessions,
-            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ))
     }
@@ -14539,7 +14567,8 @@ mod tests {
             factory,
             Config::default(),
             max_sessions,
-            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ))
     }
@@ -14558,7 +14587,8 @@ mod tests {
                 factory,
                 Config::default(),
                 max_sessions,
-                meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
+                meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store)
+                    .expect("construct runtime authority"),
                 crate::router::NotificationSink::noop(),
             )),
             runtime_store,
@@ -16039,7 +16069,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             1,
-            meerkat::PersistenceBundle::new(store, runtime_store_dyn, blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store_dyn, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         *runtime
@@ -17301,7 +17332,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             10,
-            meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
+            meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
@@ -17390,7 +17422,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             10,
-            meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
+            meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
@@ -17539,7 +17572,8 @@ mod tests {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(meerkat_store::MemoryBlobStore::new()),
             Arc::new(meerkat::MemoryScheduleStore::new()),
-        );
+        )
+        .expect("construct runtime authority");
         let runtime = Arc::new(SessionRuntime::new(
             temp_factory(&temp),
             Config::default(),
@@ -17617,7 +17651,8 @@ mod tests {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
-        let persistence = meerkat::PersistenceBundle::new(store, runtime_store, blob_store);
+        let persistence = meerkat::PersistenceBundle::new(store, runtime_store, blob_store)
+            .expect("construct runtime authority");
         let adapter = persistence.runtime_adapter();
         let target = test_auth_binding("dev", "default_openai");
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
@@ -18817,7 +18852,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             10,
-            meerkat::PersistenceBundle::new(store, runtime_store_dyn.clone(), blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store_dyn.clone(), blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
 
@@ -19589,7 +19625,8 @@ mod tests {
                 Arc::clone(&store),
                 Arc::clone(&runtime_store),
                 Arc::clone(&blob_store),
-            ),
+            )
+            .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         let build_config = mock_build_config();
@@ -19637,7 +19674,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             10,
-            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         assert!(
@@ -19695,10 +19733,10 @@ mod tests {
 
         // Create a MobMcpState and set it via set_mob_tools.
         let mob_svc = runtime.session_service();
-        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(
-            mob_svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let mob_state = Arc::new(
+            meerkat_mob_mcp::MobMcpState::new(mob_svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         runtime.set_mob_tools(Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
             mob_state,
         )));
@@ -20018,7 +20056,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             1,
-            meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store),
+            meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         let session_id = runtime
@@ -21058,7 +21097,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             1,
-            meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store),
+            meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         let session_id = runtime
@@ -21496,10 +21536,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
         let service = runtime.session_service();
-        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(
-            service.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let mob_state = Arc::new(
+            meerkat_mob_mcp::MobMcpState::new(
+                service.clone(),
+                meerkat_mob::MobControlPrincipal::Owner,
+            )
+            .expect("construct runtime authority"),
+        );
         runtime.set_mob_state(mob_state.clone());
         let created = service
             .create_session(service_create_request(
@@ -24281,10 +24324,13 @@ mod tests {
         ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let service = runtime.session_service();
-        runtime.set_mob_state(Arc::new(meerkat_mob_mcp::MobMcpState::new(
-            Arc::clone(&service),
-            meerkat_mob::MobControlPrincipal::Owner,
-        )));
+        runtime.set_mob_state(Arc::new(
+            meerkat_mob_mcp::MobMcpState::new(
+                Arc::clone(&service),
+                meerkat_mob::MobControlPrincipal::Owner,
+            )
+            .expect("construct runtime authority"),
+        ));
 
         let created = service
             .create_session(service_create_request(
@@ -24528,10 +24574,13 @@ mod tests {
         ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let mob_service = runtime.session_service();
-        runtime.set_mob_state(Arc::new(meerkat_mob_mcp::MobMcpState::new(
-            Arc::clone(&mob_service),
-            meerkat_mob::MobControlPrincipal::Owner,
-        )));
+        runtime.set_mob_state(Arc::new(
+            meerkat_mob_mcp::MobMcpState::new(
+                Arc::clone(&mob_service),
+                meerkat_mob::MobControlPrincipal::Owner,
+            )
+            .expect("construct runtime authority"),
+        ));
 
         let created = mob_service
             .create_session(service_create_request(
@@ -27549,7 +27598,8 @@ mod tests {
                 session_store,
                 runtime_store.clone(),
                 Arc::new(meerkat_store::MemoryBlobStore::new()),
-            ),
+            )
+            .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         runtime_store.fail_next_catalog_read();
@@ -28767,6 +28817,23 @@ mod tests {
     }
 
     #[test]
+    fn session_error_to_rpc_preserves_runtime_readiness() {
+        let error = session_error_to_rpc(SessionError::RuntimeUnavailable {
+            reason: meerkat_core::authorization::ControllerReadinessFailure::Busy,
+        });
+        assert_eq!(
+            error.code,
+            meerkat_contracts::ErrorCode::SessionRuntimeUnavailable.jsonrpc_code()
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "code": "SESSION_RUNTIME_UNAVAILABLE", "reason": { "kind": "busy" },
+            }))
+        );
+    }
+
+    #[test]
     fn session_error_to_rpc_surfaces_cancelled_as_request_cancelled() {
         let session_err = SessionError::Agent(meerkat_core::AgentError::Cancelled);
         let rpc_err = session_error_to_rpc(session_err);
@@ -29711,7 +29778,8 @@ mod tests {
                     Arc::new(meerkat::MemoryStore::new()),
                     store.clone(),
                     Arc::new(meerkat_store::MemoryBlobStore::new()),
-                ),
+                )
+                .expect("construct runtime authority"),
                 crate::router::NotificationSink::noop(),
             ));
             runtime.set_default_llm_client(Some(client.clone()));
@@ -29764,7 +29832,8 @@ mod tests {
                     server_writer,
                     server_runtime,
                     config_store,
-                );
+                )
+                .expect("construct runtime authority");
                 // The failure case must retain its actual repair-blocked owner.
                 // Use the existing shared-connection EOF behavior, not a test
                 // erasure or a forced successful cleanup of that owner.

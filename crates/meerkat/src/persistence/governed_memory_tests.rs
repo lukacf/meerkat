@@ -78,20 +78,19 @@ fn configuration() -> meerkat_runtime::meerkat_machine::NativeGrantWorkConfigura
     }
 }
 fn bundle() -> PersistenceBundle {
-    PersistenceBundle::new(
+    PersistenceBundle::new_with_local_grant_authorization(
         Arc::new(MemoryStore::new()),
         Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new()),
         Arc::new(MemoryBlobStore::new()),
+        configuration(),
     )
+    .expect("construct runtime authority")
 }
 
 #[tokio::test]
 async fn memory_bundle_configures_its_existing_persistent_adapter_before_sharing() {
-    let original = bundle();
-    let expected_store = original.runtime_store();
-    let configured = original
-        .with_local_grant_authorization(configuration())
-        .expect("actual bundle setup");
+    let configured = bundle();
+    let expected_store = configured.runtime_store();
     assert!(Arc::ptr_eq(&configured.runtime_store(), &expected_store));
     let adapter = configured.runtime_adapter();
     let session = meerkat_core::SessionId::new();
@@ -122,7 +121,14 @@ async fn memory_bundle_configures_its_existing_persistent_adapter_before_sharing
 fn memory_bundle_cannot_replace_an_already_exported_adapter() {
     let original = bundle();
     let actual_adapter = original.runtime_adapter();
-    let result = original.with_local_grant_authorization(configuration());
+    let runtime_store = original.runtime_store();
+    drop(original);
+    let result = PersistenceBundle::new_with_local_grant_authorization(
+        Arc::new(MemoryStore::new()),
+        runtime_store,
+        Arc::new(MemoryBlobStore::new()),
+        configuration(),
+    );
     assert!(
         matches!(
             result,
@@ -132,7 +138,7 @@ fn memory_bundle_cannot_replace_an_already_exported_adapter() {
                 }
             )
         ),
-        "sharing prevents changing authority on a different adapter"
+        "an exported actual owner retains governed custody after its bundle is dropped"
     );
     drop(actual_adapter);
 }

@@ -44,6 +44,9 @@ tokio = { workspace = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+winapi-util = { version = "0.1.11", optional = true }
+
 [features]
 default = []
 local-authorization = ["dep:meerkat-authorization"]
@@ -52,7 +55,7 @@ live = [
     "dep:meerkat-llm-core",
     "meerkat-core/__meerkat-live-authority-bridge",
 ]
-sqlite-store = ["dep:rusqlite", "dep:meerkat-sqlite", "dep:meerkat-store", "meerkat-store/sqlite"]
+sqlite-store = ["dep:rusqlite", "dep:meerkat-sqlite", "dep:meerkat-store", "meerkat-store/sqlite", "dep:winapi-util"]
 test-support = []
 
 [dev-dependencies]

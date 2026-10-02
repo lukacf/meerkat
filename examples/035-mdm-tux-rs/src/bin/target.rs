@@ -557,7 +557,7 @@ async fn build_target_runtime_surface(
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(MemoryBlobStore::new()),
         schedule_store,
-    );
+    )?;
     let runtime_adapter = persistence.runtime_adapter();
     let (session_store, runtime_store, blob_store) = persistence.into_parts();
 
@@ -568,7 +568,7 @@ async fn build_target_runtime_surface(
         service.clone(),
         Some(runtime_adapter.clone()),
         meerkat_mob::MobControlPrincipal::Owner,
-    ));
+    )?);
     *mob_tools_slot
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
@@ -2352,18 +2352,22 @@ mod tests {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(MemoryBlobStore::new()),
             schedule_store,
-        );
+        )
+        .expect("construct runtime authority");
         let runtime_adapter = persistence.runtime_adapter();
         let (session_store, runtime_store, blob_store) = persistence.into_parts();
 
         let session_service =
             PersistentSessionService::new(builder, 10, session_store, runtime_store, blob_store);
         let service = Arc::new(session_service);
-        let mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
-            service.clone(),
-            Some(runtime_adapter.clone()),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let mob_state = Arc::new(
+            MobMcpState::new_with_runtime_adapter(
+                service.clone(),
+                Some(runtime_adapter.clone()),
+                meerkat_mob::MobControlPrincipal::Owner,
+            )
+            .expect("construct runtime authority"),
+        );
         *mob_tools_slot
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(

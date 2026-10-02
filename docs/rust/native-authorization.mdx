@@ -20,7 +20,10 @@ recovery, full surface coverage, human consent and OS confinement remain separat
 integration work. The additive `meerkat_rpc::governed_jsonl` entry provides a
 fixed-host, single-connection profile. It requires `default-features = false`
 plus `local-authorization` and does not activate ordinary RPC constructors.
-This page makes no performance or live-provider coverage claim.
+Governed SQLite close/reopen and process restart, sandbox enforcement across
+supported platforms, and accepted low-overhead benchmarks remain required
+completion gates. Full surface coverage remains the endpoint. This page makes
+no performance or live-provider coverage claim.
 </Note>
 
 ## Install the real owners before sharing the machine
@@ -50,11 +53,12 @@ fn install_governance(
 }
 ```
 
-Install before wrapping the machine in `Arc`, cloning it, or registering sessions.
-Already shared or populated machines refuse installation. For in-memory
-persistence, configure the bundle below before sharing its runtime adapter;
-the backend must supply exclusive execution custody. Do not suppress a setup
-refusal or substitute a different machine after constructing the service.
+For a storeless machine, install before wrapping it in `Arc`, cloning it, or
+registering sessions. Already shared or populated machines refuse installation.
+For persistence, select governed mode during construction as shown below. The
+fluent installer does not upgrade a persistent machine. The backend must supply
+exclusive execution custody; setup refusal must propagate before publishing a
+service or provider-auth handle.
 
 ## Attach and pin the controller before submitting work
 
@@ -79,11 +83,12 @@ use std::sync::Arc;
 use meerkat::{MemoryBlobStore, MemoryStore, PersistenceBundle};
 use meerkat_runtime::InMemoryRuntimeStore;
 
-let bundle = PersistenceBundle::new(
+let bundle = PersistenceBundle::new_with_local_grant_authorization(
     Arc::new(MemoryStore::new()),
     Arc::new(InMemoryRuntimeStore::new()),
     Arc::new(MemoryBlobStore::new()),
-).with_local_grant_authorization(owners)?;
+    owners,
+)?;
 
 let (service, machine) =
     meerkat::surface::build_runtime_backed_service_with_default_reconfigure_host(
@@ -97,6 +102,32 @@ This returns the stock `PersistentSessionService` and the bundle's same
 The native runtime owns accepted inputs, original authority associations and
 attached audit, persisted in that same store. These memory stores retain records
 for the lifetime of the process; they do not provide restart durability.
+
+The low-level equivalent is
+`MeerkatMachine::persistent_with_local_grant_authorization(runtime_store, Some(blob_store), owners)?`.
+Ordinary `MeerkatMachine::persistent`, `persistent_without_blobs`, and the
+`session-store` variants of `PersistenceBundle::new` and its related constructors
+also return `Result`. They request shared custody when the backend supports it;
+governed construction requires exclusive custody directly, without dropping and
+reacquiring a claim. Ordinary custom backends without custody support remain
+usable; governed construction rejects them with `UnsupportedScope`.
+
+Reuse the bundle's machine when composing another surface. Built-in mob session
+services accept it through `acquire_runtime_adapter(Some(machine.clone()))?`. A clone of
+the same underlying machine owner is valid. A different live owner is refused
+with `ControllerReadinessFailure::AuthorityChanged`, even when it uses the same
+store. A store mismatch is `UnsupportedScope`; custody contention is `Busy`.
+`Ok(None)` remains an explicit optional-runtime outcome for custom services,
+not a substitute for a failed persistent acquisition. Builders and archive paths
+propagate acquisition errors before performing their operation.
+
+Exported auth lifecycle and OAuth capabilities retain the acquired backend
+custody, including generated/raw lifecycle clones and nested credential or device
+poll handles. Dropping only the machine does not make a conflicting governed
+owner available while those capabilities survive. This retains backend custody,
+not the machine or a runnable controller after restart. Keep using the installed
+authority for credential updates; persistent registry replacement is refused,
+while requesting the already installed owner is a no-op.
 
 Reserve creation with `service.reserve_create_session_admission().await?`, then use
 `meerkat::surface::materialize_session_with_reserved_admission_and_actor_slot`
@@ -161,11 +192,12 @@ builds it from the admitted contributors.
 ## Serve one fixed governed JSONL connection
 
 Enable `meerkat-rpc` with `default-features = false` and
-`local-authorization`. This profile takes a fresh, unshared in-memory
-`PersistenceBundle`, a selected `LlmClient`, one fixed `Config`, and a nonempty
-`Vec<ToolDef>` of callback tools. Leave the bundle unconfigured: the entry
-installs the `NativeGrantWorkConfiguration` described above. Initialize the
-selected credential through that bundle's normal auth lifecycle first.
+`local-authorization`. This profile takes an in-memory `PersistenceBundle`
+constructed with `new_with_local_grant_authorization` above, a selected
+`LlmClient`, one fixed `Config`, and a nonempty `Vec<ToolDef>` of callback tools.
+Initialize the selected credential through that bundle's installed auth lifecycle
+before serving. The entry checks that governance is already installed and uses
+that same owner; it does not install or upgrade persistent governance.
 
 The retained client does not bypass configuration validation. Its actual
 `ControllerModelSelection::auth_binding()` must name a binding in
@@ -202,7 +234,6 @@ let connection = GovernedConnection::new(
 let setup = GovernedJsonlSetup {
     config,
     persistence: bundle,
-    authorization: owners,
     client: selected_client,
     connection,
     tools: catalog,
@@ -265,8 +296,13 @@ admission readiness is reported separately through
 `WireInputAdmissionErrorDetail` values: `ErrorCode::InputRefused` (-32030) or
 `ErrorCode::InputNotReady` (-32031). Preserve that distinction and handle
 serialization failure; a readiness result does not prescribe automatic retry.
-`ErrorCode` is publicly exhaustive, so downstream Rust matches must add both
-variants. This Rust/JSONL projection does not imply new typed SDK decoders.
+Session operations that cannot acquire runtime authority instead return
+`SessionError::RuntimeUnavailable { reason }`. Its audience-safe projection uses
+`ErrorCode::SessionRuntimeUnavailable` (-32032, HTTP 503, CLI exit 52), preserving
+the typed readiness reason. It is separate from an attempted operation's local
+permission feedback and does not terminate retained work. `ErrorCode` is publicly
+exhaustive, so downstream Rust matches must handle these added variants. This
+Rust/JSONL projection does not imply new typed SDK decoders.
 
 Retain `settlement_failures` alongside the physical result. A diagnostic after a
 successful effect does not authorize repeating it. Use native input audit

@@ -119290,6 +119290,11 @@
             "const": "INPUT_NOT_READY",
             "description": "Current native input readiness is unavailable. This is an operational\ncondition, not a permission verdict or a terminal result for prior work.",
             "type": "string"
+          },
+          {
+            "const": "SESSION_RUNTIME_UNAVAILABLE",
+            "description": "Runtime authority is unavailable before a session operation starts.",
+            "type": "string"
           }
         ]
       },
@@ -142940,7 +142945,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Audience-safe native readiness causes. These describe unaccepted input;\nthey neither grant permission nor prescribe a blind retry.",
+    "description": "Audience-safe native readiness causes. These describe unavailable input or session operations;\nthey neither grant permission nor prescribe a blind retry.",
     "oneOf": [
       {
         "additionalProperties": false,
@@ -155473,7 +155478,7 @@
         "type": "string"
       },
       "WireControllerReadinessFailure": {
-        "description": "Audience-safe native readiness causes. These describe unaccepted input;\nthey neither grant permission nor prescribe a blind retry.",
+        "description": "Audience-safe native readiness causes. These describe unavailable input or session operations;\nthey neither grant permission nor prescribe a blind retry.",
         "oneOf": [
           {
             "additionalProperties": false,

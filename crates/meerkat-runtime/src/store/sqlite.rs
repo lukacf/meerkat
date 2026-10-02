@@ -3983,6 +3983,69 @@ END";
         }
     }
 
+    /// Validate file identity before opening SQLite or changing journal state.
+    /// The storage owner keeps this namespace stable for the store's lifetime.
+    #[cfg(any(unix, windows))]
+    fn validate_runtime_database_file(path: &Path) -> Result<(), RuntimeStoreError> {
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(RuntimeStoreError::ReadFailed(format!(
+                    "inspect SQLite database {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        if !metadata.is_file() {
+            return Err(RuntimeStoreError::Unsupported(format!(
+                "SQLite database {} is not a regular file",
+                path.display()
+            )));
+        }
+        if runtime_database_link_count(path, &metadata)? != 1 {
+            return Err(RuntimeStoreError::Unsupported(format!(
+                "SQLite database {} must have exactly one hard link",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn runtime_database_link_count(
+        _path: &Path,
+        metadata: &std::fs::Metadata,
+    ) -> Result<u64, RuntimeStoreError> {
+        use std::os::unix::fs::MetadataExt as _;
+        Ok(metadata.nlink())
+    }
+
+    #[cfg(windows)]
+    fn runtime_database_link_count(
+        path: &Path,
+        _metadata: &std::fs::Metadata,
+    ) -> Result<u64, RuntimeStoreError> {
+        let inspect = || -> std::io::Result<u64> {
+            let file = std::fs::File::open(path)?;
+            Ok(winapi_util::file::information(&file)?.number_of_links())
+        };
+        inspect().map_err(|error| {
+            RuntimeStoreError::ReadFailed(format!(
+                "inspect SQLite database link count {}: {error}",
+                path.display()
+            ))
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn validate_runtime_database_file(path: &Path) -> Result<(), RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(format!(
+            "SQLite database file identity is unavailable for {} on this platform",
+            path.display()
+        )))
+    }
+
     #[track_caller]
     fn open_runtime_connection(path: &Path) -> Result<RuntimeConn, RuntimeStoreError> {
         let caller = std::panic::Location::caller();
@@ -9761,6 +9824,7 @@ ORDER BY runtime_id";
         /// Open an explicit whole-BLOB runtime authority.
         pub fn new_whole_blob(path: impl Into<PathBuf>) -> Result<Self, RuntimeStoreError> {
             let path = path.into();
+            validate_runtime_database_file(&path)?;
             let conn = open_runtime_connection(&path)?;
             if head_canonical_profile_has_durable_claim(&conn)? {
                 return Err(RuntimeStoreError::Unsupported(
@@ -9799,6 +9863,7 @@ ORDER BY runtime_id";
             path: impl Into<PathBuf>,
         ) -> Result<Self, RuntimeStoreError> {
             let path = path.into();
+            validate_runtime_database_file(&path)?;
             if !path.is_file() {
                 return Err(RuntimeStoreError::NotFound(format!(
                     "no runtime database at {}; point --state-root at the realms root and --realm at the realm directory that holds runtime.sqlite3",
@@ -9867,6 +9932,7 @@ ORDER BY runtime_id";
         /// O(document) migration into the first ordinary service boundary.
         pub fn new_head_canonical(path: impl Into<PathBuf>) -> Result<Self, RuntimeStoreError> {
             let path = path.into();
+            validate_runtime_database_file(&path)?;
             let mut conn = open_head_canonical_runtime_connection(&path)?;
             pin_head_canonical_profile(&mut conn)?;
             activate_head_canonical_profiles(&mut conn)?;
@@ -23270,6 +23336,74 @@ ORDER BY runtime_id";
                 1,
                 "recovery proceeds with the decodable rows"
             );
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn hard_linked_database_is_refused_before_primary_open_mutates_either_name() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("sessions.sqlite3");
+            drop(SqliteRuntimeStore::new(&path).expect("initialize a real runtime database"));
+            // An already-current WAL database could hide a late refusal because
+            // opening it might leave identical bytes. This supported rollback
+            // journal mode makes Primary's pre-migration WAL conversion visible.
+            let conn = Connection::open(&path).unwrap();
+            let mode = conn
+                .pragma_update_and_check(None, "journal_mode", "DELETE", |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap();
+            assert!(mode.eq_ignore_ascii_case("delete"));
+            drop(conn);
+
+            let alias_parent = dir.path().join("other-parent");
+            std::fs::create_dir(&alias_parent).unwrap();
+            let alias = alias_parent.join("same-database.sqlite3");
+            std::fs::hard_link(&path, &alias).expect("create a real different-parent hard link");
+            drop(
+                SqliteRuntimeStore::new(dir.path().join("independent.sqlite3"))
+                    .expect("an unrelated single-link database remains openable"),
+            );
+
+            let durable_image = || {
+                [
+                    path.clone(),
+                    dir.path().join("sessions.sqlite3-wal"),
+                    dir.path().join("sessions.sqlite3-shm"),
+                    dir.path().join("sessions.sqlite3-journal"),
+                    alias.clone(),
+                    alias_parent.join("same-database.sqlite3-wal"),
+                    alias_parent.join("same-database.sqlite3-shm"),
+                    alias_parent.join("same-database.sqlite3-journal"),
+                ]
+                .map(|image_path| match std::fs::read(&image_path) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => panic!(
+                        "read durable SQLite image {}: {error}",
+                        image_path.display()
+                    ),
+                })
+            };
+            let before = durable_image();
+            // Exercise both names even when the first incorrectly succeeds.
+            // No untyped string comparison invents a hardlink reason enum.
+            let attempts = [&path, &alias].map(|candidate| {
+                let error = SqliteRuntimeStore::new(candidate).err();
+                (candidate, error, durable_image())
+            });
+            for (candidate, error, after) in attempts {
+                assert!(
+                    matches!(&error, Some(RuntimeStoreError::Unsupported(_))),
+                    "hard-linked open of {} must be unsupported, got {error:?}",
+                    candidate.display()
+                );
+                assert!(
+                    after == before,
+                    "refused open of {} changed database or journal bytes",
+                    candidate.display()
+                );
+            }
         }
     }
 }

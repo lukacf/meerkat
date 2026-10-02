@@ -106,7 +106,8 @@ mod live_context_mirror_tests {
         let store: Arc<dyn crate::RuntimeStore> = Arc::new(crate::InMemoryRuntimeStore::new());
         let session_id = SessionId::new();
         let operation_id = {
-            let machine = crate::MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+            let machine = crate::MeerkatMachine::persistent_without_blobs(Arc::clone(&store))
+                .expect("persistent machine");
             let _bindings = machine
                 .prepare_bindings(session_id.clone())
                 .await
@@ -140,7 +141,8 @@ mod live_context_mirror_tests {
             admission.operation().operation_id().clone()
         };
         {
-            let restarted = crate::MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+            let restarted = crate::MeerkatMachine::persistent_without_blobs(Arc::clone(&store))
+                .expect("persistent machine");
             restarted
                 .register_session(session_id.clone())
                 .await
@@ -170,7 +172,8 @@ mod live_context_mirror_tests {
                 .await
                 .expect("settle recovered work without provider capability");
         }
-        let restarted = crate::MeerkatMachine::persistent_without_blobs(store);
+        let restarted =
+            crate::MeerkatMachine::persistent_without_blobs(store).expect("persistent machine");
         restarted
             .register_session(session_id.clone())
             .await
@@ -3807,7 +3810,8 @@ mod live_context_mirror_tests {
                 crate::store::SqliteRuntimeStore::new(path.clone())
                     .expect("create sqlite runtime store"),
             ) as std::sync::Arc<dyn crate::store::RuntimeStore>;
-            let machine = crate::MeerkatMachine::persistent_without_blobs(store);
+            let machine =
+                crate::MeerkatMachine::persistent_without_blobs(store).expect("persistent machine");
             let (machine, admission) = admitted_live_bridge_operation_on(machine).await;
             authorize_test_live_bridge_execution_start(&machine, &admission).await;
             machine
@@ -3860,7 +3864,8 @@ mod live_context_mirror_tests {
         let restarted_store = std::sync::Arc::new(
             crate::store::SqliteRuntimeStore::new(path).expect("reopen sqlite runtime store"),
         ) as std::sync::Arc<dyn crate::store::RuntimeStore>;
-        let restarted = crate::MeerkatMachine::persistent_without_blobs(restarted_store);
+        let restarted = crate::MeerkatMachine::persistent_without_blobs(restarted_store)
+            .expect("persistent machine");
         restarted
             .register_session(session_id.clone())
             .await
@@ -3928,7 +3933,8 @@ mod live_context_mirror_tests {
             crate::store::SqliteRuntimeStore::new(dir.path().join("live-bridge-restart.sqlite3"))
                 .expect("reopen sqlite runtime store after terminal reconciliation"),
         ) as std::sync::Arc<dyn crate::store::RuntimeStore>;
-        let final_machine = crate::MeerkatMachine::persistent_without_blobs(final_store);
+        let final_machine = crate::MeerkatMachine::persistent_without_blobs(final_store)
+            .expect("persistent machine");
         final_machine
             .register_session(session_id.clone())
             .await
@@ -3965,7 +3971,8 @@ mod live_context_mirror_tests {
                 crate::store::SqliteRuntimeStore::new(path.clone())
                     .expect("create sqlite runtime store"),
             ) as std::sync::Arc<dyn crate::store::RuntimeStore>;
-            let machine = crate::MeerkatMachine::persistent_without_blobs(store);
+            let machine =
+                crate::MeerkatMachine::persistent_without_blobs(store).expect("persistent machine");
             let (machine, admission) = admitted_live_bridge_operation_on(machine).await;
             authorize_test_live_bridge_execution_start(&machine, &admission).await;
             (
@@ -3978,7 +3985,8 @@ mod live_context_mirror_tests {
             crate::store::SqliteRuntimeStore::new(path.clone())
                 .expect("reopen sqlite runtime store after abrupt drop"),
         ) as std::sync::Arc<dyn crate::store::RuntimeStore>;
-        let restarted = crate::MeerkatMachine::persistent_without_blobs(restarted_store);
+        let restarted = crate::MeerkatMachine::persistent_without_blobs(restarted_store)
+            .expect("persistent machine");
         restarted
             .register_session(session_id.clone())
             .await
@@ -4057,7 +4065,8 @@ mod live_context_mirror_tests {
             crate::store::SqliteRuntimeStore::new(path)
                 .expect("reopen sqlite runtime store after late terminal"),
         ) as std::sync::Arc<dyn crate::store::RuntimeStore>;
-        let final_machine = crate::MeerkatMachine::persistent_without_blobs(final_store);
+        let final_machine = crate::MeerkatMachine::persistent_without_blobs(final_store)
+            .expect("persistent machine");
         final_machine
             .register_session(session_id.clone())
             .await
@@ -4072,7 +4081,8 @@ mod live_context_mirror_tests {
     #[tokio::test]
     async fn live_bridge_external_authority_waits_for_durable_lifecycle_acknowledgement() {
         let start_store = std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new());
-        let start_machine = crate::MeerkatMachine::persistent_without_blobs(start_store.clone());
+        let start_machine = crate::MeerkatMachine::persistent_without_blobs(start_store.clone())
+            .expect("persistent machine");
         let (start_machine, start_admission) =
             admitted_live_bridge_operation_on(start_machine).await;
         confirm_test_live_bridge_final_input(&start_machine, &start_admission).await;
@@ -4086,7 +4096,8 @@ mod live_context_mirror_tests {
         let start_operation = start_admission.operation().clone();
         drop(start_machine);
 
-        let restarted_start = crate::MeerkatMachine::persistent_without_blobs(start_store.clone());
+        let restarted_start = crate::MeerkatMachine::persistent_without_blobs(start_store.clone())
+            .expect("persistent machine");
         restarted_start
             .register_session(start_session_id.clone())
             .await
@@ -4104,7 +4115,8 @@ mod live_context_mirror_tests {
 
         let lost_start_store = std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new());
         let lost_start_machine =
-            crate::MeerkatMachine::persistent_without_blobs(lost_start_store.clone());
+            crate::MeerkatMachine::persistent_without_blobs(lost_start_store.clone())
+                .expect("persistent machine");
         let (lost_start_machine, lost_start_admission) =
             admitted_live_bridge_operation_on(lost_start_machine).await;
         confirm_test_live_bridge_final_input(&lost_start_machine, &lost_start_admission).await;
@@ -4121,7 +4133,8 @@ mod live_context_mirror_tests {
         let lost_start_session_id = lost_start_admission.session_id().clone();
         drop(lost_start_machine);
         let restarted_lost_start =
-            crate::MeerkatMachine::persistent_without_blobs(lost_start_store);
+            crate::MeerkatMachine::persistent_without_blobs(lost_start_store)
+                .expect("persistent machine");
         restarted_lost_start
             .register_session(lost_start_session_id.clone())
             .await
@@ -4138,7 +4151,8 @@ mod live_context_mirror_tests {
 
         let submission_store = std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new());
         let submission_machine =
-            crate::MeerkatMachine::persistent_without_blobs(submission_store.clone());
+            crate::MeerkatMachine::persistent_without_blobs(submission_store.clone())
+                .expect("persistent machine");
         let (submission_machine, submission_admission) =
             admitted_live_bridge_operation_on(submission_machine).await;
         authorize_test_live_bridge_execution_start(&submission_machine, &submission_admission)
@@ -4170,7 +4184,8 @@ mod live_context_mirror_tests {
         drop(submission_machine);
 
         let restarted_submission =
-            crate::MeerkatMachine::persistent_without_blobs(submission_store);
+            crate::MeerkatMachine::persistent_without_blobs(submission_store)
+                .expect("persistent machine");
         restarted_submission
             .register_session(submission_session_id.clone())
             .await
@@ -4204,7 +4219,8 @@ mod live_context_mirror_tests {
     #[tokio::test]
     async fn live_bridge_retirement_converges_across_both_persistence_crash_windows() {
         let before_store = std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new());
-        let before_machine = crate::MeerkatMachine::persistent_without_blobs(before_store.clone());
+        let before_machine = crate::MeerkatMachine::persistent_without_blobs(before_store.clone())
+            .expect("persistent machine");
         let (before_machine, before_admission) =
             admitted_live_bridge_operation_on(before_machine).await;
         settle_test_live_bridge_for_retirement(&before_machine, &before_admission).await;
@@ -4213,7 +4229,8 @@ mod live_context_mirror_tests {
         drop(before_machine);
 
         let restarted_before =
-            crate::MeerkatMachine::persistent_without_blobs(before_store.clone());
+            crate::MeerkatMachine::persistent_without_blobs(before_store.clone())
+                .expect("persistent machine");
         restarted_before
             .register_session(before_session_id.clone())
             .await
@@ -4253,7 +4270,8 @@ mod live_context_mirror_tests {
         );
         drop(restarted_before);
 
-        let after_retirement = crate::MeerkatMachine::persistent_without_blobs(before_store);
+        let after_retirement = crate::MeerkatMachine::persistent_without_blobs(before_store)
+            .expect("persistent machine");
         after_retirement
             .register_session(before_session_id.clone())
             .await
@@ -4274,7 +4292,8 @@ mod live_context_mirror_tests {
 
         let lost_ack_store = std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new());
         let lost_ack_machine =
-            crate::MeerkatMachine::persistent_without_blobs(lost_ack_store.clone());
+            crate::MeerkatMachine::persistent_without_blobs(lost_ack_store.clone())
+                .expect("persistent machine");
         let (lost_ack_machine, lost_ack_admission) =
             admitted_live_bridge_operation_on(lost_ack_machine).await;
         settle_test_live_bridge_for_retirement(&lost_ack_machine, &lost_ack_admission).await;
@@ -4288,7 +4307,8 @@ mod live_context_mirror_tests {
         assert!(lost_ack.to_string().contains("lifecycle persist failed"));
         drop(lost_ack_machine);
 
-        let restarted_lost_ack = crate::MeerkatMachine::persistent_without_blobs(lost_ack_store);
+        let restarted_lost_ack = crate::MeerkatMachine::persistent_without_blobs(lost_ack_store)
+            .expect("persistent machine");
         restarted_lost_ack
             .register_session(lost_ack_session_id.clone())
             .await

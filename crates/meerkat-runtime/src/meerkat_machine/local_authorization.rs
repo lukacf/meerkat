@@ -65,48 +65,50 @@ impl std::fmt::Debug for NativeGrantWorkConfiguration {
 }
 
 impl MeerkatMachine {
-    /// Install the actual native/grant composition before sharing the machine.
-    /// Exclusive ownership is checked before constructing any Weak reference.
-    /// An empty but already shared machine is not eligible. A persistent backend
-    /// must atomically upgrade its sole actual execution claim before setup;
-    /// current support is live process-local work, not restored client custody.
-    pub fn with_local_grant_authorization(
-        mut self,
+    /// Select governed execution custody before provider authority is recovered.
+    /// Refusal returns before cache binding or any session registration.
+    /// Blob-backed inputs remain unavailable when no blob store is supplied.
+    pub fn persistent_with_local_grant_authorization(
+        store: Arc<dyn crate::store::RuntimeStore>,
+        blob_store: Option<Arc<dyn meerkat_core::BlobStore>>,
         configuration: NativeGrantWorkConfiguration,
     ) -> Result<Self, RuntimeDriverError> {
-        {
-            let shared =
-                Arc::get_mut(&mut self.shared).ok_or_else(crate::input_authority::unavailable)?;
-            if !shared.sessions.get_mut().is_empty()
-                || shared.native_work_authorization_host.get().is_some()
-            {
-                return Err(crate::input_authority::unavailable());
-            }
-            shared.upgrade_execution_custody()?;
-        }
-        // Admission checks the installed owners before an accepted batch
-        // exists. Operation preparation gets a separate adapter over that
-        // batch's actual generated owner, retaining these same policy owners.
-        let policy = Arc::new(GrantBackedWorkPolicy::new(
-            Arc::clone(&configuration.grants),
-            Arc::clone(&configuration.invocation_owner),
-            Arc::clone(&configuration.operation_owner),
-        ));
-        let host: Arc<dyn NativeWorkAuthorizationHost> =
+        Self::persistent_with_mode(store, blob_store, true)?
+            .install_local_grant_authorization(configuration)
+    }
+
+    /// Install the actual native/grant composition on a storeless machine.
+    /// Persistent profiles must be selected during fallible construction.
+    /// An empty but already shared machine is not eligible.
+    pub fn with_local_grant_authorization(
+        self,
+        configuration: NativeGrantWorkConfiguration,
+    ) -> Result<Self, RuntimeDriverError> {
+        self.require_storeless_profile_installation()?;
+        self.install_local_grant_authorization(configuration)
+    }
+
+    fn install_local_grant_authorization(
+        self,
+        configuration: NativeGrantWorkConfiguration,
+    ) -> Result<Self, RuntimeDriverError> {
+        self.install_native_work_authorization(|machine| {
+            // Admission and operation preparation retain the same actual
+            // generated grant authority and trusted policy owners.
+            let policy = Arc::new(GrantBackedWorkPolicy::new(
+                Arc::clone(&configuration.grants),
+                Arc::clone(&configuration.invocation_owner),
+                Arc::clone(&configuration.operation_owner),
+            ));
             Arc::new(NativeGrantWorkAuthorizationHost {
                 ingress: configuration.ingress,
                 policy,
                 grants: configuration.grants,
                 invocation_owner: configuration.invocation_owner,
                 operation_owner: configuration.operation_owner,
-                machine: Arc::downgrade(&self.shared),
-            });
-        self.shared
-            .native_work_authorization_host
-            .set(super::credential_custody::NativeWorkAuthorizationAttachment::new(host, &self))
-            .map_err(|_| crate::input_authority::unavailable())?;
-        self.install_native_credential_observer()?;
-        Ok(self)
+                machine,
+            })
+        })
     }
 }
 
@@ -2312,16 +2314,16 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     mod batch_custody;
 
-    // Uses the same native constructor as PersistenceBundle. The stock bundle's
-    // missing early configuration hook is documented separately; no bundle is
-    // unwrapped or replaced to simulate that public path here.
+    // Exercise the actual ordinary constructor without wrapping a bundle or
+    // replacing its runtime owner.
     fn memory_persistent_constructor_fixture()
     -> (MeerkatMachine, Arc<dyn crate::store::RuntimeStore>) {
         let store: Arc<dyn crate::store::RuntimeStore> =
             Arc::new(crate::store::InMemoryRuntimeStore::new());
         let blobs: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
-        let machine = MeerkatMachine::persistent(Arc::clone(&store), blobs);
+        let machine =
+            MeerkatMachine::persistent(Arc::clone(&store), blobs).expect("persistent machine");
         assert!(Arc::ptr_eq(
             machine
                 .shared
@@ -2381,24 +2383,15 @@ mod tests {
 
     #[tokio::test]
     async fn memory_persistent_constructor_accepts_governed_configuration() {
-        let (mut machine, store) = memory_persistent_constructor_fixture();
-        assert!(
-            Arc::get_mut(&mut machine.shared).is_some(),
-            "the setup attempt has exclusive actual machine ownership"
-        );
+        let store: Arc<dyn crate::store::RuntimeStore> =
+            Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let machine = MeerkatMachine::persistent_with_local_grant_authorization(
+            Arc::clone(&store),
+            Some(Arc::new(meerkat_store::MemoryBlobStore::new())),
+            configuration().0,
+        )
+        .expect("memory persistent owner must support configured governance");
         assert!(machine.sessions.read().await.is_empty());
-        assert!(
-            machine
-                .shared
-                .native_work_authorization_host
-                .get()
-                .is_none()
-        );
-        let (configuration, _, _) = configuration();
-        let result = machine.with_local_grant_authorization(configuration);
-        // Expected current RED: ValidationFailed from the store-presence guard.
-        // A refusal is not the success oracle and no new API is required.
-        let machine = result.expect("memory persistent owner must support configured governance");
         assert!(Arc::ptr_eq(machine.shared.store.as_ref().unwrap(), &store));
         assert!(
             machine

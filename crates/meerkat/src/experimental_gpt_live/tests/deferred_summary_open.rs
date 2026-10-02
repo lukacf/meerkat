@@ -457,7 +457,8 @@ async fn build_environment_with_pre_open_bound(
         session_store,
         runtime_store,
         Arc::new(meerkat_store::MemoryBlobStore::new()),
-    );
+    )
+    .expect("construct runtime authority");
     let factory = crate::AgentFactory::new(temp.path().join("sessions")).builtins(false);
     let mut config = crate::Config::default();
     config.realm.insert(

@@ -668,7 +668,8 @@ impl crate::store::RuntimeStoreWriteFence for SequencedRuntimeWriteFence {
 async fn assert_fenced_registration_target_and_authority_contract(
     store: Arc<dyn crate::store::RuntimeStore>,
 ) {
-    let machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+        .expect("persistent machine");
 
     let stale_target_session = SessionId::new();
     let stale_target_observation = machine
@@ -1177,7 +1178,8 @@ fn persistent_oauth_flow_authority_survives_adapter_recreation_for_same_store() 
     let _guard = persistent_auth_authority_test_guard();
     let store =
         Arc::new(crate::store::InMemoryRuntimeStore::new()) as Arc<dyn crate::store::RuntimeStore>;
-    let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+        .expect("persistent machine");
     let redirect_uri = "http://127.0.0.1/callback";
     let target = oauth_target();
     let provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
@@ -1191,7 +1193,8 @@ fn persistent_oauth_flow_authority_survives_adapter_recreation_for_same_store() 
         )
         .expect("persistent runtime authority admits OAuth state");
 
-    let recovered = MeerkatMachine::persistent(store, memory_blob_store());
+    let recovered =
+        MeerkatMachine::persistent(store, memory_blob_store()).expect("persistent machine");
     let flow = recovered
         .oauth_flow_authority()
         .consume(
@@ -1216,7 +1219,8 @@ fn persistent_oauth_flow_authority_survives_process_cache_restart_for_sqlite_sto
     let store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+        .expect("persistent machine");
     let redirect_uri = "http://127.0.0.1/callback";
     let target = oauth_target();
     let browser_provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
@@ -1247,7 +1251,8 @@ fn persistent_oauth_flow_authority_survives_process_cache_restart_for_sqlite_sto
     let restarted_store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let recovered = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let recovered = MeerkatMachine::persistent(restarted_store, memory_blob_store())
+        .expect("persistent machine");
     let browser_flow = recovered
         .oauth_flow_authority()
         .consume(
@@ -1279,7 +1284,8 @@ fn persistent_oauth_device_consume_prunes_durable_snapshot_for_sqlite_store() {
     let store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+        .expect("persistent machine");
     let target = oauth_target();
     let provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist;
 
@@ -1306,7 +1312,8 @@ fn persistent_oauth_device_consume_prunes_durable_snapshot_for_sqlite_store() {
     let restarted_store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store())
+        .expect("persistent machine");
     let err = restarted
         .oauth_flow_authority()
         .begin_device_code_poll("consumed-device-code", &target, provider)
@@ -1330,7 +1337,8 @@ fn persistent_oauth_authority_cache_rebinds_reopened_sqlite_store_after_drop() {
     let store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+        .expect("persistent machine");
     let redirect_uri = "http://127.0.0.1/callback";
     let target = oauth_target();
     let provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
@@ -1349,7 +1357,8 @@ fn persistent_oauth_authority_cache_rebinds_reopened_sqlite_store_after_drop() {
     let reopened_store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store reopens"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let reopened = MeerkatMachine::persistent(Arc::clone(&reopened_store), memory_blob_store());
+    let reopened = MeerkatMachine::persistent(Arc::clone(&reopened_store), memory_blob_store())
+        .expect("persistent machine");
     let flow = reopened
         .oauth_flow_authority()
         .consume(
@@ -1368,7 +1377,8 @@ fn persistent_oauth_authority_cache_rebinds_reopened_sqlite_store_after_drop() {
     let final_store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens again"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let final_machine = MeerkatMachine::persistent(final_store, memory_blob_store());
+    let final_machine =
+        MeerkatMachine::persistent(final_store, memory_blob_store()).expect("persistent machine");
     let err = final_machine
         .oauth_flow_authority()
         .consume(
@@ -1397,7 +1407,8 @@ fn persistent_oauth_authority_cache_rebinds_overlapping_reopened_sqlite_store() 
     let original_store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let first = MeerkatMachine::persistent(Arc::clone(&original_store), memory_blob_store());
+    let first = MeerkatMachine::persistent(Arc::clone(&original_store), memory_blob_store())
+        .expect("persistent machine");
     let redirect_uri = "http://127.0.0.1/callback";
     let target = oauth_target();
     let provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
@@ -1415,7 +1426,8 @@ fn persistent_oauth_authority_cache_rebinds_overlapping_reopened_sqlite_store() 
     let reopened_store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store reopens"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let reopened = MeerkatMachine::persistent(Arc::clone(&reopened_store), memory_blob_store());
+    let reopened = MeerkatMachine::persistent(Arc::clone(&reopened_store), memory_blob_store())
+        .expect("persistent machine");
     drop(original_store);
 
     reopened
@@ -1435,7 +1447,8 @@ fn persistent_oauth_authority_cache_rebinds_overlapping_reopened_sqlite_store() 
     let final_store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens again"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let final_machine = MeerkatMachine::persistent(final_store, memory_blob_store());
+    let final_machine =
+        MeerkatMachine::persistent(final_store, memory_blob_store()).expect("persistent machine");
     let err = final_machine
         .oauth_flow_authority()
         .consume(
@@ -1464,7 +1477,8 @@ fn persistent_oauth_release_prunes_durable_payload_snapshot_for_sqlite_store() {
     let store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+        .expect("persistent machine");
     let redirect_uri = "http://127.0.0.1/callback";
     let target = oauth_target();
     let browser_provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
@@ -1501,7 +1515,8 @@ fn persistent_oauth_release_prunes_durable_payload_snapshot_for_sqlite_store() {
     let restarted_store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store())
+        .expect("persistent machine");
     let browser_err = restarted
         .oauth_flow_authority()
         .consume(
@@ -2010,7 +2025,8 @@ async fn persistent_retire_signal_failure_cold_recovery_normalizes_dead_process_
     let machine = MeerkatMachine::persistent(
         store.clone() as Arc<dyn crate::store::RuntimeStore>,
         memory_blob_store(),
-    );
+    )
+    .expect("persistent machine");
     let session_id = SessionId::new();
     machine
         .register_session(session_id.clone())
@@ -2063,7 +2079,8 @@ async fn persistent_retire_signal_failure_cold_recovery_normalizes_dead_process_
     let recovered = MeerkatMachine::persistent(
         store.clone() as Arc<dyn crate::store::RuntimeStore>,
         memory_blob_store(),
-    );
+    )
+    .expect("persistent machine");
     recovered
         .register_session(session_id.clone())
         .await
@@ -2496,9 +2513,10 @@ async fn legacy_terminal_error_after_generated_failure_stops_without_applied_ter
     }
 
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let adapter = Arc::new(MeerkatMachine::persistent_without_blobs(
-        store.clone() as Arc<dyn RuntimeStore>
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent_without_blobs(store.clone() as Arc<dyn RuntimeStore>)
+            .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     let bindings = adapter
@@ -2657,9 +2675,10 @@ async fn runtime_loop_commits_failed_but_applied_terminal_snapshot() {
     }
 
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let adapter = Arc::new(MeerkatMachine::persistent_without_blobs(
-        store.clone() as Arc<dyn RuntimeStore>
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent_without_blobs(store.clone() as Arc<dyn RuntimeStore>)
+            .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let bindings = adapter
         .prepare_bindings(session_id.clone())
@@ -2854,10 +2873,13 @@ async fn teardown_required_runtime_loop_exit_unregisters_after_exact_cleanup() {
     }
 
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let machine = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -2977,10 +2999,13 @@ async fn failed_bound_teardown_unregister_is_retained_then_completed_by_an_expli
     }
 
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let machine = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let cleanup_calls = Arc::new(AtomicUsize::new(0));
     machine
@@ -3306,10 +3331,13 @@ async fn no_pending_runtime_loop_exit_persists_unregister_and_ensure_joins_settl
     }
 
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let machine = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -3538,7 +3566,9 @@ async fn completion_waiter_fails_closed_when_runtime_finalization_fails() {
     let store: Arc<dyn RuntimeStore> = Arc::new(
         RuntimeCommitAtomicityStore::fail_atomic_apply_once(Arc::clone(&inner)),
     );
-    let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(store, memory_blob_store()).expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(
@@ -3681,7 +3711,9 @@ async fn directed_machine_terminal_commit_failure_fails_waiter_without_publicati
     let store: Arc<dyn RuntimeStore> = Arc::new(
         RuntimeCommitAtomicityStore::unsupported_atomic_machine_lifecycle_once(Arc::clone(&inner)),
     );
-    let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(store, memory_blob_store()).expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let publisher = Arc::new(RecordingTerminalPublisher::default());
     let bindings = adapter
@@ -3806,7 +3838,9 @@ async fn nondirected_machine_terminal_commit_failure_fails_waiter_without_termin
     let store: Arc<dyn RuntimeStore> = Arc::new(
         RuntimeCommitAtomicityStore::unsupported_atomic_machine_lifecycle_once(Arc::clone(&inner)),
     );
-    let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(store, memory_blob_store()).expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let bindings = adapter
         .prepare_bindings(session_id.clone())
@@ -3969,10 +4003,10 @@ async fn runtime_loop_checkpoints_session_snapshot_after_machine_commit() {
     let runtime_store = std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new());
     let checkpoint_calls = std::sync::Arc::new(AtomicUsize::new(0));
     let observed_committed_snapshot = std::sync::Arc::new(AtomicBool::new(false));
-    let adapter = std::sync::Arc::new(MeerkatMachine::persistent(
-        runtime_store.clone(),
-        memory_blob_store(),
-    ));
+    let adapter = std::sync::Arc::new(
+        MeerkatMachine::persistent(runtime_store.clone(), memory_blob_store())
+            .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(
@@ -4020,7 +4054,9 @@ async fn aborted_nondirected_owned_commit_recovers_completed_after_compaction_ch
             Arc::clone(&release_commit),
         ),
     );
-    let machine = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(store, memory_blob_store()).expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let (session, compaction_intent) = runtime_recovery_compaction_session(&session_id);
     let checkpoint_calls = Arc::new(AtomicUsize::new(0));
@@ -4152,10 +4188,13 @@ async fn aborted_directed_owned_cancellation_commit_recovers_cancelled_terminal(
     let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
         &inner,
     )));
-    let machine = Arc::new(MeerkatMachine::persistent(
-        Arc::clone(&store) as Arc<dyn RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(
+            Arc::clone(&store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     let apply_entered = Arc::new(Notify::new());
@@ -4254,10 +4293,10 @@ async fn aborted_directed_owned_cancellation_commit_recovers_cancelled_terminal(
 #[tokio::test]
 async fn aborted_directed_candidate_checkpoint_recovers_exact_completed_terminal() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let machine = Arc::new(MeerkatMachine::persistent(
-        inner.clone() as Arc<dyn RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(inner.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
+            .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let checkpoint_entered = Arc::new(Notify::new());
     let release_checkpoint = Arc::new(Notify::new());
@@ -4361,10 +4400,10 @@ async fn aborted_directed_candidate_checkpoint_recovers_exact_completed_terminal
 #[tokio::test]
 async fn receipt_wait_resolves_at_directed_finalization_while_publication_is_parked() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let machine = Arc::new(MeerkatMachine::persistent(
-        inner as Arc<dyn RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(inner as Arc<dyn RuntimeStore>, memory_blob_store())
+            .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let checkpoint_entered = Arc::new(Notify::new());
     let release_checkpoint = Arc::new(Notify::new());
@@ -4480,10 +4519,10 @@ async fn receipt_wait_resolves_at_directed_finalization_while_publication_is_par
 #[tokio::test]
 async fn aborted_finalized_directed_publication_replays_once_and_preserves_completed() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let machine = Arc::new(MeerkatMachine::persistent(
-        inner as Arc<dyn RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(inner as Arc<dyn RuntimeStore>, memory_blob_store())
+            .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let first_publish_entered = Arc::new(Notify::new());
     let release_first_publish = Arc::new(Notify::new());
@@ -4673,10 +4712,10 @@ async fn mixed_directed_max_attempt_failure_terminalizes_only_exhausted_contribu
     }
 
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let machine = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
+            .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     let apply_calls = Arc::new(AtomicUsize::new(0));
@@ -4990,10 +5029,13 @@ async fn idle_explicit_steer_peer_request_runs_through_runtime_loop() {
         }
     }
 
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        Arc::new(crate::store::InMemoryRuntimeStore::new()),
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            Arc::new(crate::store::InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let calls = Arc::new(AtomicUsize::new(0));
     adapter
@@ -5135,10 +5177,13 @@ async fn runtime_loop_checkpoint_failure_is_completion_finalization_failure() {
         }
     }
 
-    let adapter = std::sync::Arc::new(MeerkatMachine::persistent(
-        std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new()),
-        memory_blob_store(),
-    ));
+    let adapter = std::sync::Arc::new(
+        MeerkatMachine::persistent(
+            std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(
@@ -5922,10 +5967,13 @@ async fn unregister_session_bounds_an_unquiescing_comms_drain() {
 #[tokio::test]
 async fn unregister_session_deletes_persisted_ops_lifecycle_epoch() {
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     let stale_epoch = meerkat_core::RuntimeEpochId::new();
@@ -5965,10 +6013,13 @@ async fn unregister_session_deletes_persisted_ops_lifecycle_epoch() {
     );
 
     drop(adapter);
-    let restarted = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let restarted = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     restarted
         .register_session(session_id.clone())
         .await
@@ -6000,7 +6051,9 @@ async fn cold_registration_cannot_publish_an_epoch_retired_by_overlapping_unregi
     let release = Arc::new(Notify::new());
     store.arm_block_initialize_ops_after_selection(Arc::clone(&entered), Arc::clone(&release));
     let store_dyn: Arc<dyn crate::store::RuntimeStore> = store;
-    let machine = Arc::new(MeerkatMachine::persistent(store_dyn, memory_blob_store()));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(store_dyn, memory_blob_store()).expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
 
@@ -6099,10 +6152,13 @@ async fn finalized_unregister_removal_queues_behind_unrelated_session_reads() {
     const READER_COUNT: usize = 64;
 
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let machine = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     machine
@@ -6240,10 +6296,13 @@ async fn unregister_session_delete_failure_retains_live_entry_and_stale_snapshot
     let store = Arc::new(RuntimeCommitAtomicityStore::fail_delete_ops_lifecycle_once(
         Arc::clone(&inner),
     ));
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     let stale_epoch = meerkat_core::RuntimeEpochId::new();
@@ -6360,10 +6419,13 @@ async fn unregister_session_unsupported_atomic_finalization_fails_closed() {
     let store = Arc::new(
         RuntimeCommitAtomicityStore::unsupported_unregister_finalization(Arc::clone(&inner)),
     );
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     let stale_snapshot = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
@@ -6466,10 +6528,13 @@ async fn unregister_session_unknown_commit_outcome_is_settled_before_executor_re
     let store = Arc::new(RuntimeCommitAtomicityStore::commit_then_report_unknown(
         Arc::clone(&inner),
     ));
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     let stale_snapshot = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
@@ -6587,10 +6652,13 @@ async fn unregister_session_retain_snapshot_lost_acknowledgement_retries_without
     let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
         &inner,
     )));
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     let retained_snapshot = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
@@ -6791,10 +6859,13 @@ async fn cancelled_pending_unregister_retry_keeps_registration_responsive_and_re
             Arc::clone(&finalization_release),
         ),
     );
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     let stale_snapshot = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
@@ -6899,10 +6970,13 @@ async fn unregister_session_finalization_persist_failure_restores_retry_anchor()
     let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
         &inner,
     )));
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
 
@@ -6993,10 +7067,13 @@ async fn unregister_progress_persist_failure_requires_cold_reload_from_durable_p
     let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
         &inner,
     )));
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     adapter
@@ -7074,10 +7151,13 @@ async fn unregister_progress_persist_failure_requires_cold_reload_from_durable_p
     );
 
     drop(adapter);
-    let recovered = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let recovered = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     recovered
         .register_session(session_id.clone())
         .await
@@ -7117,10 +7197,13 @@ async fn cold_recovery_resumes_typed_v3_unregister_progress() {
     let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
         &inner,
     )));
-    let first_machine = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let first_machine = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     first_machine
@@ -7149,10 +7232,13 @@ async fn cold_recovery_resumes_typed_v3_unregister_progress() {
     assert!(durable_partial.completion_waiter_drain_pending());
     drop(first_machine);
 
-    let recovered_machine = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let recovered_machine = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     // The typed v3 prefix above is what a fresh process replays; that replay is
     // pinned directly by
     // `session_management::unregister_progress_recovery_tests::durable_unregister_progress_replays_through_generated_feedback`.
@@ -7225,10 +7311,13 @@ async fn failed_first_turn_with_incomplete_teardown_still_resumes() {
     // Process A: the session runs, the turn fails terminally, and CLI shutdown
     // cannot finish teardown before the process goes away.
     {
-        let first_process = Arc::new(MeerkatMachine::persistent(
-            store.clone() as Arc<dyn crate::store::RuntimeStore>,
-            memory_blob_store(),
-        ));
+        let first_process = Arc::new(
+            MeerkatMachine::persistent(
+                store.clone() as Arc<dyn crate::store::RuntimeStore>,
+                memory_blob_store(),
+            )
+            .expect("persistent machine"),
+        );
         runtime_id = runtime_id_for_session(&session_id);
         first_process
             .prepare_bindings(session_id.clone())
@@ -7258,10 +7347,13 @@ async fn failed_first_turn_with_incomplete_teardown_still_resumes() {
     );
 
     // Process B: `rkat --resume`.
-    let resumed_process = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let resumed_process = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let bindings = resumed_process
         .prepare_bindings(session_id.clone())
         .await
@@ -7282,10 +7374,13 @@ async fn failed_first_turn_with_incomplete_teardown_still_resumes() {
 async fn unregister_session_preserves_primary_when_rollback_persist_also_fails() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
     let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(inner));
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
 
     adapter
@@ -7473,10 +7568,13 @@ async fn cancelled_terminal_unregister_finalizer_resumes_exact_cleanup_on_retry(
         Arc::clone(&delete_entered),
         Arc::clone(&delete_release),
     ));
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     let stale_snapshot = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
@@ -7591,10 +7689,13 @@ async fn cancellation_after_atomic_unregister_commit_cannot_revive_ops_snapshot(
             Arc::clone(&cleanup_release),
         ),
     );
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     let stale_snapshot = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
@@ -7732,10 +7833,13 @@ async fn retained_snapshot_seals_escaped_registry_before_same_id_replacement() {
     }
 
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     adapter
@@ -8037,10 +8141,13 @@ async fn concurrent_unregister_retry_does_not_commit_feedback_until_original_dra
 #[tokio::test]
 async fn unregister_session_retains_terminal_machine_lifecycle_snapshot() {
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
 
@@ -8284,10 +8391,10 @@ async fn input_terminal_status_by_idempotency_key_survives_restart() {
     let key = crate::identifiers::IdempotencyKey::new("restart-reconcile-1");
 
     {
-        let machine = Arc::new(MeerkatMachine::persistent(
-            Arc::clone(&store),
-            memory_blob_store(),
-        ));
+        let machine = Arc::new(
+            MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+                .expect("persistent machine"),
+        );
         machine
             .register_session_with_executor(session_id.clone(), Box::new(CompletingExecutor))
             .await
@@ -8336,7 +8443,8 @@ async fn input_terminal_status_by_idempotency_key_survives_restart() {
     let restarted_store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store())
+        .expect("persistent machine");
     restarted
         .register_session(session_id.clone())
         .await
@@ -8418,7 +8526,8 @@ async fn seed_cold_pending_terminal_candidate(
     let input_id = InputId::new();
 
     {
-        let first = MeerkatMachine::persistent(Arc::clone(&store_trait), memory_blob_store());
+        let first = MeerkatMachine::persistent(Arc::clone(&store_trait), memory_blob_store())
+            .expect("persistent machine");
         first
             .register_session(session_id.clone())
             .await
@@ -8480,10 +8589,10 @@ async fn recover_cold_pending_terminal_candidate(
         input_id,
     } = seed_cold_pending_terminal_candidate(candidate).await;
 
-    let restarted = Arc::new(MeerkatMachine::persistent(
-        Arc::clone(&store_trait),
-        memory_blob_store(),
-    ));
+    let restarted = Arc::new(
+        MeerkatMachine::persistent(Arc::clone(&store_trait), memory_blob_store())
+            .expect("persistent machine"),
+    );
     restarted
         .register_session_with_executor(session_id.clone(), Box::new(ColdTerminalRecoveryExecutor))
         .await
@@ -8575,7 +8684,9 @@ async fn cold_attached_recovery_rejects_mismatched_failure_outcome_and_cause() {
         },
     )
     .await;
-    let restarted = Arc::new(MeerkatMachine::persistent(store_trait, memory_blob_store()));
+    let restarted = Arc::new(
+        MeerkatMachine::persistent(store_trait, memory_blob_store()).expect("persistent machine"),
+    );
     let error = restarted
         .register_session_with_executor(session_id, Box::new(ColdTerminalRecoveryExecutor))
         .await
@@ -8742,10 +8853,10 @@ async fn seed_terminal_keyed_prompt_store() -> (
     let session_id = SessionId::new();
     let key = crate::identifiers::IdempotencyKey::new("terminal-status-restart-1");
 
-    let machine = Arc::new(MeerkatMachine::persistent(
-        Arc::clone(&store),
-        memory_blob_store(),
-    ));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+            .expect("persistent machine"),
+    );
     machine
         .register_session_with_executor(session_id.clone(), Box::new(CompletingExecutor))
         .await
@@ -8806,7 +8917,8 @@ async fn interaction_terminal_status_by_key_survives_restart_without_registratio
     let restarted_store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store())
+        .expect("persistent machine");
     // Deliberately NOT registered: the query must answer from the store.
     let sourced = <MeerkatMachine as SessionServiceRuntimeExt>::interaction_terminal_status(
         &restarted,
@@ -8846,7 +8958,8 @@ async fn input_state_by_idempotency_key_falls_back_to_store_when_unregistered() 
     let restarted_store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store())
+        .expect("persistent machine");
     let stored = <MeerkatMachine as SessionServiceRuntimeExt>::input_state_by_idempotency_key(
         &restarted,
         &session_id,
@@ -8873,7 +8986,8 @@ async fn input_state_by_id_falls_back_to_store_when_unregistered() {
     let restarted_store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store())
+        .expect("persistent machine");
     let stored = <MeerkatMachine as SessionServiceRuntimeExt>::input_state(
         &restarted,
         &session_id,
@@ -8900,7 +9014,8 @@ async fn run_terminal_status_resolves_from_durable_witnesses() {
     let restarted_store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store())
+        .expect("persistent machine");
     let sourced = <MeerkatMachine as SessionServiceRuntimeExt>::run_terminal_status(
         &restarted,
         &session_id,
@@ -8937,7 +9052,8 @@ async fn run_terminal_status_reports_no_durable_witness_for_unknown_run() {
     let restarted_store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store())
+        .expect("persistent machine");
 
     let fresh_run = RunId::new();
     let sourced = <MeerkatMachine as SessionServiceRuntimeExt>::run_terminal_status(
@@ -9154,7 +9270,8 @@ async fn terminal_status_never_admitted_session_is_not_found() {
         crate::store::SqliteRuntimeStore::new(dir.path().join("runtime.sqlite3"))
             .expect("sqlite runtime store"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let machine = MeerkatMachine::persistent(store, memory_blob_store());
+    let machine =
+        MeerkatMachine::persistent(store, memory_blob_store()).expect("persistent machine");
     let session_id = SessionId::new();
     let expected_runtime_id = runtime_id_for_session(&session_id);
 
@@ -9197,7 +9314,8 @@ async fn live_and_durable_run_terminal_reports_agree_after_recovery() {
     let restarted_store = Arc::new(
         crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
     ) as Arc<dyn crate::store::RuntimeStore>;
-    let restarted = MeerkatMachine::persistent(Arc::clone(&restarted_store), memory_blob_store());
+    let restarted = MeerkatMachine::persistent(Arc::clone(&restarted_store), memory_blob_store())
+        .expect("persistent machine");
     restarted
         .register_session(session_id.clone())
         .await
@@ -9485,7 +9603,8 @@ async fn cold_recovery_rebinds_idle_placement_when_ops_epoch_was_not_persisted()
     let runtime_id = runtime_id_for_session(&session_id);
     let placement_runtime_id = LogicalRuntimeId::new("worker:1");
 
-    let first = MeerkatMachine::persistent(Arc::clone(&store_dyn), memory_blob_store());
+    let first = MeerkatMachine::persistent(Arc::clone(&store_dyn), memory_blob_store())
+        .expect("persistent machine");
     let first_bindings = first
         .prepare_local_session_bindings(session_id.clone())
         .await
@@ -9538,7 +9657,8 @@ async fn cold_recovery_rebinds_idle_placement_when_ops_epoch_was_not_persisted()
     drop(first_bindings);
     drop(first);
 
-    let restarted = MeerkatMachine::persistent(store_dyn, memory_blob_store());
+    let restarted =
+        MeerkatMachine::persistent(store_dyn, memory_blob_store()).expect("persistent machine");
     let restarted_bindings = restarted
         .prepare_local_session_bindings(session_id.clone())
         .await
@@ -9569,7 +9689,8 @@ async fn cold_registration_reclaims_same_epoch_binding_from_idle_and_attached() 
             let runtime_id = runtime_id_for_session(&session_id);
             let placement_runtime_id = LogicalRuntimeId::new("worker:same-epoch");
 
-            let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+            let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+                .expect("persistent machine");
             let first_bindings = first
                 .prepare_local_session_bindings(session_id.clone())
                 .await
@@ -9612,7 +9733,8 @@ async fn cold_registration_reclaims_same_epoch_binding_from_idle_and_attached() 
             drop(first_bindings);
             drop(first);
 
-            let restarted = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+            let restarted = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+                .expect("persistent machine");
             let restarted_bindings = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 restarted.prepare_local_session_bindings(session_id.clone()),
@@ -9654,7 +9776,8 @@ async fn cold_revival_rebinds_after_torn_shutdown_with_bound_stopped_state() {
         Arc::new(crate::store::InMemoryRuntimeStore::new()) as Arc<dyn crate::store::RuntimeStore>;
     let session_id = SessionId::new();
 
-    let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+        .expect("persistent machine");
     first
         .prepare_bindings(session_id.clone())
         .await
@@ -9667,7 +9790,8 @@ async fn cold_revival_rebinds_after_torn_shutdown_with_bound_stopped_state() {
     // durable row keeps phase Stopped with the first epoch's binding tuple.
     drop(first);
 
-    let restarted = MeerkatMachine::persistent(store, memory_blob_store());
+    let restarted =
+        MeerkatMachine::persistent(store, memory_blob_store()).expect("persistent machine");
     let resumed = restarted.prepare_bindings(session_id.clone()).await.expect(
         "cold-revival prepare_bindings must revive AND re-bind the session under \
              the fresh registration epoch — a rejected re-bind is the field wedge",
@@ -9696,7 +9820,8 @@ async fn durable_unregister_then_prepare_bindings_starts_fresh_epoch() {
     let store =
         Arc::new(crate::store::InMemoryRuntimeStore::new()) as Arc<dyn crate::store::RuntimeStore>;
     let session_id = SessionId::new();
-    let adapter = MeerkatMachine::persistent(store, memory_blob_store());
+    let adapter =
+        MeerkatMachine::persistent(store, memory_blob_store()).expect("persistent machine");
 
     adapter
         .prepare_bindings(session_id.clone())
@@ -11110,9 +11235,10 @@ async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
 #[tokio::test]
 async fn persistent_without_blobs_keeps_persistent_driver() {
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let adapter = Arc::new(MeerkatMachine::persistent_without_blobs(
-        store as Arc<dyn crate::store::RuntimeStore>,
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent_without_blobs(store as Arc<dyn crate::store::RuntimeStore>)
+            .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
 
     adapter
@@ -12161,10 +12287,13 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy(
 #[tokio::test]
 async fn persistent_destroy_synchronizes_driver_control_projection_shadow() {
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
 
     adapter
@@ -12575,10 +12704,13 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
     }
 
     let store = Arc::new(BlockingDestroyCommitStore::new());
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        Arc::clone(&store) as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            Arc::clone(&store) as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     adapter
         .register_session(session_id.clone())
@@ -14886,10 +15018,13 @@ async fn exact_hard_interrupt_reaches_retiring_draining_run_only() {
         }
     }
 
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        Arc::new(crate::store::InMemoryRuntimeStore::new()),
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            Arc::new(crate::store::InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let calls = Arc::new(AtomicUsize::new(0));
     let requested_runs = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -15696,10 +15831,13 @@ async fn wedged_durability_degradation_interrupt_is_process_owned_and_deduplicat
         }
     }
 
-    let machine = Arc::new(MeerkatMachine::persistent(
-        Arc::new(crate::store::InMemoryRuntimeStore::new()),
-        memory_blob_store(),
-    ));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(
+            Arc::new(crate::store::InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let calls = Arc::new(AtomicUsize::new(0));
     let requested_runs = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -16547,10 +16685,13 @@ mod stop_teardown_coordinator_class {
         let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
             &inner,
         )));
-        let machine = Arc::new(MeerkatMachine::persistent(
-            store.clone() as Arc<dyn crate::store::RuntimeStore>,
-            memory_blob_store(),
-        ));
+        let machine = Arc::new(
+            MeerkatMachine::persistent(
+                store.clone() as Arc<dyn crate::store::RuntimeStore>,
+                memory_blob_store(),
+            )
+            .expect("persistent machine"),
+        );
         let session_id = SessionId::new();
         let runtime_id = runtime_id_for_session(&session_id);
 
@@ -16633,10 +16774,13 @@ mod stop_teardown_coordinator_class {
         );
 
         drop(machine);
-        let recovered = Arc::new(MeerkatMachine::persistent(
-            store.clone() as Arc<dyn crate::store::RuntimeStore>,
-            memory_blob_store(),
-        ));
+        let recovered = Arc::new(
+            MeerkatMachine::persistent(
+                store.clone() as Arc<dyn crate::store::RuntimeStore>,
+                memory_blob_store(),
+            )
+            .expect("persistent machine"),
+        );
         recovered
             .prepare_bindings(session_id.clone())
             .await
@@ -17546,7 +17690,8 @@ mod stop_teardown_coordinator_class {
         let machine = MeerkatMachine::persistent(
             store.clone() as Arc<dyn crate::store::RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("persistent machine");
         let session_id = SessionId::new();
         let first = machine
             .prepare_bindings(session_id.clone())
@@ -17574,10 +17719,13 @@ mod stop_teardown_coordinator_class {
         let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
             &inner,
         )));
-        let first_machine = Arc::new(MeerkatMachine::persistent(
-            store.clone() as Arc<dyn crate::store::RuntimeStore>,
-            memory_blob_store(),
-        ));
+        let first_machine = Arc::new(
+            MeerkatMachine::persistent(
+                store.clone() as Arc<dyn crate::store::RuntimeStore>,
+                memory_blob_store(),
+            )
+            .expect("persistent machine"),
+        );
         let session_id = SessionId::new();
         first_machine
             .register_session(session_id.clone())
@@ -17601,10 +17749,13 @@ mod stop_teardown_coordinator_class {
             Arc::clone(&persist_entered),
             Arc::clone(&release_persist),
         );
-        let recovered = Arc::new(MeerkatMachine::persistent(
-            store as Arc<dyn crate::store::RuntimeStore>,
-            memory_blob_store(),
-        ));
+        let recovered = Arc::new(
+            MeerkatMachine::persistent(
+                store as Arc<dyn crate::store::RuntimeStore>,
+                memory_blob_store(),
+            )
+            .expect("persistent machine"),
+        );
         let started_at = tokio::time::Instant::now();
         let prepare = {
             let recovered = Arc::clone(&recovered);
@@ -17757,10 +17908,13 @@ mod stop_teardown_coordinator_class {
     #[tokio::test]
     async fn noncooperative_interrupt_and_executor_return_in_progress_then_converge() {
         let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-        let machine = Arc::new(MeerkatMachine::persistent(
-            store.clone() as Arc<dyn crate::store::RuntimeStore>,
-            memory_blob_store(),
-        ));
+        let machine = Arc::new(
+            MeerkatMachine::persistent(
+                store.clone() as Arc<dyn crate::store::RuntimeStore>,
+                memory_blob_store(),
+            )
+            .expect("persistent machine"),
+        );
         let session_id = SessionId::new();
         let runtime_id = runtime_id_for_session(&session_id);
         let apply_started = Arc::new(Notify::new());
@@ -18204,10 +18358,13 @@ mod stop_teardown_coordinator_class {
     #[tokio::test]
     async fn persistent_external_cleanup_finishes_without_self_join_residue() {
         let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-        let machine = Arc::new(MeerkatMachine::persistent(
-            store as Arc<dyn crate::store::RuntimeStore>,
-            memory_blob_store(),
-        ));
+        let machine = Arc::new(
+            MeerkatMachine::persistent(
+                store as Arc<dyn crate::store::RuntimeStore>,
+                memory_blob_store(),
+            )
+            .expect("persistent machine"),
+        );
         let session_id = SessionId::new();
         let cleanup_ran = Arc::new(AtomicUsize::new(0));
         register(&machine, &session_id, &cleanup_ran, None, false).await;
@@ -18249,10 +18406,13 @@ mod stop_teardown_coordinator_class {
         let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
             &inner,
         )));
-        let machine = Arc::new(MeerkatMachine::persistent(
-            store.clone() as Arc<dyn crate::store::RuntimeStore>,
-            memory_blob_store(),
-        ));
+        let machine = Arc::new(
+            MeerkatMachine::persistent(
+                store.clone() as Arc<dyn crate::store::RuntimeStore>,
+                memory_blob_store(),
+            )
+            .expect("persistent machine"),
+        );
         let session_id = SessionId::new();
         let cleanup_started = Arc::new(Notify::new());
         let release_cleanup = Arc::new(Notify::new());
@@ -18367,10 +18527,13 @@ mod stop_teardown_coordinator_class {
         let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
             &inner,
         )));
-        let machine = Arc::new(MeerkatMachine::persistent(
-            store.clone() as Arc<dyn crate::store::RuntimeStore>,
-            memory_blob_store(),
-        ));
+        let machine = Arc::new(
+            MeerkatMachine::persistent(
+                store.clone() as Arc<dyn crate::store::RuntimeStore>,
+                memory_blob_store(),
+            )
+            .expect("persistent machine"),
+        );
         let session_id = SessionId::new();
         let cleanup_started = Arc::new(Notify::new());
         let release_cleanup = Arc::new(Notify::new());
@@ -19665,10 +19828,13 @@ async fn wait_for_queued_boundary_cancel(calls: &AtomicUsize) {
 #[tokio::test]
 async fn exact_run_boundary_cancel_remains_admitted_after_unregister_drain_begins() {
     let mut race = install_boundary_cancel_callback_race(
-        Arc::new(MeerkatMachine::persistent(
-            Arc::new(crate::store::InMemoryRuntimeStore::new()),
-            memory_blob_store(),
-        )),
+        Arc::new(
+            MeerkatMachine::persistent(
+                Arc::new(crate::store::InMemoryRuntimeStore::new()),
+                memory_blob_store(),
+            )
+            .expect("persistent machine"),
+        ),
         SessionId::new(),
         false,
     )
@@ -21832,10 +21998,13 @@ async fn run_advancing_during_live_boundary_preparation_preserves_successor_clai
         BoundaryPreparationResult::Stale,
         Arc::clone(&prepare_release),
     );
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        Arc::new(crate::store::InMemoryRuntimeStore::new()),
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            Arc::new(crate::store::InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let rig = InterruptYieldingTestRig::new_with_adapter(adapter, Some(probe.clone()), None).await;
     rig.start_busy_turn().await;
 
@@ -31739,7 +31908,8 @@ async fn cold_ensure_reconciles_runtime_authority_once_then_recovers_inputs_only
         &inner,
     )));
     let store: Arc<dyn RuntimeStore> = counted_store.clone();
-    let machine = Arc::new(MeerkatMachine::persistent_without_blobs(store));
+    let machine =
+        Arc::new(MeerkatMachine::persistent_without_blobs(store).expect("persistent machine"));
 
     machine
         .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
@@ -31850,7 +32020,8 @@ async fn supervisor_rotation_persistence_failures_leave_cold_resumable_checkpoin
     let next_signing_key = crate::comms_drain::encode_supervisor_signing_public_key([0xdd; 32]);
     let operation_id = uuid::Uuid::new_v4().to_string();
 
-    let mut machine = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+    let mut machine =
+        MeerkatMachine::persistent_without_blobs(Arc::clone(&store)).expect("persistent machine");
     machine
         .register_session(session_id.clone())
         .await
@@ -31916,7 +32087,8 @@ async fn supervisor_rotation_persistence_failures_leave_cold_resumable_checkpoin
     ));
 
     drop(machine);
-    machine = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+    machine =
+        MeerkatMachine::persistent_without_blobs(Arc::clone(&store)).expect("persistent machine");
     machine
         .register_session(session_id.clone())
         .await
@@ -31969,7 +32141,8 @@ async fn supervisor_rotation_persistence_failures_leave_cold_resumable_checkpoin
     ));
     drop(machine);
 
-    machine = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+    machine =
+        MeerkatMachine::persistent_without_blobs(Arc::clone(&store)).expect("persistent machine");
     machine
         .register_session(session_id.clone())
         .await
@@ -32005,7 +32178,8 @@ async fn supervisor_rotation_persistence_failures_leave_cold_resumable_checkpoin
     ));
     drop(machine);
 
-    machine = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+    machine =
+        MeerkatMachine::persistent_without_blobs(Arc::clone(&store)).expect("persistent machine");
     machine
         .register_session(session_id.clone())
         .await
@@ -32022,7 +32196,7 @@ async fn supervisor_rotation_persistence_failures_leave_cold_resumable_checkpoin
         .expect("persist completed rotation receipt");
     drop(machine);
 
-    let recovered = MeerkatMachine::persistent_without_blobs(store);
+    let recovered = MeerkatMachine::persistent_without_blobs(store).expect("persistent machine");
     recovered
         .register_session(session_id.clone())
         .await
@@ -32846,7 +33020,8 @@ async fn persistent_machine_terminal_commit_recovers_consumed_input_and_failed_t
     );
 
     drop(driver);
-    let recovered = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+    let recovered =
+        MeerkatMachine::persistent_without_blobs(Arc::clone(&store)).expect("persistent machine");
     recovered
         .register_session(session_id.clone())
         .await
@@ -39353,10 +39528,13 @@ async fn cancelled_ensure_caller_does_not_strand_owned_post_claim_attachment_sag
     let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
         &inner,
     )));
-    let machine = Arc::new(MeerkatMachine::persistent(
-        Arc::clone(&store) as Arc<dyn RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(
+            Arc::clone(&store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let initial_startup_calls = Arc::new(AtomicUsize::new(0));
     machine
@@ -39517,10 +39695,13 @@ async fn cancelled_materialization_prepare_waits_for_revive_persistence_before_e
     let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
         &inner,
     )));
-    let machine = Arc::new(MeerkatMachine::persistent(
-        Arc::clone(&store) as Arc<dyn RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(
+            Arc::clone(&store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     machine
         .register_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))
@@ -39775,10 +39956,10 @@ async fn unserved_startup_failure_preserves_durable_projection_authority_for_rea
         move || {
             let origin_runtime = detached_lease_test_runtime();
             let seeded = origin_runtime.block_on(async {
-                let machine = Arc::new(MeerkatMachine::persistent(
-                    store as Arc<dyn RuntimeStore>,
-                    memory_blob_store(),
-                ));
+                let machine = Arc::new(
+                    MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store())
+                        .expect("persistent machine"),
+                );
                 let _bindings = machine
                     .prepare_bindings(session_id.clone())
                     .await
@@ -39866,10 +40047,10 @@ async fn unserved_startup_failure_preserves_durable_projection_authority_for_rea
         })
     ));
 
-    let failing_machine = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let failing_machine = Arc::new(
+        MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
+            .expect("persistent machine"),
+    );
     let _failing_bindings = failing_machine
         .prepare_bindings(session_id.clone())
         .await
@@ -39938,10 +40119,10 @@ async fn unserved_startup_failure_preserves_durable_projection_authority_for_rea
     // both retained authorities through one later exact attachment, and only
     // then expose that attachment as serving.
     drop(failing_machine);
-    let second_machine = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let second_machine = Arc::new(
+        MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
+            .expect("persistent machine"),
+    );
     let _recovered_bindings = second_machine
         .prepare_bindings(session_id.clone())
         .await
@@ -40038,10 +40219,13 @@ async fn cold_executor_attach_replaces_retired_process_projection() {
     }
 
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
     crate::store::RuntimeStore::commit_machine_lifecycle(
@@ -48136,7 +48320,7 @@ impl CoreExecutor for HealthProbeBlockingExecutor {
 fn persistent_health_probe_machine() -> Arc<MeerkatMachine> {
     let store: Arc<dyn crate::store::RuntimeStore> =
         Arc::new(crate::store::InMemoryRuntimeStore::new());
-    Arc::new(MeerkatMachine::persistent(store, memory_blob_store()))
+    Arc::new(MeerkatMachine::persistent(store, memory_blob_store()).expect("persistent machine"))
 }
 
 #[tokio::test]

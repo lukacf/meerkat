@@ -1459,7 +1459,7 @@ impl MeerkatMachine {
                 Arc::new(RuntimeStickyModelFallbackCommitCoordinator {
                     session_id: session_id.clone(),
                     store: self.store.clone(),
-                    execution_custody: self.execution_custody.clone(),
+                    execution_custody: Ok(self.execution_custody.clone()),
                 }),
                 self.generated_auth_lease_handle(),
                 Arc::new(crate::handles::RuntimeMcpServerLifecycleHandle::new(

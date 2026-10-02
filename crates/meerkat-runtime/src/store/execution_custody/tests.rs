@@ -32,8 +32,7 @@ fn failed_upgrade_keeps_the_same_shared_claim() {
 #[test]
 fn retained_guard_clone_does_not_release_the_scope_early() {
     let owner = RuntimeStoreExecutionCustody::new();
-    let mut guard = owner.try_acquire_shared().unwrap();
-    guard.try_upgrade_to_governed().unwrap();
+    let guard = owner.try_acquire_governed().unwrap();
     let guard = Arc::new(guard);
     let retained = Arc::clone(&guard);
     drop(guard);
@@ -46,6 +45,36 @@ fn retained_guard_clone_does_not_release_the_scope_early() {
 }
 
 #[test]
+fn upfront_governed_claim_requires_all_shared_owners_to_release() {
+    let owner = RuntimeStoreExecutionCustody::new();
+    let same_owner = owner.clone();
+    let first = owner.try_acquire_shared().unwrap();
+    let second = same_owner.try_acquire_shared().unwrap();
+    assert!(matches!(
+        owner.try_acquire_governed(),
+        Err(RuntimeStoreExecutionCustodyError::Busy)
+    ));
+    drop(first);
+    assert!(matches!(
+        owner.try_acquire_governed(),
+        Err(RuntimeStoreExecutionCustodyError::Busy)
+    ));
+    drop(second);
+    let governed = same_owner.try_acquire_governed().unwrap();
+    assert!(governed.is_governed());
+    assert!(matches!(
+        owner.try_acquire_shared(),
+        Err(RuntimeStoreExecutionCustodyError::Busy)
+    ));
+    assert!(matches!(
+        owner.try_acquire_governed(),
+        Err(RuntimeStoreExecutionCustodyError::Busy)
+    ));
+    drop(governed);
+    owner.try_acquire_governed().unwrap();
+}
+
+#[test]
 fn poisoned_custody_owner_never_reopens_execution() {
     let owner = RuntimeStoreExecutionCustody::new();
     let _ = std::panic::catch_unwind(|| {
@@ -54,6 +83,10 @@ fn poisoned_custody_owner_never_reopens_execution() {
     });
     assert!(matches!(
         owner.try_acquire_shared(),
+        Err(RuntimeStoreExecutionCustodyError::Unavailable)
+    ));
+    assert!(matches!(
+        owner.try_acquire_governed(),
         Err(RuntimeStoreExecutionCustodyError::Unavailable)
     ));
 }

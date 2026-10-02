@@ -124,7 +124,8 @@ async fn recovery_replay_red_ok_requeues_missing_boundary_contributors_through_p
         .await
         .expect("persist second applied state");
 
-    let machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+        .expect("persistent machine");
     machine
         .register_session(session_id.clone())
         .await
@@ -163,7 +164,8 @@ async fn recovery_replay_red_ok_requeues_missing_boundary_contributors_through_p
     }
 
     drop(machine);
-    let cold_machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let cold_machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+        .expect("persistent machine");
     cold_machine
         .register_session(session_id.clone())
         .await

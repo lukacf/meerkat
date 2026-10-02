@@ -220,7 +220,8 @@ async fn shared_sqlite_cold_resume_probe(
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("runtime.sqlite3");
     let store = Arc::new(SqliteRuntimeStore::new(&path).unwrap());
-    let seeder = MeerkatMachine::persistent(store.clone(), memory_blob_store());
+    let seeder =
+        MeerkatMachine::persistent(store.clone(), memory_blob_store()).expect("persistent machine");
     let mut sessions = Vec::new();
     for &bytes in payload_bytes {
         let mut session = meerkat_core::Session::new();
@@ -271,10 +272,9 @@ async fn shared_sqlite_cold_resume_probe(
     // stage. Fixture construction, subsequent writes and cleanup do not.
     let cold_started = Instant::now();
     let store = Arc::new(SqliteRuntimeStore::new(&path).unwrap());
-    let machine = Arc::new(MeerkatMachine::persistent(
-        store.clone(),
-        memory_blob_store(),
-    ));
+    let machine = Arc::new(
+        MeerkatMachine::persistent(store.clone(), memory_blob_store()).expect("persistent machine"),
+    );
     let barrier = Arc::new(tokio::sync::Barrier::new(sessions.len()));
     let mut tasks = tokio::task::JoinSet::new();
     for (index, session_id) in sessions.into_iter().enumerate() {
@@ -977,7 +977,8 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
             .await
             .unwrap();
 
-        let machine = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store());
+        let machine = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store())
+            .expect("persistent machine");
         machine
             .register_session(session_id.clone())
             .await
@@ -1041,7 +1042,8 @@ async fn recovery_contract_normalizes_every_dead_process_phase_to_fresh_idle() {
         ] {
             let session_id = SessionId::new();
             let runtime_id = LogicalRuntimeId::for_session(&session_id);
-            let seeder = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store());
+            let seeder = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store())
+                .expect("persistent machine");
             seeder
                 .register_session(session_id.clone())
                 .await
@@ -1079,7 +1081,8 @@ async fn recovery_contract_normalizes_every_dead_process_phase_to_fresh_idle() {
             }
             drop(seeder);
 
-            let machine = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store());
+            let machine = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store())
+                .expect("persistent machine");
             machine
                 .register_session(session_id.clone())
                 .await
@@ -1134,7 +1137,8 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
             .await
             .unwrap();
 
-        let machine = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store());
+        let machine = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store())
+            .expect("persistent machine");
         machine
             .register_session(session_id.clone())
             .await

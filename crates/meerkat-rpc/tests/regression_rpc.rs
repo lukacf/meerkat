@@ -107,7 +107,8 @@ fn spawn_test_server() -> (
             store,
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             blob_store,
-        ),
+        )
+        .expect("construct runtime authority"),
         meerkat_rpc::router::NotificationSink::noop(),
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
@@ -127,7 +128,8 @@ fn spawn_test_server() -> (
     let server_handle = tokio::spawn(async move {
         let _temp = temp;
         let reader = BufReader::new(server_reader);
-        let mut server = RpcServer::new(reader, server_writer, runtime, config_store);
+        let mut server = RpcServer::new(reader, server_writer, runtime, config_store)
+            .expect("construct runtime authority");
         server.run().await
     });
 

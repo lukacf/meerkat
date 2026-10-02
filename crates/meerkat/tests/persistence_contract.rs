@@ -308,7 +308,8 @@ mod tests {
         builder.default_llm_client = Some(llm_client);
         builder.default_tool_dispatcher = Some(tool_dispatcher);
         let persistence =
-            PersistenceBundle::new(store, runtime_store, Arc::new(MemoryBlobStore::new()));
+            PersistenceBundle::new(store, runtime_store, Arc::new(MemoryBlobStore::new()))
+                .expect("construct runtime authority");
         let (service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service(builder, 4, persistence);
         (Arc::new(service), runtime_adapter)
@@ -322,7 +323,8 @@ mod tests {
             Arc::clone(&session_store),
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(MemoryBlobStore::new()),
-        );
+        )
+        .expect("construct runtime authority");
 
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let mut config = Config::default();
@@ -365,7 +367,8 @@ mod tests {
             Arc::clone(&session_store),
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(MemoryBlobStore::new()),
-        );
+        )
+        .expect("construct runtime authority");
 
         let mut config = Config::default();
         let section = meerkat_core::RealmConfigSection::from_inline_api_keys(&[(

@@ -117,20 +117,20 @@ async fn exercise_revalidated_stock_persistent(server: &Server, cleanup: &Cleanu
         Ok(())
     });
     let store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
-    let bundle = meerkat::PersistenceBundle::new(
+    let bundle = meerkat::PersistenceBundle::new_with_local_grant_authorization(
         Arc::new(meerkat::MemoryStore::new()),
         store.clone(),
         Arc::new(meerkat::MemoryBlobStore::new()),
+        NativeGrantWorkConfiguration {
+            grants: grants.clone(),
+            ingress,
+            invocation_owner: Arc::new(InvocationOwner),
+            operation_owner: Arc::new(HttpRecordOwner {
+                selection: selected.clone(),
+                endpoint: format!("{}/v1/messages", server.base_url),
+            }),
+        },
     )
-    .with_local_grant_authorization(NativeGrantWorkConfiguration {
-        grants: grants.clone(),
-        ingress,
-        invocation_owner: Arc::new(InvocationOwner),
-        operation_owner: Arc::new(HttpRecordOwner {
-            selection: selected.clone(),
-            endpoint: format!("{}/v1/messages", server.base_url),
-        }),
-    })
     .expect("accepted candidate configures the bundle's actual persistent owner");
     assert_eq!(
         bundle.session_persistence_profile(),

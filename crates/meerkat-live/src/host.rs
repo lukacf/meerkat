@@ -1027,7 +1027,8 @@ impl LiveProjectionError {
             // `Internal(to_string())`. Spelling these out means a future
             // `SessionError` variant forces a compile error here instead of
             // silently folding into a catch-all.
-            SessionError::Store(_)
+            SessionError::RuntimeUnavailable { .. }
+            | SessionError::Store(_)
             | SessionError::Agent(_)
             | SessionError::DurableTailHeldForRecovery { .. }
             | SessionError::DurableTailRecoveryRefused { .. }
@@ -1852,7 +1853,8 @@ impl LiveToolDispatchError {
             // string. Spelling these out means a future `SessionError`
             // variant forces a compile error here instead of silently
             // folding into a catch-all.
-            SessionError::Store(_)
+            SessionError::RuntimeUnavailable { .. }
+            | SessionError::Store(_)
             | SessionError::Agent(_)
             | SessionError::DurableTailHeldForRecovery { .. }
             | SessionError::DurableTailRecoveryRefused { .. }

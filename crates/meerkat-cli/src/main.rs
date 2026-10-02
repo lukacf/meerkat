@@ -10915,10 +10915,16 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         true
     }
 
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
-        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::runtime_adapter(
-            &self.inner,
-        )
+    fn acquire_runtime_adapter(
+        &self,
+        explicit: Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+    ) -> Result<
+        Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+        meerkat_runtime::RuntimeDriverError,
+    > {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::acquire_runtime_adapter(
+                    &self.inner, explicit,
+                )
     }
 
     fn supports_runtime_turn_apply(&self) -> bool {
@@ -14441,10 +14447,16 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         true
     }
 
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
-        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::runtime_adapter(
-            &self.inner,
-        )
+    fn acquire_runtime_adapter(
+        &self,
+        explicit: Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+    ) -> Result<
+        Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+        meerkat_runtime::RuntimeDriverError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::acquire_runtime_adapter(
+                    &self.inner, explicit,
+                )
     }
 
     fn supports_runtime_turn_apply(&self) -> bool {
@@ -16137,7 +16149,6 @@ async fn hydrate_mob_state(
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
     seeded_handles: std::collections::BTreeMap<String, meerkat_mob::MobHandle>,
 ) -> anyhow::Result<Arc<meerkat_mob_mcp::MobMcpState>> {
-    let runtime_adapter = runtime_adapter.or_else(|| session_service.runtime_adapter());
     let workgraph_service = open_workgraph_service(scope).await?;
     let mut state = meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
         session_service.clone(),
@@ -16145,7 +16156,7 @@ async fn hydrate_mob_state(
         // A16: the in-process CLI console is the owning operator
         // (explicit mint, DEC-P5E-8).
         meerkat_mob::MobControlPrincipal::Owner,
-    )
+    )?
     .with_persistent_storage_root(Some(mob_persistent_runtime_root(scope)))
     .with_workgraph_service(Some(workgraph_service))
     .with_default_llm_client_provider(default_llm_client_provider)
@@ -18747,9 +18758,6 @@ async fn execute_mob_deploy_internal(
             ),
         ))
         .with_workgraph_service(Some(open_workgraph_service(scope).await?));
-        if let Some(adapter) = session_service.runtime_adapter() {
-            builder = builder.with_runtime_adapter(adapter);
-        }
         if let Some(acceptor) = controlling_acceptor {
             builder = builder.with_controlling_acceptor(acceptor);
         }
@@ -22787,8 +22795,25 @@ default_model = "gemma"
             Ok(self.compare_remove_actor(witness).await)
         }
 
-        fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
-            Some(Arc::clone(&self.runtime_adapter))
+        fn acquire_runtime_adapter(
+            &self,
+            explicit: Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+        ) -> Result<
+            Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+            meerkat_runtime::RuntimeDriverError,
+        > {
+            let owner = Some(Arc::clone(&self.runtime_adapter));
+            if let (Some(owner), Some(requested)) = (owner.as_ref(), explicit.as_ref())
+                && !owner.shares_runtime_execution_owner_with(requested)
+            {
+                return Err(
+                    meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                        reason:
+                            meerkat_runtime::traits::ControllerReadinessFailure::AuthorityChanged,
+                    },
+                );
+            }
+            Ok(owner.or(explicit))
         }
 
         fn supports_runtime_turn_apply(&self) -> bool {
@@ -27174,10 +27199,10 @@ capabilities = ["rpc"]
         // Create mob tools factory (new pattern: factory instead of external_tools)
         let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
             Arc::new(RunMobSessionService::new(service.clone()));
-        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(
-            mob_service,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let mob_state = Arc::new(
+            meerkat_mob_mcp::MobMcpState::new(mob_service, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let mob_factory: Arc<dyn meerkat_core::service::MobToolsFactory> =
             Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(mob_state));
 
@@ -27337,9 +27362,9 @@ default_model = "gpt-5.4"
         ));
 
         let runtime_adapter =
-            <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::runtime_adapter(
-                service.as_ref(),
-            )
+            <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::acquire_runtime_adapter(
+                service.as_ref(), None,
+            ).expect("acquire runtime authority")
             .expect("embedded session service must expose its runtime adapter");
         let parent_session = Session::new();
         let parent_session_id = parent_session.id().clone();
@@ -27350,10 +27375,10 @@ default_model = "gpt-5.4"
 
         let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
             Arc::new(RunMobSessionService::new(Arc::clone(&service)));
-        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(
-            mob_service,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let mob_state = Arc::new(
+            meerkat_mob_mcp::MobMcpState::new(mob_service, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let mob_factory: Arc<dyn meerkat_core::service::MobToolsFactory> = Arc::new(
             meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&mob_state)),
         );
@@ -27564,7 +27589,8 @@ default_model = "gpt-5.4"
             Arc::clone(&store),
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(meerkat_store::MemoryBlobStore::default()),
-        );
+        )
+        .expect("construct runtime authority");
         let factory = AgentFactory::new(temp.path().join("sessions"))
             .session_store(store)
             .builtins(false)
@@ -27761,7 +27787,8 @@ default_model = "gpt-5.4"
             Arc::clone(&session_store),
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(meerkat_store::MemoryBlobStore::default()),
-        );
+        )
+        .expect("construct runtime authority");
         let factory = AgentFactory::new(temp.path().join("sessions"))
             .session_store(session_store)
             .builtins(false)
@@ -27791,7 +27818,8 @@ default_model = "gpt-5.4"
             Arc::clone(&session_store),
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(meerkat_store::MemoryBlobStore::default()),
-        );
+        )
+        .expect("construct runtime authority");
         let factory = AgentFactory::new(temp.path().join("sessions"))
             .session_store(session_store)
             .builtins(false)
@@ -28136,7 +28164,8 @@ default_model = "gpt-5.4"
             Arc::clone(&session_store),
             runtime_store,
             Arc::new(meerkat_store::MemoryBlobStore::default()),
-        );
+        )
+        .expect("construct runtime authority");
         let persistence_adapter = persistence.runtime_adapter();
         let auth_binding = meerkat_core::AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
@@ -28193,7 +28222,8 @@ default_model = "gpt-5.4"
             Arc::clone(&session_store),
             Arc::clone(&runtime_store),
             Arc::new(meerkat_store::MemoryBlobStore::default()),
-        );
+        )
+        .expect("construct runtime authority");
         let factory = AgentFactory::new(temp.path().join("sessions"))
             .session_store(session_store)
             .builtins(false)
@@ -28296,7 +28326,8 @@ default_model = "gpt-5.4"
             Arc::clone(&session_store),
             Arc::clone(&runtime_store),
             Arc::clone(&blob_store),
-        );
+        )
+        .expect("construct runtime authority");
         let factory = AgentFactory::new(temp.path().join("sessions"))
             .session_store(session_store)
             .builtins(false)
@@ -28359,10 +28390,10 @@ default_model = "gpt-5.4"
         // finalization and correctly projects an ordinary stopped runtime back
         // to Idle; a cold restart is the case where the durable Stopped
         // snapshot remains while the new machine has no live registration.
-        let cold_runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent(
-            runtime_store,
-            blob_store,
-        ));
+        let cold_runtime_adapter = Arc::new(
+            meerkat_runtime::MeerkatMachine::persistent(runtime_store, blob_store)
+                .expect("construct runtime authority"),
+        );
         assert!(
             !cold_runtime_adapter
                 .contains_session(&created.session_id)

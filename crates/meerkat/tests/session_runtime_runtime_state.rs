@@ -603,10 +603,13 @@ async fn archive_runtime_cleanup_preserves_downstream_anchors_when_unregister_fa
 
     let inner = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
     let store = Arc::new(FailDeleteOpsLifecycleOnceStore::new(Arc::clone(&inner)));
-    let runtime_adapter = Arc::new(MeerkatMachine::persistent(
-        store as Arc<dyn meerkat_runtime::store::RuntimeStore>,
-        Arc::new(meerkat_store::MemoryBlobStore::new()),
-    ));
+    let runtime_adapter = Arc::new(
+        MeerkatMachine::persistent(
+            store as Arc<dyn meerkat_runtime::store::RuntimeStore>,
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        )
+        .expect("construct runtime authority"),
+    );
     let session_id = SessionId::new();
     let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
     let snapshot = meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()

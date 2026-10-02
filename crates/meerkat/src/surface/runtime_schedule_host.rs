@@ -1028,7 +1028,8 @@ mod tests {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new())
                 as Arc<dyn meerkat_runtime::RuntimeStore>,
             Arc::new(crate::MemoryBlobStore::new()),
-        );
+        )
+        .expect("construct runtime authority");
         let factory = crate::AgentFactory::new(temp.path().join("sessions"))
             .with_comms_runtime(shared_runtime);
         let mut builder = crate::FactoryAgentBuilder::new(factory, crate::Config::default());

@@ -151,7 +151,7 @@ pub fn compose_rpc_mob_state(
     runtime: &Arc<SessionRuntime>,
     config_store: &Arc<dyn ConfigStore>,
     controlling_acceptor: Option<meerkat_mob::ControllingAcceptorConfig>,
-) -> Arc<meerkat_mob_mcp::MobMcpState> {
+) -> Result<Arc<meerkat_mob_mcp::MobMcpState>, meerkat_runtime::RuntimeDriverError> {
     // RPC mob member MCP config needs a member-session surface handle. Until
     // an authority-owned handoff exists, configured MCP fails closed instead
     // of staging facts on a router-local owner.
@@ -183,7 +183,7 @@ pub fn compose_rpc_mob_state(
         // A16: the local stdio/loopback RPC console is the owning operator
         // (explicit mint, DEC-P5E-8; bearer principals are the v2 seam).
         meerkat_mob::MobControlPrincipal::Owner,
-    )
+    )?
     .with_persistent_storage_root(persistent_mob_root)
     // Mobs rescope this service's store to their own realm, so the host
     // service is supplied even when no runtime realm identity is active. A
@@ -209,7 +209,7 @@ pub fn compose_rpc_mob_state(
     }
     let state = Arc::new(state);
     state.start_workgraph_flow_reconciler();
-    state
+    Ok(state)
 }
 
 #[cfg(feature = "comms")]
@@ -1320,7 +1320,7 @@ impl MethodRouter {
         runtime: Arc<SessionRuntime>,
         config_store: Arc<dyn ConfigStore>,
         notification_sink: NotificationSink,
-    ) -> Self {
+    ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
         let runtime_adapter = runtime.runtime_adapter();
         // Reuse the runtime's existing mob state if one was pre-configured
         // (e.g., by a kennel that created a hive mob before serving TCP
@@ -1330,7 +1330,7 @@ impl MethodRouter {
         let mob_state = if let Some(existing) = runtime.mob_state() {
             existing
         } else {
-            let mob_state = compose_rpc_mob_state(&runtime, &config_store, None);
+            let mob_state = compose_rpc_mob_state(&runtime, &config_store, None)?;
             runtime.set_mob_state(mob_state.clone());
             mob_state
         };
@@ -1354,7 +1354,7 @@ impl MethodRouter {
         // executors created lazily read the current sink at apply time.
         runtime.set_notification_sink(notification_sink.clone());
         runtime.arm_job_delivery_driver();
-        Self {
+        Ok(Self {
             #[cfg(feature = "local-authorization")]
             governed_connection: None,
             runtime,
@@ -1397,7 +1397,7 @@ impl MethodRouter {
             #[cfg(all(feature = "openai-live", feature = "mob", feature = "live-webrtc"))]
             experimental_live_context_mirror_host: Arc::new(StdRwLock::new(None)),
             live_session_factory: None,
-        }
+        })
     }
 
     #[cfg(feature = "local-authorization")]
@@ -5562,6 +5562,7 @@ mod tests {
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         meerkat::PersistenceBundle::new(store, runtime_store, memory_blob_store())
+            .expect("construct runtime authority")
     }
 
     /// Config store whose `get()` always returns a typed fault, used to prove
@@ -5618,7 +5619,8 @@ mod tests {
         let runtime = Arc::new(runtime);
         let (notif_tx, notif_rx) = mpsc::channel(100);
         let sink = NotificationSink::new(notif_tx);
-        let router = MethodRouter::new(runtime, config_store, sink);
+        let router =
+            MethodRouter::new(runtime, config_store, sink).expect("construct runtime authority");
         (router, notif_rx)
     }
 
@@ -5651,7 +5653,8 @@ mod tests {
         let runtime = Arc::new(runtime);
         let (notif_tx, notif_rx) = mpsc::channel(100);
         let sink = NotificationSink::new(notif_tx);
-        let router = MethodRouter::new(runtime, config_store, sink);
+        let router =
+            MethodRouter::new(runtime, config_store, sink).expect("construct runtime authority");
         (router, notif_rx)
     }
 
@@ -6422,7 +6425,8 @@ mod tests {
         let runtime = Arc::new(runtime);
         let (notif_tx, notif_rx) = mpsc::channel(100);
         let sink = NotificationSink::new(notif_tx);
-        let router = MethodRouter::new(runtime, config_store, sink);
+        let router =
+            MethodRouter::new(runtime, config_store, sink).expect("construct runtime authority");
         (router, notif_rx)
     }
 
@@ -6459,7 +6463,8 @@ mod tests {
         let runtime = Arc::new(runtime);
         let (notif_tx, notif_rx) = mpsc::channel(notification_capacity);
         let sink = NotificationSink::new(notif_tx);
-        let router = MethodRouter::new(runtime, config_store, sink);
+        let router =
+            MethodRouter::new(runtime, config_store, sink).expect("construct runtime authority");
         (router, notif_rx)
     }
 
@@ -6481,7 +6486,8 @@ mod tests {
             memory_blob_store(),
             Arc::new(meerkat::MemoryScheduleStore::default()),
             Arc::new(meerkat::MemoryWorkGraphStore::new()),
-        );
+        )
+        .expect("construct runtime authority");
         let runtime = SessionRuntime::new(
             factory,
             config.clone(),
@@ -6501,7 +6507,8 @@ mod tests {
             runtime.workgraph_service().is_err(),
             "this runtime has no realm identity"
         );
-        let state = compose_rpc_mob_state(&runtime, &config_store, None);
+        let state = compose_rpc_mob_state(&runtime, &config_store, None)
+            .expect("construct runtime authority");
         let host = state.workgraph_service().expect("host WorkGraph service");
         let mob_id = state
             .mob_create_definition(meerkat_mob::MobDefinition::implicit(
@@ -6555,7 +6562,8 @@ mod tests {
             temp.path().join("config_state.json"),
         )));
         let runtime = Arc::new(runtime);
-        let state = compose_rpc_mob_state(&runtime, &config_store, None);
+        let state = compose_rpc_mob_state(&runtime, &config_store, None)
+            .expect("construct runtime authority");
         assert!(
             state.workgraph_service().is_none(),
             "a disabled backend supplies no host WorkGraph service"
@@ -6760,7 +6768,8 @@ mod tests {
         let runtime = Arc::new(runtime);
         let (notif_tx, notif_rx) = mpsc::channel(100);
         let sink = NotificationSink::new(notif_tx);
-        let router = MethodRouter::new(runtime, config_store, sink);
+        let router =
+            MethodRouter::new(runtime, config_store, sink).expect("construct runtime authority");
         (router, notif_rx)
     }
 

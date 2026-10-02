@@ -7524,9 +7524,12 @@ mod tests {
     use uuid::Uuid;
 
     fn durable_direct_member_test_machine() -> Arc<MeerkatMachine> {
-        Arc::new(MeerkatMachine::persistent_without_blobs(Arc::new(
-            crate::store::InMemoryRuntimeStore::new(),
-        )))
+        Arc::new(
+            MeerkatMachine::persistent_without_blobs(Arc::new(
+                crate::store::InMemoryRuntimeStore::new(),
+            ))
+            .expect("persistent machine"),
+        )
     }
 
     #[test]
@@ -15868,7 +15871,10 @@ mod tests {
             ..predecessor.clone()
         };
 
-        let first = Arc::new(MeerkatMachine::persistent_without_blobs(Arc::clone(&store)));
+        let first = Arc::new(
+            MeerkatMachine::persistent_without_blobs(Arc::clone(&store))
+                .expect("persistent machine"),
+        );
         first
             .register_session(session_id.clone())
             .await
@@ -15883,7 +15889,8 @@ mod tests {
             .expect("durably advance to successor B");
         drop(first);
 
-        let recovered = Arc::new(MeerkatMachine::persistent_without_blobs(store));
+        let recovered =
+            Arc::new(MeerkatMachine::persistent_without_blobs(store).expect("persistent machine"));
         recovered
             .register_session(session_id.clone())
             .await
@@ -15938,9 +15945,12 @@ mod tests {
             Arc::clone(&entered),
             Arc::clone(&release),
         );
-        let adapter = Arc::new(MeerkatMachine::persistent_without_blobs(
-            Arc::clone(&store) as Arc<dyn crate::store::RuntimeStore>
-        ));
+        let adapter = Arc::new(
+            MeerkatMachine::persistent_without_blobs(
+                Arc::clone(&store) as Arc<dyn crate::store::RuntimeStore>
+            )
+            .expect("persistent machine"),
+        );
         let session_id = SessionId::new();
         adapter
             .register_session(session_id.clone())

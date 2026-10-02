@@ -81,6 +81,9 @@ fn emit_audit(
 #[derive(Clone)]
 pub struct RuntimeAuthLeaseHandle {
     machines: Arc<Mutex<AuthLeaseRegistry>>,
+    // Exported credential capabilities retain the actual backend execution
+    // owner independently of the MeerkatMachine that published them.
+    _execution_custody: Option<Arc<crate::store::RuntimeStoreExecutionClaim>>,
     #[cfg(not(target_arch = "wasm32"))]
     release_observers: Arc<Mutex<Vec<Weak<dyn AuthLeaseReleaseObserver>>>>,
 }
@@ -567,9 +570,26 @@ impl RuntimeAuthLeaseHandle {
     pub fn new() -> Self {
         Self {
             machines: Arc::new(Mutex::new(AuthLeaseRegistry::default())),
+            _execution_custody: None,
             #[cfg(not(target_arch = "wasm32"))]
             release_observers: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    pub(crate) fn with_execution_custody(
+        &self,
+        execution_custody: Option<Arc<crate::store::RuntimeStoreExecutionClaim>>,
+    ) -> Self {
+        Self {
+            machines: Arc::clone(&self.machines),
+            _execution_custody: execution_custody,
+            #[cfg(not(target_arch = "wasm32"))]
+            release_observers: Arc::clone(&self.release_observers),
+        }
+    }
+
+    pub(crate) fn shares_authority_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.machines, &other.machines)
     }
 
     #[cfg(not(target_arch = "wasm32"))]

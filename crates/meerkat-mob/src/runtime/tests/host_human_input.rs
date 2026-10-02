@@ -227,7 +227,11 @@ impl Fixture {
                 .expect("typed canonical seed")
                 .messages()
                 .len() as u64;
-            let adapter = fixture.service.runtime_adapter().expect("runtime owner");
+            let adapter = fixture
+                .service
+                .acquire_runtime_adapter(None)
+                .expect("acquire runtime authority")
+                .expect("runtime owner");
             adapter.set_live_context_mirror_host(fixture.context.clone());
             fixture.binding = Some(
                 adapter
@@ -505,7 +509,8 @@ impl Fixture {
         tokio::time::timeout(
             WAIT,
             self.service
-                .runtime_adapter()
+                .acquire_runtime_adapter(None)
+                .expect("acquire runtime authority")
                 .expect("runtime owner")
                 .drain_live_context_outbox(&self.session_id),
         )
@@ -530,7 +535,8 @@ impl Fixture {
         #[cfg(feature = "openai-live")]
         if let Some(binding) = self.binding.take() {
             self.service
-                .runtime_adapter()
+                .acquire_runtime_adapter(None)
+                .expect("acquire runtime authority")
                 .expect("runtime owner")
                 .__test_close_live_context_channel(&binding)
                 .await
@@ -1085,7 +1091,8 @@ async fn cancelled_queued_human_terminal_replay_cannot_become_success() {
             WAIT,
             fixture
                 .service
-                .runtime_adapter()
+                .acquire_runtime_adapter(None)
+                .expect("acquire runtime authority")
                 .expect("runtime cancellation owner")
                 .cancel_input_if_present(
                     &fixture.session_id,

@@ -63,7 +63,9 @@ async fn create_activation_mob(definition: MobDefinition) -> ActivationMob {
         Arc::new(InMemoryRuntimeStore::new());
     let blob_store: Arc<dyn meerkat_core::BlobStore> =
         Arc::new(meerkat_store::MemoryBlobStore::new());
-    let adapter = Arc::new(MeerkatMachine::persistent(runtime_store, blob_store));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(runtime_store, blob_store).expect("construct runtime authority"),
+    );
     let service = Arc::new(MockSessionService::new());
     service.set_runtime_adapter(Arc::clone(&adapter));
     let handle = MobBuilder::new(definition, MobStorage::in_memory())

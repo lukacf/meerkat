@@ -1481,7 +1481,7 @@ impl MeerkatMcpState {
                 // A16: the local MCP console is the owning operator
                 // (phase 5 explicit mint, DEC-P5E-8).
                 meerkat_mob::MobControlPrincipal::Owner,
-            )
+            )?
             .with_persistent_storage_root(Some(persistent_mob_root))
             .with_workgraph_service(Some(workgraph_service.clone()));
             if let Some(acceptor) = controlling_acceptor {
@@ -1674,7 +1674,8 @@ impl MeerkatMcpState {
             meerkat::surface::build_runtime_backed_service_with_default_reconfigure_host(
                 builder,
                 max_sessions,
-                PersistenceBundle::new(store, runtime_store, blob_store),
+                PersistenceBundle::new(store, runtime_store, blob_store)
+                    .expect("construct runtime authority"),
                 realm_paths.root.join("config_state.json"),
             );
 

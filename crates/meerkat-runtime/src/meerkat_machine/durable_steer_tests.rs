@@ -437,9 +437,10 @@ impl DurableSteerRig {
     }
 
     async fn persistent(store: Arc<dyn crate::store::RuntimeStore>) -> Self {
-        let rig = Self::with_adapter(Arc::new(MeerkatMachine::persistent_without_blobs(
-            Arc::clone(&store),
-        )))
+        let rig = Self::with_adapter(Arc::new(
+            MeerkatMachine::persistent_without_blobs(Arc::clone(&store))
+                .expect("persistent machine"),
+        ))
         .await;
         *rig.script.publication_store.lock().unwrap() =
             Some((store, MeerkatMachine::logical_runtime_id(&rig.session_id)));
@@ -1318,7 +1319,10 @@ async fn persistent_crash_after_the_join(append_record_lag: Duration) {
     std::mem::forget(crashed);
 
     let recovered = DurableSteerRig::with_adapter_for_session(
-        Arc::new(MeerkatMachine::persistent_without_blobs(Arc::clone(&store))),
+        Arc::new(
+            MeerkatMachine::persistent_without_blobs(Arc::clone(&store))
+                .expect("persistent machine"),
+        ),
         session_id,
     )
     .await;

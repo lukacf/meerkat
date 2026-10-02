@@ -12,42 +12,7 @@ use crate::input_state::{InputLifecycleState, InputState, StoredInputState};
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_state::RuntimeState;
 
-/// Why an unaccepted controller input cannot obtain current controller readiness.
-/// No variant is a permission verdict or a terminal result for existing work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum ControllerReadinessFailure {
-    #[error("current controller policy is unavailable")]
-    PolicyUnavailable,
-    /// No current executor support is available for governed input.
-    #[error("governed executor support is unavailable")]
-    ExecutorUnavailable,
-    /// The selected client cannot report its actual plain model route.
-    #[error("selected controller cannot provide plain model facts")]
-    FactsUnavailable,
-    #[error("controller credential custody is busy")]
-    Busy,
-    #[error("controller credential authority is unavailable")]
-    AuthorityUnavailable,
-    #[error("controller credential authority changed")]
-    AuthorityChanged,
-    #[error("controller credential custody is unsupported for this scope")]
-    UnsupportedScope,
-    #[error("controller credential is not currently usable")]
-    CredentialUnusable {
-        disposition: meerkat_core::handles::CredentialUseDisposition,
-    },
-    /// Provider-neutral failure from existing-credential preparation. Provider
-    /// diagnostics and secrets never cross this admission error boundary.
-    #[error("controller credential preparation failed: {kind:?}")]
-    CredentialPreparationFailed {
-        kind: meerkat_core::auth::AuthErrorKind,
-    },
-    #[error("controller policy observation must be refreshed")]
-    PolicyChanged,
-    #[error("replacement controller authority must be an empty owner")]
-    ReplacementNotEmpty,
-}
+pub use meerkat_core::authorization::ControllerReadinessFailure;
 
 /// Errors from RuntimeDriver operations.
 #[derive(Debug, Clone, thiserror::Error)]

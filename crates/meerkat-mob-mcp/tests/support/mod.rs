@@ -433,7 +433,8 @@ fn runtime_backed_service(
     let (service, runtime) = meerkat::surface::build_runtime_backed_service(
         builder,
         32,
-        meerkat::PersistenceBundle::new(store_dyn, runtime_store, blob_store),
+        meerkat::PersistenceBundle::new(store_dyn, runtime_store, blob_store)
+            .expect("construct runtime authority"),
     );
     (Arc::new(event_projection(service, &project_root)), runtime)
 }
@@ -528,6 +529,7 @@ impl CouncilFixture {
         let state_root = root.join("state");
         let state = if runtime == FixtureRuntime::Absent {
             MobMcpState::new_with_runtime_adapter(service.clone(), None, MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
         } else {
             Self::state_over(&service, runtime_adapter.as_ref())
         };
@@ -560,8 +562,10 @@ impl CouncilFixture {
                 service.clone(),
                 Some(Arc::clone(runtime)),
                 MobControlPrincipal::Owner,
-            ),
-            None => MobMcpState::new(service.clone(), MobControlPrincipal::Owner),
+            )
+            .expect("construct runtime authority"),
+            None => MobMcpState::new(service.clone(), MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
         }
     }
 

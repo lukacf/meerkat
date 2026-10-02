@@ -66,6 +66,8 @@ pub enum ErrorCode {
     /// Current native input readiness is unavailable. This is an operational
     /// condition, not a permission verdict or a terminal result for prior work.
     InputNotReady,
+    /// Runtime authority is unavailable before a session operation starts.
+    SessionRuntimeUnavailable,
 }
 
 impl ErrorCode {
@@ -95,6 +97,7 @@ impl ErrorCode {
             Self::MemberReloadRequired => -32029,
             Self::InputRefused => -32030,
             Self::InputNotReady => -32031,
+            Self::SessionRuntimeUnavailable => -32032,
         }
     }
 
@@ -124,6 +127,7 @@ impl ErrorCode {
             -32029 => Some(Self::MemberReloadRequired),
             -32030 => Some(Self::InputRefused),
             -32031 => Some(Self::InputNotReady),
+            -32032 => Some(Self::SessionRuntimeUnavailable),
             _ => None,
         }
     }
@@ -146,7 +150,7 @@ impl ErrorCode {
             Self::CapabilityUnavailable => 501,
             Self::SkillResolutionFailed => 422,
             Self::InvalidParams => 400,
-            Self::HostUnavailable | Self::InputNotReady => 503,
+            Self::HostUnavailable | Self::InputNotReady | Self::SessionRuntimeUnavailable => 503,
             Self::StaleCursor => 410,
         }
     }
@@ -177,6 +181,7 @@ impl ErrorCode {
             Self::MemberReloadRequired => 49,
             Self::InputRefused => 50,
             Self::InputNotReady => 51,
+            Self::SessionRuntimeUnavailable => 52,
         }
     }
 }
@@ -237,7 +242,9 @@ impl ErrorCode {
             // Hook is the existing 403 permission-denial class.
             Self::HookDenied | Self::ScopeDenied | Self::InputRefused => ErrorCategory::Hook,
             Self::AgentError => ErrorCategory::Agent,
-            Self::CapabilityUnavailable | Self::InputNotReady => ErrorCategory::Capability,
+            Self::CapabilityUnavailable | Self::InputNotReady | Self::SessionRuntimeUnavailable => {
+                ErrorCategory::Capability
+            }
             Self::SkillNotFound | Self::SkillResolutionFailed => ErrorCategory::Skill,
             Self::InvalidParams => ErrorCategory::Validation,
             Self::InternalError => ErrorCategory::Internal,
@@ -293,10 +300,24 @@ impl WireError {
     }
 }
 
+/// Audience-safe session details, including typed runtime readiness.
+pub fn session_error_details(error: &meerkat_core::SessionError) -> Option<serde_json::Value> {
+    match error {
+        meerkat_core::SessionError::RuntimeUnavailable { reason } => Some(serde_json::json!({
+            "code": error.code(),
+            "reason": crate::wire::WireControllerReadinessFailure::from(*reason),
+        })),
+        _ => error.structured_data(),
+    }
+}
+
 /// Convert from [`meerkat_core::SessionError`] to [`WireError`].
 impl From<meerkat_core::SessionError> for WireError {
     fn from(err: meerkat_core::SessionError) -> Self {
         let code = match &err {
+            meerkat_core::SessionError::RuntimeUnavailable { .. } => {
+                ErrorCode::SessionRuntimeUnavailable
+            }
             meerkat_core::SessionError::NotFound { .. } => ErrorCode::SessionNotFound,
             meerkat_core::SessionError::Busy { .. } => ErrorCode::SessionBusy,
             meerkat_core::SessionError::NotRunning { .. } => ErrorCode::SessionNotRunning,
@@ -322,7 +343,7 @@ impl From<meerkat_core::SessionError> for WireError {
             meerkat_core::SessionError::Store(_)
             | meerkat_core::SessionError::FailedWithData { .. } => ErrorCode::InternalError,
         };
-        let details = err.structured_data();
+        let details = session_error_details(&err);
         let wire = WireError::new(code, err.to_string());
         if let Some(details) = details {
             wire.with_details(details)
@@ -338,6 +359,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runtime_readiness_keeps_exact_safe_reason_and_distinct_code() {
+        let wire = WireError::from(meerkat_core::SessionError::RuntimeUnavailable {
+            reason: meerkat_core::authorization::ControllerReadinessFailure::AuthorityChanged,
+        });
+        assert_eq!(wire.code, ErrorCode::SessionRuntimeUnavailable);
+        assert_eq!(wire.code.jsonrpc_code(), -32032);
+        assert_eq!(ErrorCode::from_jsonrpc_code(-32032), Some(wire.code));
+        assert_eq!(wire.code.http_status(), 503);
+        assert_eq!(wire.code.cli_exit_code(), 52);
+        assert_eq!(
+            wire.details,
+            Some(serde_json::json!({
+                "code": "SESSION_RUNTIME_UNAVAILABLE",
+                "reason": { "kind": "authority_changed" },
+            }))
+        );
+    }
+
+    #[test]
     fn test_error_code_roundtrip() {
         let codes = [
             ErrorCode::SessionNotFound,
@@ -347,6 +387,7 @@ mod tests {
             ErrorCode::InternalError,
             ErrorCode::SkillNotFound,
             ErrorCode::RequestCancelled,
+            ErrorCode::SessionRuntimeUnavailable,
         ];
         for code in codes {
             let json = serde_json::to_string(&code).unwrap_or_default();

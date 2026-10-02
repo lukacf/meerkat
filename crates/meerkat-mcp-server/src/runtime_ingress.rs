@@ -2899,7 +2899,8 @@ mod tests {
             session_store,
             runtime_store,
             Arc::new(MemoryBlobStore::new()),
-        );
+        )
+        .expect("construct runtime authority");
 
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let mut builder = FactoryAgentBuilder::new(factory, Config::default());

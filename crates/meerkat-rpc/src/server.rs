@@ -856,6 +856,8 @@ struct AdmittedRpcResponse {
 /// Errors from the RPC server.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
+    #[error(transparent)]
+    RuntimeAuthority(#[from] meerkat_runtime::RuntimeDriverError),
     /// Transport-level error.
     #[error("Transport error: {0}")]
     Transport(#[from] TransportError),
@@ -916,7 +918,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         writer: W,
         runtime: Arc<SessionRuntime>,
         config_store: Arc<dyn ConfigStore>,
-    ) -> Self {
+    ) -> Result<Self, ServerError> {
         Self::new_with_skill_runtime(reader, writer, runtime, config_store, None)
     }
 
@@ -927,7 +929,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         runtime: Arc<SessionRuntime>,
         config_store: Arc<dyn ConfigStore>,
         skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
-    ) -> Self {
+    ) -> Result<Self, ServerError> {
         let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let notification_sink = NotificationSink::new(notification_tx);
         let (experimental_live_notification_tx, experimental_live_notification_rx) =
@@ -948,7 +950,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             crate::callback_dispatcher::CallbackRoute::new(callback_request_tx.clone());
         let callback_id_counter = callback_route.id_counter();
 
-        let router = MethodRouter::new(Arc::clone(&runtime), config_store, notification_sink)
+        let router = MethodRouter::new(Arc::clone(&runtime), config_store, notification_sink)?
             .with_skill_runtime(skill_runtime)
             .with_callback_route(callback_route);
         #[cfg(feature = "openai-live")]
@@ -957,7 +959,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                 tx: experimental_live_notification_tx,
             },
         ));
-        Self {
+        Ok(Self {
             transport,
             router,
             notification_rx,
@@ -976,7 +978,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             rpc_frame_read_admission: JsonlFrameAdmission::production(),
             callback_response_admission: RpcCallbackResponseAdmission::production(),
             skip_shutdown_on_eof: false,
-        }
+        })
     }
 
     #[cfg(feature = "local-authorization")]
@@ -1722,7 +1724,7 @@ pub async fn serve_stdio_with_options(
     let stdout = BlockingWriter::stdout();
     let reader = BufReader::new(stdin);
     let mut server =
-        RpcServer::new_with_skill_runtime(reader, stdout, runtime, config_store, skill_runtime);
+        RpcServer::new_with_skill_runtime(reader, stdout, runtime, config_store, skill_runtime)?;
     if let Some(live) = live {
         if let Some(ws) = live.ws {
             server = server.with_live_ws(ws.state, ws.base_url);
@@ -1797,8 +1799,13 @@ async fn serve_tcp_connection_with_options_and_admission(
 ) -> Result<(), ServerError> {
     let (read_half, write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
-    let mut server =
-        RpcServer::new_with_skill_runtime(reader, write_half, runtime, config_store, skill_runtime);
+    let mut server = RpcServer::new_with_skill_runtime(
+        reader,
+        write_half,
+        runtime,
+        config_store,
+        skill_runtime,
+    )?;
     if let Some(admission) = admission {
         server = server.with_rpc_request_admission(admission);
     }
@@ -2520,7 +2527,8 @@ mod tests {
             release: Arc::clone(&release),
         };
         let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
-        let mut server = RpcServer::new(reader, writer, runtime, config_store);
+        let mut server = RpcServer::new(reader, writer, runtime, config_store)
+            .expect("construct runtime authority");
         let request = test_answer_request(41);
         let permit = server
             .rpc_request_admission
@@ -2560,7 +2568,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("test tempdir");
         let (runtime, config_store) = build_test_runtime(&temp);
         let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
-        let mut server = RpcServer::new(reader, FailingWriter, runtime, config_store);
+        let mut server = RpcServer::new(reader, FailingWriter, runtime, config_store)
+            .expect("construct runtime authority");
         let request = test_answer_request(42);
         let permit = server
             .rpc_request_admission
@@ -2587,7 +2596,8 @@ mod tests {
         let (runtime, config_store) = build_test_runtime(&temp);
         let output = Arc::new(std::sync::Mutex::new(Vec::new()));
         let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
-        let mut server = RpcServer::new(reader, SharedBufferWriter(output), runtime, config_store);
+        let mut server = RpcServer::new(reader, SharedBufferWriter(output), runtime, config_store)
+            .expect("construct runtime authority");
         let request = test_answer_request(43);
         let permit = server
             .rpc_request_admission
@@ -2622,7 +2632,8 @@ mod tests {
             release: Arc::clone(&release),
         };
         let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
-        let mut server = RpcServer::new(reader, writer, runtime, config_store);
+        let mut server = RpcServer::new(reader, writer, runtime, config_store)
+            .expect("construct runtime authority");
         server.rpc_request_admission = RpcRequestAdmission::new(
             RPC_PROCESS_REQUEST_MEMORY_BUDGET_BYTES,
             RPC_PROCESS_MAX_INFLIGHT_REQUESTS,
@@ -2666,7 +2677,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("test tempdir");
         let (runtime, config_store) = build_test_runtime(&temp);
         let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
-        let mut server = RpcServer::new(reader, FailingWriter, runtime, config_store);
+        let mut server = RpcServer::new(reader, FailingWriter, runtime, config_store)
+            .expect("construct runtime authority");
         server.rpc_request_admission = RpcRequestAdmission::new(
             RPC_PROCESS_REQUEST_MEMORY_BUDGET_BYTES,
             RPC_PROCESS_MAX_INFLIGHT_REQUESTS,
@@ -2697,7 +2709,8 @@ mod tests {
         let (runtime, config_store) = build_test_runtime(&temp);
         let output = Arc::new(std::sync::Mutex::new(Vec::new()));
         let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
-        let mut server = RpcServer::new(reader, SharedBufferWriter(output), runtime, config_store);
+        let mut server = RpcServer::new(reader, SharedBufferWriter(output), runtime, config_store)
+            .expect("construct runtime authority");
         server.rpc_request_admission = RpcRequestAdmission::new(
             RPC_PROCESS_REQUEST_MEMORY_BUDGET_BYTES,
             RPC_PROCESS_MAX_INFLIGHT_REQUESTS,
@@ -2736,7 +2749,8 @@ mod tests {
             release: Arc::clone(&release),
         };
         let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
-        let mut server = RpcServer::new(reader, writer, runtime, config_store);
+        let mut server = RpcServer::new(reader, writer, runtime, config_store)
+            .expect("construct runtime authority");
         let binding = test_experimental_live_binding("output-write", 3, 7);
         let (admitted, mut settled_rx) = test_experimental_live_notification(binding);
 
@@ -2785,7 +2799,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("test tempdir");
         let (runtime, config_store) = build_test_runtime(&temp);
         let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
-        let mut server = RpcServer::new(reader, FailingWriter, runtime, config_store);
+        let mut server = RpcServer::new(reader, FailingWriter, runtime, config_store)
+            .expect("construct runtime authority");
         let binding = test_experimental_live_binding("output-write-failure", 5, 11);
         let (admitted, settled_rx) = test_experimental_live_notification(binding);
 
@@ -2808,7 +2823,8 @@ mod tests {
         let (runtime, config_store) = build_test_runtime(&temp);
         let output = Arc::new(std::sync::Mutex::new(Vec::new()));
         let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
-        let mut server = RpcServer::new(reader, SharedBufferWriter(output), runtime, config_store);
+        let mut server = RpcServer::new(reader, SharedBufferWriter(output), runtime, config_store)
+            .expect("construct runtime authority");
         let binding = test_experimental_live_binding("output-queued-shutdown", 7, 13);
         let (admitted, settled_rx) = test_experimental_live_notification(binding);
         let (queued_tx, queued_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
@@ -2839,7 +2855,8 @@ mod tests {
             SharedBufferWriter(Arc::clone(&output)),
             runtime,
             config_store,
-        );
+        )
+        .expect("construct runtime authority");
         let binding = test_experimental_live_binding("stale-output", 17, 19);
         let (admitted, settled_rx) = test_experimental_live_notification(binding);
 
@@ -2907,6 +2924,7 @@ mod tests {
                         Arc::clone(&runtime),
                         Arc::clone(&config_store),
                     )
+                    .expect("construct runtime authority")
                     .with_rpc_request_admission(shared_admission.clone()),
                 );
                 server_one.skip_shutdown_on_eof = true;
@@ -2921,6 +2939,7 @@ mod tests {
                         runtime,
                         config_store,
                     )
+                    .expect("construct runtime authority")
                     .with_rpc_request_admission(shared_admission.clone()),
                 );
                 server_two.skip_shutdown_on_eof = true;
@@ -3027,6 +3046,7 @@ mod tests {
                         Arc::clone(&runtime),
                         Arc::clone(&config_store),
                     )
+                    .expect("construct runtime authority")
                     .with_rpc_frame_read_admission(frame_admission.clone()),
                 );
                 idle_server.skip_shutdown_on_eof = true;
@@ -3047,6 +3067,7 @@ mod tests {
                         runtime,
                         config_store,
                     )
+                    .expect("construct runtime authority")
                     .with_rpc_frame_read_admission(frame_admission.clone()),
                 );
                 active_server.skip_shutdown_on_eof = true;
@@ -3089,12 +3110,15 @@ mod tests {
                 let (runtime, config_store) = build_test_runtime(&temp);
                 let (mut client, server_stream) = tokio::io::duplex(256 * 1024);
                 let output = Arc::new(std::sync::Mutex::new(Vec::new()));
-                let mut server = Box::new(RpcServer::new(
-                    TokioBufReader::new(server_stream),
-                    SharedBufferWriter(Arc::clone(&output)),
-                    runtime,
-                    config_store,
-                ));
+                let mut server = Box::new(
+                    RpcServer::new(
+                        TokioBufReader::new(server_stream),
+                        SharedBufferWriter(Arc::clone(&output)),
+                        runtime,
+                        config_store,
+                    )
+                    .expect("construct runtime authority"),
+                );
                 server.skip_shutdown_on_eof = true;
 
                 let request = RpcRequest {
@@ -3166,6 +3190,7 @@ mod tests {
                         runtime,
                         config_store,
                     )
+                    .expect("construct runtime authority")
                     .with_rpc_request_admission(admission.clone()),
                 );
                 server.skip_shutdown_on_eof = true;
@@ -3265,6 +3290,7 @@ mod tests {
                 runtime,
                 config_store,
             )
+            .expect("construct runtime authority")
             .with_rpc_request_admission(admission.clone()),
         );
         server.skip_shutdown_on_eof = true;
@@ -3374,6 +3400,7 @@ mod tests {
                 runtime,
                 config_store,
             )
+            .expect("construct runtime authority")
             .with_callback_response_admission(admission.clone()),
         );
         server.skip_shutdown_on_eof = true;
@@ -3425,6 +3452,7 @@ mod tests {
                 runtime,
                 config_store,
             )
+            .expect("construct runtime authority")
             .with_callback_response_admission(admission.clone()),
         );
         server.skip_shutdown_on_eof = true;
@@ -3468,7 +3496,8 @@ mod tests {
         let output = Arc::new(std::sync::Mutex::new(Vec::new()));
         let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
         let writer = SharedBufferWriter(Arc::clone(&output));
-        let mut server = RpcServer::new(reader, writer, runtime, config_store);
+        let mut server = RpcServer::new(reader, writer, runtime, config_store)
+            .expect("construct runtime authority");
         let request_id = RpcId::Num(42);
         let request_key = request_key(&request_id);
         let _ctx = server.request_executor.begin_request_with_semantics(
@@ -3616,7 +3645,8 @@ mod tests {
                 store,
                 Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
                 memory_blob_store(),
-            ),
+            )
+            .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         );
         let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(

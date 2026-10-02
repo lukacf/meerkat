@@ -134,7 +134,7 @@ impl From<meerkat_core::handles::CredentialUseDisposition> for WireCredentialUse
     }
 }
 
-/// Audience-safe native readiness causes. These describe unaccepted input;
+/// Audience-safe native readiness causes. These describe unavailable input or session operations;
 /// they neither grant permission nor prescribe a blind retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -158,6 +158,34 @@ pub enum WireControllerReadinessFailure {
     ReplacementNotEmpty {},
     /// A future native readiness cause without an available public projection.
     Unknown {},
+}
+
+impl From<meerkat_core::authorization::ControllerReadinessFailure>
+    for WireControllerReadinessFailure
+{
+    fn from(reason: meerkat_core::authorization::ControllerReadinessFailure) -> Self {
+        use meerkat_core::authorization::ControllerReadinessFailure;
+        match reason {
+            ControllerReadinessFailure::PolicyUnavailable => Self::PolicyUnavailable {},
+            ControllerReadinessFailure::ExecutorUnavailable => Self::ExecutorUnavailable {},
+            ControllerReadinessFailure::FactsUnavailable => Self::FactsUnavailable {},
+            ControllerReadinessFailure::Busy => Self::Busy {},
+            ControllerReadinessFailure::AuthorityUnavailable => Self::AuthorityUnavailable {},
+            ControllerReadinessFailure::AuthorityChanged => Self::AuthorityChanged {},
+            ControllerReadinessFailure::UnsupportedScope => Self::UnsupportedScope {},
+            ControllerReadinessFailure::CredentialUnusable { disposition } => {
+                Self::CredentialUnusable {
+                    disposition: disposition.into(),
+                }
+            }
+            ControllerReadinessFailure::CredentialPreparationFailed { kind } => {
+                Self::CredentialPreparationFailed { cause: kind }
+            }
+            ControllerReadinessFailure::PolicyChanged => Self::PolicyChanged {},
+            ControllerReadinessFailure::ReplacementNotEmpty => Self::ReplacementNotEmpty {},
+            _ => Self::Unknown {},
+        }
+    }
 }
 
 /// Closed input-refusal projection. Stale preparation is represented by

@@ -57,6 +57,13 @@ pub enum DeferredPromptPolicy {
 /// Errors returned by `SessionService` methods.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
+    /// Runtime authority could not be acquired before the operation started.
+    /// Existing admitted work remains intact; this is not a permission verdict.
+    #[error("runtime authority unavailable: {reason}")]
+    RuntimeUnavailable {
+        reason: crate::authorization::ControllerReadinessFailure,
+    },
+
     /// The requested session does not exist.
     #[error("session not found: {id}")]
     NotFound { id: SessionId },
@@ -393,6 +400,7 @@ impl SessionError {
     /// Return a stable error code string for wire formats.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::RuntimeUnavailable { .. } => "SESSION_RUNTIME_UNAVAILABLE",
             Self::NotFound { .. } => "SESSION_NOT_FOUND",
             Self::Busy { .. } => "SESSION_BUSY",
             Self::PersistenceDisabled => "SESSION_PERSISTENCE_DISABLED",

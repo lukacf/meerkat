@@ -294,7 +294,8 @@ async fn make_stack(
         store,
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         blob_store,
-    );
+    )
+    .expect("construct runtime authority");
     let runtime = SessionRuntime::new(
         factory,
         config.clone(),
@@ -315,6 +316,7 @@ async fn make_stack(
             Some(runtime.runtime_adapter()),
             meerkat_mob::MobControlPrincipal::Owner,
         )
+        .expect("construct runtime authority")
         .with_default_llm_client(Some(client)),
     );
     let runtime = Arc::new(runtime);

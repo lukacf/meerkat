@@ -11087,7 +11087,8 @@ mod tests {
                 Arc::clone(&sqlite_store) as Arc<dyn SessionStore>,
                 Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
                 Arc::clone(&blob_store) as Arc<dyn BlobStore>,
-            );
+            )
+            .expect("construct runtime authority");
             let (service, adapter) =
                 crate::surface::build_runtime_backed_service(builder, 4, persistence);
             let service = Arc::new(service);
@@ -11261,7 +11262,8 @@ mod tests {
             Arc::clone(&sqlite_store) as Arc<dyn SessionStore>,
             Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
             Arc::clone(&blob_store) as Arc<dyn BlobStore>,
-        );
+        )
+        .expect("construct runtime authority");
         let (restart_service, restart_adapter) =
             crate::surface::build_runtime_backed_service(restart_builder, 4, restart_persistence);
         let restart_service = Arc::new(restart_service);
@@ -11438,7 +11440,8 @@ mod tests {
             Arc::clone(&sqlite_store) as Arc<dyn SessionStore>,
             Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
             Arc::clone(&blob_store) as Arc<dyn BlobStore>,
-        );
+        )
+        .expect("construct runtime authority");
         let (service, adapter) =
             crate::surface::build_runtime_backed_service(builder, 4, persistence);
         let service = Arc::new(service);

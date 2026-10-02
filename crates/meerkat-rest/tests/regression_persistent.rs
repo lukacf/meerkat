@@ -119,7 +119,8 @@ fn build_state(
         Arc::new(meerkat_store::MemoryBlobStore::new()),
         Arc::new(meerkat::MemoryScheduleStore::default()),
         Arc::new(meerkat::MemoryWorkGraphStore::new()),
-    );
+    )
+    .expect("construct runtime authority");
     let runtime_adapter = persistence.runtime_adapter();
     let workgraph_store = persistence.workgraph_store();
     let workgraph_service = meerkat::WorkGraphService::with_scope(
@@ -151,7 +152,8 @@ fn build_state(
         Some(runtime_adapter.clone()),
         None,
         meerkat_mob::MobControlPrincipal::Owner,
-    );
+    )
+    .expect("wire runtime authority");
 
     let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
         config.clone(),

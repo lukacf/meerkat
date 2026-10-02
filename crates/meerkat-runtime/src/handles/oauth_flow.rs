@@ -336,6 +336,17 @@ impl RuntimeOAuthFlowHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(store));
     }
 
+    pub(crate) fn with_scoped_lifecycle(&self, lifecycle: Arc<RuntimeAuthLeaseHandle>) -> Self {
+        debug_assert!(self.lifecycle.shares_authority_with(&lifecycle));
+        Self {
+            registry: Arc::clone(&self.registry),
+            lifecycle,
+            store: Arc::clone(&self.store),
+            payload_lock: Arc::clone(&self.payload_lock),
+            _release_observer: self._release_observer.clone(),
+        }
+    }
+
     fn apply(
         &self,
         target: &AuthCredentialIdentity,

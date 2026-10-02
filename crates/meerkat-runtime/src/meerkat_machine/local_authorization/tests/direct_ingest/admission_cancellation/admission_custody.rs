@@ -183,17 +183,16 @@ async fn configurable_fixture(
     LocalAuthorizationPublication,
 ) {
     let (configuration, template, account, publication) = mutable_controller_configuration(true);
-    let machine = match store {
-        Some(store) => MeerkatMachine::persistent(
-            Arc::new(store.clone()),
-            Arc::new(meerkat_store::MemoryBlobStore::new()),
-        ),
-        None => MeerkatMachine::ephemeral(),
-    };
     let machine = Arc::new(
-        machine
-            .with_local_grant_authorization(configuration)
-            .unwrap(),
+        match store {
+            Some(store) => MeerkatMachine::persistent_with_local_grant_authorization(
+                Arc::new(store.clone()),
+                Some(Arc::new(meerkat_store::MemoryBlobStore::new())),
+                configuration,
+            ),
+            None => MeerkatMachine::ephemeral().with_local_grant_authorization(configuration),
+        }
+        .unwrap(),
     );
     let session = AttachedSession::attach(&machine).await;
     let selection = selected(

@@ -801,11 +801,21 @@ async fn fixture(server: &Server) -> Fixture {
     )
     .unwrap();
     let store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
-    let bundle = meerkat::PersistenceBundle::new(
+    let bundle = meerkat::PersistenceBundle::new_with_local_grant_authorization(
         Arc::new(meerkat::MemoryStore::new()),
         store.clone(),
         Arc::new(meerkat::MemoryBlobStore::new()),
-    );
+        NativeGrantWorkConfiguration {
+            grants,
+            ingress,
+            invocation_owner: Arc::new(InvocationOwner),
+            operation_owner: Arc::new(HttpRecordOwner {
+                selected: selected.clone(),
+                endpoint: format!("{}/v1/messages", server.base_url),
+            }),
+        },
+    )
+    .expect("construct governed persistence before credential publication");
     meerkat_auth_core::save_tokens_and_publish_lifecycle(
         meerkat_core::auth::ProviderAuthPersistence::new(
             Arc::new(meerkat_auth_core::EphemeralTokenStore::new()),
@@ -883,15 +893,6 @@ async fn fixture(server: &Server) -> Fixture {
             client,
             connection,
             tools,
-            authorization: NativeGrantWorkConfiguration {
-                grants,
-                ingress,
-                invocation_owner: Arc::new(InvocationOwner),
-                operation_owner: Arc::new(HttpRecordOwner {
-                    selected,
-                    endpoint: format!("{}/v1/messages", server.base_url),
-                }),
-            },
         },
         store,
         permissions,
@@ -1023,9 +1024,14 @@ async fn governed_jsonl_refusal_retains_actor_seed_and_context_then_same_run_rea
         permissions,
         produced,
     } = fixture(&http).await;
+    let exported_adapter = setup.persistence.runtime_adapter();
     let (client_io, server_io) = tokio::io::duplex(1 << 20);
     let (reader, writer) = tokio::io::split(server_io);
     let (mut server, runtime) = construct(BufReader::new(reader), writer, setup).unwrap();
+    assert!(
+        exported_adapter.shares_runtime_execution_owner_with(&runtime.runtime_adapter()),
+        "the governed connection reuses its already exported execution owner"
+    );
     let commissioned_tools = server.registered_tools();
     let callback_sender = server.callback_request_tx();
     let callback_id_counter = server.callback_id_counter();
@@ -1401,17 +1407,31 @@ async fn governed_jsonl_refusal_retains_actor_seed_and_context_then_same_run_rea
             .catch_unwind()
             .await;
     let cleanup_failures = cleanup_jsonl(reader, &mut writer, server_task, &mut http).await;
+    drop(exported_adapter);
     finish_scenario(result, cleanup_failures);
 }
 
 #[cfg(not(feature = "mcp"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn governed_jsonl_rejects_shared_bundle_and_unsupported_wire_before_setup() {
+async fn governed_jsonl_rejects_ungoverned_bundle_and_unsupported_wire_before_setup() {
     let mut http = Server::start().await;
-    let Fixture { setup, store, .. } = fixture(&http).await;
-    let alias = setup.persistence.runtime_adapter();
+    let Fixture { mut setup, .. } = fixture(&http).await;
+    let store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+    setup.persistence = meerkat::PersistenceBundle::new(
+        Arc::new(meerkat::MemoryStore::new()),
+        store.clone(),
+        Arc::new(meerkat::MemoryBlobStore::new()),
+    )
+    .expect("construct an ordinary ungoverned persistence owner");
     let (read, write) = tokio::io::duplex(1024);
-    assert!(construct(BufReader::new(read), write, setup).is_err());
+    assert!(matches!(
+        construct(BufReader::new(read), write, setup),
+        Err(GovernedJsonlError::Runtime(
+            RuntimeDriverError::ControllerReadinessUnavailable {
+                reason: meerkat_runtime::traits::ControllerReadinessFailure::UnsupportedScope,
+            }
+        ))
+    ));
     assert!(http.receiver.bodies.lock().unwrap().is_empty());
     assert!(
         store
@@ -1420,7 +1440,6 @@ async fn governed_jsonl_rejects_shared_bundle_and_unsupported_wire_before_setup(
             .unwrap()
             .is_empty()
     );
-    drop(alias);
     drop(store);
 
     let Fixture {

@@ -57,7 +57,7 @@ impl ManagedRpcHost {
             runtime.session_service(),
             Some(runtime.runtime_adapter()),
             meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        )?);
         runtime.set_mob_tools(Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
             mobs.clone(),
         )));

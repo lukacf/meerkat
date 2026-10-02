@@ -384,6 +384,15 @@ mod native {
             replacement: &Arc<crate::handles::RuntimeAuthLeaseHandle>,
             publish: impl FnOnce(),
         ) -> Result<(), RuntimeDriverError> {
+            if self.store.is_some() {
+                // Installing an unscoped clone would leave prior aliases able
+                // to mutate the cached owner after execution custody expires.
+                return if self.is_installed_credential_owner(replacement) {
+                    Ok(())
+                } else {
+                    Err(unavailable(ControllerReadinessFailure::UnsupportedScope))
+                };
+            }
             let Some(observer) = self.credential_release_observer.get() else {
                 publish();
                 return Ok(());

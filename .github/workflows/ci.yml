@@ -730,7 +730,7 @@ jobs:
           evidence.mkdir()
           expected = sorted([
               "governed_jsonl::tests::governed_jsonl_refusal_retains_actor_seed_and_context_then_same_run_read_finishes",
-              "governed_jsonl::tests::governed_jsonl_rejects_shared_bundle_and_unsupported_wire_before_setup",
+              "governed_jsonl::tests::governed_jsonl_rejects_ungoverned_bundle_and_unsupported_wire_before_setup",
           ])
           command = [
               "./scripts/repo-cargo", "test", "--locked", "-p", "meerkat-rpc", "--lib",

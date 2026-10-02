@@ -9083,6 +9083,11 @@
             "const": "INPUT_NOT_READY",
             "description": "Current native input readiness is unavailable. This is an operational\ncondition, not a permission verdict or a terminal result for prior work.",
             "type": "string"
+          },
+          {
+            "const": "SESSION_RUNTIME_UNAVAILABLE",
+            "description": "Runtime authority is unavailable before a session operation starts.",
+            "type": "string"
           }
         ]
       },

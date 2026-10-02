@@ -179,6 +179,7 @@ auto_compact_threshold = 100000
 recent_turn_budget = 4
 max_summary_tokens = 4096
 min_turns_between_compactions = 3
+history_retained_rewrites = 4
 ```
 
 When `session-compaction` is enabled, `AgentFactory` maps these values into
@@ -195,6 +196,18 @@ useful for a self-hosted gateway whose limit is not in the catalog.
 Compaction is checked against both token and serialized-request pressure.
 Inline media can exhaust a provider byte limit long before the token estimate
 reaches its threshold.
+
+`history_retained_rewrites` bounds the transcript history a session document
+keeps. Each compaction is a recorded transcript rewrite, and the session's
+rewrite graph holds the history needed to reconstruct earlier revisions.
+After each compaction, only the most recent `history_retained_rewrites`
+rewrites keep that history. Older rewrites keep their commit records and
+digests, and their message bodies are dropped. Without the bound, a session
+document kept every message it ever produced, however often it compacted. A
+fork, rewind, restore or revision read that targets a revision older than the
+window fails with a typed error naming the oldest retained revision. A
+head-canonical store such as SQLite still keeps the full history out of line,
+so revision reads there can still serve older revisions from the store.
 
 ## Retry and stream watchdog settings
 

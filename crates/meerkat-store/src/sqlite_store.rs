@@ -4625,6 +4625,17 @@ fn validated_graph_edge_bytes_for_session(
         }
         return Ok(Vec::new());
     };
+    // Head-canonical edge rows start at generation 1; a re-anchored graph
+    // retired those edges and cannot be converted.
+    if history.state().retired_count() != 0 {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: session.id().clone(),
+            reason: format!(
+                "transcript graph retired its first {} rewrite occurrence(s); head-canonical conversion needs the whole graph",
+                history.state().retired_count()
+            ),
+        });
+    }
     let mut prefix = TranscriptRewritePrefixAccumulator::empty();
     let mut edges = Vec::with_capacity(actual_count);
     for (index, edge) in history.state().edges().iter().enumerate() {
@@ -10624,6 +10635,193 @@ mod tests {
         .unwrap()
     }
 
+    /// Transcript-history retention re-anchors the live Session's graph after
+    /// each compaction. HeadCanonical persistence must keep committing the
+    /// pending occurrence from the re-anchored graph, and a cold load replays
+    /// the store's whole graph with the same rolling identity.
+    #[tokio::test]
+    async fn head_canonical_persistence_survives_in_memory_history_retirement() {
+        let (_dir, store) = temp_store();
+        let incremental = incremental(&store);
+        let mut session = Session::new();
+        for turn in 0..4 {
+            session.push(user(&format!("seed {turn}")));
+        }
+        let root = PreparedHeadCanonicalMutation::prepare_root(&session).expect("prepare root");
+        incremental
+            .apply_prepared_head_canonical_mutation(&root)
+            .await
+            .expect("persist root");
+        root.acknowledge_session(&mut session, root.successor_head_token())
+            .expect("acknowledge root");
+        let runtime_head = root.successor_head().clone();
+        let mut observed_head = runtime_head.clone();
+        let retention = meerkat_core::TranscriptHistoryRetention::from_count(2).expect("retention");
+        for cycle in 0..10 {
+            for turn in 0..8 {
+                session.push(user(&format!("cycle {cycle} turn {turn}")));
+            }
+            let end = session.messages().len();
+            session
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 0, end },
+                    vec![user(&format!("summary {cycle}"))],
+                    TranscriptRewriteReason::new("compaction"),
+                    Some("unit-test".to_string()),
+                    None,
+                )
+                .expect("commit rewrite");
+            session
+                .retire_transcript_history(retention)
+                .expect("retire history");
+            let rewrite = PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+                &session,
+                &runtime_head,
+                observed_head.clone(),
+            )
+            .expect("prepare rewrite from a re-anchored graph");
+            assert_eq!(
+                rewrite.steps().len(),
+                1,
+                "cycle {cycle} persists one occurrence"
+            );
+            assert_eq!(
+                incremental
+                    .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+                    .await
+                    .expect("persist rewrite"),
+                rewrite.successor_head_token()
+            );
+            rewrite
+                .acknowledge_physical_projection(&mut session, rewrite.successor_head_token())
+                .expect("acknowledge rewrite");
+            observed_head = rewrite.successor_head().clone();
+        }
+        let live = session
+            .transcript_history_state()
+            .expect("live graph")
+            .expect("live graph present");
+        assert_eq!(live.retired_count(), 8);
+        let loaded = store
+            .load(session.id())
+            .await
+            .expect("cold load")
+            .expect("session present");
+        assert_eq!(loaded.messages(), session.messages());
+        let replayed = loaded
+            .transcript_history_state()
+            .expect("replayed graph")
+            .expect("replayed graph present");
+        assert_eq!(replayed.commit_count(), 10);
+        assert_eq!(
+            replayed.retired_count(),
+            0,
+            "the store keeps the whole graph"
+        );
+        assert_eq!(replayed.graph_prefix(), live.graph_prefix());
+        assert_eq!(replayed.rewrite_prefix(), live.rewrite_prefix());
+    }
+
+    /// Bytes an ordinary HeadCanonical turn hands the store: appended rows,
+    /// the changed metadata cells and the compact successor head. The
+    /// transcript-history graph is never among them, however large it grows:
+    /// it leaves the session only as per-occurrence edges at rewrite commits.
+    fn ordinary_turn_carried_bytes(mutation: &PreparedHeadCanonicalMutation) -> usize {
+        let rows: usize = mutation.serialized_suffix().iter().map(Vec::len).sum();
+        let cells: usize = mutation
+            .metadata_projection()
+            .mutations()
+            .iter()
+            .filter_map(|mutation| mutation.successor())
+            .map(|cell| cell.canonical_json().len())
+            .sum();
+        let head = serde_json::to_vec(mutation.successor_head())
+            .expect("encode head")
+            .len();
+        rows + cells + head
+    }
+
+    #[tokio::test]
+    async fn ordinary_head_canonical_turn_bytes_stay_o_delta_while_history_grows() {
+        let (_dir, store) = temp_store();
+        let incremental = incremental(&store);
+        let mut session = Session::new();
+        session.push(user("seed"));
+        let root = PreparedHeadCanonicalMutation::prepare_root(&session).expect("prepare root");
+        incremental
+            .apply_prepared_head_canonical_mutation(&root)
+            .await
+            .expect("persist root");
+        root.acknowledge_session(&mut session, root.successor_head_token())
+            .expect("acknowledge root");
+        // Every turn commits its own boundary, so the committed runtime head
+        // and the observed physical head advance together.
+        let mut observed_head = root.successor_head().clone();
+        let filler = "history ".repeat(256);
+        let mut per_turn = Vec::new();
+        for cycle in 0..24 {
+            // Ordinary turns between compactions: each must carry only its
+            // own rows, whatever the accumulated (un-retired) graph holds.
+            for turn in 0..3 {
+                session.push(user(&format!("cycle {cycle} turn {turn} {filler}")));
+                let mutation = PreparedHeadCanonicalMutation::prepare_intra_turn(
+                    &session,
+                    &observed_head,
+                    observed_head.clone(),
+                )
+                .expect("prepare ordinary turn");
+                per_turn.push(ordinary_turn_carried_bytes(&mutation));
+                incremental
+                    .apply_prepared_head_canonical_mutation(&mutation)
+                    .await
+                    .expect("persist ordinary turn");
+                mutation
+                    .acknowledge_session(&mut session, mutation.successor_head_token())
+                    .expect("acknowledge ordinary turn");
+                observed_head = mutation.successor_head().clone();
+            }
+            let end = session.messages().len();
+            session
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 0, end },
+                    vec![user(&format!("summary {cycle}"))],
+                    TranscriptRewriteReason::new("compaction"),
+                    Some("unit-test".to_string()),
+                    None,
+                )
+                .expect("commit rewrite");
+            let rewrite = PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+                &session,
+                &observed_head,
+                observed_head.clone(),
+            )
+            .expect("prepare rewrite");
+            incremental
+                .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+                .await
+                .expect("persist rewrite");
+            rewrite
+                .acknowledge_physical_projection(&mut session, rewrite.successor_head_token())
+                .expect("acknowledge rewrite");
+            observed_head = rewrite.successor_head().clone();
+        }
+        let whole_document = session.to_persisted_bytes().expect("encode").len();
+        let first = per_turn[0];
+        let last = *per_turn.last().expect("turns ran");
+        let max = per_turn.iter().copied().max().expect("turns ran");
+        eprintln!(
+            "ordinary HeadCanonical turn bytes: first {first}, max {max}, last {last}; whole document {whole_document}"
+        );
+        assert!(
+            max <= first + 4096,
+            "ordinary-turn bytes must not grow with history: first {first}, max {max}"
+        );
+        assert!(
+            last * 50 < whole_document,
+            "an ordinary turn ({last} bytes) must be a sliver of the whole document ({whole_document} bytes) a blob store would write"
+        );
+    }
+
     #[tokio::test]
     async fn prepared_rewrite_persists_only_delta_rows_and_supports_linked_tail_append() {
         let (_dir, store) = temp_store();
@@ -13500,7 +13698,7 @@ mod tests {
         );
         assert_eq!(state.head(), second_commit.revision);
         assert_eq!(
-            state.commits().last(),
+            state.commits().next_back(),
             Some(&second_commit),
             "audited graph must end at the exact latest rewrite occurrence"
         );

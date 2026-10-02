@@ -226,6 +226,10 @@ fn bound_summarization_projection(messages: Vec<Message>, budget: usize) -> Vec<
 }
 
 impl Compactor for DefaultCompactor {
+    fn transcript_history_retention(&self) -> meerkat_core::TranscriptHistoryRetention {
+        self.config.transcript_history_retention()
+    }
+
     fn request_byte_cap(&self, pressure: meerkat_core::ProviderRequestPressure) -> Option<u64> {
         pressure.effective_cap(self.config.max_request_bytes)
     }
@@ -509,6 +513,7 @@ mod tests {
             recent_turn_budget: 2,
             max_summary_tokens: 4096,
             min_turns_between_compactions: 3,
+            history_retained_rewrites: 4,
         }
     }
 

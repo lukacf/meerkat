@@ -293,6 +293,19 @@ pub struct CompactionConfig {
     /// current history or exact provider request has already crossed a live
     /// capacity threshold; cadence cannot veto recovery.
     pub min_turns_between_compactions: u32,
+    /// Recent transcript rewrites whose bodies the session graph keeps after
+    /// a compaction; older ones are retired. Zero is treated as one: the
+    /// newest rewrite is always retained.
+    pub history_retained_rewrites: usize,
+}
+
+impl CompactionConfig {
+    /// The typed retention bound for [`Self::history_retained_rewrites`].
+    #[must_use]
+    pub fn transcript_history_retention(&self) -> crate::TranscriptHistoryRetention {
+        crate::TranscriptHistoryRetention::from_count(self.history_retained_rewrites.max(1))
+            .unwrap_or_default()
+    }
 }
 
 impl CompactionConfig {
@@ -316,6 +329,7 @@ impl Default for CompactionConfig {
             recent_turn_budget: 4,
             max_summary_tokens: 4096,
             min_turns_between_compactions: 3,
+            history_retained_rewrites: crate::TranscriptHistoryRetention::DEFAULT_RETAINED_REWRITES,
         }
     }
 }
@@ -334,6 +348,14 @@ pub trait Compactor: Send + Sync {
     /// use the same authority.
     fn request_byte_cap(&self, pressure: ProviderRequestPressure) -> Option<u64> {
         pressure.max_bytes
+    }
+
+    /// How many recent transcript rewrites keep their bodies in the session
+    /// graph after a compaction commits; older ones are retired (commits and
+    /// digests kept). Defaults to
+    /// [`crate::TranscriptHistoryRetention::DEFAULT_RETAINED_REWRITES`].
+    fn transcript_history_retention(&self) -> crate::TranscriptHistoryRetention {
+        crate::TranscriptHistoryRetention::default()
     }
 
     /// Return the prompt to send to the LLM for summarization.

@@ -162,10 +162,11 @@ use transcript_history::validate::{
     assistant_tool_use_ids, message_role_name, validate_transcript_tool_result_shape,
 };
 pub use transcript_history::{
-    ProvenReleased0810RewriteRemap, TRANSCRIPT_HISTORY_FORMAT_CURRENT, TranscriptEndpointWitness,
-    TranscriptGraphPrefixAccumulator, TranscriptHistoryState, TranscriptParentAdvance,
-    TranscriptRevisionBody, TranscriptRevisionEdge, TranscriptRewriteAuditReceiptBatch,
-    TranscriptRewriteCommit, TranscriptRewriteParentTransition, TranscriptRewritePatch,
+    ProvenReleased0810RewriteRemap, RetiredTranscriptPrefix, TRANSCRIPT_HISTORY_FORMAT_CURRENT,
+    TranscriptEndpointWitness, TranscriptGraphPrefixAccumulator, TranscriptHistoryRetention,
+    TranscriptHistoryState, TranscriptParentAdvance, TranscriptRevisionBody,
+    TranscriptRevisionEdge, TranscriptRewriteAuditReceiptBatch, TranscriptRewriteCommit,
+    TranscriptRewriteCommits, TranscriptRewriteParentTransition, TranscriptRewritePatch,
     TranscriptRewritePrefixAccumulator, TranscriptRewriteRecord, ValidatedTranscriptHistory,
     ValidatedTranscriptRewriteSuffix, extend_transcript_rewrite_prefix_accumulator,
     remap_proven_released_0810_rewrite_record, transcript_history_full_body_materializations,
@@ -408,6 +409,18 @@ pub enum TranscriptEditError {
     HistoryStateMalformed(String),
     #[error("invalid transcript shape after rewrite: {0}")]
     InvalidTranscriptShape(String),
+    /// The revision belongs to a rewrite occurrence the session's graph has
+    /// retired under its history retention bound: its commit and digests
+    /// remain, its body does not. Fork, rewind, restore and replay targets
+    /// must be at or after `oldest_retained_revision`.
+    #[error(
+        "transcript revision {revision} was retired with {retired_rewrites} older rewrite(s); the oldest retained revision is {oldest_retained_revision}"
+    )]
+    TranscriptRevisionRetired {
+        revision: String,
+        oldest_retained_revision: String,
+        retired_rewrites: u64,
+    },
 }
 
 /// Where the rows of a same-session rewrite replacement come from.
@@ -6060,6 +6073,35 @@ impl Session {
         Ok(())
     }
 
+    /// Retire transcript-history occurrences beyond `retention`.
+    ///
+    /// Applies the graph owner's one re-anchoring transition
+    /// ([`TranscriptHistoryState::retire_occurrences_beyond`]) and installs
+    /// the result. Commits and rolling prefix digests are unchanged, so every
+    /// rewrite authority that binds the graph still verifies; only the bodies
+    /// of retired occurrences go. Returns how many occurrences this call
+    /// retired.
+    pub fn retire_transcript_history(
+        &mut self,
+        retention: TranscriptHistoryRetention,
+    ) -> Result<usize, TranscriptEditError> {
+        let Some(history) = self.validated_transcript_history_state()? else {
+            return Ok(0);
+        };
+        if history.state().commit_count() - history.state().retired_count()
+            <= retention.retained_rewrites()
+        {
+            return Ok(0);
+        }
+        let mut state = history.state().clone();
+        let retired = state.retire_occurrences_beyond(retention)?;
+        if retired != 0 {
+            self.install_validated_transcript_history_state(state)
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        }
+        Ok(retired)
+    }
+
     /// Small rewrite-prefix fact for receipt comparison.
     #[must_use]
     pub fn transcript_rewrite_prefix_authority(
@@ -7309,6 +7351,11 @@ impl Session {
             let Some(history) = self.validated_transcript_history_state()? else {
                 return Ok(None);
             };
+            // A retired revision is known but no longer restorable: refuse
+            // naming the oldest retained revision instead of "not retained".
+            if history.state().is_retired_revision(revision) {
+                return Err(history.state().retired_revision_refusal(revision));
+            }
             if !history.state().contains_revision(revision) {
                 return Ok(None);
             }

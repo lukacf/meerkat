@@ -312,6 +312,16 @@ them.
   for host code that reads it deliberately. The MCP refresh path logs status
   and body size at debug level, never the body. This also covers the
   authorization-code and device-code grants, which share the error type.
+- An asset recovery dispatched from main (`release-workflow-dispatch --mode
+  assets`) can publish its release archives. It runs main's workflow against
+  the tag, so its build attestations name main's commit, and the exact-tag
+  provenance check refused every archive (v0.8.50 run 36988090176). Each build
+  job now checks that its checkout is the tag commit and stamps every archive
+  with it (`<archive>.source-commit`, attested with the archive); for those
+  recovery runs the publisher verifies each archive and stamp against
+  release.yml at the run's commit on `refs/heads/main` and requires the stamp
+  to name the tag commit. Tag pushes and dispatches on the tag ref keep the
+  exact-tag check.
 
 - The machine TLA generator parenthesizes a field's pending value when a
   later expression in the same update block reads it. A conditionally

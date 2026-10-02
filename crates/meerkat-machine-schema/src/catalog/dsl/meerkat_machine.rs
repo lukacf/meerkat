@@ -32517,9 +32517,11 @@ macro_rules! meerkat_catalog_machine_dsl {
         // output with a non-empty transcript. The runtime asks the client for
         // its raw decoded-audio counters for exactly that output; the request
         // is made once per channel, only while the channel's execution
-        // binding is the exact active one.
+        // binding is the exact active one. A live channel serves only an
+        // attached runtime (idle, the session has no attached runtime to bind
+        // a channel to), so these edges exist in Attached and Running only.
         transition RequestLiveMediaHealth {
-            per_phase [Idle, Attached, Running]
+            per_phase [Attached, Running]
             on input RequestLiveMediaHealth {
                 session_id, channel_id, runtime_id, fence_token, generation,
                 output_id, assistant_transcript_nonempty
@@ -32562,7 +32564,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // runtime binding). Audible when any decoded frame reached the
         // audible floor (2000 micro-RMS, the peer's non-silent floor).
         transition ObserveLiveChannelMediaHealthAudible {
-            per_phase [Idle, Attached, Running]
+            per_phase [Attached, Running]
             on input ObserveLiveChannelMediaHealth {
                 session_id, channel_id, output_id, decoded_frames, audible_frames,
                 max_rms_micros
@@ -32596,7 +32598,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // frame: a media fault. The session's first media fault recommends a
         // reopen.
         transition ObserveLiveChannelMediaHealthSilentReopen {
-            per_phase [Idle, Attached, Running]
+            per_phase [Attached, Running]
             on input ObserveLiveChannelMediaHealth {
                 session_id, channel_id, output_id, decoded_frames, audible_frames,
                 max_rms_micros
@@ -32634,7 +32636,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // A media fault after the session already spent its reopen: the
         // channel closes with the fault and no reopen recommendation.
         transition ObserveLiveChannelMediaHealthSilentExhausted {
-            per_phase [Idle, Attached, Running]
+            per_phase [Attached, Running]
             on input ObserveLiveChannelMediaHealth {
                 session_id, channel_id, output_id, decoded_frames, audible_frames,
                 max_rms_micros

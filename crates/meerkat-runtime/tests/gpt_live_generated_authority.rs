@@ -7582,12 +7582,21 @@ fn media_health_judged(transition: &mm::MeerkatMachineTransition) -> Option<(boo
     })
 }
 
+/// A live channel serves an attached runtime: the media-health edges run in
+/// Attached and Running only.
+fn opened_attached_authority() -> mm::MeerkatMachineAuthority {
+    let mut state = opened_authority().state().clone();
+    state.lifecycle_phase = mm::MeerkatPhase::Attached;
+    mm::MeerkatMachineAuthority::recover_from_state(state)
+        .expect("seed state satisfies generated invariants")
+}
+
 /// The runtime requests media health for a channel's first assistant output
 /// only, only for a non-empty transcript on the exact active binding, and
 /// judges exactly that output once.
 #[test]
 fn media_health_judges_only_the_first_output_of_an_active_channel_once() {
-    let mut authority = opened_authority();
+    let mut authority = opened_attached_authority();
     assert!(
         request_media_health(&mut authority, "output-1", true).is_err(),
         "a channel without an active execution binding is never judged"
@@ -7648,7 +7657,7 @@ fn media_health_judges_only_the_first_output_of_an_active_channel_once() {
 /// carries the fact when it reports closed.
 #[test]
 fn a_silent_first_output_is_a_media_fault_that_recommends_one_reopen() {
-    let mut authority = opened_authority();
+    let mut authority = opened_attached_authority();
     bind_only(&mut authority);
     request_media_health(&mut authority, "output-1", true).expect("requested");
     let judged = observe_media_health(&mut authority, "output-1", 0, 400).expect("silent report");
@@ -7685,25 +7694,7 @@ fn a_silent_first_output_is_a_media_fault_that_recommends_one_reopen() {
 /// recommendation, so a broken media path never loops.
 #[test]
 fn a_second_media_fault_on_a_session_does_not_recommend_another_reopen() {
-    let mut state = mm::MeerkatMachineState {
-        lifecycle_phase: mm::MeerkatPhase::Idle,
-        session_id: Some(mm::SessionId(SESSION.to_string())),
-        active_runtime_id: Some(runtime_id()),
-        active_fence_token: Some(fence()),
-        active_runtime_generation: Some(generation()),
-        live_delegation_channel_worker_cap:
-            meerkat_runtime::live_execution::LIVE_DELEGATION_CHANNEL_WORKER_CAP,
-        ..Default::default()
-    };
-    state
-        .live_active_channel_by_session
-        .insert(SESSION.to_string(), CHANNEL.to_string());
-    state
-        .live_channel_session_by_channel
-        .insert(CHANNEL.to_string(), SESSION.to_string());
-    state
-        .live_channel_identity_by_channel
-        .insert(CHANNEL.to_string(), identity());
+    let mut state = opened_attached_authority().state().clone();
     state
         .live_media_fault_reopens_by_session
         .insert(SESSION.to_string(), 1);

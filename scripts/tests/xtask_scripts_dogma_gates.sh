@@ -337,6 +337,14 @@ printf '%s\n' \
   'echo "Error: Invariant NotGoalSilentReopen is violated."' \
   'echo "Error: Invariant NotGoalSilentExhausted is violated."' \
   'echo "Error: Invariant NotGoalFaultedChannelReportsClosed is violated."' \
+  'echo "Error: Action property NeverRequestAttached is violated."' \
+  'echo "Error: Action property NeverRequestRunning is violated."' \
+  'echo "Error: Action property NeverAudibleAttached is violated."' \
+  'echo "Error: Action property NeverAudibleRunning is violated."' \
+  'echo "Error: Action property NeverSilentReopenAttached is violated."' \
+  'echo "Error: Action property NeverSilentReopenRunning is violated."' \
+  'echo "Error: Action property NeverSilentExhaustedAttached is violated."' \
+  'echo "Error: Action property NeverSilentExhaustedRunning is violated."' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
 

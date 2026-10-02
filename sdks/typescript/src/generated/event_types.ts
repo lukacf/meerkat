@@ -1411,12 +1411,6 @@ export type AgentEvent = {
   terminal_status: BackgroundJobTerminalStatus;
   type: "background_job_completed";
 } | {
-  channel_id: string;
-  reason: LiveChannelCloseReason;
-  reopen_recommended: boolean;
-  session_id: SessionId;
-  type: "live_channel_closed";
-} | {
   record: TranscriptRewriteRecord;
   session_id: SessionId;
   type: "transcript_rewrite_committed";
@@ -1476,6 +1470,12 @@ export type AgentEvent = {
   run_id: RunId;
   session_id: SessionId;
   type: "boundary_appends_discarded";
+} | {
+  channel_id: string;
+  reason: LiveChannelCloseReason;
+  reopen_recommended: boolean;
+  session_id: SessionId;
+  type: "live_channel_closed";
 };
 
 /**

@@ -3386,11 +3386,57 @@ fn wake_interrupt_notify(notify: &tokio::sync::Notify) {
 // EphemeralSessionService
 // ---------------------------------------------------------------------------
 
+/// The service's live session handles.
+///
+/// Access is closure-scoped and synchronous: no guard ever escapes to a
+/// caller, so the map cannot be held across an `.await`. That matters because
+/// a session task serves no commands while its turn runs. A caller holding the
+/// map while it awaits a task reply (or any other I/O) would pin it for that
+/// whole turn, and because the lock is fair, every later writer (a new
+/// session's insert) and every later reader of any session would queue behind
+/// it. Callers clone what they need (for example the command sender, see
+/// [`EphemeralSessionService::session_command_tx`]) and talk to the session
+/// task with the map released.
+#[derive(Default)]
+struct SessionTable {
+    inner: RwLock<IndexMap<SessionId, SessionHandle>>,
+}
+
+impl SessionTable {
+    /// Run `f` over the map under a shared lock. `f` is synchronous, so the
+    /// lock is released before the caller can await anything.
+    async fn read<T>(&self, f: impl FnOnce(&IndexMap<SessionId, SessionHandle>) -> T) -> T {
+        let sessions = self.inner.read().await;
+        f(&sessions)
+    }
+
+    /// Run `f` over the map under the exclusive lock. `f` is synchronous, so
+    /// the lock is released before the caller can await anything.
+    async fn write<T>(&self, f: impl FnOnce(&mut IndexMap<SessionId, SessionHandle>) -> T) -> T {
+        let mut sessions = self.inner.write().await;
+        f(&mut sessions)
+    }
+
+    /// Run `f` over one session's handle, if it is registered.
+    async fn with_handle<T>(
+        &self,
+        id: &SessionId,
+        f: impl FnOnce(&SessionHandle) -> T,
+    ) -> Option<T> {
+        self.read(|sessions| sessions.get(id).map(f)).await
+    }
+
+    /// Whether `id` has a live handle.
+    async fn contains(&self, id: &SessionId) -> bool {
+        self.read(|sessions| sessions.contains_key(id)).await
+    }
+}
+
 /// In-memory session service with no persistence.
 ///
 /// Sessions are kept alive as tokio tasks. All state is lost on process exit.
 pub struct EphemeralSessionService<B: SessionAgentBuilder> {
-    sessions: RwLock<IndexMap<SessionId, SessionHandle>>,
+    sessions: SessionTable,
     archived_views: RwLock<IndexMap<SessionId, SessionView>>,
     /// Stable outer boundary for overlapping turns and live identity/tool
     /// mutations of one logical session. Weak entries keep the same mutex
@@ -3451,26 +3497,29 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         expected_run_id: &RunId,
     ) -> Result<bool, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        let woke = {
-            let mut slot = lock_turn_admission(&handle.turn_admission);
-            let active_run_id = handle
-                .turn_state_handle
-                .as_deref()
-                .and_then(|turn_state| turn_state.snapshot().active_run_id);
-            if active_run_id.as_ref() != Some(expected_run_id) {
-                return Ok(false);
-            }
-            slot.request_interrupt()
-                .map_err(|_| SessionError::NotRunning { id: id.clone() })?
-        };
-        if woke {
-            wake_interrupt_notify(&handle.interrupt_notify);
-        }
-        Ok(true)
+        self.sessions
+            .read(|sessions| -> Result<bool, SessionError> {
+                let handle = sessions
+                    .get(id)
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                let woke = {
+                    let mut slot = lock_turn_admission(&handle.turn_admission);
+                    let active_run_id = handle
+                        .turn_state_handle
+                        .as_deref()
+                        .and_then(|turn_state| turn_state.snapshot().active_run_id);
+                    if active_run_id.as_ref() != Some(expected_run_id) {
+                        return Ok(false);
+                    }
+                    slot.request_interrupt()
+                        .map_err(|_| SessionError::NotRunning { id: id.clone() })?
+                };
+                if woke {
+                    wake_interrupt_notify(&handle.interrupt_notify);
+                }
+                Ok(true)
+            })
+            .await
     }
 
     /// Deliver cooperative cancellation to one exact live run.
@@ -3484,39 +3533,43 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         expected_run_id: &RunId,
     ) -> Result<(), SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        self.sessions
+            .read(|sessions| -> Result<(), SessionError> {
+                let handle = sessions
+                    .get(id)
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
 
-        let Some(cancel_after_boundary_handle) = handle.cancel_after_boundary_handle.as_ref()
-        else {
-            return Err(SessionError::Unsupported(
-                "cancel_after_boundary".to_string(),
-            ));
-        };
-        let Some(turn_state_handle) = handle.turn_state_handle.as_deref() else {
-            return Err(SessionError::Unsupported(
-                "cancel_after_boundary_exact_run_authority".to_string(),
-            ));
-        };
-        let current_run_id = turn_state_handle.snapshot().active_run_id;
-        if current_run_id.as_ref() != Some(expected_run_id) {
-            return Err(SessionError::NotRunning { id: id.clone() });
-        }
+                let Some(cancel_after_boundary_handle) =
+                    handle.cancel_after_boundary_handle.as_ref()
+                else {
+                    return Err(SessionError::Unsupported(
+                        "cancel_after_boundary".to_string(),
+                    ));
+                };
+                let Some(turn_state_handle) = handle.turn_state_handle.as_deref() else {
+                    return Err(SessionError::Unsupported(
+                        "cancel_after_boundary_exact_run_authority".to_string(),
+                    ));
+                };
+                let current_run_id = turn_state_handle.snapshot().active_run_id;
+                if current_run_id.as_ref() != Some(expected_run_id) {
+                    return Err(SessionError::NotRunning { id: id.clone() });
+                }
 
-        {
-            let mut slot = lock_turn_admission(&handle.turn_admission);
-            slot.authorize_cancel_after_boundary()
-                .map_err(|_| SessionError::NotRunning { id: id.clone() })?;
-            // The agent task owns the receiver. If the exact run already ended,
-            // send failure is benign; a delivered stale command is rejected by
-            // the run-id check in Agent::observe_cancel_after_boundary_request.
-            let _ = cancel_after_boundary_handle
-                .send(CancelAfterBoundaryCommand::for_run(expected_run_id.clone()));
-        }
-        wake_interrupt_notify(&handle.interrupt_notify);
-        Ok(())
+                {
+                    let mut slot = lock_turn_admission(&handle.turn_admission);
+                    slot.authorize_cancel_after_boundary()
+                        .map_err(|_| SessionError::NotRunning { id: id.clone() })?;
+                    // The agent task owns the receiver. If the exact run already ended,
+                    // send failure is benign; a delivered stale command is rejected by
+                    // the run-id check in Agent::observe_cancel_after_boundary_request.
+                    let _ = cancel_after_boundary_handle
+                        .send(CancelAfterBoundaryCommand::for_run(expected_run_id.clone()));
+                }
+                wake_interrupt_notify(&handle.interrupt_notify);
+                Ok(())
+            })
+            .await
     }
 
     fn build_runtime_receipt(
@@ -3733,7 +3786,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     /// Create a new ephemeral session service.
     pub fn new(builder: B, max_sessions: usize) -> Self {
         Self {
-            sessions: RwLock::new(IndexMap::new()),
+            sessions: SessionTable::default(),
             archived_views: RwLock::new(IndexMap::new()),
             turn_finalization_gates: Mutex::new(HashMap::new()),
             session_event_lines: std::sync::Mutex::new(HashMap::new()),
@@ -3923,10 +3976,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     /// cannot stall host-health observation.
     pub async fn live_session_actor_registered(&self, id: &SessionId) -> bool {
         self.sessions
-            .read()
+            .with_handle(id, |handle| !handle.command_tx.is_closed())
             .await
-            .get(id)
-            .is_some_and(|handle| !handle.command_tx.is_closed())
+            .unwrap_or(false)
     }
 
     /// Subscribe to the live session actor's turn activity, or `None` when no
@@ -3938,12 +3990,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     /// the watch pins this actor: a later same-id replacement is not observed.
     pub async fn session_activity_watch(&self, id: &SessionId) -> Option<SessionActivityWatch> {
         self.sessions
-            .read()
-            .await
-            .get(id)
-            .map(|handle| SessionActivityWatch {
+            .with_handle(id, |handle| SessionActivityWatch {
                 state_rx: handle.state_rx.clone(),
             })
+            .await
     }
 
     /// Observe whether the actor-owned Session document is export-visible.
@@ -3956,16 +4006,19 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     /// actor exited remains a fault, rather than fabricated absence. The
     /// result is not a lease on this actor or authority over its metadata.
     pub async fn export_session_visible(&self, id: &SessionId) -> Result<bool, SessionError> {
-        let sessions = self.sessions.read().await;
-        let Some(handle) = sessions.get(id) else {
-            return Ok(false);
-        };
-        if handle.command_tx.is_closed() {
-            return Err(SessionError::Agent(AgentError::InternalError(
-                "Session task has exited".to_string(),
-            )));
-        }
-        Ok(true)
+        self.sessions
+            .read(|sessions| -> Result<bool, SessionError> {
+                let Some(handle) = sessions.get(id) else {
+                    return Ok(false);
+                };
+                if handle.command_tx.is_closed() {
+                    return Err(SessionError::Agent(AgentError::InternalError(
+                        "Session task has exited".to_string(),
+                    )));
+                }
+                Ok(true)
+            })
+            .await
     }
 
     /// Abort the registered actor task for `id` while leaving its registry
@@ -3976,13 +4029,15 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     /// stale entry for a live actor. Returns `false` when no entry exists.
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) async fn abort_live_session_actor_task_for_test(&self, id: &SessionId) -> bool {
-        let command_tx = {
-            let sessions = self.sessions.read().await;
-            let Some(handle) = sessions.get(id) else {
-                return false;
-            };
-            handle.task_handle.abort();
-            handle.command_tx.clone()
+        let Some(command_tx) = self
+            .sessions
+            .with_handle(id, |handle| {
+                handle.task_handle.abort();
+                handle.command_tx.clone()
+            })
+            .await
+        else {
+            return false;
         };
         command_tx.closed().await;
         true
@@ -3998,9 +4053,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Option<LiveSessionActorWitness> {
-        self.sessions.read().await.get(id).and_then(|handle| {
-            (!handle.command_tx.is_closed()).then(|| handle.actor_witness.clone())
-        })
+        self.sessions
+            .with_handle(id, |handle| {
+                (!handle.command_tx.is_closed()).then(|| handle.actor_witness.clone())
+            })
+            .await
+            .flatten()
     }
 
     /// Validate the exact current member bridge policy and isolated-client
@@ -4009,14 +4067,16 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<(), SessionError> {
-        let command_tx = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(id)
-                .filter(|handle| !handle.command_tx.is_closed())
-                .map(|handle| handle.command_tx.clone())
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
-        };
+        let command_tx = self
+            .sessions
+            .read(|sessions| -> Result<_, SessionError> {
+                sessions
+                    .get(id)
+                    .filter(|handle| !handle.command_tx.is_closed())
+                    .map(|handle| handle.command_tx.clone())
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })
+            })
+            .await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
             .send(SessionCommand::ValidateLiveBridgeMemberEligibility { reply_tx })
@@ -4046,14 +4106,16 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         request: LiveBridgeSessionOperationRequest,
         cancellation: tokio::sync::watch::Receiver<bool>,
     ) -> Result<LiveBridgeSessionOperationTerminalReceiver, SessionError> {
-        let command_tx = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(id)
-                .filter(|handle| !handle.command_tx.is_closed())
-                .map(|handle| handle.command_tx.clone())
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
-        };
+        let command_tx = self
+            .sessions
+            .read(|sessions| -> Result<_, SessionError> {
+                sessions
+                    .get(id)
+                    .filter(|handle| !handle.command_tx.is_closed())
+                    .map(|handle| handle.command_tx.clone())
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })
+            })
+            .await?;
         let (accepted_tx, accepted_rx) = oneshot::channel();
         command_tx
             .send(SessionCommand::StartLiveBridgeOperation {
@@ -4087,14 +4149,21 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         witness: &LiveSessionActorWitness,
     ) -> Result<RuntimeContextAdmissionGuard, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(witness.session_id())
-            .filter(|handle| witness.is_handle(handle) && !handle.command_tx.is_closed())
-            .ok_or_else(|| SessionError::NotFound {
-                id: witness.session_id().clone(),
-            })?;
-        self.acquire_runtime_context_admission_for_handle(witness.session_id(), handle)
+        self.sessions
+            .read(
+                |sessions| -> Result<RuntimeContextAdmissionGuard, SessionError> {
+                    let handle = sessions
+                        .get(witness.session_id())
+                        .filter(|handle| {
+                            witness.is_handle(handle) && !handle.command_tx.is_closed()
+                        })
+                        .ok_or_else(|| SessionError::NotFound {
+                            id: witness.session_id().clone(),
+                        })?;
+                    self.acquire_runtime_context_admission_for_handle(witness.session_id(), handle)
+                },
+            )
+            .await
     }
 
     /// Export the full session (messages + metadata) for persistence.
@@ -4105,16 +4174,18 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<meerkat_core::Session, SessionError> {
-        let (command_tx, deferred_turn_state) = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            (
-                handle.command_tx.clone(),
-                Arc::clone(&handle.deferred_turn_state),
-            )
-        };
+        let (command_tx, deferred_turn_state) = self
+            .sessions
+            .read(|sessions| -> Result<_, SessionError> {
+                let handle = sessions
+                    .get(id)
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                Ok((
+                    handle.command_tx.clone(),
+                    Arc::clone(&handle.deferred_turn_state),
+                ))
+            })
+            .await?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
@@ -4151,13 +4222,15 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<LiveSessionTranscriptAuthoritySnapshot, SessionError> {
-        let (actor_witness, command_tx) = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            (handle.actor_witness.clone(), handle.command_tx.clone())
-        };
+        let (actor_witness, command_tx) = self
+            .sessions
+            .read(|sessions| -> Result<_, SessionError> {
+                let handle = sessions
+                    .get(id)
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                Ok((handle.actor_witness.clone(), handle.command_tx.clone()))
+            })
+            .await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
             .send(SessionCommand::ObserveSessionTranscriptAuthority { reply_tx })
@@ -4199,18 +4272,22 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 expected.session_id()
             ))));
         }
-        let (command_tx, deferred_turn_state) = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(id)
-                .filter(|handle| expected.actor_witness.is_handle(handle));
-            let Some(handle) = handle else {
-                return Ok(None);
-            };
-            (
-                handle.command_tx.clone(),
-                Arc::clone(&handle.deferred_turn_state),
-            )
+        let Some((command_tx, deferred_turn_state)) = self
+            .sessions
+            .read(|sessions| {
+                sessions
+                    .get(id)
+                    .filter(|handle| expected.actor_witness.is_handle(handle))
+                    .map(|handle| {
+                        (
+                            handle.command_tx.clone(),
+                            Arc::clone(&handle.deferred_turn_state),
+                        )
+                    })
+            })
+            .await
+        else {
+            return Ok(None);
         };
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
@@ -4235,9 +4312,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         else {
             return Ok(None);
         };
-        let still_current = self.sessions.read().await.get(id).is_some_and(|handle| {
-            expected.actor_witness.is_handle(handle) && expected.actor_witness.is_live()
-        });
+        let still_current = self
+            .sessions
+            .with_handle(id, |handle| {
+                expected.actor_witness.is_handle(handle) && expected.actor_witness.is_live()
+            })
+            .await
+            .unwrap_or(false);
         if !still_current {
             return Ok(None);
         }
@@ -4256,14 +4337,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         results: Vec<ToolResult>,
     ) -> Result<meerkat_core::session::CallbackResultIngress, SessionError> {
-        let command_tx = self
-            .sessions
-            .read()
-            .await
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
-            .command_tx
-            .clone();
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
             .send(SessionCommand::ClassifyCallbackResultIngress { results, reply_tx })
@@ -4294,10 +4368,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         // trip; see `session_command_tx`.
         let command_tx = self
             .sessions
-            .read()
-            .await
-            .get(id)
-            .map(|session| session.command_tx.clone());
+            .with_handle(id, |session| session.command_tx.clone())
+            .await;
         let command_tx = match command_tx {
             Some(command_tx) => command_tx,
             None if intents.is_empty() => {
@@ -4337,14 +4409,16 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<(), SessionError> {
-        let command_tx = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
-                .command_tx
-                .clone()
-        };
+        let command_tx = self
+            .sessions
+            .read(|sessions| -> Result<_, SessionError> {
+                Ok(sessions
+                    .get(id)
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
+                    .command_tx
+                    .clone())
+            })
+            .await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
             .send(SessionCommand::AbortUncommittedCompactionProjections { reply_tx })
@@ -4609,10 +4683,15 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         session_id: &SessionId,
     ) -> Option<Arc<std::sync::Mutex<SessionDeferredTurnState>>> {
-        let sessions = self.sessions.read().await;
-        sessions
-            .get(session_id)
-            .map(|h| Arc::clone(&h.deferred_turn_state))
+        self.sessions
+            .read(
+                |sessions| -> Option<Arc<std::sync::Mutex<SessionDeferredTurnState>>> {
+                    sessions
+                        .get(session_id)
+                        .map(|h| Arc::clone(&h.deferred_turn_state))
+                },
+            )
+            .await
     }
 
     /// Drop a live session handle without archiving it.
@@ -4639,19 +4718,24 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 "synthetic live-session discard failure".to_string(),
             )));
         }
-        let (handle, projection) = {
-            let mut sessions = self.sessions.write().await;
-            let Some(handle) = sessions.get(id) else {
-                return Ok(());
-            };
-            let projection = Self::request_live_session_handle_shutdown(id, handle)?;
-            handle.actor_witness.revoke();
-            let Some(handle) = sessions.swap_remove(id) else {
-                return Err(SessionError::Agent(AgentError::InternalError(format!(
-                    "session {id} disappeared during exact live actor discard"
-                ))));
-            };
-            (handle, projection)
+        let removed = self
+            .sessions
+            .write(|sessions| -> Result<_, SessionError> {
+                let Some(handle) = sessions.get(id) else {
+                    return Ok(None);
+                };
+                let projection = Self::request_live_session_handle_shutdown(id, handle)?;
+                handle.actor_witness.revoke();
+                let Some(handle) = sessions.swap_remove(id) else {
+                    return Err(SessionError::Agent(AgentError::InternalError(format!(
+                        "session {id} disappeared during exact live actor discard"
+                    ))));
+                };
+                Ok(Some((handle, projection)))
+            })
+            .await?;
+        let Some((handle, projection)) = removed else {
+            return Ok(());
         };
         self.shutdown_removed_live_session_handle(id, handle, projection);
         Ok(())
@@ -4669,7 +4753,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         id: &SessionId,
     ) {
-        let handle = self.sessions.write().await.swap_remove(id);
+        let handle = self
+            .sessions
+            .write(|sessions| sessions.swap_remove(id))
+            .await;
         let Some(handle) = handle else {
             return;
         };
@@ -4700,24 +4787,29 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         witness: &LiveSessionActorWitness,
     ) -> Result<bool, SessionError> {
-        let (handle, projection) = {
-            let mut sessions = self.sessions.write().await;
-            let Some(handle) = sessions.get(witness.session_id()) else {
-                return Ok(false);
-            };
-            if !witness.is_handle(handle) {
-                return Ok(false);
-            }
-            let projection =
-                Self::request_live_session_handle_shutdown(witness.session_id(), handle)?;
-            handle.actor_witness.revoke();
-            let Some(handle) = sessions.swap_remove(witness.session_id()) else {
-                return Err(SessionError::Agent(AgentError::InternalError(format!(
-                    "session {} disappeared during exact live actor discard",
-                    witness.session_id()
-                ))));
-            };
-            (handle, projection)
+        let removed = self
+            .sessions
+            .write(|sessions| -> Result<_, SessionError> {
+                let Some(handle) = sessions.get(witness.session_id()) else {
+                    return Ok(None);
+                };
+                if !witness.is_handle(handle) {
+                    return Ok(None);
+                }
+                let projection =
+                    Self::request_live_session_handle_shutdown(witness.session_id(), handle)?;
+                handle.actor_witness.revoke();
+                let Some(handle) = sessions.swap_remove(witness.session_id()) else {
+                    return Err(SessionError::Agent(AgentError::InternalError(format!(
+                        "session {} disappeared during exact live actor discard",
+                        witness.session_id()
+                    ))));
+                };
+                Ok(Some((handle, projection)))
+            })
+            .await?;
+        let Some((handle, projection)) = removed else {
+            return Ok(false);
         };
         self.shutdown_removed_live_session_handle(witness.session_id(), handle, projection);
         Ok(true)
@@ -4765,33 +4857,41 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         meerkat_core::PreparedTransientTurnContextBoundary,
         meerkat_core::CoreBoundaryStageError,
     > {
-        let (actor_witness, state) = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions.get(id).ok_or_else(|| {
-                meerkat_core::CoreBoundaryStageError::stale(format!(
-                    "session {id} has no live actor"
-                ))
-            })?;
-            if handle.command_tx.is_closed() || !handle.actor_witness.is_live() {
-                return Err(meerkat_core::CoreBoundaryStageError::stale(format!(
-                    "session {id} actor is closed"
-                )));
-            }
-            (
-                handle.actor_witness.clone(),
-                handle.transient_turn_context_state.clone(),
+        let (actor_witness, state) = self
+            .sessions
+            .read(
+                |sessions| -> Result<_, meerkat_core::CoreBoundaryStageError> {
+                    let handle = sessions.get(id).ok_or_else(|| {
+                        meerkat_core::CoreBoundaryStageError::stale(format!(
+                            "session {id} has no live actor"
+                        ))
+                    })?;
+                    if handle.command_tx.is_closed() || !handle.actor_witness.is_live() {
+                        return Err(meerkat_core::CoreBoundaryStageError::stale(format!(
+                            "session {id} actor is closed"
+                        )));
+                    }
+                    Ok((
+                        handle.actor_witness.clone(),
+                        handle.transient_turn_context_state.clone(),
+                    ))
+                },
             )
-        };
+            .await?;
 
         let prepared = state
             .prepare_active_turn_boundary(expected_run_id, delivery)
             .await?;
 
-        let still_exact = self.sessions.read().await.get(id).is_some_and(|handle| {
-            actor_witness.is_handle(handle)
-                && actor_witness.is_live()
-                && !handle.command_tx.is_closed()
-        });
+        let still_exact = self
+            .sessions
+            .with_handle(id, |handle| {
+                actor_witness.is_handle(handle)
+                    && actor_witness.is_live()
+                    && !handle.command_tx.is_closed()
+            })
+            .await
+            .unwrap_or(false);
         if !still_exact {
             drop(prepared);
             return Err(meerkat_core::CoreBoundaryStageError::stale(format!(
@@ -4809,10 +4909,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     pub async fn discard_uncommitted_boundary_deliveries(&self, id: &SessionId, run_id: &RunId) {
         let state = self
             .sessions
-            .read()
-            .await
-            .get(id)
-            .map(|handle| handle.transient_turn_context_state.clone());
+            .with_handle(id, |handle| handle.transient_turn_context_state.clone())
+            .await;
         if let Some(state) = state {
             state.discard_uncommitted_durable_deliveries(run_id);
         }
@@ -4827,18 +4925,22 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         witness: &LiveSessionActorWitness,
         events: &[AgentEvent],
     ) -> Result<Vec<CoreInteractionTerminalPublicationReceipt>, SessionError> {
-        let command_tx = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(witness.session_id())
-                .filter(|handle| {
-                    witness.is_handle(handle) && witness.is_live() && !handle.command_tx.is_closed()
-                })
-                .map(|handle| handle.command_tx.clone())
-                .ok_or_else(|| SessionError::NotFound {
-                    id: witness.session_id().clone(),
-                })?
-        };
+        let command_tx = self
+            .sessions
+            .read(|sessions| -> Result<_, SessionError> {
+                sessions
+                    .get(witness.session_id())
+                    .filter(|handle| {
+                        witness.is_handle(handle)
+                            && witness.is_live()
+                            && !handle.command_tx.is_closed()
+                    })
+                    .map(|handle| handle.command_tx.clone())
+                    .ok_or_else(|| SessionError::NotFound {
+                        id: witness.session_id().clone(),
+                    })
+            })
+            .await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
             .send(SessionCommand::PublishRuntimeInteractionTerminals {
@@ -4873,18 +4975,22 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
         SessionError,
     > {
-        let command_tx = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(witness.session_id())
-                .filter(|handle| {
-                    witness.is_handle(handle) && witness.is_live() && !handle.command_tx.is_closed()
-                })
-                .map(|handle| handle.command_tx.clone())
-                .ok_or_else(|| SessionError::NotFound {
-                    id: witness.session_id().clone(),
-                })?
-        };
+        let command_tx = self
+            .sessions
+            .read(|sessions| -> Result<_, SessionError> {
+                sessions
+                    .get(witness.session_id())
+                    .filter(|handle| {
+                        witness.is_handle(handle)
+                            && witness.is_live()
+                            && !handle.command_tx.is_closed()
+                    })
+                    .map(|handle| handle.command_tx.clone())
+                    .ok_or_else(|| SessionError::NotFound {
+                        id: witness.session_id().clone(),
+                    })
+            })
+            .await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
             .send(SessionCommand::PublishInteractionTerminalsExactBatch {
@@ -4918,18 +5024,22 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 "boundary discard session does not match the exact actor".to_string(),
             )));
         }
-        let command_tx = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(witness.session_id())
-                .filter(|handle| {
-                    witness.is_handle(handle) && witness.is_live() && !handle.command_tx.is_closed()
-                })
-                .map(|handle| handle.command_tx.clone())
-                .ok_or_else(|| SessionError::NotFound {
-                    id: witness.session_id().clone(),
-                })?
-        };
+        let command_tx = self
+            .sessions
+            .read(|sessions| -> Result<_, SessionError> {
+                sessions
+                    .get(witness.session_id())
+                    .filter(|handle| {
+                        witness.is_handle(handle)
+                            && witness.is_live()
+                            && !handle.command_tx.is_closed()
+                    })
+                    .map(|handle| handle.command_tx.clone())
+                    .ok_or_else(|| SessionError::NotFound {
+                        id: witness.session_id().clone(),
+                    })
+            })
+            .await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
             .send(SessionCommand::PublishBoundaryAppendsDiscarded {
@@ -5219,37 +5329,38 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         channel_id: meerkat_core::LiveChannelId,
     ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTruncationEvidence>, SessionError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        {
-            // The map guard ends with this block, before the reply wait.
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            // Serialize command enqueue with turn admission, not turn execution.
-            // A pending tool run owns the agent and must never strand close
-            // behind its own completion or acquire cancellation by this path.
-            let slot = lock_turn_admission(&handle.turn_admission);
-            if slot.phase() == TurnAdmissionPhase::ShuttingDown {
-                return Err(SessionError::Agent(
-                    meerkat_core::error::AgentError::Cancelled,
-                ));
-            }
-            if slot.phase() != TurnAdmissionPhase::Idle {
-                return Err(SessionError::Busy { id: id.clone() });
-            }
-            handle
-                .command_tx
-                .try_send(SessionCommand::ResolveLiveAssistantPlaybackOnChannelClose {
-                    channel_id,
-                    reply_tx,
-                })
-                .map_err(|error| match error {
-                    mpsc::error::TrySendError::Full(_) => SessionError::Busy { id: id.clone() },
-                    mpsc::error::TrySendError::Closed(_) => {
-                        SessionError::Agent(meerkat_core::error::AgentError::Cancelled)
-                    }
-                })?;
-        }
+        self.sessions
+            .read(|sessions| -> Result<(), SessionError> {
+                let handle = sessions
+                    .get(id)
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                // Serialize command enqueue with turn admission, not turn execution.
+                // A pending tool run owns the agent and must never strand close
+                // behind its own completion or acquire cancellation by this path.
+                let slot = lock_turn_admission(&handle.turn_admission);
+                if slot.phase() == TurnAdmissionPhase::ShuttingDown {
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::Cancelled,
+                    ));
+                }
+                if slot.phase() != TurnAdmissionPhase::Idle {
+                    return Err(SessionError::Busy { id: id.clone() });
+                }
+                handle
+                    .command_tx
+                    .try_send(SessionCommand::ResolveLiveAssistantPlaybackOnChannelClose {
+                        channel_id,
+                        reply_tx,
+                    })
+                    .map_err(|error| match error {
+                        mpsc::error::TrySendError::Full(_) => SessionError::Busy { id: id.clone() },
+                        mpsc::error::TrySendError::Closed(_) => {
+                            SessionError::Agent(meerkat_core::error::AgentError::Cancelled)
+                        }
+                    })?;
+                Ok(())
+            })
+            .await?;
         reply_rx
             .await
             .map_err(|_| SessionError::Agent(meerkat_core::error::AgentError::Cancelled))?
@@ -5475,14 +5586,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         record: meerkat_core::types::SystemNoticeRecord,
     ) -> Result<meerkat_core::service::AppendSystemContextStatus, SessionError> {
-        let command_tx = self
-            .sessions
-            .read()
-            .await
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
-            .command_tx
-            .clone();
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
             .send(SessionCommand::AppendSystemNoticeControl { record, reply_tx })
@@ -5507,14 +5611,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         req: AppendSystemContextRequest,
     ) -> Result<meerkat_core::service::AppendSystemContextStatus, SessionError> {
-        let command_tx = self
-            .sessions
-            .read()
-            .await
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
-            .command_tx
-            .clone();
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
             .send(SessionCommand::AppendSystemMessageControl { req, reply_tx })
@@ -5540,14 +5637,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         request: meerkat_core::InstructionActivationRequest,
     ) -> Result<meerkat_core::InstructionActivationMutation, SessionError> {
-        let command_tx = self
-            .sessions
-            .read()
-            .await
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
-            .command_tx
-            .clone();
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
             .send(SessionCommand::ActivateInstructionControl { request, reply_tx })
@@ -5582,16 +5672,18 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         role: &str,
         deferred_turn_state_override: Option<SessionDeferredTurnState>,
     ) -> Result<PreparedHeadCanonicalRuntimeBoundary, SessionError> {
-        let (command_tx, live_deferred_turn_state) = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            (
-                handle.command_tx.clone(),
-                lock_deferred_turn_state(&handle.deferred_turn_state).clone(),
-            )
-        };
+        let (command_tx, live_deferred_turn_state) = self
+            .sessions
+            .read(|sessions| -> Result<_, SessionError> {
+                let handle = sessions
+                    .get(id)
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                Ok((
+                    handle.command_tx.clone(),
+                    lock_deferred_turn_state(&handle.deferred_turn_state).clone(),
+                ))
+            })
+            .await?;
         let projection_source = if deferred_turn_state_override.is_some() {
             HeadCanonicalDeferredProjectionSource::ExplicitOverride
         } else {
@@ -5631,14 +5723,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         successor_head_token: String,
     ) -> Result<HeadCanonicalRuntimeBoundaryAcknowledgeOutcome, SessionError> {
-        let command_tx = self
-            .sessions
-            .read()
-            .await
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
-            .command_tx
-            .clone();
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
             .send(SessionCommand::AcknowledgeHeadCanonicalRuntimeBoundary {
@@ -5684,14 +5769,16 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 )),
             ));
         }
-        let command_tx = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
-                .command_tx
-                .clone()
-        };
+        let command_tx = self
+            .sessions
+            .read(|sessions| -> Result<_, SessionError> {
+                Ok(sessions
+                    .get(id)
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
+                    .command_tx
+                    .clone())
+            })
+            .await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
             .send(SessionCommand::SyncSessionFromDurableSnapshot {
@@ -5782,22 +5869,27 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<CoreApplyTerminal, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        let terminal = {
-            let mut slot = lock_turn_admission(&handle.turn_admission);
-            slot.resolve_last_start_turn_public_terminal()
-        }
-        .map_err(|error| {
-            SessionError::Agent(AgentError::InternalError(format!(
-                "generated turn authority did not confirm NoPendingBoundary terminal: {error}"
-            )))
-        })?;
-        match terminal {
-            StartTurnPublicTerminal::NoPendingBoundary => Ok(CoreApplyTerminal::NoPendingBoundary),
-        }
+        self.sessions
+            .read(|sessions| -> Result<CoreApplyTerminal, SessionError> {
+                let handle = sessions
+                    .get(id)
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                let terminal = {
+                let mut slot = lock_turn_admission(&handle.turn_admission);
+                slot.resolve_last_start_turn_public_terminal()
+            }
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated turn authority did not confirm NoPendingBoundary terminal: {error}"
+                )))
+            })?;
+                match terminal {
+                    StartTurnPublicTerminal::NoPendingBoundary => {
+                        Ok(CoreApplyTerminal::NoPendingBoundary)
+                    }
+                }
+            })
+            .await
     }
 
     fn require_runtime_execution_kind_stamp(req: &StartTurnRequest) -> Result<(), SessionError> {
@@ -5823,24 +5915,34 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<RuntimeContextAdmissionGuard, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        self.acquire_runtime_context_admission_for_handle(id, handle)
+        self.sessions
+            .read(
+                |sessions| -> Result<RuntimeContextAdmissionGuard, SessionError> {
+                    let handle = sessions
+                        .get(id)
+                        .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                    self.acquire_runtime_context_admission_for_handle(id, handle)
+                },
+            )
+            .await
     }
 
     pub async fn join_active_runtime_context_admission(
         &self,
         id: &SessionId,
     ) -> Result<Option<RuntimeContextAdmissionGuard>, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        Ok(try_join_active_capacity_lease(Arc::clone(
-            &handle.active_capacity_lease,
-        )))
+        self.sessions
+            .read(
+                |sessions| -> Result<Option<RuntimeContextAdmissionGuard>, SessionError> {
+                    let handle = sessions
+                        .get(id)
+                        .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                    Ok(try_join_active_capacity_lease(Arc::clone(
+                        &handle.active_capacity_lease,
+                    )))
+                },
+            )
+            .await
     }
 
     #[cfg(feature = "session-store")]
@@ -5936,91 +6038,113 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
 
         let prompt: meerkat_core::types::ContentInput = req.prompt.clone();
 
+        // Phase 1: observe the actor and its identity with the map held only
+        // for the synchronous read (see `SessionTable`).
+        let observed = self
+            .sessions
+            .with_handle(id, |handle| {
+                if preclaimed_turn
+                    .as_ref()
+                    .is_some_and(|claim| !claim.belongs_to(handle))
+                {
+                    return None;
+                }
+                Some((
+                    handle.actor_witness.clone(),
+                    handle.llm_identity_rx.borrow().clone(),
+                ))
+            })
+            .await
+            .flatten();
+        let Some((actor_witness, identity)) = observed else {
+            return Err((
+                SessionError::NotFound { id: id.clone() },
+                reserved_admission.take(),
+            ));
+        };
+
+        // Phase 2: model-catalog validation runs with the map released.
+        if preclaimed_turn
+            .as_ref()
+            .is_none_or(|claim| claim.requires_prompt_validation(&identity))
         {
-            let sessions = self.sessions.read().await;
-            let handle = match sessions.get(id) {
-                Some(handle) => handle,
-                None => {
-                    return Err((
-                        SessionError::NotFound { id: id.clone() },
-                        reserved_admission.take(),
-                    ));
-                }
-            };
-            if preclaimed_turn
-                .as_ref()
-                .is_some_and(|claim| !claim.belongs_to(handle))
-            {
-                return Err((
-                    SessionError::NotFound { id: id.clone() },
-                    reserved_admission.take(),
-                ));
-            }
-            let identity = handle.llm_identity_rx.borrow().clone();
-            if preclaimed_turn
-                .as_ref()
-                .is_none_or(|claim| claim.requires_prompt_validation(&identity))
-            {
-                self.validate_prompt_video_input(&prompt, &identity)
-                    .await
-                    .map_err(|error| (error, None))?;
-            }
+            self.validate_prompt_video_input(&prompt, &identity)
+                .await
+                .map_err(|error| (error, None))?;
+        }
 
-            // Atomic busy check via compare-and-swap. This is the single
-            // point of admission — if two callers race, exactly one wins.
-            let turn_claim = match preclaimed_turn.take() {
-                Some(claim) => claim,
-                None => Self::claim_start_turn(id, handle, Some(identity))
-                    .map_err(|error| (error, None))?,
-            };
+        // Phase 3: claim admission and build the command against the same
+        // actor allocation, again under a synchronous map read.
+        let (command_tx, command, turn_claim) = self
+            .sessions
+            .read(
+                |sessions| -> Result<_, (SessionError, Option<RuntimeContextAdmissionGuard>)> {
+                    let Some(handle) = sessions
+                        .get(id)
+                        .filter(|handle| actor_witness.is_handle(handle))
+                    else {
+                        return Err((
+                            SessionError::NotFound { id: id.clone() },
+                            reserved_admission.take(),
+                        ));
+                    };
 
-            let mut system_messages = req
-                .runtime
-                .turn_metadata
-                .as_ref()
-                .map(|metadata| metadata.system_prompts.clone())
-                .unwrap_or_default();
-            // Runtime metadata is assembled by upstream ordered contributors;
-            // the explicit StartTurn field is the final System append at this
-            // same boundary. Preserve duplicates and exact content.
-            system_messages.extend(req.system_prompt);
+                    // Atomic busy check via compare-and-swap. This is the single
+                    // point of admission — if two callers race, exactly one wins.
+                    let turn_claim = match preclaimed_turn.take() {
+                        Some(claim) => claim,
+                        None => Self::claim_start_turn(id, handle, Some(identity))
+                            .map_err(|error| (error, None))?,
+                    };
 
-            let active_admission = if let Some(admission) = reserved_admission.take() {
-                admission
-            } else {
-                match self.acquire_runtime_context_admission_for_handle(id, handle) {
-                    Ok(admission) => admission,
-                    Err(err) => {
-                        return Err((err, None));
-                    }
-                }
-            };
+                    let mut system_messages = req
+                        .runtime
+                        .turn_metadata
+                        .as_ref()
+                        .map(|metadata| metadata.system_prompts.clone())
+                        .unwrap_or_default();
+                    // Runtime metadata is assembled by upstream ordered contributors;
+                    // the explicit StartTurn field is the final System append at this
+                    // same boundary. Preserve duplicates and exact content.
+                    system_messages.extend(req.system_prompt);
 
-            let command = SessionCommand::StartTurn {
-                prompt,
-                system_messages,
-                injected_context: req.injected_context,
-                runtime: Box::new(req.runtime),
-                event_tx: req.event_tx,
-                result_tx,
-                active_admission: Some(active_admission),
-            };
-            if handle.command_tx.send(command).await.is_err() {
-                // Dropping the rejected command drops its admission guard; the
-                // final lease release settles staged-restore vs capacity
-                // release through the registry-owned promotion status. The
-                // turn-claim guard separately restores Admitted -> Idle.
-                return Err((
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                        "Session task has exited".to_string(),
-                    )),
-                    None,
-                ));
-            }
-            turn_claim.transfer_to_session_task();
-            if let Some(admission_notification) = admission_notification {
-                let _ = admission_notification.send(());
-            }
+                    let active_admission = if let Some(admission) = reserved_admission.take() {
+                        admission
+                    } else {
+                        self.acquire_runtime_context_admission_for_handle(id, handle)
+                            .map_err(|err| (err, None))?
+                    };
+
+                    let command = SessionCommand::StartTurn {
+                        prompt,
+                        system_messages,
+                        injected_context: req.injected_context,
+                        runtime: Box::new(req.runtime),
+                        event_tx: req.event_tx,
+                        result_tx,
+                        active_admission: Some(active_admission),
+                    };
+                    Ok((handle.command_tx.clone(), command, turn_claim))
+                },
+            )
+            .await?;
+
+        // Phase 4: hand the command to the actor with the map released.
+        if command_tx.send(command).await.is_err() {
+            // Dropping the rejected command drops its admission guard; the
+            // final lease release settles staged-restore vs capacity
+            // release through the registry-owned promotion status. The
+            // turn-claim guard separately restores Admitted -> Idle.
+            return Err((
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                )),
+                None,
+            ));
+        }
+        turn_claim.transfer_to_session_task();
+        if let Some(admission_notification) = admission_notification {
+            let _ = admission_notification.send(());
         }
 
         let result = result_rx.await.map_err(|_| {
@@ -6045,16 +6169,30 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         req: StartTurnRequest,
         admission_notification: Option<oneshot::Sender<()>>,
     ) -> Result<RunResult, SessionError> {
-        let preclaimed_turn = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            let identity = handle.llm_identity_rx.borrow().clone();
-            self.validate_prompt_video_input(&req.prompt, &identity)
-                .await?;
-            Self::claim_start_turn(id, handle, Some(identity))?
-        };
+        // Observe, validate with the map released, then claim against the
+        // same actor allocation (see `SessionTable`).
+        let (actor_witness, identity) = self
+            .sessions
+            .with_handle(id, |handle| {
+                (
+                    handle.actor_witness.clone(),
+                    handle.llm_identity_rx.borrow().clone(),
+                )
+            })
+            .await
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        self.validate_prompt_video_input(&req.prompt, &identity)
+            .await?;
+        let preclaimed_turn = self
+            .sessions
+            .read(|sessions| {
+                let handle = sessions
+                    .get(id)
+                    .filter(|handle| actor_witness.is_handle(handle))
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                Self::claim_start_turn(id, handle, Some(identity))
+            })
+            .await?;
         let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
         self.start_turn_execution_with_admission_recovering_not_found(
             id,
@@ -6083,10 +6221,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
     ) -> Result<mpsc::Sender<SessionCommand>, SessionError> {
         self.sessions
-            .read()
+            .with_handle(id, |handle| handle.command_tx.clone())
             .await
-            .get(id)
-            .map(|handle| handle.command_tx.clone())
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })
     }
 
@@ -6098,10 +6234,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         session_id: &SessionId,
     ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
-        let sessions = self.sessions.read().await;
-        sessions
-            .get(session_id)
-            .and_then(|h| h.event_injector.clone())
+        self.sessions
+            .read(|sessions| -> Option<Arc<dyn meerkat_core::EventInjector>> {
+                sessions
+                    .get(session_id)
+                    .and_then(|h| h.event_injector.clone())
+            })
+            .await
     }
 
     #[doc(hidden)]
@@ -6109,10 +6248,15 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         session_id: &SessionId,
     ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
-        let sessions = self.sessions.read().await;
-        sessions
-            .get(session_id)
-            .and_then(|h| h.interaction_event_injector.clone())
+        self.sessions
+            .read(
+                |sessions| -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
+                    sessions
+                        .get(session_id)
+                        .and_then(|h| h.interaction_event_injector.clone())
+                },
+            )
+            .await
     }
 
     /// Get shared system-context control state for a session, if available.
@@ -6120,10 +6264,15 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         session_id: &SessionId,
     ) -> Option<meerkat_core::TransientTurnContextStateHandle> {
-        let sessions = self.sessions.read().await;
-        sessions
-            .get(session_id)
-            .map(|h| h.transient_turn_context_state.clone())
+        self.sessions
+            .read(
+                |sessions| -> Option<meerkat_core::TransientTurnContextStateHandle> {
+                    sessions
+                        .get(session_id)
+                        .map(|h| h.transient_turn_context_state.clone())
+                },
+            )
+            .await
     }
 
     /// Get the current live durable LLM identity for a session.
@@ -6131,13 +6280,16 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         session_id: &SessionId,
     ) -> Result<SessionLlmIdentity, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(session_id)
-            .ok_or_else(|| SessionError::NotFound {
-                id: session_id.clone(),
-            })?;
-        Ok(handle.llm_identity_rx.borrow().clone())
+        self.sessions
+            .read(|sessions| -> Result<SessionLlmIdentity, SessionError> {
+                let handle = sessions
+                    .get(session_id)
+                    .ok_or_else(|| SessionError::NotFound {
+                        id: session_id.clone(),
+                    })?;
+                Ok(handle.llm_identity_rx.borrow().clone())
+            })
+            .await
     }
 
     /// Get the comms runtime for a session, if available.
@@ -6145,10 +6297,15 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         session_id: &SessionId,
     ) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
-        let sessions = self.sessions.read().await;
-        sessions
-            .get(session_id)
-            .and_then(|h| h.comms_runtime.clone())
+        self.sessions
+            .read(
+                |sessions| -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+                    sessions
+                        .get(session_id)
+                        .and_then(|h| h.comms_runtime.clone())
+                },
+            )
+            .await
     }
 
     pub async fn send_comms(
@@ -6156,12 +6313,14 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         session_id: &SessionId,
         command: meerkat_core::CommsCommand,
     ) -> Option<Result<meerkat_core::SendReceipt, meerkat_core::SendError>> {
-        let sender = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(session_id)
-                .and_then(|handle| handle.observed_comms_sender.clone())
-        }?;
+        let sender = self
+            .sessions
+            .read(|sessions| {
+                sessions
+                    .get(session_id)
+                    .and_then(|handle| handle.observed_comms_sender.clone())
+            })
+            .await?;
         Some(sender.send(command).await)
     }
 
@@ -6189,32 +6348,34 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     /// Every session is attempted. Handles whose generated teardown authority
     /// rejects shutdown remain registered for a later retry.
     pub async fn try_shutdown(&self) -> Result<(), SessionError> {
-        let (handles, first_error) = {
-            let mut sessions = self.sessions.write().await;
-            let pending = std::mem::take(&mut *sessions);
-            let mut handles = Vec::with_capacity(pending.len());
-            let mut first_error = None;
-            for (session_id, handle) in pending {
-                match Self::request_live_session_handle_shutdown(&session_id, &handle) {
-                    Ok(projection) => {
-                        handle.actor_witness.revoke();
-                        handles.push((session_id, handle, projection));
-                    }
-                    Err(error) => {
-                        tracing::error!(
-                            %error,
-                            %session_id,
-                            "session service shutdown could not authorize exact actor teardown"
-                        );
-                        if first_error.is_none() {
-                            first_error = Some(error);
+        let (handles, first_error) = self
+            .sessions
+            .write(|sessions| {
+                let pending = std::mem::take(&mut *sessions);
+                let mut handles = Vec::with_capacity(pending.len());
+                let mut first_error = None;
+                for (session_id, handle) in pending {
+                    match Self::request_live_session_handle_shutdown(&session_id, &handle) {
+                        Ok(projection) => {
+                            handle.actor_witness.revoke();
+                            handles.push((session_id, handle, projection));
                         }
-                        sessions.insert(session_id, handle);
+                        Err(error) => {
+                            tracing::error!(
+                                %error,
+                                %session_id,
+                                "session service shutdown could not authorize exact actor teardown"
+                            );
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                            sessions.insert(session_id, handle);
+                        }
                     }
                 }
-            }
-            (handles, first_error)
-        };
+                (handles, first_error)
+            })
+            .await;
         for (session_id, handle, projection) in handles {
             self.shutdown_removed_live_session_handle(&session_id, handle, projection);
         }
@@ -6235,13 +6396,16 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {id}")))?;
-        handle
-            .event_journal
-            .subscribe(meerkat_core::comms::SessionEventCursor::Live)
+        self.sessions
+            .read(|sessions| -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {id}")))?;
+            handle
+                .event_journal
+                .subscribe(meerkat_core::comms::SessionEventCursor::Live)
+            })
+            .await
     }
 
     /// Subscribe to session-wide events starting at a typed cursor.
@@ -6285,15 +6449,20 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         cursor: meerkat_core::comms::SessionEventCursor,
     ) -> Result<LiveActorEventSubscription, meerkat_core::comms::StreamError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {id}")))?;
-        Ok(LiveActorEventSubscription {
-            actor: handle.actor_witness.clone(),
-            epoch: handle.event_journal.epoch(),
-            stream: handle.event_journal.subscribe(cursor)?,
-        })
+        self.sessions
+            .read(
+                |sessions| -> Result<LiveActorEventSubscription, meerkat_core::comms::StreamError> {
+                    let handle = sessions.get(id).ok_or_else(|| {
+                        meerkat_core::comms::StreamError::NotFound(format!("session {id}"))
+                    })?;
+                    Ok(LiveActorEventSubscription {
+                        actor: handle.actor_witness.clone(),
+                        epoch: handle.event_journal.epoch(),
+                        stream: handle.event_journal.subscribe(cursor)?,
+                    })
+                },
+            )
+            .await
     }
 
     /// Install the singular lossless event stream consumed by the persistent
@@ -6309,13 +6478,15 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<LosslessEventProjectionStream, meerkat_core::comms::StreamError> {
-        let slot = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions.get(id).ok_or_else(|| {
-                meerkat_core::comms::StreamError::NotFound(format!("session {id}"))
-            })?;
-            Arc::clone(&handle.lossless_event_projection_tx)
-        };
+        let slot = self
+            .sessions
+            .read(|sessions| -> Result<_, meerkat_core::comms::StreamError> {
+                let handle = sessions.get(id).ok_or_else(|| {
+                    meerkat_core::comms::StreamError::NotFound(format!("session {id}"))
+                })?;
+                Ok(Arc::clone(&handle.lossless_event_projection_tx))
+            })
+            .await?;
 
         let (tx, rx) = mpsc::unbounded_channel();
         let queued_events = Arc::new(AtomicUsize::new(0));
@@ -6348,12 +6519,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         after: SystemTime,
     ) -> Result<SystemTime, meerkat_core::comms::StreamError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
+        let mut rx = self
+            .sessions
+            .with_handle(id, |handle| handle.summary_rx.clone())
+            .await
             .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {id}")))?;
-        let mut rx = handle.summary_rx.clone();
-        drop(sessions);
 
         loop {
             let current = rx.borrow().updated_at;
@@ -6379,11 +6549,19 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         tokio::sync::broadcast::Receiver<EventEnvelope<AgentEvent>>,
         meerkat_core::comms::StreamError,
     > {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {id}")))?;
-        Ok(handle.event_journal.subscribe_raw())
+        self.sessions
+            .read(
+                |sessions| -> Result<
+                    tokio::sync::broadcast::Receiver<EventEnvelope<AgentEvent>>,
+                    meerkat_core::comms::StreamError,
+                > {
+                    let handle = sessions.get(id).ok_or_else(|| {
+                        meerkat_core::comms::StreamError::NotFound(format!("session {id}"))
+                    })?;
+                    Ok(handle.event_journal.subscribe_raw())
+                },
+            )
+            .await
     }
 
     fn is_session_state_active(state: SessionState) -> bool {
@@ -6694,25 +6872,27 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             lossless_event_projection_tx,
         };
 
-        let rejected_handle = {
-            let mut sessions = self.sessions.write().await;
-            if sessions.contains_key(&session_id) {
-                Some(handle)
-            } else {
-                sessions.insert(session_id.clone(), handle);
-                // Record the singular typed materialization fact keyed by
-                // session id. For a deferred session the registry also takes
-                // CUSTODY of the reserved capacity permit — staged-ness is
-                // never re-derived from permit-presence elsewhere.
-                match staged_create_permit {
-                    Some(permit) => self.staged_registry.record_staged(&session_id, permit),
-                    None => self.staged_registry.record_active(&session_id),
+        let rejected_handle = self
+            .sessions
+            .write(|sessions| {
+                if sessions.contains_key(&session_id) {
+                    Some(handle)
+                } else {
+                    sessions.insert(session_id.clone(), handle);
+                    // Record the singular typed materialization fact keyed by
+                    // session id. For a deferred session the registry also takes
+                    // CUSTODY of the reserved capacity permit — staged-ness is
+                    // never re-derived from permit-presence elsewhere.
+                    match staged_create_permit {
+                        Some(permit) => self.staged_registry.record_staged(&session_id, permit),
+                        None => self.staged_registry.record_active(&session_id),
+                    }
+                    // Notify waiters (e.g., CLI --stdin) that a session is available.
+                    self.session_registered.notify_waiters();
+                    None
                 }
-                // Notify waiters (e.g., CLI --stdin) that a session is available.
-                self.session_registered.notify_waiters();
-                None
-            }
-        };
+            })
+            .await;
         if let Some(handle) = rejected_handle {
             // Duplicate IDs are unexpected but can happen if the builder returns a reused ID.
             // Stop the task so it does not leak in the background.
@@ -6786,21 +6966,23 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         }
 
         // Claim the canonical turn slot for the eager first turn.
-        {
-            let sessions = self.sessions.read().await;
-            let handle = sessions.get(&session_id).ok_or_else(|| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "fresh session handle missing for eager first turn: {session_id}"
-                )))
-            })?;
-            if let Err(error) = Self::request_start_turn(&session_id, handle) {
-                return Err(SessionError::Agent(
-                    meerkat_core::error::AgentError::InternalError(format!(
-                        "fresh session failed to admit eager first turn: {error}"
-                    )),
-                ));
-            }
-        }
+        self.sessions
+            .read(|sessions| -> Result<_, SessionError> {
+                let handle = sessions.get(&session_id).ok_or_else(|| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "fresh session handle missing for eager first turn: {session_id}"
+                    )))
+                })?;
+                if let Err(error) = Self::request_start_turn(&session_id, handle) {
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "fresh session failed to admit eager first turn: {error}"
+                        )),
+                    ));
+                }
+                Ok(())
+            })
+            .await?;
 
         // Dogma K10: `RuntimeTurnMetadata` (via `build.initial_turn_metadata`)
         // is the ONLY carrier of initial-turn render/skill facts — there is no
@@ -6842,15 +7024,16 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .await
             .is_err()
         {
-            let sessions = self.sessions.read().await;
-            if let Some(handle) = sessions.get(&session_id) {
-                Self::try_abort_admitted_turn(handle);
-            }
-            drop(sessions);
-            let mut sessions = self.sessions.write().await;
-            if let Some(handle) = sessions.swap_remove(&session_id) {
-                handle.actor_witness.revoke();
-            }
+            self.sessions
+                .with_handle(&session_id, Self::try_abort_admitted_turn)
+                .await;
+            self.sessions
+                .write(|sessions| {
+                    if let Some(handle) = sessions.swap_remove(&session_id) {
+                        handle.actor_witness.revoke();
+                    }
+                })
+                .await;
             self.staged_registry.forget(&session_id);
             return Err(SessionError::Agent(
                 meerkat_core::error::AgentError::InternalError(
@@ -6862,10 +7045,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let result = match result_rx.await {
             Ok(result) => result,
             Err(_) => {
-                let mut sessions = self.sessions.write().await;
-                if let Some(handle) = sessions.swap_remove(&session_id) {
-                    handle.actor_witness.revoke();
-                }
+                self.sessions
+                    .write(|sessions| {
+                        if let Some(handle) = sessions.swap_remove(&session_id) {
+                            handle.actor_witness.revoke();
+                        }
+                    })
+                    .await;
                 self.staged_registry.forget(&session_id);
                 return Err(SessionError::Agent(
                     meerkat_core::error::AgentError::InternalError(
@@ -7007,19 +7193,22 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        let woke = {
-            let mut slot = lock_turn_admission(&handle.turn_admission);
-            slot.request_interrupt()
-                .map_err(|_| SessionError::NotRunning { id: id.clone() })?
-        };
-        if woke {
-            wake_interrupt_notify(&handle.interrupt_notify);
-        }
-        Ok(())
+        self.sessions
+            .read(|sessions| -> Result<(), SessionError> {
+                let handle = sessions
+                    .get(id)
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                let woke = {
+                    let mut slot = lock_turn_admission(&handle.turn_admission);
+                    slot.request_interrupt()
+                        .map_err(|_| SessionError::NotRunning { id: id.clone() })?
+                };
+                if woke {
+                    wake_interrupt_notify(&handle.interrupt_notify);
+                }
+                Ok(())
+            })
+            .await
     }
 
     async fn interrupt_run_if_current(
@@ -7034,24 +7223,28 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         // Preserve the ordinary SessionService API's "current active run"
         // semantics by resolving the current witness once, then delegating to
         // the exact run-scoped command path.
-        let expected_run_id = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            if handle.cancel_after_boundary_handle.is_none() {
-                return Err(SessionError::Unsupported(
-                    "cancel_after_boundary".to_string(),
-                ));
-            }
-            let turn_state_handle = handle.turn_state_handle.as_deref().ok_or_else(|| {
-                SessionError::Unsupported("cancel_after_boundary_exact_run_authority".to_string())
-            })?;
-            turn_state_handle
-                .snapshot()
-                .active_run_id
-                .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?
-        };
+        let expected_run_id = self
+            .sessions
+            .read(|sessions| -> Result<_, SessionError> {
+                let handle = sessions
+                    .get(id)
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                if handle.cancel_after_boundary_handle.is_none() {
+                    return Err(SessionError::Unsupported(
+                        "cancel_after_boundary".to_string(),
+                    ));
+                }
+                let turn_state_handle = handle.turn_state_handle.as_deref().ok_or_else(|| {
+                    SessionError::Unsupported(
+                        "cancel_after_boundary_exact_run_authority".to_string(),
+                    )
+                })?;
+                turn_state_handle
+                    .snapshot()
+                    .active_run_id
+                    .ok_or_else(|| SessionError::NotRunning { id: id.clone() })
+            })
+            .await?;
         self.cancel_after_boundary_for_run(id, &expected_run_id)
             .await
     }
@@ -7065,117 +7258,125 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = match sessions.get(id) {
-            Some(handle) => handle,
-            None => {
-                drop(sessions);
-                return self
-                    .archived_views
-                    .read()
-                    .await
-                    .get(id)
-                    .cloned()
-                    .ok_or_else(|| SessionError::NotFound { id: id.clone() });
-            }
-        };
-
-        // Serve live reads from the service-owned summary/watch state instead
-        // of round-tripping through the session task. This keeps read-side
-        // snapshots responsive on sync surfaces such as wasm exports.
-        let state = *handle.state_rx.borrow();
-        let summary = handle.summary_rx.borrow().clone();
-        let live_identity = handle.llm_identity_rx.borrow().clone();
-        Ok(SessionView {
-            state: SessionInfo {
-                session_id: id.clone(),
-                created_at: handle.created_at,
-                updated_at: summary.updated_at,
-                message_count: summary.message_count,
-                is_active: Self::is_session_state_active(state),
-                model: live_identity.model,
-                provider: live_identity.provider,
-                last_assistant_text: summary.last_assistant_text,
-                labels: handle.labels.clone(),
-            },
-            billing: SessionUsage {
-                total_tokens: summary.total_tokens,
-                usage: summary.usage,
-            },
-        })
+        let live = self
+            .sessions
+            .with_handle(id, |handle| {
+                // Serve live reads from the service-owned summary/watch state instead
+                // of round-tripping through the session task. This keeps read-side
+                // snapshots responsive on sync surfaces such as wasm exports.
+                let state = *handle.state_rx.borrow();
+                let summary = handle.summary_rx.borrow().clone();
+                let live_identity = handle.llm_identity_rx.borrow().clone();
+                SessionView {
+                    state: SessionInfo {
+                        session_id: id.clone(),
+                        created_at: handle.created_at,
+                        updated_at: summary.updated_at,
+                        message_count: summary.message_count,
+                        is_active: Self::is_session_state_active(state),
+                        model: live_identity.model,
+                        provider: live_identity.provider,
+                        last_assistant_text: summary.last_assistant_text,
+                        labels: handle.labels.clone(),
+                    },
+                    billing: SessionUsage {
+                        total_tokens: summary.total_tokens,
+                        usage: summary.usage,
+                    },
+                }
+            })
+            .await;
+        match live {
+            Some(view) => Ok(view),
+            None => self
+                .archived_views
+                .read()
+                .await
+                .get(id)
+                .cloned()
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() }),
+        }
     }
 
     async fn list(&self, query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
-        let sessions = self.sessions.read().await;
-        let mut summaries: Vec<SessionSummary> = sessions
-            .iter()
-            .map(|(session_id, h)| {
-                let state = *h.state_rx.borrow();
-                let cache = h.summary_rx.borrow();
-                SessionSummary {
-                    session_id: session_id.clone(),
-                    created_at: h.created_at,
-                    updated_at: cache.updated_at,
-                    message_count: cache.message_count,
-                    total_tokens: cache.total_tokens,
-                    is_active: Self::is_session_state_active(state),
-                    labels: h.labels.clone(),
-                }
-            })
-            .collect();
-
-        // Filter by labels if specified (all k/v pairs must match).
-        if let Some(ref filter_labels) = query.labels {
-            summaries.retain(|s| {
-                filter_labels
+        self.sessions
+            .read(|sessions| -> Result<Vec<SessionSummary>, SessionError> {
+                let mut summaries: Vec<SessionSummary> = sessions
                     .iter()
-                    .all(|(k, v)| s.labels.get(k) == Some(v))
-            });
-        }
+                    .map(|(session_id, h)| {
+                        let state = *h.state_rx.borrow();
+                        let cache = h.summary_rx.borrow();
+                        SessionSummary {
+                            session_id: session_id.clone(),
+                            created_at: h.created_at,
+                            updated_at: cache.updated_at,
+                            message_count: cache.message_count,
+                            total_tokens: cache.total_tokens,
+                            is_active: Self::is_session_state_active(state),
+                            labels: h.labels.clone(),
+                        }
+                    })
+                    .collect();
 
-        if let Some(offset) = query.offset {
-            if offset < summaries.len() {
-                summaries = summaries.split_off(offset);
-            } else {
-                summaries.clear();
-            }
-        }
-        if let Some(limit) = query.limit {
-            summaries.truncate(limit);
-        }
+                // Filter by labels if specified (all k/v pairs must match).
+                if let Some(ref filter_labels) = query.labels {
+                    summaries.retain(|s| {
+                        filter_labels
+                            .iter()
+                            .all(|(k, v)| s.labels.get(k) == Some(v))
+                    });
+                }
 
-        Ok(summaries)
+                if let Some(offset) = query.offset {
+                    if offset < summaries.len() {
+                        summaries = summaries.split_off(offset);
+                    } else {
+                        summaries.clear();
+                    }
+                }
+                if let Some(limit) = query.limit {
+                    summaries.truncate(limit);
+                }
+
+                Ok(summaries)
+            })
+            .await
     }
 
     async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
-        Ok(self.sessions.read().await.contains_key(id))
+        Ok(self.sessions.contains(id).await)
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-        let mut sessions = self.sessions.write().await;
         // Every remaining awaitable realization resource is acquired before
         // asking either generated machine to authorize the lifecycle change.
-        // Global lock order for the only operation that needs both registries:
-        // live sessions, then archived views. Readers never retain an archived
-        // view guard while acquiring the live registry.
+        // Lock order for the only operation that needs both registries:
+        // archived views, then the live session table. The table is only ever
+        // held for a synchronous closure (see `SessionTable`), so nothing can
+        // hold it while waiting for the archived views.
         let mut archived_views = self.archived_views.write().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        // Standalone archive still changes the canonical session-document
-        // lifecycle fact. Obtain its generated Active -> Archived verdict
-        // before mutating the live actor's turn-admission authority.
-        authorize_standalone_archive(id)?;
-        let projection = Self::request_live_session_handle_shutdown(id, handle)?;
-        handle.actor_witness.revoke();
-        let handle = sessions
-            .swap_remove(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (handle, projection) = self
+            .sessions
+            .write(|sessions| -> Result<_, SessionError> {
+                let handle = sessions
+                    .get(id)
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                // Standalone archive still changes the canonical session-document
+                // lifecycle fact. Obtain its generated Active -> Archived verdict
+                // before mutating the live actor's turn-admission authority.
+                authorize_standalone_archive(id)?;
+                let projection = Self::request_live_session_handle_shutdown(id, handle)?;
+                handle.actor_witness.revoke();
+                let handle = sessions
+                    .swap_remove(id)
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                Ok((handle, projection))
+            })
+            .await?;
         let archived_view = Self::archived_view_from_handle(id, &handle);
         archived_views.insert(id.clone(), archived_view);
 
         drop(archived_views);
-        drop(sessions);
         self.shutdown_removed_live_session_handle(id, handle, projection);
         Ok(())
     }
@@ -11410,14 +11611,18 @@ mod admission_window_tests {
             .await
             .expect("create deferred session");
         let command_tx = {
-            let sessions = service.sessions.read().await;
-            let handle = sessions.get(&result.session_id).expect("session handle");
-            EphemeralSessionService::<AdmissionProbeBuilder>::request_start_turn(
-                &result.session_id,
-                handle,
-            )
-            .expect("admit turn before command delivery");
-            handle.command_tx.clone()
+            service
+                .sessions
+                .with_handle(&result.session_id, |handle| {
+                    EphemeralSessionService::<AdmissionProbeBuilder>::request_start_turn(
+                        &result.session_id,
+                        handle,
+                    )
+                    .expect("admit turn before command delivery");
+                    handle.command_tx.clone()
+                })
+                .await
+                .expect("session handle")
         };
         (result.session_id, command_tx)
     }
@@ -11547,12 +11752,16 @@ mod admission_window_tests {
             .await
             .expect("create deferred session");
         {
-            let sessions = service.sessions.read().await;
-            let handle = sessions.get(&result.session_id).expect("session handle");
+            let turn_admission = service
+                .sessions
+                .with_handle(&result.session_id, |handle| {
+                    Arc::clone(&handle.turn_admission)
+                })
+                .await
+                .expect("session handle");
             *turn_admission_for_run
                 .lock()
-                .expect("turn admission probe lock poisoned") =
-                Some(Arc::clone(&handle.turn_admission));
+                .expect("turn admission probe lock poisoned") = Some(turn_admission);
         }
 
         let result = service
@@ -11598,9 +11807,14 @@ mod admission_window_tests {
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
         {
-            let sessions = service.sessions.read().await;
-            let handle = sessions.get(&session_id).expect("session handle");
-            EphemeralSessionService::<AdmissionProbeBuilder>::try_abort_admitted_turn(handle);
+            service
+                .sessions
+                .with_handle(
+                    &session_id,
+                    EphemeralSessionService::<AdmissionProbeBuilder>::try_abort_admitted_turn,
+                )
+                .await
+                .expect("session handle");
         }
         // Aborting the admission does not synthesize another command; staleness
         // reset is now core-owned via the run-start flush, so no clear helper
@@ -11694,13 +11908,15 @@ mod archive_shutdown_drain_tests {
             service: &EphemeralSessionService<B>,
             session_id: &SessionId,
         ) {
-            let sessions = service.sessions.read().await;
-            let handle = sessions.get(session_id).expect("session handle");
+            let turn_admission = service
+                .sessions
+                .with_handle(session_id, |handle| Arc::clone(&handle.turn_admission))
+                .await
+                .expect("session handle");
             *self
                 .turn_admission
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                Some(Arc::clone(&handle.turn_admission));
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(turn_admission);
         }
     }
 
@@ -11907,25 +12123,22 @@ mod archive_shutdown_drain_tests {
         service: &EphemeralSessionService<B>,
         session_id: &SessionId,
     ) -> mpsc::Sender<SessionCommand> {
-        let sessions = service.sessions.read().await;
-        sessions
-            .get(session_id)
+        service
+            .sessions
+            .with_handle(session_id, |handle| handle.command_tx.clone())
+            .await
             .expect("session handle")
-            .command_tx
-            .clone()
     }
 
     async fn turn_admission_for<B: SessionAgentBuilder + 'static>(
         service: &EphemeralSessionService<B>,
         session_id: &SessionId,
     ) -> Arc<std::sync::Mutex<TurnAdmissionSlot>> {
-        let sessions = service.sessions.read().await;
-        Arc::clone(
-            &sessions
-                .get(session_id)
-                .expect("session handle")
-                .turn_admission,
-        )
+        service
+            .sessions
+            .with_handle(session_id, |handle| Arc::clone(&handle.turn_admission))
+            .await
+            .expect("session handle")
     }
 
     /// Entry 16/18 ("Archive-Unregister-Command-Leapfrog"): a runtime context
@@ -12073,10 +12286,17 @@ mod archive_shutdown_drain_tests {
         // Claim the admission (the start-turn decision point), then let the
         // archive teardown transition commit BEFORE the command is delivered.
         {
-            let sessions = service.sessions.read().await;
-            let handle = sessions.get(&session_id).expect("session handle");
-            EphemeralSessionService::<DrainProbeBuilder>::request_start_turn(&session_id, handle)
-                .expect("idle session admits the turn");
+            service
+                .sessions
+                .with_handle(&session_id, |handle| {
+                    EphemeralSessionService::<DrainProbeBuilder>::request_start_turn(
+                        &session_id,
+                        handle,
+                    )
+                    .expect("idle session admits the turn");
+                })
+                .await
+                .expect("session handle");
         }
         {
             let mut slot = lock_turn_admission(&turn_admission);

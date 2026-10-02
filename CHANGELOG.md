@@ -558,8 +558,10 @@ them.
     behind it.
   - Seen in a host whose coordinator spawned review workers from a tool call:
     the spawns completed only after the coordinator's turn released.
-  - Every session-task round trip now takes the task's command sender and
-    releases the map before it sends and waits.
+  - The session map is now a type whose only access is a synchronous
+    closure (or a cloned handle fact), so no guard can be held across an
+    `.await`. Every session-task round trip takes the task's command sender
+    and sends and waits with the map released.
 
 - The machine TLA generator parenthesizes a field's pending value when a
   later expression in the same update block reads it. A conditionally

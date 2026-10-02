@@ -273,6 +273,19 @@ them.
   input, so the wait is woken by the admission rather than re-reading on a
   timer. It returns `Ok(None)` for a session without a live registration.
 
+- `release-workflow-dispatch --mode assets --assets-run-id RUN_ID` (workflow
+  input `assets_run_id`, or `ASSETS_RUN_ID=RUN_ID make release-assets`)
+  publishes the archives an earlier asset recovery run built, instead of
+  rebuilding them. The build jobs are skipped; the publisher downloads that
+  run's archives and requires the run to be a `release.yml` dispatch on main
+  at a commit in main's history with a successful `Release binary build gate`,
+  every archive attested by `release.yml` at that commit on `refs/heads/main`,
+  and the source stamps to name the tag commit. A run from before the stamps
+  (v0.8.50 run 36988090176) is accepted only when the tag is an ancestor of
+  its commit and every path changed between them is under `.github/` or
+  `CHANGELOG.md`. Every publish also checks again that each binary in each
+  archive embeds the release version.
+
 ### Deprecated
 
 - `SessionRuntime::set_callback_channel`. It replaced the route shared by

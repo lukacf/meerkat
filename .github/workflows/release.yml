@@ -31,6 +31,11 @@ on:
         required: false
         default: ""
         type: string
+      assets_run_id:
+        description: "Asset recovery: publish the release archives of this earlier release.yml run on main instead of rebuilding them (requires publish_release_assets_only)"
+        required: false
+        default: ""
+        type: string
       publish_release_assets_only:
         description: "Recovery lane: build surface binaries and publish GitHub release assets only"
         required: false
@@ -703,7 +708,8 @@ jobs:
         needs.release_validate_gate.result == 'skipped')) &&
       (startsWith(github.ref, 'refs/tags/v') ||
        (github.event_name == 'workflow_dispatch' &&
-        github.event.inputs.publish_release_assets_only == 'true'))
+        github.event.inputs.publish_release_assets_only == 'true')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.assets_run_id == '')
     runs-on: ${{ matrix.platform.runs-on }}
     # Linux GNU binaries must keep the same glibc floor as the BuildBuddy lane
     # (buildpack-deps:bullseye = glibc 2.31, see tools/bazel/platforms/BUILD.bazel);
@@ -962,7 +968,8 @@ jobs:
         needs.release_validate_gate.result == 'skipped')) &&
       (startsWith(github.ref, 'refs/tags/v') ||
        (github.event_name == 'workflow_dispatch' &&
-        github.event.inputs.publish_release_assets_only == 'true'))
+        github.event.inputs.publish_release_assets_only == 'true')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.assets_run_id == '')
     # Windows binaries are cross-compiled from Linux with cargo-xwin (clang-cl,
     # lld-link, the Windows SDK). The native windows-latest build ran 190 to
     # 275 minutes on every release from v0.8.11 to v0.8.39 and lost its runner
@@ -1118,7 +1125,8 @@ jobs:
          github.event.inputs.release_backend == 'buildbuddy') ||
         (github.event_name != 'workflow_dispatch' &&
          (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
-          vars.MEERKAT_RELEASE_BUILDBUDDY == '1'))))
+          vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.assets_run_id == '')
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     env:
       BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
@@ -1505,8 +1513,21 @@ jobs:
     steps:
       - name: Check selected release binary backend
         shell: bash
+        env:
+          ASSETS_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.assets_run_id || '' }}
         run: |
           set -euo pipefail
+          # Asset recovery from an earlier run: nothing is built here; the
+          # publisher verifies that run's archives and that its own build
+          # gate passed (see publish_github_release).
+          if [[ -n "${ASSETS_RUN_ID}" ]]; then
+            for result in "${{ needs.build_binaries.result }}" "${{ needs.build_binaries_buildbuddy.result }}" \
+                          "${{ needs.build_binaries_windows_cross.result }}" "${{ needs.verify_windows_binaries.result }}"; do
+              [[ "${result}" == "skipped" ]] || { echo "assets_run_id set, but a build job ran (${result})" >&2; exit 1; }
+            done
+            echo "Publishing the archives of release run ${ASSETS_RUN_ID}; no build in this run."
+            exit 0
+          fi
           bb_selected="${{ github.actor == 'lukacf' && ((github.event_name == 'workflow_dispatch' && github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1'))) }}"
           github_result="${{ needs.build_binaries.result }}"
           buildbuddy_result="${{ needs.build_binaries_buildbuddy.result }}"
@@ -1569,9 +1590,22 @@ jobs:
           fetch-depth: 0
 
       - name: Download all artifacts
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.assets_run_id == '' }}
         uses: actions/download-artifact@v4
         with:
           path: release-artifacts
+
+      # Asset recovery from an earlier run (assets_run_id): its archives,
+      # stamps and attestations; verify-release-asset-provenance --source-run
+      # binds them to that run before anything is published.
+      - name: Download the archives of the earlier release run
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.assets_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          pattern: meerkat-*
+          run-id: ${{ github.event.inputs.assets_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Prepare and verify complete release asset set
         env:
@@ -1587,20 +1621,67 @@ jobs:
             --output-dir prepared-release-artifacts \
             --release-tag "${RELEASE_TAG}"
 
+      # The build jobs refuse to package a binary that does not embed the
+      # release version; check it again on the exact bytes being published,
+      # which for assets_run_id were built by an earlier run.
+      - name: Require the release version in every published binary
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          version="${version//\//-}"
+          checked=0
+          for archive in prepared-release-artifacts/*.tar.gz prepared-release-artifacts/*.zip; do
+            [[ -f "${archive}" ]] || continue
+            unpacked="$(mktemp -d)"
+            case "${archive}" in
+              *.tar.gz) tar -xzf "${archive}" -C "${unpacked}" ;;
+              *.zip) unzip -q "${archive}" -d "${unpacked}" ;;
+            esac
+            binaries=0
+            while IFS= read -r -d '' binary; do
+              binaries=$((binaries + 1))
+              grep -aqF -- "${version}" "${binary}" || {
+                echo "$(basename "${archive}"): $(basename "${binary}") does not embed release version ${version}" >&2
+                exit 1
+              }
+            done < <(find "${unpacked}" -type f -print0)
+            [[ "${binaries}" -gt 0 ]] || { echo "$(basename "${archive}") is empty" >&2; exit 1; }
+            rm -rf "${unpacked}"
+            checked=$((checked + 1))
+          done
+          [[ "${checked}" -gt 0 ]] || { echo "no release archives to check" >&2; exit 1; }
+          echo "Every binary in ${checked} archives embeds ${version}"
+
       # Tag push, or a dispatch on the tag ref: every archive is attested
       # from exactly the tag commit. An asset recovery dispatched from main
       # runs main's workflow against the tag, so its attestations name the
       # run's commit: then each archive must be attested by release.yml at
       # that commit on refs/heads/main, and carry an attested stamp proving
-      # its build job checked out the tag commit.
+      # its build job checked out the tag commit. With assets_run_id the
+      # archives come from that earlier run: --source-run binds them to its
+      # commit, requires its build gate to have passed, and accepts an
+      # unstamped run only if nothing outside .github/ and CHANGELOG.md
+      # changed between the tag and that commit.
       - name: Verify exact-tag release build provenance
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
           RECOVERY_FROM_MAIN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release_assets_only == 'true' && github.ref == 'refs/heads/main' }}
+          ASSETS_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.assets_run_id || '' }}
         run: |
           set -euo pipefail
-          if [[ "${RECOVERY_FROM_MAIN}" == "true" ]]; then
+          if [[ -n "${ASSETS_RUN_ID}" && "${RECOVERY_FROM_MAIN}" != "true" ]]; then
+            echo "assets_run_id requires publish_release_assets_only dispatched on main" >&2
+            exit 1
+          fi
+          if [[ -n "${ASSETS_RUN_ID}" ]]; then
+            scripts/verify-release-asset-provenance \
+              --source-run "${ASSETS_RUN_ID}" \
+              --stamps release-artifacts \
+              prepared-release-artifacts "${RELEASE_TAG}"
+          elif [[ "${RECOVERY_FROM_MAIN}" == "true" ]]; then
             scripts/verify-release-asset-provenance \
               --recovery-source "${GITHUB_SHA}" \
               --stamps release-artifacts \

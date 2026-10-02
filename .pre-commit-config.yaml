@@ -68,6 +68,16 @@ repos:
         pass_filenames: false
         stages: [manual]
 
+  # On commit: recorded gpt-live provider streams must be scrubbed (no
+  # credentials, SDP, host details or voice audio) before they are committed.
+  - repo: local
+    hooks:
+      - id: gpt-live-replay-fixture-scrubbed
+        name: gpt-live replay fixtures are scrubbed
+        entry: scripts/gpt-live-scrub-provider-stream check
+        language: script
+        files: '^tests/integration/fixtures/gpt_live_replay/.*\.jsonl$'
+
   # On push: secret detection
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.18.4

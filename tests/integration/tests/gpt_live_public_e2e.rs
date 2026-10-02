@@ -975,7 +975,12 @@ impl PublicLiveHarness {
             shared.connect(&mut peer, &self.session_id),
         );
         let replacement = match (&self.evidence, channel) {
-            (Some(evidence), Some(channel)) => evidence.wire(channel).scope(connect).await??,
+            (Some(evidence), Some(channel)) => {
+                evidence
+                    .provider_recording(channel)
+                    .scope(evidence.wire(channel).scope(connect))
+                    .await??
+            }
             _ => connect.await??,
         };
         if let (Some(evidence), Some(channel)) = (&self.evidence, channel) {
@@ -1451,7 +1456,12 @@ async fn open_public_live_with(
             shared.connect(&mut peer, &session_id),
         );
         let exact = match (&evidence, channel) {
-            (Some(evidence), Some(channel)) => evidence.wire(channel).scope(connect).await??,
+            (Some(evidence), Some(channel)) => {
+                evidence
+                    .provider_recording(channel)
+                    .scope(evidence.wire(channel).scope(connect))
+                    .await??
+            }
             _ => connect.await??,
         };
         if let (Some(evidence), Some(channel)) = (&evidence, channel) {

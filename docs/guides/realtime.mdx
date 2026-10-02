@@ -315,6 +315,27 @@ Use `live/status` to read the current state of a live channel:
 ```
 </CodeGroup>
 
+### Channel close events
+
+Every committed live channel close publishes one
+`{"type": "live_channel_closed", "session_id": ..., "channel_id": ...,
+"reason": ..., "reopen_recommended": ...}` event (`AgentEvent::LiveChannelClosed`)
+on the owning session's event stream, so observers never poll `live/status` to
+learn that a channel closed or why. `reason` is one of:
+
+| Reason | Cause |
+|--------|-------|
+| `client_requested` | `live/close`, a member host close, or the client's own close on the channel transport |
+| `client_disconnected` | The client's socket or peer connection went away |
+| `provider_closed` | The provider ended the session |
+| `error` | A terminal adapter, provider or transport protocol error (including a rejected configuration) |
+| `media_fault` | The channel's first assistant output had a transcript but no audible audio (see media health above) |
+| `replaced` | A context or result recovery reopened the session on a fresh channel |
+| `open_abandoned` | The channel's open was abandoned before it activated |
+
+`reopen_recommended` is true only for a `media_fault` whose session may still
+reopen with its retained context.
+
 ## Live channel methods
 
 | Method | Purpose |
@@ -836,6 +857,40 @@ Public admission diagnostics include the failing stage and typed cause (for
 example, `missing_default_binding`, `lease_absent`, or
 `openai-live-openai-api-backend`) without logging credentials, provider payloads,
 or connection URLs. These diagnostics do not change admission policy.
+
+### Media health of the first output
+
+A public Live WebRTC session can occasionally carry silent media for its whole
+life while the model speaks: transcripts arrive, but the remote audio track
+decodes as silence. The runtime catches this on each channel's first assistant
+output, in `ProviderManagedUnmeasured` mode:
+
+1. When that output's first segment commits with a non-empty transcript, the
+   runtime sends `live/media_health_requested { channel_id, output_id }`. The
+   `output_id` is only a report key (that output is already settled; it is not
+   a playback handle).
+2. The client answers with `live/media_health { channel_id, output_id,
+   decoded_frames, audible_frames, max_rms }`: raw counters from the channel's
+   media start to now (nothing was audible before the first output).
+   `audible_frames` counts decoded frames whose RMS reached the client's
+   non-silent floor, and `max_rms` is linear amplitude (0.0 to 1.0). The client
+   never sends a verdict.
+3. The runtime judges the counters. `audible` keeps the channel open. A
+   `media_fault` (no audible frame and a peak below 0.002) means the runtime
+   has already closed the channel through the ordinary close (retained summary
+   custody included) before it answered. `reopen_recommended` is true for the
+   session's first media fault, so the client can reopen with the retained
+   context. A second fault on the same session closes without the
+   recommendation, so a broken media path never loops.
+
+Observers that did not send the report (a UI, the owning agent, other SDK
+consumers) learn the close from the session event stream (see "Channel close
+events" below). `live/status` also reports
+`{"status": "closed", "reason": "media_fault", "reopen_recommended": true}`.
+A plain close still reports `{"status": "closed"}`. The request is made once
+per channel. A report for an output the runtime did not request, a repeated
+report, or a report for an inactive channel is refused. A client that never
+answers leaves the output unjudged: no fault and no reopen.
 
 For public Live, `live/playback_complete` is an explicit caller-confirmed
 snapshot cut: it commits the transcript prefix observed at that ordered

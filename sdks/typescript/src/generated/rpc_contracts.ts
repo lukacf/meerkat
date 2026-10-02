@@ -82,6 +82,8 @@ import type {
   LiveCommitInputParams,
   LiveCommitInputResult,
   LiveInterruptResult,
+  LiveMediaHealthParams,
+  LiveMediaHealthResult,
   LiveOpenParams,
   LiveOpenResult,
   LivePlaybackCompleteParams,
@@ -697,6 +699,10 @@ export interface RpcMethodContracts {
   "live/webrtc/answer": {
     params: LiveWebrtcAnswerParams;
     result: (LiveWebrtcAnswerResult) & Record<string, unknown>;
+  };
+  "live/media_health": {
+    params: LiveMediaHealthParams;
+    result: (LiveMediaHealthResult) & Record<string, unknown>;
   };
   "mob/create": {
     params: MobCreateParams;

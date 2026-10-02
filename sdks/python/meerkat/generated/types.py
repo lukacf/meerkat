@@ -4910,6 +4910,43 @@ enum — see `wire_live_adapter_status_byte_compatible_with_core`)."""
 
 
 @dataclass
+class LiveMediaHealthRequestedParams:
+    """Runtime request notification `live/media_health_requested`: at the typed
+end of a channel's first assistant output (its first segment settled with
+a non-empty transcript), the runtime asks the client for its raw
+decoded-audio counters from the channel's media start to now (nothing was
+audible before the first output). The `output_id` is only the report key;
+that output is already settled and is not a playback handle. The client
+answers with `live/media_health`. A client that never answers leaves the
+output unjudged."""
+    channel_id: str
+    output_id: str
+
+
+@dataclass
+class LiveMediaHealthParams:
+    """`live/media_health` request: the client's raw decoded-audio counters from
+the channel's media start to now, for the output a
+`live/media_health_requested` notification named. The runtime judges them;
+the client never sends a verdict."""
+    audible_frames: int
+    channel_id: str
+    decoded_frames: int
+    max_rms: float
+    output_id: str
+
+
+# The runtime's verdict on one `live/media_health` report.
+LiveMediaHealthVerdict = Literal['audible', 'media_fault']
+
+@dataclass
+class LiveMediaHealthResult:
+    """`live/media_health` result."""
+    verdict: LiveMediaHealthVerdict
+    reopen_recommended: Optional[bool] = None
+
+
+@dataclass
 class LiveSendInputParams:
     """Request payload for `live/send_input`.
 
@@ -5206,6 +5243,9 @@ class WireLiveDegradationReasonUnknown(TypedDict, total=False):
 
 WireLiveDegradationReason = WireLiveDegradationReasonRateLimited | WireLiveDegradationReasonProviderThrottled | WireLiveDegradationReasonNetworkUnstable | WireLiveDegradationReasonOther | WireLiveDegradationReasonUnknown
 
+# Typed cause of a runtime-initiated live channel close.
+WireLiveCloseReason = Literal['media_fault']
+
 # Wire mirror of [`meerkat_core::live_adapter::LiveAdapterStatus`].
 #
 # Internally-tagged on `status` (snake_case). The `degraded` variant
@@ -5228,6 +5268,8 @@ class WireLiveAdapterStatusClosing(TypedDict, total=False):
     status: Required[Literal['closing']]
 
 class WireLiveAdapterStatusClosed(TypedDict, total=False):
+    reason: NotRequired[Optional[WireLiveCloseReason]]
+    reopen_recommended: NotRequired[bool]
     status: Required[Literal['closed']]
 
 class WireLiveAdapterStatusUnknown(TypedDict, total=False):

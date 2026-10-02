@@ -1754,6 +1754,35 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -3415,6 +3444,46 @@
               "kind"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
           }
         ]
       },
@@ -24331,6 +24400,35 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -26122,6 +26220,46 @@
               "kind"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
           }
         ]
       },
@@ -36717,6 +36855,35 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -40268,6 +40435,46 @@
               "kind"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
           }
         ]
       },
@@ -44602,7 +44809,21 @@
             "type": "object"
           },
           {
+            "description": "The channel is closed. `reason` is present when the runtime closed it\nfor a typed cause (a media fault); `reopen_recommended` says whether\nthe session may reopen it with its retained context. A plain close\nserializes as `{\"status\":\"closed\"}`, as before.",
             "properties": {
+              "reason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireLiveCloseReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
               "status": {
                 "const": "closed",
                 "type": "string"
@@ -44684,6 +44905,16 @@
           "provider_native_resume"
         ],
         "type": "object"
+      },
+      "WireLiveCloseReason": {
+        "description": "Typed cause of a runtime-initiated live channel close.",
+        "oneOf": [
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it: the media path is broken.",
+            "type": "string"
+          }
+        ]
       },
       "WireLiveContinuityMode": {
         "description": "Wire projection of [`meerkat_core::live_adapter::LiveContinuityMode`].\n\nInternally-tagged on `mode` (snake_case) — matches the core enum's serde\nshape exactly so the wire payload is byte-identical. CC6: closes the\ntyped-surface gap. SDK consumers get a discriminated union (TS) or\ntagged-variant (Python) instead of a raw JSON blob, and the\n`ProviderNativeResume { provider_session_id }` payload field is visible\nto schema codegen.\n\n**Breaking-change note (pre-1.0 dogma, no shims):** T12 already moved the\ncore enum from a bare-string serde shape (`\"transcript_only\"`) to the\ninternally-tagged form (`{\"mode\":\"transcript_only\"}`). This wire mirror\nmakes that shape change visible to schema codegen and SDK clients.",
@@ -50843,6 +51074,35 @@
             },
             "required": [
               "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
             ],
             "type": "object"
           }
@@ -57387,6 +57647,46 @@
           }
         ]
       },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -63236,7 +63536,21 @@
             "type": "object"
           },
           {
+            "description": "The channel is closed. `reason` is present when the runtime closed it\nfor a typed cause (a media fault); `reopen_recommended` says whether\nthe session may reopen it with its retained context. A plain close\nserializes as `{\"status\":\"closed\"}`, as before.",
             "properties": {
+              "reason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireLiveCloseReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
               "status": {
                 "const": "closed",
                 "type": "string"
@@ -63318,6 +63632,16 @@
           "provider_native_resume"
         ],
         "type": "object"
+      },
+      "WireLiveCloseReason": {
+        "description": "Typed cause of a runtime-initiated live channel close.",
+        "oneOf": [
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it: the media path is broken.",
+            "type": "string"
+          }
+        ]
       },
       "WireLiveContinuityMode": {
         "description": "Wire projection of [`meerkat_core::live_adapter::LiveContinuityMode`].\n\nInternally-tagged on `mode` (snake_case) — matches the core enum's serde\nshape exactly so the wire payload is byte-identical. CC6: closes the\ntyped-surface gap. SDK consumers get a discriminated union (TS) or\ntagged-variant (Python) instead of a raw JSON blob, and the\n`ProviderNativeResume { provider_session_id }` payload field is visible\nto schema codegen.\n\n**Breaking-change note (pre-1.0 dogma, no shims):** T12 already moved the\ncore enum from a bare-string serde shape (`\"transcript_only\"`) to the\ninternally-tagged form (`{\"mode\":\"transcript_only\"}`). This wire mirror\nmakes that shape change visible to schema codegen and SDK clients.",
@@ -72445,6 +72769,35 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -76794,6 +77147,46 @@
           }
         ]
       },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -81125,7 +81518,21 @@
             "type": "object"
           },
           {
+            "description": "The channel is closed. `reason` is present when the runtime closed it\nfor a typed cause (a media fault); `reopen_recommended` says whether\nthe session may reopen it with its retained context. A plain close\nserializes as `{\"status\":\"closed\"}`, as before.",
             "properties": {
+              "reason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireLiveCloseReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
               "status": {
                 "const": "closed",
                 "type": "string"
@@ -81207,6 +81614,16 @@
           "provider_native_resume"
         ],
         "type": "object"
+      },
+      "WireLiveCloseReason": {
+        "description": "Typed cause of a runtime-initiated live channel close.",
+        "oneOf": [
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it: the media path is broken.",
+            "type": "string"
+          }
+        ]
       },
       "WireLiveContinuityMode": {
         "description": "Wire projection of [`meerkat_core::live_adapter::LiveContinuityMode`].\n\nInternally-tagged on `mode` (snake_case) — matches the core enum's serde\nshape exactly so the wire payload is byte-identical. CC6: closes the\ntyped-surface gap. SDK consumers get a discriminated union (TS) or\ntagged-variant (Python) instead of a raw JSON blob, and the\n`ProviderNativeResume { provider_session_id }` payload field is visible\nto schema codegen.\n\n**Breaking-change note (pre-1.0 dogma, no shims):** T12 already moved the\ncore enum from a bare-string serde shape (`\"transcript_only\"`) to the\ninternally-tagged form (`{\"mode\":\"transcript_only\"}`). This wire mirror\nmakes that shape change visible to schema codegen and SDK clients.",
@@ -85403,6 +85820,35 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -87128,6 +87574,46 @@
               "kind"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
           }
         ]
       },
@@ -98010,6 +98496,97 @@
     ],
     "title": "LiveInterruptStatus"
   },
+  "LiveMediaHealthParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`live/media_health` request: the client's raw decoded-audio counters from\nthe channel's media start to now, for the output a\n`live/media_health_requested` notification named. The runtime judges them;\nthe client never sends a verdict.",
+    "properties": {
+      "audible_frames": {
+        "description": "Decoded frames whose RMS reached the client's non-silent floor.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "channel_id": {
+        "type": "string"
+      },
+      "decoded_frames": {
+        "description": "Audio frames the client decoded since the channel's media start.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "max_rms": {
+        "description": "Highest decoded RMS, in linear amplitude (0.0 to 1.0).",
+        "format": "double",
+        "type": "number"
+      },
+      "output_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel_id",
+      "output_id",
+      "decoded_frames",
+      "audible_frames",
+      "max_rms"
+    ],
+    "title": "LiveMediaHealthParams",
+    "type": "object"
+  },
+  "LiveMediaHealthRequestedParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Runtime request notification `live/media_health_requested`: at the typed\nend of a channel's first assistant output (its first segment settled with\na non-empty transcript), the runtime asks the client for its raw\ndecoded-audio counters from the channel's media start to now (nothing was\naudible before the first output). The `output_id` is only the report key;\nthat output is already settled and is not a playback handle. The client\nanswers with `live/media_health`. A client that never answers leaves the\noutput unjudged.",
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "output_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel_id",
+      "output_id"
+    ],
+    "title": "LiveMediaHealthRequestedParams",
+    "type": "object"
+  },
+  "LiveMediaHealthResult": {
+    "$defs": {
+      "LiveMediaHealthVerdict": {
+        "description": "The runtime's verdict on one `live/media_health` report.",
+        "oneOf": [
+          {
+            "const": "audible",
+            "description": "The output was audible; the channel stays open.",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The output had a transcript but no audible audio: the runtime closed\nthe channel with reason `media_fault` before answering.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`live/media_health` result.",
+    "properties": {
+      "reopen_recommended": {
+        "description": "For a media fault: whether the session may reopen the channel with its\nretained context (one media-fault reopen per session).",
+        "type": "boolean"
+      },
+      "verdict": {
+        "$ref": "#/$defs/LiveMediaHealthVerdict"
+      }
+    },
+    "required": [
+      "verdict"
+    ],
+    "title": "LiveMediaHealthResult",
+    "type": "object"
+  },
   "LiveOpenParams": {
     "$defs": {
       "LiveOpenTransport": {
@@ -99251,7 +99828,21 @@
             "type": "object"
           },
           {
+            "description": "The channel is closed. `reason` is present when the runtime closed it\nfor a typed cause (a media fault); `reopen_recommended` says whether\nthe session may reopen it with its retained context. A plain close\nserializes as `{\"status\":\"closed\"}`, as before.",
             "properties": {
+              "reason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireLiveCloseReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
               "status": {
                 "const": "closed",
                 "type": "string"
@@ -99278,6 +99869,16 @@
               "debug"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "WireLiveCloseReason": {
+        "description": "Typed cause of a runtime-initiated live channel close.",
+        "oneOf": [
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it: the media path is broken.",
+            "type": "string"
           }
         ]
       },
@@ -142689,6 +143290,35 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -144388,6 +145018,46 @@
               "kind"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
           }
         ]
       },
@@ -154426,7 +155096,21 @@
             "type": "object"
           },
           {
+            "description": "The channel is closed. `reason` is present when the runtime closed it\nfor a typed cause (a media fault); `reopen_recommended` says whether\nthe session may reopen it with its retained context. A plain close\nserializes as `{\"status\":\"closed\"}`, as before.",
             "properties": {
+              "reason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireLiveCloseReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
               "status": {
                 "const": "closed",
                 "type": "string"
@@ -154453,6 +155137,16 @@
               "debug"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "WireLiveCloseReason": {
+        "description": "Typed cause of a runtime-initiated live channel close.",
+        "oneOf": [
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it: the media path is broken.",
+            "type": "string"
           }
         ]
       },
@@ -155608,6 +156302,16 @@
   },
   "WireLiveAdapterStatus": {
     "$defs": {
+      "WireLiveCloseReason": {
+        "description": "Typed cause of a runtime-initiated live channel close.",
+        "oneOf": [
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it: the media path is broken.",
+            "type": "string"
+          }
+        ]
+      },
       "WireLiveDegradationReason": {
         "description": "Wire mirror of [`meerkat_core::live_adapter::LiveDegradationReason`].\n\nInternally-tagged on `kind` (snake_case) — matches the core enum's serde\nshape exactly. SDK consumers route on `kind` to distinguish the\nnon-payload variants from the typed `other { detail }` payload.",
         "oneOf": [
@@ -155750,7 +156454,21 @@
         "type": "object"
       },
       {
+        "description": "The channel is closed. `reason` is present when the runtime closed it\nfor a typed cause (a media fault); `reopen_recommended` says whether\nthe session may reopen it with its retained context. A plain close\nserializes as `{\"status\":\"closed\"}`, as before.",
         "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireLiveCloseReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reopen_recommended": {
+            "type": "boolean"
+          },
           "status": {
             "const": "closed",
             "type": "string"

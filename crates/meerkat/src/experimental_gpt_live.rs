@@ -1763,7 +1763,20 @@ pub enum ExperimentalLivePumpRetirementError {
 #[derive(Clone)]
 pub struct ExperimentalLivePublicObservation {
     binding: ProviderWebrtcBinding,
+    kind: ExperimentalLivePublicObservationKind,
     output: meerkat_live::LiveAssistantOutputAddress,
+}
+
+/// Which client control event one public observation is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExperimentalLivePublicObservationKind {
+    /// `live/assistant_output_available`: an actionable playback handle.
+    AssistantOutputAvailable,
+    /// `live/media_health_requested`: the runtime asks the client for its raw
+    /// decoded-audio counters for the channel's first assistant output (an
+    /// already consumed output; its id is only the report key).
+    MediaHealthRequested,
 }
 
 impl ExperimentalLivePublicObservation {
@@ -1771,7 +1784,27 @@ impl ExperimentalLivePublicObservation {
         binding: ProviderWebrtcBinding,
         output: meerkat_live::LiveAssistantOutputAddress,
     ) -> Self {
-        Self { binding, output }
+        Self {
+            binding,
+            kind: ExperimentalLivePublicObservationKind::AssistantOutputAvailable,
+            output,
+        }
+    }
+
+    fn media_health_requested(
+        binding: ProviderWebrtcBinding,
+        output: meerkat_live::LiveAssistantOutputAddress,
+    ) -> Self {
+        Self {
+            binding,
+            kind: ExperimentalLivePublicObservationKind::MediaHealthRequested,
+            output,
+        }
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> ExperimentalLivePublicObservationKind {
+        self.kind
     }
 
     /// Candidate-only projection seam for the non-shipping Gate0 transport.
@@ -1807,6 +1840,7 @@ impl fmt::Debug for ExperimentalLivePublicObservation {
         formatter
             .debug_struct("ExperimentalLivePublicObservation")
             .field("binding", &"[REDACTED]")
+            .field("kind", &self.kind)
             .field("output", &self.output)
             .finish()
     }
@@ -2029,7 +2063,10 @@ impl crate::surface::LiveWebrtcBoundReadyCustody for ExperimentalGptLiveBoundRea
         }
         let observation = self
             .live_adapter_host
-            .reserve_channel_close_observation(binding.channel_id())
+            .reserve_channel_close_observation(
+                binding.channel_id(),
+                meerkat_core::LiveChannelCloseReason::OpenAbandoned,
+            )
             .await;
         match observation {
             Ok(observation) => {
@@ -6908,7 +6945,69 @@ async fn release_unmeasured_segment(
     runtime
         .commit_live_assistant_output_terminal(reservation)
         .map_err(|error| error.to_string())?;
+    request_first_output_media_health(activation, binding, seal).await;
     Ok(UnmeasuredSegmentRelease::Committed)
+}
+
+/// The typed end of the channel's first assistant output: its first segment
+/// committed with a non-empty transcript. Ask the client for its raw
+/// decoded-audio counters (from the channel's media start; nothing was
+/// audible before this output) so the generated media-health edge can judge
+/// whether the media path carried the speech. Requested once per channel;
+/// later segments and outputs find the request made and return at once. The
+/// request is advisory: its refusal (the channel is closing) or a failed
+/// publication never fails the committed release.
+async fn request_first_output_media_health(
+    activation: &PreparedExperimentalGptLiveActivation,
+    binding: &ProviderWebrtcBinding,
+    seal: &UnmeasuredSegmentSeal,
+) {
+    let Some(output_id) = seal.output_id.as_deref() else {
+        return;
+    };
+    if seal.snapshot.trim().is_empty() {
+        return;
+    }
+    let requested = match activation
+        .runtime
+        .request_live_media_health(&activation.runtime_binding, output_id, true)
+        .await
+    {
+        Ok(requested) => requested,
+        Err(error) => {
+            tracing::warn!(
+                channel = %binding.channel_id(),
+                %error,
+                "media health was not requested for the channel's first output"
+            );
+            return;
+        }
+    };
+    if !requested {
+        return;
+    }
+    tracing::info!(
+        channel = %binding.channel_id(),
+        "requested the client's media health for the channel's first output"
+    );
+    if let Err(error) = activation
+        .public_observation_publisher
+        .publish(ExperimentalLivePublicObservation::media_health_requested(
+            binding.clone(),
+            meerkat_live::LiveAssistantOutputAddress {
+                channel_id: binding.channel_id().clone(),
+                output_id: output_id.to_owned(),
+                content_index: 0,
+            },
+        ))
+        .await
+    {
+        tracing::warn!(
+            channel = %binding.channel_id(),
+            %error,
+            "media health request could not be published; the output stays unjudged"
+        );
+    }
 }
 
 /// Hand one release to the channel's close, whose deferred settlement
@@ -10042,6 +10141,11 @@ mod tests {
             &self,
             observation: ExperimentalLivePublicObservation,
         ) -> Result<(), ExperimentalLivePublicObservationDeliveryError> {
+            if observation.kind() == ExperimentalLivePublicObservationKind::MediaHealthRequested {
+                // A media-health request is no playback handle: the matrix
+                // records only actionable outputs.
+                return Ok(());
+            }
             if self.fail_once.swap(false, Ordering::AcqRel) {
                 return Err(ExperimentalLivePublicObservationDeliveryError::Rejected);
             }
@@ -19538,6 +19642,24 @@ mod tests {
         ActivatedResult,
         RawDuringRegistration,
         CancelledRawDuringRegistration,
+        /// The client reports the channel's first unmeasured output silent.
+        MediaFaultOnFirstOutput,
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn a_silent_first_unmeasured_output_closes_the_channel_on_a_media_fault() {
+        run_context_and_result_recovery_close_case(
+            None,
+            true,
+            false,
+            Some(RecoveryCloseCase::MediaFaultOnFirstOutput),
+        )
+        .await;
     }
 
     #[cfg(all(
@@ -20881,6 +21003,122 @@ mod tests {
             })
             .await
             .expect("unmeasured voice observation is retained without playback completion");
+            // The committed first output with a transcript is the typed end
+            // the runtime requests media health at.
+            let requested_output = runtime
+                .live_media_health_requested_output(&session_id, &old_channel)
+                .await
+                .expect("machine state")
+                .expect("the channel's first output requested media health");
+            let report = |output_id: &str, audible_frames: u64, max_rms: f64| {
+                meerkat_contracts::LiveMediaHealthParams {
+                    channel_id: old_channel.to_string(),
+                    output_id: output_id.to_string(),
+                    decoded_frames: 24_000,
+                    audible_frames,
+                    max_rms,
+                }
+            };
+            assert!(
+                matches!(
+                    member_host
+                        .report_experimental_live_media_health(
+                            authority.as_ref(),
+                            &old_channel,
+                            &initial_activation_receipt,
+                            &report("not-the-requested-output", 0, 0.0),
+                        )
+                        .await,
+                    Err(crate::surface::ExperimentalLiveMediaHealthError::Refused(_))
+                ),
+                "a report for an output the runtime did not request is refused"
+            );
+            if matches!(close_case, Some(RecoveryCloseCase::MediaFaultOnFirstOutput)) {
+                use futures::StreamExt;
+                let mut observer = service
+                    .subscribe_session_events(&session_id)
+                    .await
+                    .expect("an observer subscribes to the session event stream");
+                let verdict = member_host
+                    .report_experimental_live_media_health(
+                        authority.as_ref(),
+                        &old_channel,
+                        &initial_activation_receipt,
+                        &report(&requested_output, 0, 0.0004),
+                    )
+                    .await
+                    .expect("a silent report is judged");
+                assert_eq!(
+                    verdict,
+                    meerkat_contracts::LiveMediaHealthResult {
+                        verdict: meerkat_contracts::LiveMediaHealthVerdict::MediaFault,
+                        reopen_recommended: true,
+                    }
+                );
+                // An observer that did not send the report learns the typed
+                // close from the session event stream, without polling.
+                let closed_event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while let Some(envelope) = observer.next().await {
+                        if let meerkat_core::AgentEvent::LiveChannelClosed {
+                            channel_id,
+                            reason,
+                            reopen_recommended,
+                            ..
+                        } = envelope.payload
+                        {
+                            return Some((channel_id, reason, reopen_recommended));
+                        }
+                    }
+                    None
+                })
+                .await
+                .expect("the closed fact is published after the close commits");
+                assert_eq!(
+                    closed_event,
+                    Some((
+                        old_channel.to_string(),
+                        meerkat_core::LiveChannelCloseReason::MediaFault,
+                        true
+                    ))
+                );
+                let closed = member_host
+                    .validate_experimental_live_channel_custody(
+                        &old_channel,
+                        opened.pending_receipt(),
+                    )
+                    .await
+                    .expect("closed custody stays readable");
+                assert!(matches!(
+                    closed.phase(),
+                    crate::surface::ExperimentalLiveChannelPhaseStatus::Closed
+                ));
+                assert!(
+                    member_host
+                        .report_experimental_live_media_health(
+                            authority.as_ref(),
+                            &old_channel,
+                            &initial_activation_receipt,
+                            &report(&requested_output, 0, 0.0),
+                        )
+                        .await
+                        .is_err(),
+                    "a closed channel's output is never judged again"
+                );
+                return;
+            }
+            let verdict = member_host
+                .report_experimental_live_media_health(
+                    authority.as_ref(),
+                    &old_channel,
+                    &initial_activation_receipt,
+                    &report(&requested_output, 900, 0.31),
+                )
+                .await
+                .expect("an audible report is judged");
+            assert_eq!(
+                verdict.verdict,
+                meerkat_contracts::LiveMediaHealthVerdict::Audible
+            );
             assert!(
                 mirror_host
                     .pending_replacement_required(&session_id)

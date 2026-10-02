@@ -2574,7 +2574,12 @@ mod orchestrator {
                 let binding = crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError::ChannelBindingFailed;
                 authority.unbind_channel(&channel_id, session_id).await;
                 if let Err(cleanup) = self
-                    .close_live_channel(host, &channel_id, Some(session_id))
+                    .close_live_channel_for(
+                        host,
+                        &channel_id,
+                        Some(session_id),
+                        meerkat_core::LiveChannelCloseReason::OpenAbandoned,
+                    )
                     .await
                 {
                     return Err(super::ExperimentalLiveChannelOpenError::BindingCleanup {
@@ -2629,7 +2634,12 @@ mod orchestrator {
                     let binding = crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError::ChannelBindingFailed;
                     authority.unbind_channel(&channel_id, session_id).await;
                     if let Err(cleanup) = self
-                        .close_live_channel(host, &channel_id, Some(session_id))
+                        .close_live_channel_for(
+                            host,
+                            &channel_id,
+                            Some(session_id),
+                            meerkat_core::LiveChannelCloseReason::OpenAbandoned,
+                        )
                         .await
                     {
                         return Err(super::ExperimentalLiveChannelOpenError::BindingCleanup {
@@ -2656,7 +2666,12 @@ mod orchestrator {
             {
                 authority.unbind_channel(&channel_id, session_id).await;
                 if let Err(cleanup) = self
-                    .close_live_channel(host, &channel_id, Some(session_id))
+                    .close_live_channel_for(
+                        host,
+                        &channel_id,
+                        Some(session_id),
+                        meerkat_core::LiveChannelCloseReason::OpenAbandoned,
+                    )
                     .await
                 {
                     return Err(super::ExperimentalLiveChannelOpenError::BindingCleanup {
@@ -2669,7 +2684,12 @@ mod orchestrator {
             if let Err(binding) = pending.bind_opened(&result).await {
                 authority.unbind_channel(&channel_id, session_id).await;
                 if let Err(cleanup) = self
-                    .close_live_channel(host, &channel_id, Some(session_id))
+                    .close_live_channel_for(
+                        host,
+                        &channel_id,
+                        Some(session_id),
+                        meerkat_core::LiveChannelCloseReason::OpenAbandoned,
+                    )
                     .await
                 {
                     return Err(super::ExperimentalLiveChannelOpenError::BindingCleanup {
@@ -3117,9 +3137,14 @@ mod orchestrator {
             channel_id: &LiveChannelId,
         ) -> Result<(), LiveChannelVerbError> {
             authority.unbind_channel(channel_id, session_id).await;
-            self.close_live_channel(host, channel_id, Some(session_id))
-                .await
-                .map(|_| ())
+            self.close_live_channel_for(
+                host,
+                channel_id,
+                Some(session_id),
+                meerkat_core::LiveChannelCloseReason::Error,
+            )
+            .await
+            .map(|_| ())
         }
 
         /// The full `live/open` pipeline, S1-S12 (order-preserving
@@ -3688,7 +3713,13 @@ mod orchestrator {
             session_id: &SessionId,
             channel_id: &LiveChannelId,
         ) {
-            match host.reserve_channel_close_observation(channel_id).await {
+            match host
+                .reserve_channel_close_observation(
+                    channel_id,
+                    meerkat_core::LiveChannelCloseReason::OpenAbandoned,
+                )
+                .await
+            {
                 Ok(observation) => {
                     let committed = self
                         .commit_live_close_for_open_failure(
@@ -3924,13 +3955,106 @@ mod orchestrator {
             channel: &LiveChannelId,
         ) -> Result<Option<LiveCloseResult>, crate::surface::ExperimentalLiveChannelCloseError>
         {
+            self.close_experimental_live_channel_for(
+                host,
+                authority,
+                channel,
+                meerkat_core::LiveChannelCloseReason::ClientRequested,
+            )
+            .await
+        }
+
+        /// [`Self::close_experimental_live_channel`] naming why the channel
+        /// closes (carried to the committed close's
+        /// `AgentEvent::LiveChannelClosed`).
+        #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+        pub async fn close_experimental_live_channel_for(
+            &self,
+            host: &Arc<LiveAdapterHost>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            channel: &LiveChannelId,
+            reason: meerkat_core::LiveChannelCloseReason,
+        ) -> Result<Option<LiveCloseResult>, crate::surface::ExperimentalLiveChannelCloseError>
+        {
             self.close_experimental_live_channel_inner(
                 host,
                 authority,
                 channel,
                 ExperimentalLiveClosePurpose::Explicit,
+                reason,
             )
             .await
+        }
+
+        /// Judge the client's raw decoded-audio counters for the output the
+        /// runtime requested media health for (the channel's first assistant
+        /// output). A media fault closes the channel through the ordinary
+        /// explicit close (retained summary custody is the normal path)
+        /// before the verdict is returned, so a client that receives
+        /// `media_fault` may reopen at once when `reopen_recommended`.
+        #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+        pub async fn report_experimental_live_media_health(
+            &self,
+            host: &Arc<LiveAdapterHost>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            channel: &LiveChannelId,
+            report: &meerkat_contracts::LiveMediaHealthParams,
+        ) -> Result<
+            meerkat_contracts::LiveMediaHealthResult,
+            crate::surface::ExperimentalLiveMediaHealthError,
+        > {
+            use crate::surface::ExperimentalLiveMediaHealthError;
+            let session_id = self
+                .runtime_adapter
+                .live_session_for_active_channel(channel)
+                .await
+                .ok_or_else(|| {
+                    ExperimentalLiveMediaHealthError::Refused(
+                        "the channel is not active".to_string(),
+                    )
+                })?;
+            if report.channel_id != channel.as_str() {
+                return Err(ExperimentalLiveMediaHealthError::Refused(
+                    "the report names another channel".to_string(),
+                ));
+            }
+            let max_rms_micros = crate::surface::live_media_health_rms_micros(report.max_rms);
+            let judgement = self
+                .runtime_adapter
+                .observe_live_media_health(
+                    &session_id,
+                    channel,
+                    &report.output_id,
+                    report.decoded_frames,
+                    report.audible_frames,
+                    max_rms_micros,
+                )
+                .await
+                .map_err(|error| ExperimentalLiveMediaHealthError::Refused(error.to_string()))?;
+            if !judgement.media_faulted() {
+                return Ok(meerkat_contracts::LiveMediaHealthResult {
+                    verdict: meerkat_contracts::LiveMediaHealthVerdict::Audible,
+                    reopen_recommended: false,
+                });
+            }
+            tracing::warn!(
+                %session_id,
+                %channel,
+                decoded_frames = report.decoded_frames,
+                audible_frames = report.audible_frames,
+                max_rms_micros,
+                reopen_recommended = judgement.reopen_recommended(),
+                "the channel's first assistant output decoded silent; closing it on a media fault"
+            );
+            self.close_experimental_live_channel(host, authority, channel)
+                .await?;
+            // The committed close reports `LiveChannelClosed` (reason
+            // `media_fault`) on the session event stream through the
+            // runtime's close publisher.
+            Ok(meerkat_contracts::LiveMediaHealthResult {
+                verdict: meerkat_contracts::LiveMediaHealthVerdict::MediaFault,
+                reopen_recommended: judgement.reopen_recommended(),
+            })
         }
 
         /// The sealed recovery proves its append already resolved ambiguous.
@@ -3966,6 +4090,7 @@ mod orchestrator {
                 authority,
                 recovery.closing_channel_id(),
                 ExperimentalLiveClosePurpose::ContextRecovery,
+                meerkat_core::LiveChannelCloseReason::Replaced,
             )
             .await
         }
@@ -4001,6 +4126,7 @@ mod orchestrator {
                 authority,
                 recovery.closing_channel_id(),
                 ExperimentalLiveClosePurpose::ResultRecovery,
+                meerkat_core::LiveChannelCloseReason::Replaced,
             )
             .await
         }
@@ -4012,6 +4138,7 @@ mod orchestrator {
             authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
             channel: &LiveChannelId,
             purpose: ExperimentalLiveClosePurpose,
+            reason: meerkat_core::LiveChannelCloseReason,
         ) -> Result<Option<LiveCloseResult>, crate::surface::ExperimentalLiveChannelCloseError>
         {
             use crate::experimental_gpt_live::ExperimentalLivePhysicalClose;
@@ -4072,11 +4199,17 @@ mod orchestrator {
                             authority,
                             recovery_channel,
                             ExperimentalLiveClosePurpose::Explicit,
+                            reason,
                         ))
                         .await?;
                         if closed.is_none() {
-                            self.close_live_channel(host, recovery_channel, Some(&session))
-                                .await?;
+                            self.close_live_channel_for(
+                                host,
+                                recovery_channel,
+                                Some(&session),
+                                reason,
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -4159,14 +4292,14 @@ mod orchestrator {
                 meerkat_live::traced_live_close_step(
                     Some(channel),
                     "close_verb",
-                    self.close_live_channel(host, channel, Some(&session)),
+                    self.close_live_channel_for(host, channel, Some(&session), reason),
                 )
                 .await?
             } else {
-                if self
+                if !self
                     .live_channel_status(host, channel, Some(&session))
                     .await?
-                    != meerkat_contracts::WireLiveAdapterStatus::Closed
+                    .is_closed()
                 {
                     return Err(ExperimentalLiveChannelCloseError::BindingMismatch);
                 }
@@ -4211,6 +4344,25 @@ mod orchestrator {
             channel_id: &LiveChannelId,
             expected_session: Option<&SessionId>,
         ) -> Result<LiveCloseResult, LiveChannelVerbError> {
+            self.close_live_channel_for(
+                host,
+                channel_id,
+                expected_session,
+                meerkat_core::LiveChannelCloseReason::ClientRequested,
+            )
+            .await
+        }
+
+        /// [`Self::close_live_channel`] naming why the channel closes: the
+        /// typed reason travels on the host's close observation to the
+        /// committed close's `AgentEvent::LiveChannelClosed`.
+        pub async fn close_live_channel_for(
+            &self,
+            host: &LiveAdapterHost,
+            channel_id: &LiveChannelId,
+            expected_session: Option<&SessionId>,
+            reason: meerkat_core::LiveChannelCloseReason,
+        ) -> Result<LiveCloseResult, LiveChannelVerbError> {
             let request = LiveChannelRequestPublicKind::Close;
             let Some(session_id) = self
                 .runtime_adapter
@@ -4226,7 +4378,7 @@ mod orchestrator {
             let observation = match meerkat_live::traced_live_close_step(
                 Some(channel_id),
                 "reserve_close_observation",
-                host.reserve_channel_close_observation(channel_id),
+                host.reserve_channel_close_observation(channel_id, reason),
             )
             .await
             {
@@ -4551,7 +4703,12 @@ mod orchestrator {
                     )
                     .await;
                     let close = self
-                        .close_live_channel(host, channel_id, Some(session_id))
+                        .close_live_channel_for(
+                            host,
+                            channel_id,
+                            Some(session_id),
+                            meerkat_core::LiveChannelCloseReason::Error,
+                        )
                         .await
                         .map(|_| ())
                         .map_err(|close| close.to_string());
@@ -4616,7 +4773,12 @@ mod orchestrator {
                 )
                 .await;
                 let close = self
-                    .close_live_channel(host, channel_id, Some(session_id))
+                    .close_live_channel_for(
+                        host,
+                        channel_id,
+                        Some(session_id),
+                        meerkat_core::LiveChannelCloseReason::Error,
+                    )
                     .await
                     .map(|_| ())
                     .map_err(|error| error.to_string());
@@ -5035,7 +5197,13 @@ mod orchestrator {
             LiveChannelPublicStatus::Opening => Ok(WireLiveAdapterStatus::Opening),
             LiveChannelPublicStatus::Ready => Ok(WireLiveAdapterStatus::Ready),
             LiveChannelPublicStatus::Closing => Ok(WireLiveAdapterStatus::Closing),
-            LiveChannelPublicStatus::Closed => Ok(WireLiveAdapterStatus::Closed),
+            LiveChannelPublicStatus::Closed => Ok(match authority.media_fault_reopen_recommended {
+                Some(reopen_recommended) => WireLiveAdapterStatus::Closed {
+                    reason: Some(meerkat_contracts::WireLiveCloseReason::MediaFault),
+                    reopen_recommended,
+                },
+                None => WireLiveAdapterStatus::closed(),
+            }),
             LiveChannelPublicStatus::Degraded => {
                 let reason = authority.degradation_reason.ok_or_else(|| {
                     "LiveChannelStatusResolved emitted degraded status without reason".to_string()

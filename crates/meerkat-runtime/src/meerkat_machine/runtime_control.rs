@@ -13718,12 +13718,53 @@ impl MeerkatMachine {
                 {
                     host.retire_closed_channel(session_id, commit).await;
                 }
+                self.publish_live_channel_closed(session_id, observation)
+                    .await;
                 Ok(authority)
             }
             None => Err(RuntimeDriverError::Internal(format!(
                 "RecordLiveCloseClosed for channel '{channel_id}' emitted no LiveCloseResultResolved effect"
             ))),
         }
+    }
+
+    /// Report one committed close on the session event stream. A media fault
+    /// recorded by the generated media-health edge names the reason (with its
+    /// reopen recommendation); otherwise the closing path's reason stands.
+    #[cfg(feature = "live")]
+    async fn publish_live_channel_closed(
+        &self,
+        session_id: &SessionId,
+        observation: &meerkat_live::LiveChannelCloseObservation,
+    ) {
+        let Some(publisher) = self.live_channel_close_publisher() else {
+            return;
+        };
+        let media_fault = self
+            .session_dsl_state(session_id)
+            .await
+            .ok()
+            .and_then(|state| {
+                state
+                    .live_media_fault_reopen_recommended_by_channel
+                    .get(observation.channel_id())
+                    .copied()
+            });
+        let (reason, reopen_recommended) = match media_fault {
+            Some(reopen_recommended) => (
+                meerkat_core::LiveChannelCloseReason::MediaFault,
+                reopen_recommended,
+            ),
+            None => (observation.reason(), false),
+        };
+        publisher
+            .publish_live_channel_closed(
+                session_id,
+                &meerkat_live::LiveChannelId::new(observation.channel_id()),
+                reason,
+                reopen_recommended,
+            )
+            .await;
     }
 
     /// Consume the exact one-use rollback capability from an atomic accepted
@@ -14527,6 +14568,7 @@ impl MeerkatMachine {
                 status_observation_sequence,
                 degradation_reason,
                 degradation_detail,
+                media_fault_reopen_recommended,
             } if *effect_channel_id == channel_id
                 && *status_observation_sequence == observation.observation_sequence() =>
             {
@@ -14537,6 +14579,7 @@ impl MeerkatMachine {
                     *status_observation_sequence,
                     *degradation_reason,
                     degradation_detail.clone(),
+                    *media_fault_reopen_recommended,
                 ))
             }
             _ => None,
@@ -14548,6 +14591,150 @@ impl MeerkatMachine {
                 "RecordLiveChannelStatus for channel '{channel_id}' emitted no LiveChannelStatusResolved effect"
             ))),
         }
+    }
+
+    /// Ask the client for its raw decoded-audio counters for a channel's
+    /// first assistant output (`RequestLiveMediaHealth`), at that output's
+    /// typed end. Returns `false` without a request when the channel's first
+    /// output was already requested; any other refusal (a stale binding, an
+    /// inactive channel, an empty transcript) is an error.
+    pub async fn request_live_media_health(
+        &self,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+        output_id: &str,
+        assistant_transcript_nonempty: bool,
+    ) -> Result<bool, RuntimeDriverError> {
+        let session_id = binding.session_id();
+        let channel_id = binding.channel_id().to_string();
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let state = self
+            .session_dsl_state(session_id)
+            .await
+            .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
+        if state
+            .live_media_health_requested_output_by_channel
+            .contains_key(channel_id.as_str())
+        {
+            return Ok(false);
+        }
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RequestLiveMediaHealth {
+                    session_id: session_id.to_string(),
+                    channel_id: channel_id.clone(),
+                    runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                        binding.runtime_id(),
+                    ),
+                    fence_token: crate::meerkat_machine::dsl::FenceToken::from_domain(
+                        binding.fence_token(),
+                    ),
+                    generation: crate::meerkat_machine::dsl::Generation::from_domain(
+                        binding.generation(),
+                    ),
+                    output_id: output_id.to_owned(),
+                    assistant_transcript_nonempty,
+                },
+                "RequestLiveMediaHealth",
+            )
+            .await
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        let requested = effects.as_slice().iter().any(|effect| {
+            matches!(
+                effect,
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveMediaHealthRequested {
+                    channel_id: effect_channel,
+                    output_id: effect_output,
+                    ..
+                } if *effect_channel == channel_id && effect_output == output_id
+            )
+        });
+        if requested {
+            Ok(true)
+        } else {
+            Err(RuntimeDriverError::Internal(
+                "RequestLiveMediaHealth emitted no LiveMediaHealthRequested effect".to_string(),
+            ))
+        }
+    }
+
+    /// The output the runtime requested media health for on a channel (its
+    /// first assistant output), when the request was made.
+    pub async fn live_media_health_requested_output(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> Result<Option<String>, RuntimeDriverError> {
+        let state = self
+            .session_dsl_state(session_id)
+            .await
+            .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
+        Ok(state
+            .live_media_health_requested_output_by_channel
+            .get(channel_id.as_str())
+            .cloned())
+    }
+
+    /// Judge the client's raw decoded-audio counters for the requested output
+    /// (`ObserveLiveChannelMediaHealth`). Refused unless the report names the
+    /// exact output the runtime requested on the session's active channel and
+    /// that output was not judged yet.
+    pub async fn observe_live_media_health(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+        output_id: &str,
+        decoded_frames: u64,
+        audible_frames: u64,
+        max_rms_micros: u64,
+    ) -> Result<crate::live_execution::LiveMediaHealthJudgement, RuntimeDriverError> {
+        let channel = channel_id.to_string();
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ObserveLiveChannelMediaHealth {
+                    session_id: session_id.to_string(),
+                    channel_id: channel.clone(),
+                    output_id: output_id.to_owned(),
+                    decoded_frames,
+                    audible_frames,
+                    max_rms_micros,
+                },
+                "ObserveLiveChannelMediaHealth",
+            )
+            .await
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        effects
+            .as_slice()
+            .iter()
+            .find_map(|effect| {
+                match effect {
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveChannelMediaHealthJudged {
+                    channel_id: effect_channel,
+                    output_id: effect_output,
+                    media_faulted,
+                    reopen_recommended,
+                    ..
+                } if *effect_channel == channel && effect_output == output_id => Some(
+                    crate::live_execution::LiveMediaHealthJudgement::new(
+                        *media_faulted,
+                        *reopen_recommended,
+                    ),
+                ),
+                _ => None,
+            }
+            })
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(
+                    "ObserveLiveChannelMediaHealth emitted no LiveChannelMediaHealthJudged effect"
+                        .to_string(),
+                )
+            })
     }
 
     pub(super) async fn cancel_after_boundary_inner(

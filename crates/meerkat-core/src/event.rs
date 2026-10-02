@@ -136,6 +136,32 @@ pub enum AgentErrorClass {
     NoPendingBoundary,
 }
 
+/// Typed cause of a committed live channel close.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LiveChannelCloseReason {
+    /// A caller asked to close the channel (`live/close`, a member host
+    /// close, or the client's own close request on the channel transport).
+    ClientRequested,
+    /// The client's transport went away (socket or peer connection lost).
+    ClientDisconnected,
+    /// The provider ended the session.
+    ProviderClosed,
+    /// A terminal adapter, provider or transport protocol error (including a
+    /// configuration the provider rejected).
+    Error,
+    /// The channel's first assistant output had a non-empty transcript but
+    /// the client decoded no audible audio for it.
+    MediaFault,
+    /// The runtime retired the channel for a replacement (context or result
+    /// recovery reopens the session on a fresh channel).
+    Replaced,
+    /// The channel's open was abandoned before it activated.
+    OpenAbandoned,
+}
+
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1055,6 +1081,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::StreamTruncated { .. } => "stream_truncated",
         AgentEvent::ToolConfigChanged { .. } => "tool_config_changed",
         AgentEvent::BackgroundJobCompleted { .. } => "background_job_completed",
+        AgentEvent::LiveChannelClosed { .. } => "live_channel_closed",
         AgentEvent::TranscriptRewriteCommitted { .. } => TRANSCRIPT_REWRITE_COMMITTED_EVENT_TYPE,
         AgentEvent::TranscriptRewriteAuditReceiptCommitted { .. } => {
             TRANSCRIPT_REWRITE_AUDIT_RECEIPT_COMMITTED_EVENT_TYPE
@@ -2699,6 +2726,20 @@ pub enum AgentEvent {
     /// Existing durable-join authority resolved these applications as discarded.
     /// Published only after any required requeue persistence succeeds.
     BoundaryAppendsDiscarded(BoundaryAppendsDiscarded),
+    /// The runtime closed one of this session's live channels for a typed
+    /// cause (a media fault on its first assistant output). Published on the
+    /// session event stream after the close commits, so every observer
+    /// learns the cause and whether the session may reopen the channel with
+    /// its retained context, without polling `live/status`.
+    ///
+    /// Appended after every released variant: declaration order is the
+    /// implicit discriminant (the xtask `released_enum_ordinals` test).
+    LiveChannelClosed {
+        session_id: SessionId,
+        channel_id: String,
+        reason: LiveChannelCloseReason,
+        reopen_recommended: bool,
+    },
 }
 
 /// Exact negative application fact projected from durable boundary join resolution.

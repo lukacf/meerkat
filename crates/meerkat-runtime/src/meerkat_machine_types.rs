@@ -1017,6 +1017,8 @@ meerkat_machine_runtime_internal_inputs!(
         AuthorizeLiveDelegationSteer,
         ReconcileLiveDelegationSteer,
         ResolveLiveDelegationSteerDelivery,
+        RequestLiveMediaHealth,
+        ObserveLiveChannelMediaHealth,
         ResolveLiveDelegationCancellation,
         RecordLiveDelegationWorkerTerminal,
         ReconcileRevokedLiveDelegationWorkerAfterRestart,

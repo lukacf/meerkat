@@ -66,9 +66,10 @@ pub use live_host::{
 pub use live_host::{
     ExperimentalGptLiveContextMirrorHost, ExperimentalLiveChannelCloseError,
     ExperimentalLiveChannelCustodyStatus, ExperimentalLiveChannelPhaseStatus,
-    ExperimentalLiveContextRecoveryError, ExperimentalLivePlaybackOwnerReadiness,
-    ExperimentalLiveReplacementRequired, LiveContextPreparationFailure,
-    LiveContextPreparationStage, LiveContextPreparationStatus,
+    ExperimentalLiveContextRecoveryError, ExperimentalLiveMediaHealthError,
+    ExperimentalLivePlaybackOwnerReadiness, ExperimentalLiveReplacementRequired,
+    LiveContextPreparationFailure, LiveContextPreparationStage, LiveContextPreparationStatus,
+    live_media_health_rms_micros,
 };
 #[cfg(all(
     feature = "session-store",

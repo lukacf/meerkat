@@ -136,6 +136,18 @@ them.
   (the operation a `LifecycleOperationPending { "explicit_resume member ..." }`
   names) to end.
 
+- `meerkat_machine_schema::SymbolRef::parse` is a public constructor for a
+  coverage anchor path, so a crate outside Meerkat can build a coverage
+  manifest for its own machines. The check is lexical and never touches the
+  filesystem: the path must be non-empty, repository-relative and
+  `/`-separated, with no control characters, no drive or stream `:`, no
+  empty/`.`/`..` component, and no component that Windows cannot hold
+  (trailing dot or space, `< > " | ? *`, or a device name such as `CON` or
+  `LPT1`). Each refusal is a typed `SymbolRefError` (with
+  `NonPortableComponentKind` for the portability rules). It does not prove
+  that the file exists or realizes the anchored semantics; the owning
+  coverage validator checks that. The built-in catalogs now construct their
+  anchors through the same parser.
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a

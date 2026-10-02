@@ -14,9 +14,9 @@ pub use compositions::{
 };
 pub use coverage::{
     CompositionCoverageManifest, CoverageAnchor, CoverageClaims, CoverageSchemaTarget,
-    MachineCoverageManifest, ScenarioCoverage, SemanticCoverageEntry, SymbolRef,
-    canonical_composition_coverage_manifests, canonical_machine_coverage_manifests,
-    scheduler_rule_coverage_name,
+    MachineCoverageManifest, NonPortableComponentKind, ScenarioCoverage, SemanticCoverageEntry,
+    SymbolRef, SymbolRefError, canonical_composition_coverage_manifests,
+    canonical_machine_coverage_manifests, scheduler_rule_coverage_name,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

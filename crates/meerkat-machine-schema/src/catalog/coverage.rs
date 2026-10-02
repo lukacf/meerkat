@@ -40,11 +40,122 @@ use super::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolRef(String);
 
+/// Why a coverage anchor path is not a portable, repository-relative path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SymbolRefError {
+    #[error("coverage anchor path is empty")]
+    Empty,
+    #[error("coverage anchor path must be repository-relative, not absolute")]
+    Absolute,
+    #[error("coverage anchor path must use `/` separators")]
+    Backslash,
+    #[error("coverage anchor path cannot contain a drive or stream separator `:`")]
+    Colon,
+    #[error("coverage anchor path cannot contain control characters")]
+    ControlCharacter,
+    #[error("coverage anchor path cannot contain an empty, `.` or `..` component")]
+    InvalidComponent,
+    #[error("coverage anchor path component `{0}` is not portable")]
+    NonPortableComponent(NonPortableComponentKind),
+}
+
+/// Which portability rule a path component breaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonPortableComponentKind {
+    /// Ends with `.` or a space, which Windows strips.
+    TrailingDotOrSpace,
+    /// Contains one of `< > " | ? *`.
+    ReservedCharacter,
+    /// Is a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`..`COM9`,
+    /// `LPT1`..`LPT9`, with or without an extension).
+    ReservedDeviceName,
+}
+
+impl std::fmt::Display for NonPortableComponentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TrailingDotOrSpace => "ends with a dot or space",
+            Self::ReservedCharacter => "contains a reserved character",
+            Self::ReservedDeviceName => "is a reserved device name",
+        })
+    }
+}
+
 impl SymbolRef {
+    /// Parse a repository-relative coverage anchor path.
+    ///
+    /// The check is lexical and never touches the filesystem: the path is
+    /// non-empty, relative, `/`-separated, free of control characters, drive
+    /// or stream separators, empty/`.`/`..` components, and of components
+    /// that are not portable to Windows. It does not prove that the file
+    /// exists, that it stays inside the repository through symlinks, or that
+    /// it realizes the anchored semantics: the coverage validator that owns
+    /// the catalog checks those.
+    pub fn parse(path: impl Into<String>) -> Result<Self, SymbolRefError> {
+        let path = path.into();
+        if path.is_empty() {
+            return Err(SymbolRefError::Empty);
+        }
+        if path.starts_with('/') {
+            return Err(SymbolRefError::Absolute);
+        }
+        if path.contains('\\') {
+            return Err(SymbolRefError::Backslash);
+        }
+        if path.contains(':') {
+            return Err(SymbolRefError::Colon);
+        }
+        if path.chars().any(char::is_control) {
+            return Err(SymbolRefError::ControlCharacter);
+        }
+        for component in path.split('/') {
+            if component.is_empty() || component == "." || component == ".." {
+                return Err(SymbolRefError::InvalidComponent);
+            }
+            if let Some(kind) = non_portable_component(component) {
+                return Err(SymbolRefError::NonPortableComponent(kind));
+            }
+        }
+        Ok(Self(path))
+    }
+
     /// Borrow the underlying repo-relative path.
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+fn non_portable_component(component: &str) -> Option<NonPortableComponentKind> {
+    if component.ends_with(['.', ' ']) {
+        return Some(NonPortableComponentKind::TrailingDotOrSpace);
+    }
+    if component.contains(['<', '>', '"', '|', '?', '*']) {
+        return Some(NonPortableComponentKind::ReservedCharacter);
+    }
+    let stem = component.split('.').next().unwrap_or_default();
+    let device = stem.eq_ignore_ascii_case("CON")
+        || stem.eq_ignore_ascii_case("PRN")
+        || stem.eq_ignore_ascii_case("AUX")
+        || stem.eq_ignore_ascii_case("NUL")
+        || ["COM", "LPT"].iter().any(|prefix| {
+            stem.get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+                && matches!(
+                    &stem[prefix.len()..],
+                    "1" | "2"
+                        | "3"
+                        | "4"
+                        | "5"
+                        | "6"
+                        | "7"
+                        | "8"
+                        | "9"
+                        | "\u{b9}"
+                        | "\u{b2}"
+                        | "\u{b3}"
+                )
+        });
+    device.then_some(NonPortableComponentKind::ReservedDeviceName)
 }
 
 /// The schema element an anchor claims to realize.
@@ -3113,7 +3224,7 @@ fn machine_anchor(
 ) -> CoverageAnchor {
     CoverageAnchor {
         id: id.into(),
-        symbol: SymbolRef(symbol.into()),
+        symbol: SymbolRef::parse(symbol).expect("portable coverage anchor path"),
         target: CoverageSchemaTarget::Machine(
             MachineId::parse(machine).expect("valid machine slug"),
         ),
@@ -3136,7 +3247,7 @@ fn route_anchor(
 ) -> CoverageAnchor {
     CoverageAnchor {
         id: id.into(),
-        symbol: SymbolRef(symbol.into()),
+        symbol: SymbolRef::parse(symbol).expect("portable coverage anchor path"),
         target: CoverageSchemaTarget::Route(RouteId::parse(route).expect("valid route slug")),
         note: note.into(),
         claims,

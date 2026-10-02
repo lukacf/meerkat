@@ -1,129 +1,41 @@
-//! One stock persistent service turn over the accepted memory candidate.
-//! Reuses E1 HTTP/native owners and reads the real committed Session document.
-//! Process-local memory only; this is not SQLite or restart coverage.
+//! Current native S2 revalidation through the stock persistent bundle.
+//! The application table is the real configured invocation policy owner for this
+//! fixture; native acceptance, actor, controller, grants and audit are unchanged.
+//! This is not a JSONL/RPC authentication or governed wire projection claim.
 use super::*;
-use meerkat::surface::{
-    PersistentRuntimeExecutor, build_runtime_backed_service_with_default_reconfigure_host,
-    materialize_session_with_reserved_admission_and_actor_slot,
-};
-use meerkat_runtime::accept::AcceptOutcome;
-use meerkat_runtime::input_state::{InputLifecycleState, InputTerminalOutcome, StoredInputState};
-use meerkat_runtime::{
-    InMemoryRuntimeStore, MeerkatDriverKind, RuntimeSessionPersistenceProfile, RuntimeStore,
-};
 
-type CleanupSlot = Mutex<Option<(Arc<MeerkatMachine>, SessionId)>>;
-
-fn decode_stored_audit(
-    row: Value,
-) -> Result<Vec<StoredAuthorizationAuditObservation>, serde_json::Error> {
-    #[derive(serde::Deserialize)]
-    struct AuditProjection {
-        // StoredInputState deliberately omits an empty frozen audit prefix.
-        // Explicit null or malformed present payloads must still fail decoding.
-        #[serde(default)]
-        authorization_audit: Vec<StoredAuthorizationAuditObservation>,
-    }
-    serde_json::from_value::<AuditProjection>(row).map(|row| row.authorization_audit)
+#[derive(Clone, PartialEq, Eq)]
+enum InvocationAction {
+    Invoke,
 }
 
-fn stored_audit(row: &StoredInputState) -> Vec<StoredAuthorizationAuditObservation> {
-    decode_stored_audit(serde_json::to_value(row).unwrap()).expect("actual stored row audit")
+#[derive(Clone, PartialEq, Eq)]
+struct InvocationPermissionRow {
+    requester: PrincipalRef,
+    ingress_actor: PrincipalRef,
+    realm: RealmId,
+    runtime: LogicalRuntimeId,
+    executor: PrincipalRef,
+    action: InvocationAction,
 }
 
-#[test]
-fn stored_audit_decoder_accepts_only_valid_arrays_or_omitted_empty_prefix() {
-    let empty_row = StoredInputState::new_accepted(meerkat_core::InputId::new());
-    let encoded = serde_json::to_value(&empty_row).unwrap();
-    assert!(encoded.get("authorization_audit").is_none());
-    assert!(decode_stored_audit(encoded).unwrap().is_empty());
-    assert!(
-        decode_stored_audit(serde_json::json!({"authorization_audit": []}))
-            .unwrap()
-            .is_empty()
-    );
-
-    // A typed historical record exercises decoding only, not native admission.
-    let record = StoredAuthorizationAuditObservation {
-        contributors: Vec::new().into(),
-        observation: meerkat_authorization_contracts::audit::AuthorizationAuditObservation {
-            operation_id: meerkat_core::OperationId::new(),
-            execution_scope: OperationExecutionScope::Domain,
-            run_id: None,
-            context_revision: None,
-            observation: AuditObservation::Entry,
-        },
+async fn exercise_revalidated_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
+    let seed = Session::new();
+    let session_id = seed.id().clone();
+    let runtime = LogicalRuntimeId::for_session(&session_id);
+    let permission_row = InvocationPermissionRow {
+        requester: principal("requester"),
+        ingress_actor: principal("ingress"),
+        realm: RealmId::parse("native-loop").unwrap(),
+        runtime: runtime.clone(),
+        executor: principal("executor"),
+        action: InvocationAction::Invoke,
     };
-    let expected = vec![record];
-    assert_eq!(
-        decode_stored_audit(serde_json::json!({"authorization_audit": &expected})).unwrap(),
-        expected,
-    );
-    for malformed in [
-        serde_json::json!({"authorization_audit": null}),
-        serde_json::json!({"authorization_audit": {}}),
-        serde_json::json!({"authorization_audit": [null]}),
-        serde_json::json!({"authorization_audit": [{}]}),
-    ] {
-        assert!(decode_stored_audit(malformed).is_err());
-    }
-}
-
-fn assert_original(
-    row: &StoredInputState,
-    input_id: &meerkat_core::InputId,
-    claims: &InputAuthorityAssociation,
-) {
-    assert_eq!(&row.state.input_id, input_id);
-    assert_eq!(row.state.authority_contributors.len(), 1);
-    assert_eq!(row.state.authority_contributors[0].input_id(), input_id);
-    assert_eq!(row.state.authority_contributors[0].association(), claims);
-}
-
-fn assert_stock_document(saved: &Session, session_id: &SessionId) {
-    assert_eq!(saved.id(), session_id);
-    let mut paired = 0;
-    for pair in saved.messages().windows(2) {
-        if let [
-            Message::BlockAssistant(message),
-            Message::ToolResults { results, .. },
-        ] = pair
-        {
-            let ids: Vec<_> = message
-                .tool_calls()
-                .map(|call| call.id.to_string())
-                .collect();
-            if ids == [DENIED_CALL, PERMITTED_CALL] {
-                assert_eq!(results.len(), 2);
-                assert_eq!(
-                    results
-                        .iter()
-                        .filter(|result| result.tool_use_id == DENIED_CALL && result.is_error)
-                        .count(),
-                    1
-                );
-                assert_eq!(
-                    results
-                        .iter()
-                        .filter(|result| result.tool_use_id == PERMITTED_CALL
-                            && !result.is_error
-                            && result.text_content() == "record-7 value")
-                        .count(),
-                    1
-                );
-                paired += 1;
-            }
-        }
-    }
-    assert_eq!(
-        paired, 1,
-        "one committed assistant/result batch preserves both siblings"
-    );
-    assert_eq!(saved.messages().iter().filter(|message| matches!(message,
-        Message::BlockAssistant(assistant) if assistant.text_blocks().collect::<String>() == FINISHED)).count(), 1);
-}
-
-async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
+    // The embedding application owns this exact invocation entitlement table.
+    // No native accepted row, grant, controller or currentness token is copied.
+    let permissions = Arc::new(Mutex::new(vec![permission_row.clone()]));
+    let decisions: Arc<Mutex<Vec<(meerkat_core::InputId, Option<OperationRefusalKind>)>>> =
+        Arc::new(Mutex::new(Vec::new()));
     let client = http_client(server);
     let selected = client
         .controller_model_selection()
@@ -132,7 +44,7 @@ async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
         LocalGrantAuthority::new(
             LocalGrantConfiguration {
                 root: principal("grant-owner"),
-                namespace: id("stock-persistent-native-grants"),
+                namespace: id("stock-revalidation-native-grants"),
                 generation: 1,
             },
             LocalAuthorizationPublication::new(),
@@ -161,7 +73,9 @@ async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
     let ingress_controller = controller.clone();
     let ingress_operation = operation.clone();
     let ingress_selection = selected.clone();
-    let ingress: Arc<NativeIngressCheck> = Arc::new(move |runtime, _, current, claimed| {
+    let ingress_permissions = permissions.clone();
+    let ingress_decisions = decisions.clone();
+    let ingress: Arc<NativeIngressCheck> = Arc::new(move |runtime, input, current, claimed| {
         if current.requester() != &principal("requester")
             || current.ingress_actor() != &principal("ingress")
             || current.realm() != &RealmId::parse("native-loop").unwrap()
@@ -173,8 +87,33 @@ async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
                     ingress_selection.clone(),
                 )
         {
-            return Err(denied().into());
+            let refusal = denied();
+            ingress_decisions
+                .lock()
+                .unwrap()
+                .push((input.id().clone(), Some(refusal.kind())));
+            return Err(refusal.into());
         }
+        let allowed = ingress_permissions.lock().unwrap().iter().any(|row| {
+            row.requester == *current.requester()
+                && row.ingress_actor == *current.ingress_actor()
+                && row.realm == *current.realm()
+                && row.runtime == *runtime
+                && row.executor == principal("executor")
+                && row.action == InvocationAction::Invoke
+        });
+        if !allowed {
+            let refusal = denied();
+            ingress_decisions
+                .lock()
+                .unwrap()
+                .push((input.id().clone(), Some(refusal.kind())));
+            return Err(refusal.into());
+        }
+        ingress_decisions
+            .lock()
+            .unwrap()
+            .push((input.id().clone(), None));
         Ok(())
     });
     let store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
@@ -184,7 +123,7 @@ async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
         Arc::new(meerkat::MemoryBlobStore::new()),
     )
     .with_local_grant_authorization(NativeGrantWorkConfiguration {
-        grants,
+        grants: grants.clone(),
         ingress,
         invocation_owner: Arc::new(InvocationOwner),
         operation_owner: Arc::new(HttpRecordOwner {
@@ -212,8 +151,6 @@ async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
         build_runtime_backed_service_with_default_reconfigure_host(builder, 2, bundle, config_path);
     assert!(Arc::ptr_eq(&machine, &configured_adapter));
     assert!(Arc::ptr_eq(&service.runtime_store(), &store));
-    let seed = Session::new();
-    let session_id = seed.id().clone();
     *cleanup.lock().unwrap() = Some((machine.clone(), session_id.clone()));
     let reserved = service.reserve_create_session_admission().await.unwrap();
     let created = Box::pin(materialize_session_with_reserved_admission_and_actor_slot(
@@ -255,7 +192,6 @@ async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
     .await
     .expect("stock persistent service and real actor-slot executor");
     assert_eq!(created.session_id, session_id);
-    let runtime = LogicalRuntimeId::for_session(&session_id);
     let snapshot = machine
         .meerkat_machine_spine_snapshot(&session_id)
         .await
@@ -276,15 +212,16 @@ async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
     assert!(tool_feedback(initial_document.session().messages(), DENIED_CALL).is_none());
     assert!(tool_feedback(initial_document.session().messages(), PERMITTED_CALL).is_none());
 
-    let pin = {
+    let (pin, actor_witness) = {
         let actor_lease = service
             .acquire_live_session_actor_turn_boundary_lease(&session_id)
             .await
             .expect("current stock persistent actor under its turn boundary");
-        service
+        let pin = service
             .pin_controller_client_for_actor(&actor_lease)
             .await
-            .unwrap()
+            .unwrap();
+        (pin, actor_lease.witness().clone())
     };
     assert!(
         pin.selection() == &selected,
@@ -301,7 +238,34 @@ async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
     )
     .await
     .expect("same native generated credential owner");
-    let claims = association(&runtime, controller, operation, selected);
+    let credential_owner = machine.generated_auth_lease_handle();
+    let credential_key = meerkat_core::handles::LeaseKey::from(selected.credential());
+    let credential_before = credential_owner.snapshot(&credential_key);
+    assert_eq!(
+        credential_before.phase,
+        Some(meerkat_core::handles::AuthLeasePhase::Valid)
+    );
+    assert!(credential_before.credential_present);
+    let controller_before = grants
+        .resolve_controller_lineage(
+            std::slice::from_ref(&controller),
+            &principal("executor"),
+            None,
+        )
+        .expect("actual controller lineage before entitlement mutation");
+    let operation_before = grants
+        .resolve_lineage(
+            std::slice::from_ref(&operation),
+            &principal("executor"),
+            None,
+        )
+        .expect("actual operation lineage before entitlement mutation");
+    let claims = association(
+        &runtime,
+        controller.clone(),
+        operation.clone(),
+        selected.clone(),
+    );
     let mut prompt = PromptInput::new("Attempt the two record actions", None);
     prompt.header.authority_association = Some(claims.clone());
     let input = Input::Prompt(prompt);
@@ -311,15 +275,159 @@ async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
         principal("requester"),
         principal("ingress"),
         RealmId::parse("native-loop").unwrap(),
-        super::super::evidence("stock-persistent-current-authentication"),
+        super::super::super::evidence("stock-revalidation-current-authentication"),
     )
     .unwrap()
-    .with_controller_client(&input, pin)
+    .with_controller_client(&input, pin.clone())
     .unwrap();
-    let (accepted, completion) = machine
-        .accept_input_with_completion(&session_id, input.with_ingress_context(current).unwrap())
+    let submitted = input.with_ingress_context(current).unwrap();
+    assert!(
+        decisions.lock().unwrap().is_empty(),
+        "materialization did not admit work"
+    );
+    let removed_row = {
+        let mut rows = permissions.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        rows.remove(0)
+    };
+    assert!(
+        removed_row == permission_row,
+        "only the actual requester invocation row changed"
+    );
+    let refused = machine
+        .accept_input_with_completion(&session_id, submitted.clone())
+        .await;
+    // Current public native conversion collapses the owner's exact Denied to
+    // ValidationFailed. A separate reviewed projection is not installed here.
+    assert!(
+        matches!(
+            &refused,
+            Err(meerkat_runtime::RuntimeDriverError::ValidationFailed { .. })
+        ),
+        "current native rejection class: {:?}",
+        refused.as_ref().err()
+    );
+    let refusal_decisions = decisions.lock().unwrap().clone();
+    assert!(
+        !refusal_decisions.is_empty(),
+        "actual installed ingress owner ran"
+    );
+    assert!(
+        refusal_decisions
+            .iter()
+            .all(|(id, kind)| id == &input_id && *kind == Some(OperationRefusalKind::Denied)),
+        "the actual owner returned typed denial; observed {} checks",
+        refusal_decisions.len()
+    );
+    assert!(
+        machine
+            .input_state(&session_id, &input_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.load_input_states(&runtime).await.unwrap().is_empty());
+    let rejected_snapshot = machine
+        .meerkat_machine_spine_snapshot(&session_id)
         .await
-        .expect("actual persistent native admission");
+        .unwrap();
+    assert_eq!(
+        rejected_snapshot.binding.driver_kind,
+        MeerkatDriverKind::Persistent
+    );
+    assert_eq!(rejected_snapshot.binding.runtime_id, runtime);
+    assert!(rejected_snapshot.control.current_run_id.is_none());
+    assert!(
+        server.receiver.bodies.lock().unwrap().is_empty(),
+        "no model HTTP after denial"
+    );
+    assert_eq!(
+        server.receiver.authorized_requests.load(Ordering::SeqCst),
+        0
+    );
+    assert!(
+        tools.0.lock().unwrap().is_empty(),
+        "no physical tool entry after denial"
+    );
+    let rejected_document = store
+        .load_committed_whole_blob_snapshot(&runtime)
+        .await
+        .unwrap()
+        .expect("initial committed document retained");
+    assert_eq!(rejected_document.bytes(), initial_bytes.as_slice());
+    assert_eq!(
+        rejected_document.authority().store_revision(),
+        initial_revision
+    );
+    assert_eq!(
+        rejected_document.authority().blob_sha256(),
+        initial_document.authority().blob_sha256()
+    );
+    let rejected_session = service
+        .load_authoritative_session(&session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(rejected_session.messages()).unwrap(),
+        serde_json::to_value(initial_document.session().messages()).unwrap()
+    );
+    assert_eq!(
+        credential_owner.snapshot(&credential_key),
+        credential_before
+    );
+    controller_before
+        .check_current()
+        .expect("controller owner was not mutated");
+    operation_before
+        .check_current()
+        .expect("executor operation grant was not mutated");
+    grants
+        .resolve_controller_lineage(
+            std::slice::from_ref(&controller),
+            &principal("executor"),
+            None,
+        )
+        .expect("controller remains usable");
+    grants
+        .resolve_lineage(
+            std::slice::from_ref(&operation),
+            &principal("executor"),
+            None,
+        )
+        .expect("operation grant remains usable");
+    {
+        let actor_lease = service
+            .acquire_live_session_actor_turn_boundary_lease_exact(&actor_witness)
+            .await
+            .unwrap()
+            .expect("same live stock actor survived refusal");
+        let still_pinned = service
+            .pin_controller_client_for_actor(&actor_lease)
+            .await
+            .unwrap();
+        assert!(still_pinned.selection() == pin.selection());
+        assert!(
+            Arc::ptr_eq(still_pinned.client(), pin.client()),
+            "same actual controller client"
+        );
+    }
+    // Restore the identical application row, not a grant or a fabricated pin.
+    // Retrying the same process-bound input is safe because it was never accepted.
+    permissions.lock().unwrap().push(removed_row);
+    assert!(permissions.lock().unwrap().as_slice() == std::slice::from_ref(&permission_row));
+    let (accepted, completion) = machine
+        .accept_input_with_completion(&session_id, submitted)
+        .await
+        .expect("restored entitlement admits through the same native owner");
+    assert!(
+        decisions
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, kind)| id == &input_id && kind.is_none()),
+        "current owner re-read the restored row"
+    );
     assert!(
         matches!(accepted, AcceptOutcome::Accepted { input_id: ref accepted_id, .. }
         if accepted_id == &input_id)
@@ -446,6 +554,36 @@ async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
     let allowed = tool_feedback(saved.messages(), PERMITTED_CALL).unwrap();
     assert!(!allowed.is_error);
     assert_eq!(allowed.text_content(), "record-7 value");
+
+    assert_eq!(
+        store.load_input_states(&runtime).await.unwrap().len(),
+        1,
+        "only the restored invocation became a durable input"
+    );
+    assert!(decisions.lock().unwrap().starts_with(&refusal_decisions));
+    assert_eq!(
+        credential_owner.snapshot(&credential_key),
+        credential_before
+    );
+    controller_before
+        .check_current()
+        .expect("same controller grant after completion");
+    operation_before
+        .check_current()
+        .expect("same executor grant after completion");
+    {
+        let actor_lease = service
+            .acquire_live_session_actor_turn_boundary_lease_exact(&actor_witness)
+            .await
+            .unwrap()
+            .expect("same actor completed the restored invocation");
+        let still_pinned = service
+            .pin_controller_client_for_actor(&actor_lease)
+            .await
+            .unwrap();
+        assert!(still_pinned.selection() == pin.selection());
+        assert!(Arc::ptr_eq(still_pinned.client(), pin.client()));
+    }
 
     // Completion must make the actual store's frozen audit prefix current.
     let final_row = store
@@ -575,12 +713,12 @@ async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stock_persistent_bundle_governed_turn_commits_session_input_and_audit() {
+async fn stock_persistent_revalidates_requester_before_admission_and_preserves_actor() {
     let mut server = Server::start().await;
     let cleanup = CleanupSlot::new(None);
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(
         Duration::from_secs(60),
-        exercise_stock_persistent(&server, &cleanup),
+        exercise_revalidated_stock_persistent(&server, &cleanup),
     ))
     .catch_unwind()
     .await;
@@ -609,6 +747,3 @@ async fn stock_persistent_bundle_governed_turn_commits_session_input_and_audit()
             .expect("actual persistent teardown");
     }
 }
-
-#[path = "stock_persistent/revalidation.rs"]
-mod revalidation;

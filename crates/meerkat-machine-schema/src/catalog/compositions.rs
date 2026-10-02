@@ -446,6 +446,8 @@ pub fn job_runtime_delivery_composition() -> CompositionSchema {
             runtime_delivery_first_commit_witness(),
             runtime_delivery_notification_commit_witness(),
             runtime_delivery_crash_retry_reuse_witness(),
+            runtime_delivery_out_of_order_acknowledgement_witness(),
+            runtime_delivery_apply_after_ahead_acknowledgement_witness(),
         ],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
@@ -2892,6 +2894,199 @@ fn runtime_delivery_crash_retry_reuse_witness() -> CompositionWitness {
         ],
         expected_transition_order: vec![],
         state_limits: runtime_delivery_witness_limits(),
+    }
+}
+
+fn runtime_delivery_input(
+    input: &str,
+    fields: Vec<CompositionWitnessField>,
+) -> CompositionWitnessInput {
+    witness_input("runtime_delivery", input, fields)
+}
+
+fn runtime_delivery_ack_witness_limits() -> CompositionStateLimits {
+    CompositionStateLimits {
+        step_limit: 30,
+        pending_input_limit: 8,
+        pending_route_limit: 4,
+        delivered_route_limit: 6,
+        emitted_effect_limit: 16,
+        seq_limit: 0,
+        set_limit: 2,
+        map_limit: 2,
+    }
+}
+
+fn runtime_delivery_two_commit_inputs() -> Vec<CompositionWitnessInput> {
+    vec![
+        witness_input(
+            "job",
+            "Submit",
+            vec![
+                witness_field("job_id", Expr::String("job_1".into())),
+                witness_field(
+                    "restart_class",
+                    named_variant("DetachedJobRestartClass", "CheckpointResumable"),
+                ),
+            ],
+        ),
+        witness_input(
+            "job",
+            "ClaimAttempt",
+            vec![
+                witness_field("attempt_id", Expr::String("attempt_1".into())),
+                witness_field("worker_id", Expr::String("worker_1".into())),
+                witness_field("claimed_at_ms", Expr::U64(1)),
+                witness_field("lease_expires_at_ms", Expr::U64(2)),
+                witness_field("runner_handle", Expr::String("runner_1".into())),
+            ],
+        ),
+        witness_input(
+            "job",
+            "EmitNotification",
+            vec![
+                witness_field("attempt_id", Expr::String("attempt_1".into())),
+                witness_field("fence", Expr::U64(1)),
+                witness_field("notification_id", Expr::String("notification_1".into())),
+                witness_field("idempotency_key", Expr::String("key_1".into())),
+                witness_field(
+                    "runtime_delivery_id",
+                    Expr::String(RUNTIME_DELIVERY_NOTIFICATION_ID.into()),
+                ),
+                witness_field("observed_at_ms", Expr::U64(2)),
+            ],
+        ),
+        witness_input(
+            "job",
+            "CompleteAttempt",
+            vec![
+                witness_field("attempt_id", Expr::String("attempt_1".into())),
+                witness_field("fence", Expr::U64(1)),
+                witness_field("completed_at_ms", Expr::U64(2)),
+            ],
+        ),
+    ]
+}
+
+const RUNTIME_DELIVERY_NOTIFICATION_ID: &str = "job_1:notification:notification_1";
+/// `job_notification_enters_runtime_inbox` keys the runtime delivery by the
+/// notification id.
+const RUNTIME_DELIVERY_NOTIFICATION_KEY: &str = "notification_1";
+
+fn runtime_delivery_ack(
+    input: &str,
+    delivery_id: &str,
+    delivery_sequence: u64,
+) -> CompositionWitnessInput {
+    runtime_delivery_input(
+        input,
+        vec![
+            witness_field("delivery_id", Expr::String(delivery_id.into())),
+            witness_field("delivery_sequence", Expr::U64(delivery_sequence)),
+        ],
+    )
+}
+
+fn runtime_delivery_two_commit_transitions() -> Vec<CompositionWitnessTransition> {
+    vec![
+        witness_transition("job", "SubmitQueued"),
+        witness_transition("job", "ClaimQueued"),
+        witness_transition("job", "EmitRunningNotification"),
+        witness_transition("job", "CompleteRunningAttempt"),
+        witness_transition("runtime_delivery", "CommitNewDelivery"),
+        witness_transition("job", "ApplyRunningNotificationDelivery"),
+        witness_transition("job", "ApplySucceededDelivery"),
+    ]
+}
+
+fn runtime_delivery_order(earlier: &str, later: &str) -> CompositionWitnessTransitionOrder {
+    CompositionWitnessTransitionOrder {
+        earlier: witness_transition("runtime_delivery", earlier),
+        later: witness_transition("runtime_delivery", later),
+    }
+}
+
+fn runtime_delivery_cursor_at(cursor: u64) -> CompositionWitnessState {
+    CompositionWitnessState {
+        machine: mi_id("runtime_delivery"),
+        phase: None,
+        fields: vec![witness_field("applied_cursor", Expr::U64(cursor))],
+    }
+}
+
+/// Two committed deliveries acknowledged out of order through every
+/// acknowledgement arm: the second is acknowledged ahead of the cursor and
+/// parked, the first is acknowledged at the cursor, the prefix advance
+/// carries the cursor over the parked one, and a late acknowledgement of the
+/// first observes it already applied. Witness expectations hold on every
+/// behavior that completes the script, so a guard that lets one
+/// acknowledgement take a second arm fails the witness.
+fn runtime_delivery_out_of_order_acknowledgement_witness() -> CompositionWitness {
+    let mut preload_inputs = runtime_delivery_two_commit_inputs();
+    preload_inputs.extend([
+        runtime_delivery_ack("AcknowledgeDelivery", "terminal", 2),
+        runtime_delivery_ack("AcknowledgeDelivery", RUNTIME_DELIVERY_NOTIFICATION_KEY, 1),
+        runtime_delivery_input("AdvanceAcknowledgedPrefix", vec![]),
+        runtime_delivery_ack("AcknowledgeDelivery", RUNTIME_DELIVERY_NOTIFICATION_KEY, 1),
+    ]);
+    let mut expected_transitions = runtime_delivery_two_commit_transitions();
+    expected_transitions.extend([
+        witness_transition("runtime_delivery", "AcknowledgeAheadOfCursor"),
+        witness_transition("runtime_delivery", "AcknowledgeNextDelivery"),
+        witness_transition("runtime_delivery", "AdvanceOverAcknowledgedDelivery"),
+        witness_transition("runtime_delivery", "ObserveAlreadyAppliedAcknowledgement"),
+    ]);
+    CompositionWitness {
+        name: witness_id("runtime_delivery_out_of_order_acknowledgement"),
+        preload_inputs,
+        expected_routes: vec![
+            route_id("job_notification_enters_runtime_inbox"),
+            route_id("job_terminal_enters_runtime_inbox"),
+        ],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![runtime_delivery_cursor_at(2)],
+        expected_transitions,
+        expected_transition_order: vec![
+            runtime_delivery_order("AcknowledgeAheadOfCursor", "AcknowledgeNextDelivery"),
+            runtime_delivery_order("AcknowledgeNextDelivery", "AdvanceOverAcknowledgedDelivery"),
+            runtime_delivery_order(
+                "AdvanceOverAcknowledgedDelivery",
+                "ObserveAlreadyAppliedAcknowledgement",
+            ),
+        ],
+        state_limits: runtime_delivery_ack_witness_limits(),
+    }
+}
+
+/// A delivery acknowledged ahead of the cursor and then applied in order is
+/// no longer pending: applying it removes it from the acknowledged set.
+fn runtime_delivery_apply_after_ahead_acknowledgement_witness() -> CompositionWitness {
+    let mut preload_inputs = runtime_delivery_two_commit_inputs();
+    preload_inputs.extend([
+        runtime_delivery_ack("AcknowledgeDelivery", "terminal", 2),
+        runtime_delivery_ack("MarkDeliveryApplied", RUNTIME_DELIVERY_NOTIFICATION_KEY, 1),
+        runtime_delivery_ack("MarkDeliveryApplied", "terminal", 2),
+    ]);
+    let mut expected_transitions = runtime_delivery_two_commit_transitions();
+    expected_transitions.extend([
+        witness_transition("runtime_delivery", "AcknowledgeAheadOfCursor"),
+        witness_transition("runtime_delivery", "ApplyNextDelivery"),
+    ]);
+    CompositionWitness {
+        name: witness_id("runtime_delivery_apply_after_ahead_acknowledgement"),
+        preload_inputs,
+        expected_routes: vec![
+            route_id("job_notification_enters_runtime_inbox"),
+            route_id("job_terminal_enters_runtime_inbox"),
+        ],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![runtime_delivery_cursor_at(2)],
+        expected_transitions,
+        expected_transition_order: vec![runtime_delivery_order(
+            "AcknowledgeAheadOfCursor",
+            "ApplyNextDelivery",
+        )],
+        state_limits: runtime_delivery_ack_witness_limits(),
     }
 }
 

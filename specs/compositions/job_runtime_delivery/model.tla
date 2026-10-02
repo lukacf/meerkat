@@ -193,6 +193,20 @@ WitnessInit_runtime_delivery_crash_retry_reuse ==
     /\ witness_current_script_input = [machine |-> "job", variant |-> "Submit", payload |-> [job_id |-> "job_1", restart_class |-> "Adoptable"], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_crash_retry_reuse:1", source_machine |-> "external_entry", source_effect |-> "Submit", effect_id |-> 0]
     /\ witness_remaining_script_inputs = <<[machine |-> "job", variant |-> "ClaimAttempt", payload |-> [attempt_id |-> "attempt_1", claimed_at_ms |-> 1, lease_expires_at_ms |-> 2, runner_handle |-> "runner_1", worker_id |-> "worker_1"], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_crash_retry_reuse:2", source_machine |-> "external_entry", source_effect |-> "ClaimAttempt", effect_id |-> 0], [machine |-> "job", variant |-> "CompleteAttempt", payload |-> [attempt_id |-> "attempt_1", completed_at_ms |-> 2, fence |-> 1], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_crash_retry_reuse:3", source_machine |-> "external_entry", source_effect |-> "CompleteAttempt", effect_id |-> 0], [machine |-> "runtime_delivery", variant |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> 1], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_crash_retry_reuse:4", source_machine |-> "external_entry", source_effect |-> "CommitDelivery", effect_id |-> 0]>>
 
+WitnessInit_runtime_delivery_out_of_order_acknowledgement ==
+    /\ BaseInit
+    /\ pending_inputs = <<[machine |-> "job", variant |-> "Submit", payload |-> [job_id |-> "job_1", restart_class |-> "CheckpointResumable"], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_out_of_order_acknowledgement:1", source_machine |-> "external_entry", source_effect |-> "Submit", effect_id |-> 0]>>
+    /\ observed_inputs = {[machine |-> "job", variant |-> "Submit", payload |-> [job_id |-> "job_1", restart_class |-> "CheckpointResumable"], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_out_of_order_acknowledgement:1", source_machine |-> "external_entry", source_effect |-> "Submit", effect_id |-> 0]}
+    /\ witness_current_script_input = [machine |-> "job", variant |-> "Submit", payload |-> [job_id |-> "job_1", restart_class |-> "CheckpointResumable"], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_out_of_order_acknowledgement:1", source_machine |-> "external_entry", source_effect |-> "Submit", effect_id |-> 0]
+    /\ witness_remaining_script_inputs = <<[machine |-> "job", variant |-> "ClaimAttempt", payload |-> [attempt_id |-> "attempt_1", claimed_at_ms |-> 1, lease_expires_at_ms |-> 2, runner_handle |-> "runner_1", worker_id |-> "worker_1"], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_out_of_order_acknowledgement:2", source_machine |-> "external_entry", source_effect |-> "ClaimAttempt", effect_id |-> 0], [machine |-> "job", variant |-> "EmitNotification", payload |-> [attempt_id |-> "attempt_1", fence |-> 1, idempotency_key |-> "key_1", notification_id |-> "notification_1", observed_at_ms |-> 2, runtime_delivery_id |-> "job_1:notification:notification_1"], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_out_of_order_acknowledgement:3", source_machine |-> "external_entry", source_effect |-> "EmitNotification", effect_id |-> 0], [machine |-> "job", variant |-> "CompleteAttempt", payload |-> [attempt_id |-> "attempt_1", completed_at_ms |-> 2, fence |-> 1], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_out_of_order_acknowledgement:4", source_machine |-> "external_entry", source_effect |-> "CompleteAttempt", effect_id |-> 0], [machine |-> "runtime_delivery", variant |-> "AcknowledgeDelivery", payload |-> [delivery_id |-> "terminal", delivery_sequence |-> 2], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_out_of_order_acknowledgement:5", source_machine |-> "external_entry", source_effect |-> "AcknowledgeDelivery", effect_id |-> 0], [machine |-> "runtime_delivery", variant |-> "AcknowledgeDelivery", payload |-> [delivery_id |-> "notification_1", delivery_sequence |-> 1], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_out_of_order_acknowledgement:6", source_machine |-> "external_entry", source_effect |-> "AcknowledgeDelivery", effect_id |-> 0], [machine |-> "runtime_delivery", variant |-> "AdvanceAcknowledgedPrefix", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_out_of_order_acknowledgement:7", source_machine |-> "external_entry", source_effect |-> "AdvanceAcknowledgedPrefix", effect_id |-> 0], [machine |-> "runtime_delivery", variant |-> "AcknowledgeDelivery", payload |-> [delivery_id |-> "notification_1", delivery_sequence |-> 1], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_out_of_order_acknowledgement:8", source_machine |-> "external_entry", source_effect |-> "AcknowledgeDelivery", effect_id |-> 0]>>
+
+WitnessInit_runtime_delivery_apply_after_ahead_acknowledgement ==
+    /\ BaseInit
+    /\ pending_inputs = <<[machine |-> "job", variant |-> "Submit", payload |-> [job_id |-> "job_1", restart_class |-> "CheckpointResumable"], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_apply_after_ahead_acknowledgement:1", source_machine |-> "external_entry", source_effect |-> "Submit", effect_id |-> 0]>>
+    /\ observed_inputs = {[machine |-> "job", variant |-> "Submit", payload |-> [job_id |-> "job_1", restart_class |-> "CheckpointResumable"], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_apply_after_ahead_acknowledgement:1", source_machine |-> "external_entry", source_effect |-> "Submit", effect_id |-> 0]}
+    /\ witness_current_script_input = [machine |-> "job", variant |-> "Submit", payload |-> [job_id |-> "job_1", restart_class |-> "CheckpointResumable"], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_apply_after_ahead_acknowledgement:1", source_machine |-> "external_entry", source_effect |-> "Submit", effect_id |-> 0]
+    /\ witness_remaining_script_inputs = <<[machine |-> "job", variant |-> "ClaimAttempt", payload |-> [attempt_id |-> "attempt_1", claimed_at_ms |-> 1, lease_expires_at_ms |-> 2, runner_handle |-> "runner_1", worker_id |-> "worker_1"], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_apply_after_ahead_acknowledgement:2", source_machine |-> "external_entry", source_effect |-> "ClaimAttempt", effect_id |-> 0], [machine |-> "job", variant |-> "EmitNotification", payload |-> [attempt_id |-> "attempt_1", fence |-> 1, idempotency_key |-> "key_1", notification_id |-> "notification_1", observed_at_ms |-> 2, runtime_delivery_id |-> "job_1:notification:notification_1"], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_apply_after_ahead_acknowledgement:3", source_machine |-> "external_entry", source_effect |-> "EmitNotification", effect_id |-> 0], [machine |-> "job", variant |-> "CompleteAttempt", payload |-> [attempt_id |-> "attempt_1", completed_at_ms |-> 2, fence |-> 1], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_apply_after_ahead_acknowledgement:4", source_machine |-> "external_entry", source_effect |-> "CompleteAttempt", effect_id |-> 0], [machine |-> "runtime_delivery", variant |-> "AcknowledgeDelivery", payload |-> [delivery_id |-> "terminal", delivery_sequence |-> 2], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_apply_after_ahead_acknowledgement:5", source_machine |-> "external_entry", source_effect |-> "AcknowledgeDelivery", effect_id |-> 0], [machine |-> "runtime_delivery", variant |-> "MarkDeliveryApplied", payload |-> [delivery_id |-> "notification_1", delivery_sequence |-> 1], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_apply_after_ahead_acknowledgement:6", source_machine |-> "external_entry", source_effect |-> "MarkDeliveryApplied", effect_id |-> 0], [machine |-> "runtime_delivery", variant |-> "MarkDeliveryApplied", payload |-> [delivery_id |-> "terminal", delivery_sequence |-> 2], source_kind |-> "entry", source_route |-> "witness:runtime_delivery_apply_after_ahead_acknowledgement:7", source_machine |-> "external_entry", source_effect |-> "MarkDeliveryApplied", effect_id |-> 0]>>
+
 job_SubmitQueued(arg_job_id, arg_restart_class) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "job"
@@ -1974,6 +1988,40 @@ WitnessInjectNext_runtime_delivery_crash_retry_reuse ==
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_0f96f7326f4c2704
 
+WitnessInjectNext_runtime_delivery_out_of_order_acknowledgement ==
+    LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input
+        next_remaining_script_inputs == IF Len(witness_remaining_script_inputs) > 0 THEN Tail(witness_remaining_script_inputs) ELSE <<>>
+    IN
+    /\ witness_current_script_input # None
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ EntryPacketAdmissible(next_script_input)
+    /\ Len(pending_inputs) = 0
+    /\ Len(pending_routes) = 0
+    /\ Len(witness_remaining_script_inputs) > 0
+    /\ pending_inputs' = Append(pending_inputs, next_script_input)
+    /\ observed_inputs' = observed_inputs \cup {next_script_input}
+    /\ witness_current_script_input' = next_script_input
+    /\ witness_remaining_script_inputs' = next_remaining_script_inputs
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_0f96f7326f4c2704
+
+WitnessInjectNext_runtime_delivery_apply_after_ahead_acknowledgement ==
+    LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input
+        next_remaining_script_inputs == IF Len(witness_remaining_script_inputs) > 0 THEN Tail(witness_remaining_script_inputs) ELSE <<>>
+    IN
+    /\ witness_current_script_input # None
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ EntryPacketAdmissible(next_script_input)
+    /\ Len(pending_inputs) = 0
+    /\ Len(pending_routes) = 0
+    /\ Len(witness_remaining_script_inputs) > 0
+    /\ pending_inputs' = Append(pending_inputs, next_script_input)
+    /\ observed_inputs' = observed_inputs \cup {next_script_input}
+    /\ witness_current_script_input' = next_script_input
+    /\ witness_remaining_script_inputs' = next_remaining_script_inputs
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_0f96f7326f4c2704
+
 WitnessScriptComplete_runtime_delivery_first_commit ==
     /\ Len(witness_remaining_script_inputs) = 0
     /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
@@ -2011,6 +2059,46 @@ WitnessScriptComplete_runtime_delivery_crash_retry_reuse ==
     /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "ReuseCommittedDelivery")
     /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ApplySucceededDelivery")
 
+WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement ==
+    /\ Len(witness_remaining_script_inputs) = 0
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ Len(pending_routes) = 0
+    /\ \E packet \in delivered_routes : packet.route = "job_notification_enters_runtime_inbox"
+    /\ \E packet \in delivered_routes : packet.route = "job_terminal_enters_runtime_inbox"
+    /\ (runtime_delivery_applied_cursor = 2)
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "SubmitQueued")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ClaimQueued")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "EmitRunningNotification")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "CompleteRunningAttempt")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "CommitNewDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ApplyRunningNotificationDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ApplySucceededDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "AcknowledgeAheadOfCursor")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "AcknowledgeNextDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "AdvanceOverAcknowledgedDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "ObserveAlreadyAppliedAcknowledgement")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "runtime_delivery" /\ earlier.transition = "AcknowledgeAheadOfCursor" /\ later.machine = "runtime_delivery" /\ later.transition = "AcknowledgeNextDelivery" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "runtime_delivery" /\ earlier.transition = "AcknowledgeNextDelivery" /\ later.machine = "runtime_delivery" /\ later.transition = "AdvanceOverAcknowledgedDelivery" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "runtime_delivery" /\ earlier.transition = "AdvanceOverAcknowledgedDelivery" /\ later.machine = "runtime_delivery" /\ later.transition = "ObserveAlreadyAppliedAcknowledgement" /\ earlier.step < later.step)
+
+WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement ==
+    /\ Len(witness_remaining_script_inputs) = 0
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ Len(pending_routes) = 0
+    /\ \E packet \in delivered_routes : packet.route = "job_notification_enters_runtime_inbox"
+    /\ \E packet \in delivered_routes : packet.route = "job_terminal_enters_runtime_inbox"
+    /\ (runtime_delivery_applied_cursor = 2)
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "SubmitQueued")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ClaimQueued")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "EmitRunningNotification")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "CompleteRunningAttempt")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "CommitNewDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ApplyRunningNotificationDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ApplySucceededDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "AcknowledgeAheadOfCursor")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "ApplyNextDelivery")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "runtime_delivery" /\ earlier.transition = "AcknowledgeAheadOfCursor" /\ later.machine = "runtime_delivery" /\ later.transition = "ApplyNextDelivery" /\ earlier.step < later.step)
+
 WitnessNoPrematureStutter_runtime_delivery_first_commit ==
     \/ WitnessScriptComplete_runtime_delivery_first_commit
     \/ model_step_count' # model_step_count
@@ -2021,6 +2109,14 @@ WitnessNoPrematureStutter_runtime_delivery_notification_commit ==
 
 WitnessNoPrematureStutter_runtime_delivery_crash_retry_reuse ==
     \/ WitnessScriptComplete_runtime_delivery_crash_retry_reuse
+    \/ model_step_count' # model_step_count
+
+WitnessNoPrematureStutter_runtime_delivery_out_of_order_acknowledgement ==
+    \/ WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement
+    \/ model_step_count' # model_step_count
+
+WitnessNoPrematureStutter_runtime_delivery_apply_after_ahead_acknowledgement ==
+    \/ WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement
     \/ model_step_count' # model_step_count
 
 WitnessSatisfiedStutter_runtime_delivery_first_commit ==
@@ -2055,6 +2151,44 @@ WitnessSatisfiedStutter_runtime_delivery_crash_retry_reuse ==
     /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "CompleteRunningAttempt")
     /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "ReuseCommittedDelivery")
     /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ApplySucceededDelivery")
+    /\ UNCHANGED vars
+
+WitnessSatisfiedStutter_runtime_delivery_out_of_order_acknowledgement ==
+    /\ WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement
+    /\ \E packet \in delivered_routes : packet.route = "job_notification_enters_runtime_inbox"
+    /\ \E packet \in delivered_routes : packet.route = "job_terminal_enters_runtime_inbox"
+    /\ (runtime_delivery_applied_cursor = 2)
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "SubmitQueued")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ClaimQueued")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "EmitRunningNotification")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "CompleteRunningAttempt")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "CommitNewDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ApplyRunningNotificationDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ApplySucceededDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "AcknowledgeAheadOfCursor")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "AcknowledgeNextDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "AdvanceOverAcknowledgedDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "ObserveAlreadyAppliedAcknowledgement")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "runtime_delivery" /\ earlier.transition = "AcknowledgeAheadOfCursor" /\ later.machine = "runtime_delivery" /\ later.transition = "AcknowledgeNextDelivery" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "runtime_delivery" /\ earlier.transition = "AcknowledgeNextDelivery" /\ later.machine = "runtime_delivery" /\ later.transition = "AdvanceOverAcknowledgedDelivery" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "runtime_delivery" /\ earlier.transition = "AdvanceOverAcknowledgedDelivery" /\ later.machine = "runtime_delivery" /\ later.transition = "ObserveAlreadyAppliedAcknowledgement" /\ earlier.step < later.step)
+    /\ UNCHANGED vars
+
+WitnessSatisfiedStutter_runtime_delivery_apply_after_ahead_acknowledgement ==
+    /\ WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement
+    /\ \E packet \in delivered_routes : packet.route = "job_notification_enters_runtime_inbox"
+    /\ \E packet \in delivered_routes : packet.route = "job_terminal_enters_runtime_inbox"
+    /\ (runtime_delivery_applied_cursor = 2)
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "SubmitQueued")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ClaimQueued")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "EmitRunningNotification")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "CompleteRunningAttempt")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "CommitNewDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ApplyRunningNotificationDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ApplySucceededDelivery")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "AcknowledgeAheadOfCursor")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "ApplyNextDelivery")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "runtime_delivery" /\ earlier.transition = "AcknowledgeAheadOfCursor" /\ later.machine = "runtime_delivery" /\ later.transition = "ApplyNextDelivery" /\ earlier.step < later.step)
     /\ UNCHANGED vars
 
 CoreNext ==
@@ -2172,6 +2306,36 @@ WitnessNext_runtime_delivery_crash_retry_reuse ==
     \/ WitnessSatisfiedStutter_runtime_delivery_crash_retry_reuse
     \/ WitnessInjectNext_runtime_delivery_crash_retry_reuse
 
+WitnessNext_runtime_delivery_out_of_order_acknowledgement ==
+    \/ DeliverQueuedRoute
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "Submit" /\ job_SubmitQueued(witness_packet.payload.job_id, witness_packet.payload.restart_class)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "ClaimAttempt" /\ job_ClaimQueued(witness_packet.payload.attempt_id, witness_packet.payload.worker_id, witness_packet.payload.claimed_at_ms, witness_packet.payload.lease_expires_at_ms, witness_packet.payload.runner_handle)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "EmitNotification" /\ job_EmitRunningNotification(witness_packet.payload.attempt_id, witness_packet.payload.fence, witness_packet.payload.notification_id, witness_packet.payload.idempotency_key, witness_packet.payload.runtime_delivery_id, witness_packet.payload.observed_at_ms)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "CompleteAttempt" /\ job_CompleteRunningAttempt(witness_packet.payload.attempt_id, witness_packet.payload.fence, witness_packet.payload.completed_at_ms)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "runtime_delivery" /\ witness_packet.variant = "CommitDelivery" /\ runtime_delivery_CommitNewDelivery(witness_packet.payload.delivery_id, witness_packet.payload.source_sequence)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "MarkDeliveryApplied" /\ job_ApplyRunningNotificationDelivery(witness_packet.payload.delivery_id, witness_packet.payload.delivery_sequence)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "MarkDeliveryApplied" /\ job_ApplySucceededDelivery(witness_packet.payload.delivery_id, witness_packet.payload.delivery_sequence)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "runtime_delivery" /\ witness_packet.variant = "AcknowledgeDelivery" /\ runtime_delivery_AcknowledgeAheadOfCursor(witness_packet.payload.delivery_id, witness_packet.payload.delivery_sequence)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "runtime_delivery" /\ witness_packet.variant = "AcknowledgeDelivery" /\ runtime_delivery_AcknowledgeNextDelivery(witness_packet.payload.delivery_id, witness_packet.payload.delivery_sequence)
+    \/ runtime_delivery_AdvanceOverAcknowledgedDelivery
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "runtime_delivery" /\ witness_packet.variant = "AcknowledgeDelivery" /\ runtime_delivery_ObserveAlreadyAppliedAcknowledgement(witness_packet.payload.delivery_id, witness_packet.payload.delivery_sequence)
+    \/ WitnessSatisfiedStutter_runtime_delivery_out_of_order_acknowledgement
+    \/ WitnessInjectNext_runtime_delivery_out_of_order_acknowledgement
+
+WitnessNext_runtime_delivery_apply_after_ahead_acknowledgement ==
+    \/ DeliverQueuedRoute
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "Submit" /\ job_SubmitQueued(witness_packet.payload.job_id, witness_packet.payload.restart_class)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "ClaimAttempt" /\ job_ClaimQueued(witness_packet.payload.attempt_id, witness_packet.payload.worker_id, witness_packet.payload.claimed_at_ms, witness_packet.payload.lease_expires_at_ms, witness_packet.payload.runner_handle)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "EmitNotification" /\ job_EmitRunningNotification(witness_packet.payload.attempt_id, witness_packet.payload.fence, witness_packet.payload.notification_id, witness_packet.payload.idempotency_key, witness_packet.payload.runtime_delivery_id, witness_packet.payload.observed_at_ms)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "CompleteAttempt" /\ job_CompleteRunningAttempt(witness_packet.payload.attempt_id, witness_packet.payload.fence, witness_packet.payload.completed_at_ms)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "runtime_delivery" /\ witness_packet.variant = "CommitDelivery" /\ runtime_delivery_CommitNewDelivery(witness_packet.payload.delivery_id, witness_packet.payload.source_sequence)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "MarkDeliveryApplied" /\ job_ApplyRunningNotificationDelivery(witness_packet.payload.delivery_id, witness_packet.payload.delivery_sequence)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "job" /\ witness_packet.variant = "MarkDeliveryApplied" /\ job_ApplySucceededDelivery(witness_packet.payload.delivery_id, witness_packet.payload.delivery_sequence)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "runtime_delivery" /\ witness_packet.variant = "AcknowledgeDelivery" /\ runtime_delivery_AcknowledgeAheadOfCursor(witness_packet.payload.delivery_id, witness_packet.payload.delivery_sequence)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "runtime_delivery" /\ witness_packet.variant = "MarkDeliveryApplied" /\ runtime_delivery_ApplyNextDelivery(witness_packet.payload.delivery_id, witness_packet.payload.delivery_sequence)
+    \/ WitnessSatisfiedStutter_runtime_delivery_apply_after_ahead_acknowledgement
+    \/ WitnessInjectNext_runtime_delivery_apply_after_ahead_acknowledgement
+
 
 job_terminal_reaches_runtime_delivery_authority == \E route_name \in RouteNames : /\ RouteSource(route_name) = "job" /\ RouteEffect(route_name) = "TerminalCommitted" /\ RouteTargetMachine(route_name) = "runtime_delivery" /\ RouteTargetInput(route_name) = "CommitDelivery"
 job_notification_reaches_runtime_delivery_authority == \E route_name \in RouteNames : /\ RouteSource(route_name) = "job" /\ RouteEffect(route_name) = "NotificationCommitted" /\ RouteTargetMachine(route_name) = "runtime_delivery" /\ RouteTargetInput(route_name) = "CommitDelivery"
@@ -2193,6 +2357,8 @@ DeepStateConstraint == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ C
 WitnessStateConstraint_runtime_delivery_first_commit == /\ model_step_count <= 12 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 13 /\ Len(pending_routes) <= 4 /\ Cardinality(delivered_routes) <= 3 /\ Cardinality(emitted_effects) <= 6 /\ Cardinality(observed_transitions) <= 12 /\ Cardinality(job_notification_ids) <= 2 /\ Cardinality(job_notification_idempotency_keys) <= 2 /\ Cardinality(DOMAIN job_notification_id_by_key) <= 2 /\ Cardinality(DOMAIN job_notification_delivery_ids) <= 2 /\ Cardinality(DOMAIN job_notification_sequences) <= 2 /\ Cardinality(job_notification_applied) <= 2 /\ Cardinality(runtime_delivery_delivery_ids) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_sequences) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_source_sequences) <= 2 /\ Cardinality(runtime_delivery_committed_sequences) <= 2 /\ Cardinality(runtime_delivery_acknowledged_sequences) <= 2
 WitnessStateConstraint_runtime_delivery_notification_commit == /\ model_step_count <= 12 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 13 /\ Len(pending_routes) <= 4 /\ Cardinality(delivered_routes) <= 3 /\ Cardinality(emitted_effects) <= 6 /\ Cardinality(observed_transitions) <= 12 /\ Cardinality(job_notification_ids) <= 2 /\ Cardinality(job_notification_idempotency_keys) <= 2 /\ Cardinality(DOMAIN job_notification_id_by_key) <= 2 /\ Cardinality(DOMAIN job_notification_delivery_ids) <= 2 /\ Cardinality(DOMAIN job_notification_sequences) <= 2 /\ Cardinality(job_notification_applied) <= 2 /\ Cardinality(runtime_delivery_delivery_ids) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_sequences) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_source_sequences) <= 2 /\ Cardinality(runtime_delivery_committed_sequences) <= 2 /\ Cardinality(runtime_delivery_acknowledged_sequences) <= 2
 WitnessStateConstraint_runtime_delivery_crash_retry_reuse == /\ model_step_count <= 12 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 13 /\ Len(pending_routes) <= 4 /\ Cardinality(delivered_routes) <= 3 /\ Cardinality(emitted_effects) <= 6 /\ Cardinality(observed_transitions) <= 12 /\ Cardinality(job_notification_ids) <= 2 /\ Cardinality(job_notification_idempotency_keys) <= 2 /\ Cardinality(DOMAIN job_notification_id_by_key) <= 2 /\ Cardinality(DOMAIN job_notification_delivery_ids) <= 2 /\ Cardinality(DOMAIN job_notification_sequences) <= 2 /\ Cardinality(job_notification_applied) <= 2 /\ Cardinality(runtime_delivery_delivery_ids) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_sequences) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_source_sequences) <= 2 /\ Cardinality(runtime_delivery_committed_sequences) <= 2 /\ Cardinality(runtime_delivery_acknowledged_sequences) <= 2
+WitnessStateConstraint_runtime_delivery_out_of_order_acknowledgement == /\ model_step_count <= 30 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 16 /\ Len(pending_routes) <= 4 /\ Cardinality(delivered_routes) <= 6 /\ Cardinality(emitted_effects) <= 16 /\ Cardinality(observed_transitions) <= 30 /\ Cardinality(job_notification_ids) <= 2 /\ Cardinality(job_notification_idempotency_keys) <= 2 /\ Cardinality(DOMAIN job_notification_id_by_key) <= 2 /\ Cardinality(DOMAIN job_notification_delivery_ids) <= 2 /\ Cardinality(DOMAIN job_notification_sequences) <= 2 /\ Cardinality(job_notification_applied) <= 2 /\ Cardinality(runtime_delivery_delivery_ids) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_sequences) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_source_sequences) <= 2 /\ Cardinality(runtime_delivery_committed_sequences) <= 2 /\ Cardinality(runtime_delivery_acknowledged_sequences) <= 2
+WitnessStateConstraint_runtime_delivery_apply_after_ahead_acknowledgement == /\ model_step_count <= 30 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 16 /\ Len(pending_routes) <= 4 /\ Cardinality(delivered_routes) <= 6 /\ Cardinality(emitted_effects) <= 16 /\ Cardinality(observed_transitions) <= 30 /\ Cardinality(job_notification_ids) <= 2 /\ Cardinality(job_notification_idempotency_keys) <= 2 /\ Cardinality(DOMAIN job_notification_id_by_key) <= 2 /\ Cardinality(DOMAIN job_notification_delivery_ids) <= 2 /\ Cardinality(DOMAIN job_notification_sequences) <= 2 /\ Cardinality(job_notification_applied) <= 2 /\ Cardinality(runtime_delivery_delivery_ids) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_sequences) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_source_sequences) <= 2 /\ Cardinality(runtime_delivery_committed_sequences) <= 2 /\ Cardinality(runtime_delivery_acknowledged_sequences) <= 2
 
 Spec ==
     /\ Init
@@ -2209,6 +2375,14 @@ WitnessSpec_runtime_delivery_notification_commit ==
 WitnessSpec_runtime_delivery_crash_retry_reuse ==
     /\ WitnessInit_runtime_delivery_crash_retry_reuse
     /\ [] [WitnessNext_runtime_delivery_crash_retry_reuse]_vars
+
+WitnessSpec_runtime_delivery_out_of_order_acknowledgement ==
+    /\ WitnessInit_runtime_delivery_out_of_order_acknowledgement
+    /\ [] [WitnessNext_runtime_delivery_out_of_order_acknowledgement]_vars
+
+WitnessSpec_runtime_delivery_apply_after_ahead_acknowledgement ==
+    /\ WitnessInit_runtime_delivery_apply_after_ahead_acknowledgement
+    /\ [] [WitnessNext_runtime_delivery_apply_after_ahead_acknowledgement]_vars
 
 WitnessRouteObserved_runtime_delivery_first_commit_job_terminal_enters_runtime_inbox == WitnessScriptComplete_runtime_delivery_first_commit => (RouteObserved_job_terminal_enters_runtime_inbox)
 WitnessRouteObserved_runtime_delivery_first_commit_runtime_delivery_commit_acknowledges_job_outbox == WitnessScriptComplete_runtime_delivery_first_commit => (RouteObserved_runtime_delivery_commit_acknowledges_job_outbox)
@@ -2232,6 +2406,36 @@ WitnessTransitionObserved_runtime_delivery_crash_retry_reuse_job_ClaimQueued == 
 WitnessTransitionObserved_runtime_delivery_crash_retry_reuse_job_CompleteRunningAttempt == WitnessScriptComplete_runtime_delivery_crash_retry_reuse => (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "CompleteRunningAttempt")
 WitnessTransitionObserved_runtime_delivery_crash_retry_reuse_runtime_delivery_ReuseCommittedDelivery == WitnessScriptComplete_runtime_delivery_crash_retry_reuse => (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "ReuseCommittedDelivery")
 WitnessTransitionObserved_runtime_delivery_crash_retry_reuse_job_ApplySucceededDelivery == WitnessScriptComplete_runtime_delivery_crash_retry_reuse => (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ApplySucceededDelivery")
+WitnessRouteObserved_runtime_delivery_out_of_order_acknowledgement_job_notification_enters_runtime_inbox == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (RouteObserved_job_notification_enters_runtime_inbox)
+WitnessRouteObserved_runtime_delivery_out_of_order_acknowledgement_job_terminal_enters_runtime_inbox == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (RouteObserved_job_terminal_enters_runtime_inbox)
+WitnessStateObserved_runtime_delivery_out_of_order_acknowledgement_1 == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (runtime_delivery_applied_cursor = 2)
+WitnessTransitionObserved_runtime_delivery_out_of_order_acknowledgement_job_SubmitQueued == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "SubmitQueued")
+WitnessTransitionObserved_runtime_delivery_out_of_order_acknowledgement_job_ClaimQueued == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ClaimQueued")
+WitnessTransitionObserved_runtime_delivery_out_of_order_acknowledgement_job_EmitRunningNotification == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "EmitRunningNotification")
+WitnessTransitionObserved_runtime_delivery_out_of_order_acknowledgement_job_CompleteRunningAttempt == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "CompleteRunningAttempt")
+WitnessTransitionObserved_runtime_delivery_out_of_order_acknowledgement_runtime_delivery_CommitNewDelivery == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "CommitNewDelivery")
+WitnessTransitionObserved_runtime_delivery_out_of_order_acknowledgement_job_ApplyRunningNotificationDelivery == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ApplyRunningNotificationDelivery")
+WitnessTransitionObserved_runtime_delivery_out_of_order_acknowledgement_job_ApplySucceededDelivery == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ApplySucceededDelivery")
+WitnessTransitionObserved_runtime_delivery_out_of_order_acknowledgement_runtime_delivery_AcknowledgeAheadOfCursor == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "AcknowledgeAheadOfCursor")
+WitnessTransitionObserved_runtime_delivery_out_of_order_acknowledgement_runtime_delivery_AcknowledgeNextDelivery == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "AcknowledgeNextDelivery")
+WitnessTransitionObserved_runtime_delivery_out_of_order_acknowledgement_runtime_delivery_AdvanceOverAcknowledgedDelivery == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "AdvanceOverAcknowledgedDelivery")
+WitnessTransitionObserved_runtime_delivery_out_of_order_acknowledgement_runtime_delivery_ObserveAlreadyAppliedAcknowledgement == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "ObserveAlreadyAppliedAcknowledgement")
+WitnessTransitionOrder_runtime_delivery_out_of_order_acknowledgement_1 == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "runtime_delivery" /\ earlier.transition = "AcknowledgeAheadOfCursor" /\ later.machine = "runtime_delivery" /\ later.transition = "AcknowledgeNextDelivery" /\ earlier.step < later.step)
+WitnessTransitionOrder_runtime_delivery_out_of_order_acknowledgement_2 == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "runtime_delivery" /\ earlier.transition = "AcknowledgeNextDelivery" /\ later.machine = "runtime_delivery" /\ later.transition = "AdvanceOverAcknowledgedDelivery" /\ earlier.step < later.step)
+WitnessTransitionOrder_runtime_delivery_out_of_order_acknowledgement_3 == WitnessScriptComplete_runtime_delivery_out_of_order_acknowledgement => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "runtime_delivery" /\ earlier.transition = "AdvanceOverAcknowledgedDelivery" /\ later.machine = "runtime_delivery" /\ later.transition = "ObserveAlreadyAppliedAcknowledgement" /\ earlier.step < later.step)
+WitnessRouteObserved_runtime_delivery_apply_after_ahead_acknowledgement_job_notification_enters_runtime_inbox == WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement => (RouteObserved_job_notification_enters_runtime_inbox)
+WitnessRouteObserved_runtime_delivery_apply_after_ahead_acknowledgement_job_terminal_enters_runtime_inbox == WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement => (RouteObserved_job_terminal_enters_runtime_inbox)
+WitnessStateObserved_runtime_delivery_apply_after_ahead_acknowledgement_1 == WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement => (runtime_delivery_applied_cursor = 2)
+WitnessTransitionObserved_runtime_delivery_apply_after_ahead_acknowledgement_job_SubmitQueued == WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "SubmitQueued")
+WitnessTransitionObserved_runtime_delivery_apply_after_ahead_acknowledgement_job_ClaimQueued == WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ClaimQueued")
+WitnessTransitionObserved_runtime_delivery_apply_after_ahead_acknowledgement_job_EmitRunningNotification == WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "EmitRunningNotification")
+WitnessTransitionObserved_runtime_delivery_apply_after_ahead_acknowledgement_job_CompleteRunningAttempt == WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "CompleteRunningAttempt")
+WitnessTransitionObserved_runtime_delivery_apply_after_ahead_acknowledgement_runtime_delivery_CommitNewDelivery == WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "CommitNewDelivery")
+WitnessTransitionObserved_runtime_delivery_apply_after_ahead_acknowledgement_job_ApplyRunningNotificationDelivery == WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ApplyRunningNotificationDelivery")
+WitnessTransitionObserved_runtime_delivery_apply_after_ahead_acknowledgement_job_ApplySucceededDelivery == WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "job" /\ packet.transition = "ApplySucceededDelivery")
+WitnessTransitionObserved_runtime_delivery_apply_after_ahead_acknowledgement_runtime_delivery_AcknowledgeAheadOfCursor == WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "AcknowledgeAheadOfCursor")
+WitnessTransitionObserved_runtime_delivery_apply_after_ahead_acknowledgement_runtime_delivery_ApplyNextDelivery == WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement => (\E packet \in observed_transitions : /\ packet.machine = "runtime_delivery" /\ packet.transition = "ApplyNextDelivery")
+WitnessTransitionOrder_runtime_delivery_apply_after_ahead_acknowledgement_1 == WitnessScriptComplete_runtime_delivery_apply_after_ahead_acknowledgement => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "runtime_delivery" /\ earlier.transition = "AcknowledgeAheadOfCursor" /\ later.machine = "runtime_delivery" /\ later.transition = "ApplyNextDelivery" /\ earlier.step < later.step)
 
 THEOREM Spec => []job_terminal_reaches_runtime_delivery_authority
 THEOREM Spec => []job_notification_reaches_runtime_delivery_authority

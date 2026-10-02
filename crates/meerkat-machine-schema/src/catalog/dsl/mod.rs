@@ -5069,6 +5069,7 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "UnsupportedBackend",
                     "AttentionTargetRealmMismatch",
                     "BackingStoreUnavailable",
+                    "UnpairedAdmissionIdentity",
                 ],
             ),
             NamedTypeBinding::string_enum(

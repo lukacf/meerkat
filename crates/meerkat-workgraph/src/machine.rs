@@ -1476,6 +1476,9 @@ fn work_graph_error_kind(error: &WorkGraphError) -> wg_dsl::WorkGraphErrorKind {
         WorkGraphError::AttentionTargetRealmMismatch { .. } => {
             wg_dsl::WorkGraphErrorKind::AttentionTargetRealmMismatch
         }
+        WorkGraphError::UnpairedAdmissionIdentity { .. } => {
+            wg_dsl::WorkGraphErrorKind::UnpairedAdmissionIdentity
+        }
     }
 }
 
@@ -1528,6 +1531,21 @@ pub(crate) fn apply_new_item_dsl_created(
     ),
     WorkGraphError,
 > {
+    // Pure typed extraction for the refusal's payload; the machine decides
+    // whether the identity is refused.
+    let (admission_key_present, request_digest_present) = match &input {
+        wg_dsl::WorkGraphLifecycleInput::CreateOpen {
+            admission_key,
+            admission_request_digest,
+            ..
+        }
+        | wg_dsl::WorkGraphLifecycleInput::CreateBlocked {
+            admission_key,
+            admission_request_digest,
+            ..
+        } => (admission_key.is_some(), admission_request_digest.is_some()),
+        _ => (false, false),
+    };
     let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
     let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
@@ -1537,9 +1555,10 @@ pub(crate) fn apply_new_item_dsl_created(
             wg_dsl::WorkGraphLifecycleEffect::UnpairedAdmissionIdentityRejected
         )
     }) {
-        return Err(WorkGraphError::InvalidInput(
-            "work item admission identity must carry both an admission key and a request digest, or neither".to_string(),
-        ));
+        return Err(WorkGraphError::UnpairedAdmissionIdentity {
+            admission_key_present,
+            request_digest_present,
+        });
     }
     let mut created = None;
     for effect in transition.effects() {
@@ -2797,6 +2816,13 @@ mod tests {
             (
                 WorkGraphError::InvalidTransition("bad".to_string()),
                 WorkGraphPublicErrorClass::InvalidTransition,
+            ),
+            (
+                WorkGraphError::UnpairedAdmissionIdentity {
+                    admission_key_present: true,
+                    request_digest_present: false,
+                },
+                WorkGraphPublicErrorClass::InvalidArguments,
             ),
             (
                 WorkGraphError::InvalidInput("bad".to_string()),

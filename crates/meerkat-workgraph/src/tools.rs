@@ -472,7 +472,8 @@ fn map_error(error: WorkGraphError) -> WorkGraphToolError {
         WorkGraphError::InvalidTransition(_) => WorkGraphToolErrorCode::InvalidTransition,
         WorkGraphError::InvalidInput(_)
         | WorkGraphError::InvalidTimestampMillis { .. }
-        | WorkGraphError::AttentionTargetRealmMismatch { .. } => {
+        | WorkGraphError::AttentionTargetRealmMismatch { .. }
+        | WorkGraphError::UnpairedAdmissionIdentity { .. } => {
             WorkGraphToolErrorCode::InvalidArguments
         }
         WorkGraphError::UnsupportedBackend(_) => WorkGraphToolErrorCode::CapabilityUnavailable,

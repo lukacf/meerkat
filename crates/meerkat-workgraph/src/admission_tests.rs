@@ -597,17 +597,21 @@ fn half_present_admission_identity_is_a_typed_refusal_not_a_guard_failure() {
             admission_key,
             admission_request_digest,
         };
-    for input in [
-        create_open(key(), None),
-        create_open(None, digest()),
-        create_blocked(key(), None),
-        create_blocked(None, digest()),
+    for (input, key_present) in [
+        (create_open(key(), None), true),
+        (create_open(None, digest()), false),
+        (create_blocked(key(), None), true),
+        (create_blocked(None, digest()), false),
     ] {
         match crate::machine::apply_new_item_dsl_created(input) {
-            Err(WorkGraphError::InvalidInput(message)) => {
-                assert!(message.contains("admission key"), "{message}");
+            Err(WorkGraphError::UnpairedAdmissionIdentity {
+                admission_key_present,
+                request_digest_present,
+            }) => {
+                assert_eq!(admission_key_present, key_present);
+                assert_eq!(request_digest_present, !key_present);
             }
-            other => panic!("half-present identity must be refused as invalid input: {other:?}"),
+            other => panic!("half-present identity must be a typed refusal: {other:?}"),
         }
     }
     // Paired and absent identities still create.

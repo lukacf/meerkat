@@ -312,6 +312,7 @@ pub enum WorkGraphErrorKind {
     UnsupportedBackend,
     AttentionTargetRealmMismatch,
     BackingStoreUnavailable,
+    UnpairedAdmissionIdentity,
 }
 
 /// Machine-owned public error classification surfaced to REST/RPC callers. The
@@ -1965,6 +1966,7 @@ machine! {
                 kind == WorkGraphErrorKind::InvalidInput
                 || kind == WorkGraphErrorKind::InvalidTimestampMillis
                 || kind == WorkGraphErrorKind::AttentionTargetRealmMismatch
+                || kind == WorkGraphErrorKind::UnpairedAdmissionIdentity
             }
             update {}
             to Absent

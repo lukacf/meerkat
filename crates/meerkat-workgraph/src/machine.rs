@@ -9,7 +9,7 @@ use crate::types::{
     AddEvidenceRequest, AttentionDelegatedAuthority, CancelledChildJoinPolicy,
     ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest, FailedChildJoinPolicy,
     ObserveLeaseExpiryRequest, ObserveReadinessRequest, PolicyEscalateRequest,
-    ProjectedAttentionAuthority, ReleaseWorkItemRequest, UpdateWorkItemRequest,
+    ProjectedAttentionAuthority, ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAdmissionKey,
     WorkAttentionBinding, WorkAttentionMode, WorkAttentionStatus, WorkClaim, WorkCompletionPolicy,
     WorkEdge, WorkEdgeKind, WorkGraphEvent, WorkGraphEventKind, WorkGraphMachineState, WorkItem,
     WorkItemId, WorkNamespace, WorkStatus,
@@ -449,6 +449,63 @@ impl WorkGraphMachine {
     /// authority, and mirrors the emitted
     /// `CreateCompletionPolicyAdmissionClassified` verdict. The shell decides
     /// nothing and fails closed if the machine refuses or emits no verdict.
+    /// Classify a keyed create that found `existing` already admitted under the
+    /// same realm/namespace admission key.
+    ///
+    /// The store returns the existing item without judging it; this machine
+    /// compares the requested key and the owner-computed request digest
+    /// against the item's machine-owned admission identity. The shell mirrors
+    /// the verdict and fails closed on anything other than exactly one.
+    pub fn classify_admission_replay(
+        existing: &WorkItem,
+        admission_key: &WorkAdmissionKey,
+        request_digest: &str,
+    ) -> Result<wg_dsl::WorkAdmissionReplayKind, WorkGraphError> {
+        validate_item_machine_projection(existing)?;
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(
+            existing.machine_state.clone(),
+        )
+        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyAdmissionReplay {
+                requested_admission_key: Some(wg_dsl::WorkAdmissionKeyRef::from(
+                    admission_key.as_str(),
+                )),
+                requested_request_digest: Some(wg_dsl::WorkAdmissionDigestRef::from(
+                    request_digest,
+                )),
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::Store(format!(
+                "WorkGraphLifecycle refused admission replay classification for work item {}: {error:?}",
+                existing.id
+            ))
+        })?;
+
+        let mut admission = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::AdmissionReplayClassified {
+                admission: emitted,
+            } = effect
+                && admission.replace(*emitted).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "WorkGraphLifecycle emitted multiple admission replay verdicts for work item {}",
+                    existing.id
+                )));
+            }
+        }
+
+        admission.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "WorkGraphLifecycle emitted no admission replay verdict for work item {}",
+                existing.id
+            ))
+        })
+    }
+
     pub fn classify_create_completion_policy_admission(
         completion_policy: &crate::types::WorkCompletionPolicy,
     ) -> Result<wg_dsl::WorkCreateCompletionPolicyAdmissionKind, WorkGraphError> {
@@ -717,6 +774,23 @@ impl WorkGraphMachine {
         namespace: WorkNamespace,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
+        Self::create_item_with_admission(request, realm_id, namespace, now, None)
+    }
+
+    /// Create a work item whose machine state records an exact keyed admission
+    /// identity: the caller's key plus the owner-computed digest of the exact
+    /// request. `None` creates an ordinary unkeyed item.
+    pub fn create_item_with_admission(
+        request: CreateWorkItemRequest,
+        realm_id: String,
+        namespace: WorkNamespace,
+        now: DateTime<Utc>,
+        admission: Option<(&WorkAdmissionKey, &str)>,
+    ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
+        let admission_key =
+            admission.map(|(key, _)| wg_dsl::WorkAdmissionKeyRef::from(key.as_str()));
+        let admission_request_digest =
+            admission.map(|(_, digest)| wg_dsl::WorkAdmissionDigestRef::from(digest));
         let title = validate_title(request.title)?;
         let status = request.status.unwrap_or_default();
         // The creation policy "a new work item may only start open or blocked"
@@ -745,6 +819,8 @@ impl WorkGraphMachine {
                     cancelled_child_join_policy: cancelled_child_join_policy_to_dsl(
                         request.cancelled_child_join_policy,
                     ),
+                    admission_key,
+                    admission_request_digest,
                 }
             }
             wg_dsl::WorkCreateStatusAdmissionKind::AdmittedBlocked => {
@@ -766,6 +842,8 @@ impl WorkGraphMachine {
                     cancelled_child_join_policy: cancelled_child_join_policy_to_dsl(
                         request.cancelled_child_join_policy,
                     ),
+                    admission_key,
+                    admission_request_digest,
                 }
             }
             wg_dsl::WorkCreateStatusAdmissionKind::Denied => {

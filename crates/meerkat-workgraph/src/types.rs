@@ -159,6 +159,97 @@ impl FromStr for WorkNamespace {
     }
 }
 
+/// Maximum byte length of a [`WorkAdmissionKey`], matching the mob
+/// external-delivery idempotency key bound.
+pub const WORK_ADMISSION_KEY_MAX_BYTES: usize = 512;
+
+/// Caller-owned key that makes one work item admission exact and durable.
+///
+/// Within a realm and namespace the key admits at most one item. Repeating a
+/// keyed create with the same request returns that item
+/// ([`WorkAdmissionOutcome::Replayed`]); the same key with a different request
+/// is a typed [`WorkAdmissionOutcome::Conflict`], never a silent duplicate or an
+/// overwrite. The key is admission identity only: it grants no authority and is
+/// not a display or provenance reference (use [`ExternalWorkRef`] for those).
+///
+/// Unlike [`WorkItemId`], the value must already be canonical: surrounding
+/// whitespace is rejected rather than trimmed, so two distinct caller strings
+/// can never collapse onto one admission.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(try_from = "String", into = "String")]
+pub struct WorkAdmissionKey(String);
+
+impl WorkAdmissionKey {
+    pub fn new(value: impl Into<String>) -> Result<Self, WorkGraphError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.trim() != value
+            || value.len() > WORK_ADMISSION_KEY_MAX_BYTES
+            || value.chars().any(char::is_control)
+        {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "work admission key must be canonical nonempty text no longer than {WORK_ADMISSION_KEY_MAX_BYTES} bytes"
+            )));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for WorkAdmissionKey {
+    type Error = WorkGraphError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<WorkAdmissionKey> for String {
+    fn from(value: WorkAdmissionKey) -> Self {
+        value.0
+    }
+}
+
+impl fmt::Display for WorkAdmissionKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Result of [`crate::WorkGraphService::create_idempotent`].
+///
+/// `Created` and `Replayed` both carry the one item admitted under the key.
+/// A replay returns the item's current state (possibly advanced or terminal);
+/// it is historical admission evidence, not a fresh creation or a claim.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkAdmissionOutcome {
+    /// The key was new: the item was created and its `Created` event appended.
+    Created(WorkItem),
+    /// The key was already admitted with an identical request. Nothing was
+    /// written.
+    Replayed(WorkItem),
+    /// The key was already admitted with a different request. Nothing was
+    /// written; `existing_item_id` names the item that owns the key.
+    Conflict {
+        admission_key: WorkAdmissionKey,
+        existing_item_id: WorkItemId,
+    },
+}
+
+impl WorkAdmissionOutcome {
+    /// The admitted item for `Created`/`Replayed`; `None` for a conflict.
+    pub fn item(&self) -> Option<&WorkItem> {
+        match self {
+            Self::Created(item) | Self::Replayed(item) => Some(item),
+            Self::Conflict { .. } => None,
+        }
+    }
+}
+
 fn validate_token(name: &str, value: String) -> Result<String, WorkGraphError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {

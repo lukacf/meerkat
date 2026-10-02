@@ -8,9 +8,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `WorkGraphLifecycleMachine`
 
 ### Code Anchors
-- `workgraph_lifecycle` (machine `WorkGraphLifecycleMachine`): `crates/meerkat-workgraph/src/machine.rs` — WorkGraphMachine domain-facing lifecycle transition seam over CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ClassifyTerminalityAbsent, ClassifyTerminalityOpen, ClassifyTerminalityInProgress, ClassifyTerminalityBlocked, ClassifyTerminalityCompleted, ClassifyTerminalityCancelled, ClassifyTerminalityFailed, ValidateLink, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, ClassifyCreateStatusAdmissionOpen, ClassifyCreateStatusAdmissionBlocked, ClassifyCreateStatusAdmissionDeniedAbsent, ClassifyCreateStatusAdmissionDeniedInProgress, ClassifyCreateStatusAdmissionDeniedCompleted, ClassifyCreateStatusAdmissionDeniedCancelled, ClassifyCreateStatusAdmissionDeniedFailed, ClassifyPublicConfirmationAdmissionSelfAttest, ClassifyPublicConfirmationAdmissionHostConfirmed, ClassifyPublicConfirmationAdmissionPrincipalConfirmed, ClassifyPublicConfirmationAdmissionSupervisor, ClassifyPublicConfirmationAdmissionReviewerQuorum, ClassifyCompletionPolicyMutationAdmissionUnchanged, ClassifyCompletionPolicyMutationAdmissionChanged; effects Created, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LifecycleTerminal, LifecycleNonTerminal, LinkValidated, Closed, EvidenceAdded, CreateStatusAdmissionClassified, PublicConfirmationAdmissionClassified, CompletionPolicyMutationAdmissionClassified; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, public status defaults, terminality classification, create status admission, public confirmation admission, completion policy mutation admission, and topology legality
+- `workgraph_lifecycle` (machine `WorkGraphLifecycleMachine`): `crates/meerkat-workgraph/src/machine.rs` — WorkGraphMachine domain-facing lifecycle transition seam over CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ClassifyTerminalityAbsent, ClassifyTerminalityOpen, ClassifyTerminalityInProgress, ClassifyTerminalityBlocked, ClassifyTerminalityCompleted, ClassifyTerminalityCancelled, ClassifyTerminalityFailed, ValidateLink, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, ClassifyCreateStatusAdmissionOpen, ClassifyCreateStatusAdmissionBlocked, ClassifyCreateStatusAdmissionDeniedAbsent, ClassifyCreateStatusAdmissionDeniedInProgress, ClassifyCreateStatusAdmissionDeniedCompleted, ClassifyCreateStatusAdmissionDeniedCancelled, ClassifyCreateStatusAdmissionDeniedFailed, ClassifyPublicConfirmationAdmissionSelfAttest, ClassifyPublicConfirmationAdmissionHostConfirmed, ClassifyPublicConfirmationAdmissionPrincipalConfirmed, ClassifyPublicConfirmationAdmissionSupervisor, ClassifyPublicConfirmationAdmissionReviewerQuorum, ClassifyCompletionPolicyMutationAdmissionUnchanged, ClassifyCompletionPolicyMutationAdmissionChanged, ClassifyAdmissionReplayExact, ClassifyAdmissionReplayConflict, ClassifyAdmissionReplayKeyMismatch; effects Created, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LifecycleTerminal, LifecycleNonTerminal, LinkValidated, Closed, EvidenceAdded, CreateStatusAdmissionClassified, PublicConfirmationAdmissionClassified, CompletionPolicyMutationAdmissionClassified, AdmissionReplayClassified; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim, admission_identity_paired, absent_has_no_admission_identity; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, public status defaults, terminality classification, create status admission, public confirmation admission, completion policy mutation admission, keyed admission replay, and topology legality
 
 ### Scenarios
+- `workgraph_keyed_admission_replay` — CreateOpen and CreateBlocked record a paired machine-owned admission key and request digest (admission_identity_paired, absent_has_no_admission_identity); ClassifyAdmissionReplayExact, ClassifyAdmissionReplayConflict and ClassifyAdmissionReplayKeyMismatch decide, in every phase, whether a keyed create that found an existing item is an exact replay, a typed conflict, or a store-index mismatch, emitting AdmissionReplayClassified
 - `workgraph_create_update_ready_claim` — CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, Created, Updated, ClaimOpen, ClaimExpiredInProgress, Claimed, due eligibility, blocker satisfaction, public create status defaulting, create status admission classifies open and blocked as admissible creation states and denies the rest, and CAS revision
 - `workgraph_claim_release_recovery` — only one active claim exists, ReleaseInProgress, Released, expired leases become recoverable through machine-approved claim, claim_only_in_progress, blocked_has_no_claim, and terminal_has_no_claim
 - `workgraph_block_close_evidence` — BlockOpen, BlockInProgress, BlockBlocked, Blocked, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, Closed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, EvidenceAdded, public close status defaulting, public confirmation admission admits only a self-attested completion policy and denies every other policy as requiring trusted host, absent_has_zero_revision, live_has_positive_revision, and terminal_has_terminal_time
@@ -19,10 +20,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 ### Transitions
 - `CreateOpen`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
+  - scenarios: `workgraph_keyed_admission_replay`, `workgraph_create_update_ready_claim`
 - `CreateBlocked`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
+  - scenarios: `workgraph_keyed_admission_replay`, `workgraph_create_update_ready_claim`
 - `UpdateOpen`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_create_update_ready_claim`
@@ -887,6 +888,69 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyCompletionPolicyMutationAdmissionChangedFailed`
   - anchors: `workgraph_lifecycle`
   - scenarios: (unclaimed)
+- `ClassifyAdmissionReplayExactAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayExactOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayExactInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayExactBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayExactCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayExactCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayExactFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayConflictAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayConflictOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayConflictInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayConflictBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayConflictCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayConflictCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayConflictFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayKeyMismatchAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayKeyMismatchOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayKeyMismatchInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayKeyMismatchBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayKeyMismatchCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayKeyMismatchCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `ClassifyAdmissionReplayKeyMismatchFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
 - `ClassifyConfirmationAdmissionPrincipalRequiredAbsent`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -1017,7 +1081,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 ### Effects
 - `Created`
   - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
+  - scenarios: `workgraph_keyed_admission_replay`, `workgraph_create_update_ready_claim`
 - `Updated`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_create_update_ready_claim`
@@ -1081,6 +1145,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ChildJoinClassified`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AdmissionReplayClassified`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
 
 ### Invariants
 - `absent_has_zero_revision`
@@ -1101,6 +1168,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `blocked_has_no_claim`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_claim_release_recovery`
+- `admission_identity_paired`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
+- `absent_has_no_admission_identity`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_keyed_admission_replay`
 - `terminal_has_no_claim`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_claim_release_recovery`

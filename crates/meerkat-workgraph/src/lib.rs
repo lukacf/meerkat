@@ -37,6 +37,9 @@ pub use execution_machine::{
 pub use machine::{
     ChildJoinDisposition, WorkAttentionMachine, WorkGraphMachine, WorkGraphPublicErrorClass,
 };
+#[cfg(test)]
+mod admission_tests;
+
 pub use rest_contract::{
     WORKGRAPH_REST_PATHS, WorkGraphRestOperationDescriptor, WorkGraphRestPathDescriptor,
     WorkGraphRestRoute, workgraph_rest_path_catalog, workgraph_rest_request_response_schema,
@@ -45,7 +48,7 @@ pub use rest_contract::{
 pub use service::{AttentionTargetRealmResolver, WorkExecutionBridge, WorkGraphService};
 pub use store::{
     DisabledWorkGraphStore, MemoryWorkGraphStore, WorkGraphEventFilter, WorkGraphNamespaceRead,
-    WorkGraphStore, WorkGraphStoreKind,
+    WorkGraphStore, WorkGraphStoreKind, WorkItemAdmissionInsert,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::{SqliteWorkGraphStore, WORKGRAPH_DOMAIN, prepare_pre_0_8_10_workgraph_attention};
@@ -76,15 +79,16 @@ pub use types::{
     ObserveLeaseExpiryRequest, ObserveReadinessRequest, PolicyEscalateRequest,
     ProjectedAttentionAuthority, PublicGoalCompletionPolicy, PublicGoalCreateRequest,
     PublicGoalRequestCloseRequest, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest,
-    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachineState, WorkAttentionMode,
-    WorkAttentionStatus, WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge,
-    WorkEdgeKind, WorkEvidenceKind, WorkEvidenceRef, WorkExecutionAuthority, WorkExecutionBinding,
-    WorkExecutionBindingFilter, WorkExecutionBindingId, WorkExecutionEvidenceKind,
-    WorkExecutionEvidenceProjection, WorkExecutionMachineState, WorkExecutionTarget,
-    WorkGraphEvent, WorkGraphEventKind, WorkGraphEventsResponse, WorkGraphFact, WorkGraphIdParams,
-    WorkGraphItemsResponse, WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter,
-    WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey,
-    WorkOwnerKind, WorkPriority, WorkStatus, mob_agent_owner_id_parts,
+    WORK_ADMISSION_KEY_MAX_BYTES, WorkAdmissionKey, WorkAdmissionOutcome, WorkAttentionBinding,
+    WorkAttentionBindingId, WorkAttentionMachineState, WorkAttentionMode, WorkAttentionStatus,
+    WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceKind,
+    WorkEvidenceRef, WorkExecutionAuthority, WorkExecutionBinding, WorkExecutionBindingFilter,
+    WorkExecutionBindingId, WorkExecutionEvidenceKind, WorkExecutionEvidenceProjection,
+    WorkExecutionMachineState, WorkExecutionTarget, WorkGraphEvent, WorkGraphEventKind,
+    WorkGraphEventsResponse, WorkGraphFact, WorkGraphIdParams, WorkGraphItemsResponse,
+    WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter,
+    WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority,
+    WorkStatus, mob_agent_owner_id_parts,
 };
 
 pub const WORKGRAPH_CAPABILITY_DISABLED_DESCRIPTION: &str =

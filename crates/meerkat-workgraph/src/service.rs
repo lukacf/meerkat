@@ -9,7 +9,7 @@ use serde_json::json;
 
 use crate::machine::{WorkAttentionMachine, WorkGraphMachine, completion_policy_name};
 use crate::machines::workgraph_lifecycle as wg_dsl;
-use crate::store::{WorkGraphEventFilter, WorkGraphStore};
+use crate::store::{WorkGraphEventFilter, WorkGraphStore, WorkItemAdmissionInsert};
 use crate::types::{
     AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,
     AttentionContextProjection, AttentionListRequest, AttentionListResult, AttentionPauseRequest,
@@ -21,12 +21,13 @@ use crate::types::{
     GoalCreateResult, GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest,
     GoalStatusResult, LinkWorkItemsRequest, ObserveLeaseExpiryRequest, ObserveReadinessRequest,
     PolicyEscalateRequest, ProjectedAttentionAuthority, ReadyWorkFilter, ReleaseWorkItemRequest,
-    UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMode,
-    WorkAttentionStatus, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceKind,
-    WorkEvidenceRef, WorkExecutionBinding, WorkExecutionBindingFilter, WorkExecutionBindingId,
-    WorkExecutionEvidenceKind, WorkExecutionEvidenceProjection, WorkGraphEvent, WorkGraphEventKind,
-    WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter, WorkItemId, WorkItemRef,
-    WorkNamespace, WorkOwnerKey, WorkStatus,
+    UpdateWorkItemRequest, WorkAdmissionKey, WorkAdmissionOutcome, WorkAttentionBinding,
+    WorkAttentionBindingId, WorkAttentionMode, WorkAttentionStatus, WorkCompletionPolicy, WorkEdge,
+    WorkEdgeKind, WorkEvidenceKind, WorkEvidenceRef, WorkExecutionBinding,
+    WorkExecutionBindingFilter, WorkExecutionBindingId, WorkExecutionEvidenceKind,
+    WorkExecutionEvidenceProjection, WorkGraphEvent, WorkGraphEventKind, WorkGraphSnapshot,
+    WorkGraphSnapshotFilter, WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace,
+    WorkOwnerKey, WorkStatus,
 };
 use crate::{
     ChildJoinDisposition, WorkExecutionLifecycleEffect, WorkExecutionMachine,
@@ -239,6 +240,82 @@ impl WorkGraphService {
             self.scope(request.realm_id.clone(), request.namespace.clone())?;
         let (item, event) = WorkGraphMachine::create_item(request, realm_id, namespace, now)?;
         self.store.insert_item(item, event).await
+    }
+
+    /// Create a work item exactly once under `admission_key`.
+    ///
+    /// Within the resolved realm and namespace the key admits one item. The
+    /// owner computes a canonical digest of the exact request (with scope
+    /// resolved), records key and digest in the item's machine state, and
+    /// indexes the key durably in the same store transaction as the item.
+    ///
+    /// - A new key creates the item: [`WorkAdmissionOutcome::Created`].
+    /// - The same key with an identical request returns the existing item
+    ///   unchanged, whatever its current phase: [`WorkAdmissionOutcome::Replayed`].
+    /// - The same key with a different request writes nothing:
+    ///   [`WorkAdmissionOutcome::Conflict`].
+    ///
+    /// Replay versus conflict is decided by `WorkGraphLifecycleMachine` over
+    /// the existing item's recorded admission identity, not by the store or
+    /// this shell. The key is admission identity only; `external_refs` remain
+    /// provenance and never participate in deduplication.
+    pub async fn create_idempotent(
+        &self,
+        admission_key: WorkAdmissionKey,
+        request: CreateWorkItemRequest,
+    ) -> Result<WorkAdmissionOutcome, WorkGraphError> {
+        let now = self.store.get_store_time_utc().await?;
+        validate_completion_policy(&request.completion_policy)?;
+        match WorkGraphMachine::classify_create_completion_policy_admission(
+            &request.completion_policy,
+        )? {
+            wg_dsl::WorkCreateCompletionPolicyAdmissionKind::Admitted => {}
+            wg_dsl::WorkCreateCompletionPolicyAdmissionKind::DeniedNonSelfAttest => {
+                return Err(WorkGraphError::InvalidInput(
+                    "non-goal work items must use self_attest completion policy".to_string(),
+                ));
+            }
+        }
+        reject_reserved_evidence_refs(&request.evidence_refs)?;
+        let (realm_id, namespace) =
+            self.scope(request.realm_id.clone(), request.namespace.clone())?;
+        let mut scoped = request;
+        scoped.realm_id = Some(realm_id.clone());
+        scoped.namespace = Some(namespace.clone());
+        let request_digest = item_admission_request_digest(&scoped)?;
+        let (item, event) = WorkGraphMachine::create_item_with_admission(
+            scoped,
+            realm_id,
+            namespace,
+            now,
+            Some((&admission_key, request_digest.as_str())),
+        )?;
+        match self.store.insert_item_admitted(item, event).await? {
+            WorkItemAdmissionInsert::Inserted(item) => Ok(WorkAdmissionOutcome::Created(item)),
+            WorkItemAdmissionInsert::Existing(existing) => {
+                match WorkGraphMachine::classify_admission_replay(
+                    &existing,
+                    &admission_key,
+                    &request_digest,
+                )? {
+                    wg_dsl::WorkAdmissionReplayKind::Replayed => {
+                        Ok(WorkAdmissionOutcome::Replayed(existing))
+                    }
+                    wg_dsl::WorkAdmissionReplayKind::Conflict => {
+                        Ok(WorkAdmissionOutcome::Conflict {
+                            admission_key,
+                            existing_item_id: existing.id,
+                        })
+                    }
+                    wg_dsl::WorkAdmissionReplayKind::KeyMismatch => {
+                        Err(WorkGraphError::Store(format!(
+                            "work item admission index returned item {} whose machine-owned admission key differs from `{admission_key}`",
+                            existing.id
+                        )))
+                    }
+                }
+            }
+        }
     }
 
     pub async fn create_goal(
@@ -2225,6 +2302,26 @@ impl WorkExecutionBridge {
             .project_execution_evidence(realm_id, namespace, binding_id, projection)
             .await
     }
+}
+
+/// Domain-separated canonical SHA-256 digest of one keyed create request.
+///
+/// The request is a closed typed struct (no free-form JSON), so its serde
+/// encoding is deterministic. Scope must already be resolved so that a
+/// default-scoped and an explicitly scoped identical request digest equal.
+fn item_admission_request_digest(
+    request: &CreateWorkItemRequest,
+) -> Result<String, WorkGraphError> {
+    use sha2::{Digest, Sha256};
+    let encoded = serde_json::to_vec(request).map_err(|err| {
+        WorkGraphError::InvalidInput(format!(
+            "work item admission request is not encodable: {err}"
+        ))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"meerkat-workgraph.item-admission.v1\0");
+    hasher.update(&encoded);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 #[cfg(test)]

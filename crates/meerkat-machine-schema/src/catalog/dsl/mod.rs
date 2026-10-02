@@ -4955,6 +4955,8 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string("WorkItemKey"),
+            NamedTypeBinding::string("WorkAdmissionKeyRef"),
+            NamedTypeBinding::string("WorkAdmissionDigestRef"),
             NamedTypeBinding::type_path_struct(
                 "WorkEdgeKey",
                 "crate::catalog::dsl::workgraph_lifecycle::WorkEdgeKey",
@@ -5049,6 +5051,10 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "WorkCreateStatusAdmissionKind",
                 &["Denied", "AdmittedOpen", "AdmittedBlocked"],
+            ),
+            NamedTypeBinding::string_enum(
+                "WorkAdmissionReplayKind",
+                &["KeyMismatch", "Replayed", "Conflict"],
             ),
             NamedTypeBinding::string_enum(
                 "WorkCreateCompletionPolicyAdmissionKind",

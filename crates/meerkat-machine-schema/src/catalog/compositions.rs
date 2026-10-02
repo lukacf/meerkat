@@ -1188,6 +1188,8 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
                             named_variant("CancelledChildJoinPolicy", "RequireSuccess"),
                         ),
                         witness_field("unresolved_blocker_count", Expr::U64(0)),
+                        witness_field("admission_key", Expr::None),
+                        witness_field("admission_request_digest", Expr::None),
                     ],
                 ),
                 witness_input(

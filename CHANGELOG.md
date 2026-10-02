@@ -277,6 +277,27 @@ them.
   - the defaulted `Compactor::transcript_history_retention`, which
     `DefaultCompactor` reads from its config.
 
+- Exact keyed WorkGraph item admission (#1496):
+  `meerkat_workgraph::WorkGraphService::create_idempotent(admission_key, request)`
+  returns `WorkAdmissionOutcome::{Created, Replayed, Conflict { admission_key,
+  existing_item_id }}`.
+  - Within a realm and namespace a `WorkAdmissionKey` admits one item.
+  - The same key with the same request returns the existing item unchanged,
+    in any phase, terminal included, and writes nothing.
+  - The same key with a different request is a typed conflict and writes
+    nothing.
+  - The owner computes a domain-separated SHA-256 digest of the exact request
+    (with scope resolved) and records key and digest in the item's machine
+    state. `WorkGraphLifecycleMachine` decides replay versus conflict
+    (`ClassifyAdmissionReplay`).
+  - SQLite indexes the key in the new `workgraph_item_admissions` table
+    (workgraph schema version 4; version 3 files migrate on open), in the
+    same transaction as the item. Concurrent admissions of one key create
+    exactly once.
+  - New store capability `WorkGraphStore::insert_item_admitted` returns
+    `WorkItemAdmissionInsert::{Inserted, Existing}`. It defaults to
+    unsupported; the memory and SQLite stores implement it.
+  - `ExternalWorkRef` stays provenance only and is never a dedupe key.
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a

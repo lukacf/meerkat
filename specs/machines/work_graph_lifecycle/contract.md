@@ -30,10 +30,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `reviewer_confirmation_owner_keys`: `Set<WorkOwnerKey>`
 - `failed_child_join_policy`: `FailedChildJoinPolicy`
 - `cancelled_child_join_policy`: `CancelledChildJoinPolicy`
+- `admission_key`: `Option<WorkAdmissionKeyRef>`
+- `admission_request_digest`: `Option<WorkAdmissionDigestRef>`
 
 ## Inputs
-- `CreateOpen`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, completion_reviewer_quorum_threshold: Option<u64>, unresolved_blocker_count: u64, failed_child_join_policy: FailedChildJoinPolicy, cancelled_child_join_policy: CancelledChildJoinPolicy)
-- `CreateBlocked`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, completion_reviewer_quorum_threshold: Option<u64>, unresolved_blocker_count: u64, failed_child_join_policy: FailedChildJoinPolicy, cancelled_child_join_policy: CancelledChildJoinPolicy)
+- `CreateOpen`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, completion_reviewer_quorum_threshold: Option<u64>, unresolved_blocker_count: u64, failed_child_join_policy: FailedChildJoinPolicy, cancelled_child_join_policy: CancelledChildJoinPolicy, admission_key: Option<WorkAdmissionKeyRef>, admission_request_digest: Option<WorkAdmissionDigestRef>)
+- `CreateBlocked`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, completion_reviewer_quorum_threshold: Option<u64>, unresolved_blocker_count: u64, failed_child_join_policy: FailedChildJoinPolicy, cancelled_child_join_policy: CancelledChildJoinPolicy, admission_key: Option<WorkAdmissionKeyRef>, admission_request_digest: Option<WorkAdmissionDigestRef>)
 - `Update`(expected_revision: u64, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, completion_reviewer_quorum_threshold: Option<u64>, unresolved_blocker_count: u64)
 - `PolicyEscalate`(expected_revision: u64, requested_completion_policy: WorkCompletionPolicy, requested_completion_supervisor_owner_key: Option<WorkOwnerKey>, requested_completion_reviewer_quorum_threshold: Option<u64>)
 - `Claim`(expected_revision: u64, owner_key: WorkOwnerKey, now_utc_ms: u64, lease_expires_at_utc_ms: Option<u64>, child_join_satisfied: Bool)
@@ -58,6 +60,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy: WorkCompletionPolicy, requested_completion_supervisor_owner_key: Option<WorkOwnerKey>, requested_completion_reviewer_quorum_threshold: Option<u64>)
 - `ClassifyConfirmationAdmission`(completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, requested_principal_owner_key: Option<WorkOwnerKey>, requested_principal_kind: Option<WorkOwnerKind>, supplied_evidence_kind: WorkConfirmationEvidenceObservation)
 - `ClassifyReadiness`(now_utc_ms: u64, child_join_satisfied: Bool)
+- `ClassifyAdmissionReplay`(requested_admission_key: Option<WorkAdmissionKeyRef>, requested_request_digest: Option<WorkAdmissionDigestRef>)
 
 ## Signals
 
@@ -84,6 +87,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ConfirmationAdmissionClassified`(admission: WorkConfirmationAdmissionKind)
 - `WorkItemReadinessClassified`(ready: Bool)
 - `ChildJoinClassified`(disposition: ChildJoinDisposition)
+- `AdmissionReplayClassified`(admission: WorkAdmissionReplayKind)
 
 ## Helpers
 - `completion_policy_payload_valid`(policy: WorkCompletionPolicy, supervisor_owner_key: Option<WorkOwnerKey>, reviewer_quorum_threshold: Option<u64>) -> `Bool`
@@ -105,6 +109,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `terminal_has_terminal_time`
 - `claim_only_in_progress`
 - `blocked_has_no_claim`
+- `admission_identity_paired`
+- `absent_has_no_admission_identity`
 - `terminal_has_no_claim`
 - `supervisor_policy_has_owner`
 - `non_supervisor_policy_has_no_owner`
@@ -114,17 +120,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Transitions
 ### `CreateOpen`
 - From: `Absent`
-- On: `CreateOpen`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy)
+- On: `CreateOpen`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest)
 - Guards:
   - `completion_policy_payload_valid`
+  - `admission_identity_paired`
 - Emits: `Created`
 - To: `Open`
 
 ### `CreateBlocked`
 - From: `Absent`
-- On: `CreateBlocked`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy)
+- On: `CreateBlocked`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest)
 - Guards:
   - `completion_policy_payload_valid`
+  - `admission_identity_paired`
 - Emits: `Created`
 - To: `Blocked`
 
@@ -2416,6 +2424,174 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `CompletionPolicyMutationAdmissionClassified`
 - To: `Failed`
 
+### `ClassifyAdmissionReplayExactAbsent`
+- From: `Absent`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_exact`
+- Emits: `AdmissionReplayClassified`
+- To: `Absent`
+
+### `ClassifyAdmissionReplayExactOpen`
+- From: `Open`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_exact`
+- Emits: `AdmissionReplayClassified`
+- To: `Open`
+
+### `ClassifyAdmissionReplayExactInProgress`
+- From: `InProgress`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_exact`
+- Emits: `AdmissionReplayClassified`
+- To: `InProgress`
+
+### `ClassifyAdmissionReplayExactBlocked`
+- From: `Blocked`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_exact`
+- Emits: `AdmissionReplayClassified`
+- To: `Blocked`
+
+### `ClassifyAdmissionReplayExactCompleted`
+- From: `Completed`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_exact`
+- Emits: `AdmissionReplayClassified`
+- To: `Completed`
+
+### `ClassifyAdmissionReplayExactCancelled`
+- From: `Cancelled`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_exact`
+- Emits: `AdmissionReplayClassified`
+- To: `Cancelled`
+
+### `ClassifyAdmissionReplayExactFailed`
+- From: `Failed`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_exact`
+- Emits: `AdmissionReplayClassified`
+- To: `Failed`
+
+### `ClassifyAdmissionReplayConflictAbsent`
+- From: `Absent`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_conflict`
+- Emits: `AdmissionReplayClassified`
+- To: `Absent`
+
+### `ClassifyAdmissionReplayConflictOpen`
+- From: `Open`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_conflict`
+- Emits: `AdmissionReplayClassified`
+- To: `Open`
+
+### `ClassifyAdmissionReplayConflictInProgress`
+- From: `InProgress`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_conflict`
+- Emits: `AdmissionReplayClassified`
+- To: `InProgress`
+
+### `ClassifyAdmissionReplayConflictBlocked`
+- From: `Blocked`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_conflict`
+- Emits: `AdmissionReplayClassified`
+- To: `Blocked`
+
+### `ClassifyAdmissionReplayConflictCompleted`
+- From: `Completed`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_conflict`
+- Emits: `AdmissionReplayClassified`
+- To: `Completed`
+
+### `ClassifyAdmissionReplayConflictCancelled`
+- From: `Cancelled`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_conflict`
+- Emits: `AdmissionReplayClassified`
+- To: `Cancelled`
+
+### `ClassifyAdmissionReplayConflictFailed`
+- From: `Failed`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_conflict`
+- Emits: `AdmissionReplayClassified`
+- To: `Failed`
+
+### `ClassifyAdmissionReplayKeyMismatchAbsent`
+- From: `Absent`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_key_mismatch`
+- Emits: `AdmissionReplayClassified`
+- To: `Absent`
+
+### `ClassifyAdmissionReplayKeyMismatchOpen`
+- From: `Open`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_key_mismatch`
+- Emits: `AdmissionReplayClassified`
+- To: `Open`
+
+### `ClassifyAdmissionReplayKeyMismatchInProgress`
+- From: `InProgress`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_key_mismatch`
+- Emits: `AdmissionReplayClassified`
+- To: `InProgress`
+
+### `ClassifyAdmissionReplayKeyMismatchBlocked`
+- From: `Blocked`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_key_mismatch`
+- Emits: `AdmissionReplayClassified`
+- To: `Blocked`
+
+### `ClassifyAdmissionReplayKeyMismatchCompleted`
+- From: `Completed`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_key_mismatch`
+- Emits: `AdmissionReplayClassified`
+- To: `Completed`
+
+### `ClassifyAdmissionReplayKeyMismatchCancelled`
+- From: `Cancelled`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_key_mismatch`
+- Emits: `AdmissionReplayClassified`
+- To: `Cancelled`
+
+### `ClassifyAdmissionReplayKeyMismatchFailed`
+- From: `Failed`
+- On: `ClassifyAdmissionReplay`(requested_admission_key, requested_request_digest)
+- Guards:
+  - `admission_replay_key_mismatch`
+- Emits: `AdmissionReplayClassified`
+- To: `Failed`
+
 ### `ClassifyConfirmationAdmissionPrincipalRequiredAbsent`
 - From: `Absent`
 - On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
@@ -2754,9 +2930,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `workgraph_lifecycle` (machine `WorkGraphLifecycleMachine`): `crates/meerkat-workgraph/src/machine.rs` — WorkGraphMachine domain-facing lifecycle transition seam over CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ClassifyTerminalityAbsent, ClassifyTerminalityOpen, ClassifyTerminalityInProgress, ClassifyTerminalityBlocked, ClassifyTerminalityCompleted, ClassifyTerminalityCancelled, ClassifyTerminalityFailed, ValidateLink, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, ClassifyCreateStatusAdmissionOpen, ClassifyCreateStatusAdmissionBlocked, ClassifyCreateStatusAdmissionDeniedAbsent, ClassifyCreateStatusAdmissionDeniedInProgress, ClassifyCreateStatusAdmissionDeniedCompleted, ClassifyCreateStatusAdmissionDeniedCancelled, ClassifyCreateStatusAdmissionDeniedFailed, ClassifyPublicConfirmationAdmissionSelfAttest, ClassifyPublicConfirmationAdmissionHostConfirmed, ClassifyPublicConfirmationAdmissionPrincipalConfirmed, ClassifyPublicConfirmationAdmissionSupervisor, ClassifyPublicConfirmationAdmissionReviewerQuorum, ClassifyCompletionPolicyMutationAdmissionUnchanged, ClassifyCompletionPolicyMutationAdmissionChanged; effects Created, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LifecycleTerminal, LifecycleNonTerminal, LinkValidated, Closed, EvidenceAdded, CreateStatusAdmissionClassified, PublicConfirmationAdmissionClassified, CompletionPolicyMutationAdmissionClassified; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, public status defaults, terminality classification, create status admission, public confirmation admission, completion policy mutation admission, and topology legality
+- `workgraph_lifecycle` (machine `WorkGraphLifecycleMachine`): `crates/meerkat-workgraph/src/machine.rs` — WorkGraphMachine domain-facing lifecycle transition seam over CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ClassifyTerminalityAbsent, ClassifyTerminalityOpen, ClassifyTerminalityInProgress, ClassifyTerminalityBlocked, ClassifyTerminalityCompleted, ClassifyTerminalityCancelled, ClassifyTerminalityFailed, ValidateLink, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, ClassifyCreateStatusAdmissionOpen, ClassifyCreateStatusAdmissionBlocked, ClassifyCreateStatusAdmissionDeniedAbsent, ClassifyCreateStatusAdmissionDeniedInProgress, ClassifyCreateStatusAdmissionDeniedCompleted, ClassifyCreateStatusAdmissionDeniedCancelled, ClassifyCreateStatusAdmissionDeniedFailed, ClassifyPublicConfirmationAdmissionSelfAttest, ClassifyPublicConfirmationAdmissionHostConfirmed, ClassifyPublicConfirmationAdmissionPrincipalConfirmed, ClassifyPublicConfirmationAdmissionSupervisor, ClassifyPublicConfirmationAdmissionReviewerQuorum, ClassifyCompletionPolicyMutationAdmissionUnchanged, ClassifyCompletionPolicyMutationAdmissionChanged, ClassifyAdmissionReplayExact, ClassifyAdmissionReplayConflict, ClassifyAdmissionReplayKeyMismatch; effects Created, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LifecycleTerminal, LifecycleNonTerminal, LinkValidated, Closed, EvidenceAdded, CreateStatusAdmissionClassified, PublicConfirmationAdmissionClassified, CompletionPolicyMutationAdmissionClassified, AdmissionReplayClassified; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim, admission_identity_paired, absent_has_no_admission_identity; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, public status defaults, terminality classification, create status admission, public confirmation admission, completion policy mutation admission, keyed admission replay, and topology legality
 
 ### Scenarios
+- `workgraph_keyed_admission_replay` — CreateOpen and CreateBlocked record a paired machine-owned admission key and request digest (admission_identity_paired, absent_has_no_admission_identity); ClassifyAdmissionReplayExact, ClassifyAdmissionReplayConflict and ClassifyAdmissionReplayKeyMismatch decide, in every phase, whether a keyed create that found an existing item is an exact replay, a typed conflict, or a store-index mismatch, emitting AdmissionReplayClassified
 - `workgraph_create_update_ready_claim` — CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, Created, Updated, ClaimOpen, ClaimExpiredInProgress, Claimed, due eligibility, blocker satisfaction, public create status defaulting, create status admission classifies open and blocked as admissible creation states and denies the rest, and CAS revision
 - `workgraph_claim_release_recovery` — only one active claim exists, ReleaseInProgress, Released, expired leases become recoverable through machine-approved claim, claim_only_in_progress, blocked_has_no_claim, and terminal_has_no_claim
 - `workgraph_block_close_evidence` — BlockOpen, BlockInProgress, BlockBlocked, Blocked, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, Closed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, EvidenceAdded, public close status defaulting, public confirmation admission admits only a self-attested completion policy and denies every other policy as requiring trusted host, absent_has_zero_revision, live_has_positive_revision, and terminal_has_terminal_time

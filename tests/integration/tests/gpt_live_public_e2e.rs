@@ -5324,14 +5324,17 @@ fn tool_results_named(history: &Value, name: &str) -> Vec<(String, bool, String)
 /// S102's typed round trip, each step awaited on its own typed state (the
 /// harness's executor-turn wait reads the same way): exactly one successful
 /// executor `send_request`; the member's reply arriving at the executor as an
-/// incoming peer response; and that reply reaching the live channel as typed
-/// runtime work. A comms request has no built-in wait, so the reply is a
-/// later turn's input, never part of the asking turn.
+/// incoming peer response; and the executor's turn over that reply reaching
+/// the open channel as a voiced session-lane row. A comms request has no
+/// built-in wait, so the reply is a later turn's input, never part of the
+/// asking turn. That later turn is conversation the provider has not heard
+/// while the user waits on the call, so the mirror voices it (an ordinary
+/// session-context append); it is not background work to keep quiet.
 async fn s102_member_round_trip(
     live: &mut PublicLiveHarness,
     evidence: &Journal,
     channel: u32,
-    runtime_work_before: usize,
+    session_rows_before: usize,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let mut failures = Vec::new();
     let executor_history = live
@@ -5361,9 +5364,13 @@ async fn s102_member_round_trip(
         }
     }
     // The member's reply arrives at the executor as a correlated peer
-    // response (`format_peer_response_projection`).
+    // response (`format_peer_response_projection`), and the executor's turn
+    // over it commits an assistant reply after it. Both are read from
+    // `session/history`, the canonical committed rows: the durable half of
+    // the contract, which a reopen seed and a replay carry, not only the
+    // transport append below.
     let deadline = Instant::now() + Duration::from_secs(180);
-    let response = loop {
+    let (peer_response_seen, reply) = loop {
         let history = live
             .rpc
             .call(
@@ -5372,48 +5379,104 @@ async fn s102_member_round_trip(
                 60,
             )
             .await?;
-        let text = history.to_string();
-        if text.contains("Peer response from") && text.contains(S102_MEMBER) {
-            break Some(text);
-        }
-        if Instant::now() >= deadline {
-            break None;
+        let messages = history["messages"].as_array().cloned().unwrap_or_default();
+        let response_at = messages.iter().position(|row| {
+            let text = row.to_string();
+            text.contains("Peer response from") && text.contains(S102_MEMBER)
+        });
+        let reply = response_at.and_then(|at| {
+            messages[at + 1..]
+                .iter()
+                .filter(|row| row["role"] == "block_assistant")
+                .map(assistant_row_text)
+                .find(|text| !text.trim().is_empty())
+        });
+        if reply.is_some() || Instant::now() >= deadline {
+            break (response_at.is_some(), reply);
         }
         sleep(Duration::from_millis(250)).await;
     };
-    if response.is_none() {
+    if !peer_response_seen {
         failures.push(format!(
             "{S102_MEMBER}'s reply never reached the executor as a peer response"
         ));
         return Ok(failures);
     }
-    // The executor's turn over that response is runtime work committed after
-    // the voice session was created, so it reaches the channel through the
-    // live-context owner as a runtime-work append.
+    let Some(reply) = reply else {
+        failures.push(format!(
+            "the executor never answered {S102_MEMBER}'s peer response"
+        ));
+        return Ok(failures);
+    };
+    println!("GPT_LIVE_S102_EXECUTOR_REPLY text={reply:?}");
+    // That reply reaches the open channel as a voiced session-lane row: the
+    // mirror's ordinary append of a canonical row the provider has not
+    // heard, carrying the reply's text.
+    let probe: String = reply.trim().chars().take(48).collect();
     let deadline = Instant::now() + Duration::from_secs(180);
-    let replayed = loop {
-        let appends = evidence.owned_thinking_appends(channel)?;
-        let fresh: Vec<String> = appends
+    let voiced = loop {
+        let rows = evidence.session_commentary_appends(channel)?;
+        let found = rows
             .iter()
-            .filter(|text| text.starts_with(LIVE_RUNTIME_WORK_PREFIX))
-            .skip(runtime_work_before)
-            .cloned()
-            .collect();
-        if !fresh.is_empty() {
-            break Some(fresh);
-        }
-        if Instant::now() >= deadline {
-            break None;
+            .skip(session_rows_before)
+            .find(|(text, _)| commentary_carries(text, &probe))
+            .cloned();
+        if found.is_some() || Instant::now() >= deadline {
+            break found;
         }
         sleep(Duration::from_millis(250)).await;
     };
-    match replayed {
-        Some(fresh) => println!("GPT_LIVE_S102_RUNTIME_WORK appends={fresh:?}"),
+    match voiced {
+        Some((text, bytes)) => {
+            println!("GPT_LIVE_S102_VOICED_REPLY bytes={bytes} text={text:?}")
+        }
         None => failures.push(format!(
-            "the executor's turn over {S102_MEMBER}'s reply never reached the live channel as runtime work"
+            "the executor's reply to {S102_MEMBER}'s response never reached the live channel \
+             as a voiced session row"
         )),
     }
     Ok(failures)
+}
+
+/// The text blocks of one `block_assistant` history row, joined.
+fn assistant_row_text(row: &Value) -> String {
+    row["blocks"]
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| block["block_type"] == "text")
+                .filter_map(|block| block["data"]["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a voiced row's content carries `probe`: the mirror sends a
+/// canonical row as JSON (`{"role":"assistant","text":...}`), so its string
+/// values are compared, not its escaped bytes.
+fn commentary_carries(content: &str, probe: &str) -> bool {
+    fn strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+        match value {
+            Value::String(text) => out.push(text),
+            Value::Array(items) => items.iter().for_each(|item| strings(item, out)),
+            Value::Object(map) => map.values().for_each(|item| strings(item, out)),
+            _ => {}
+        }
+    }
+    match serde_json::from_str::<Value>(content) {
+        Ok(value) => {
+            let mut found = Vec::new();
+            strings(&value, &mut found);
+            found
+                .iter()
+                .any(|text| text.trim_start().starts_with(probe))
+        }
+        // A prefix cut inside the JSON (content over the capture limit)
+        // still carries the probe's bytes when it has no escapes.
+        Err(_) => content.contains(probe),
+    }
 }
 
 /// Planted second member and its planted tool: test oracles the roster
@@ -5604,11 +5667,7 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
 
         // Q3: ask them, delegated.
         evidence.stage(EvidenceStage::WhoAreYouAsk)?;
-        let runtime_work_before_q3 = evidence
-            .owned_thinking_appends(channel)?
-            .iter()
-            .filter(|text| text.starts_with(LIVE_RUNTIME_WORK_PREFIX))
-            .count();
+        let session_rows_before_q3 = evidence.session_commentary_appends(channel)?.len();
         let request3 = delegated_request(
             &mut live,
             started,
@@ -5631,7 +5690,7 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
         // checked: round 1's substring oracle passed on "their sense of the
         // time" while the member was never reached.
         let round_trip_failures =
-            s102_member_round_trip(&mut live, &evidence, channel, runtime_work_before_q3).await?;
+            s102_member_round_trip(&mut live, &evidence, channel, session_rows_before_q3).await?;
 
         evidence.stage(EvidenceStage::Closing)?;
         live.record_uplink("S102").await?;

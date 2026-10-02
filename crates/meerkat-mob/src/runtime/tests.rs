@@ -82718,6 +82718,72 @@ async fn dispatch_handles_bind_their_authority_lanes() {
     handle.shutdown().await.expect("shutdown test mob");
 }
 
+/// #1500: an input admitted to a member's runtime before a mob Stop, but not
+/// yet prepared into a run, must not start a run while the mob is Stopped.
+/// Stop is a pause: the input stays queued and runs once after Resume.
+#[tokio::test]
+async fn test_stop_holds_an_admitted_member_input_until_resume() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-held-by-stop");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn turn-driven lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    // Runs report their start (and block) so a leaked run is observable.
+    service.set_block_runtime_turns(true);
+    // Admit an input, then hold the member's runtime loop before it takes
+    // the input into a run: the input is queued and unprepared.
+    let (queue_gap_entered, queue_gap_release) = service
+        .runtime_adapter
+        .arm_runtime_loop_before_queue_authority_test_hook(session_id.clone());
+    let member = handle.member(&identity).await.expect("member handle");
+    let _turn = member
+        .start_turn(
+            ContentInput::Text("admitted before the stop".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("admit the input");
+    tokio::time::timeout(Duration::from_secs(30), queue_gap_entered)
+        .await
+        .expect("the runtime loop reaches the queue gap")
+        .expect("queue-authority hook armed");
+
+    handle.stop().await.expect("stop the mob");
+    assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+
+    // Release the loop. The queued input must not start a run while the mob
+    // is Stopped.
+    let started = service.runtime_turn_started.notified();
+    tokio::pin!(started);
+    started.as_mut().enable();
+    queue_gap_release
+        .send(())
+        .expect("release the runtime loop");
+    tokio::time::timeout(Duration::from_secs(30), started)
+        .await
+        .expect("hang guard");
+    assert_ne!(
+        handle.status().await.unwrap(),
+        MobState::Stopped,
+        "a queued member input started a run while the mob is Stopped"
+    );
+}
+
 // Runtime-backed tracked-turn LLM identity and terminal-event regressions.
 #[tokio::test]
 async fn test_batched_steer_turns_fan_out_complete_commit_gated_event_streams() {

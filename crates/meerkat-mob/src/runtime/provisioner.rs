@@ -11870,9 +11870,10 @@ impl MobProvisioner for SessionBackend {
                                     &mut actor_materialization_route,
                                     super::session_service::SessionActorMaterializationRoute::Fresh,
                                 );
-                                match route
-                                    .advance_resume_preparation_after_machine_prepare(prepared)
-                                    .await
+                                match meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                                    route.advance_resume_preparation_after_machine_prepare(prepared)
+                                })
+                                .await
                                 {
                                     Ok(route) => {
                                         actor_materialization_route = route;
@@ -11921,26 +11922,29 @@ impl MobProvisioner for SessionBackend {
                             "actor-only recovery for '{recovery_session_id}' lost B before actor creation"
                         ))
                     })?;
-                let created = create_attached_session_actor_recovery_owned(
-                    AttachedSessionActorRecoveryContext {
-                        session_id: recovery_session_id,
-                        session_service: Arc::clone(&backend.session_service),
-                        prepared,
-                        boundary,
-                        state: Arc::clone(&state),
-                        route: actor_materialization_route,
-                        actor_witness_slot: actor_witness_slot.clone(),
-                        req: req.create_session,
-                    },
-                )
+                let created = meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                    create_attached_session_actor_recovery_owned(
+                        AttachedSessionActorRecoveryContext {
+                            session_id: recovery_session_id,
+                            session_service: Arc::clone(&backend.session_service),
+                            prepared,
+                            boundary,
+                            state: Arc::clone(&state),
+                            route: actor_materialization_route,
+                            actor_witness_slot: actor_witness_slot.clone(),
+                            req: req.create_session,
+                        },
+                    )
+                })
                 .await?;
                 recovered_attached_state = Some(state);
                 Ok(created)
             }
         } else if let Some(transaction) = actor_transaction.take() {
-            match transaction
-                .create_owned_with_route(req.create_session, actor_materialization_route)
-                .await
+            match meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                transaction.create_owned_with_route(req.create_session, actor_materialization_route)
+            })
+            .await
             {
                 Ok((created, transaction)) => {
                     actor_transaction = Some(transaction);
@@ -15053,8 +15057,10 @@ impl MobProvisioner for MultiBackendProvisioner {
     ) -> Result<MemberSpawnReceipt, MobError> {
         match req.binding {
             RuntimeBinding::Session => {
-                self.session
-                    .provision_member(ProvisionMemberRequest {
+                // Built in its own boxed frame: the request and the session
+                // backend's saga are large at opt-level 0 (#1462).
+                meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                    self.session.provision_member(ProvisionMemberRequest {
                         create_session: req.create_session,
                         authorized_resume: req.authorized_resume,
                         session_origin: req.session_origin,
@@ -15067,7 +15073,8 @@ impl MobProvisioner for MultiBackendProvisioner {
                         runtime_revival_intent: req.runtime_revival_intent,
                         direct_member_incarnation: None,
                     })
-                    .await
+                })
+                .await
             }
             RuntimeBinding::External {
                 peer_id,

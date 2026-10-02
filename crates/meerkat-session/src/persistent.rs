@@ -7930,17 +7930,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary::Committed(evidence))
     }
 
-    /// Publish `AgentEvent::LiveChannelClosed` on the session event stream
-    /// (an ephemeral observation; nothing is persisted).
-    pub async fn publish_live_channel_closed(
+    /// Enqueue `AgentEvent::LiveChannelClosed` for the session event stream
+    /// (an ephemeral observation; nothing is persisted). Never waits on the
+    /// session actor; see
+    /// [`crate::EphemeralSessionService::enqueue_live_channel_closed`].
+    pub async fn enqueue_live_channel_closed(
         &self,
         id: &SessionId,
         channel_id: meerkat_core::LiveChannelId,
         reason: meerkat_core::LiveChannelCloseReason,
         reopen_recommended: bool,
-    ) -> Result<(), SessionError> {
+    ) -> Result<(), crate::LiveChannelClosedNotPublished> {
         self.inner
-            .publish_live_channel_closed(id, channel_id, reason, reopen_recommended)
+            .enqueue_live_channel_closed(id, channel_id, reason, reopen_recommended)
             .await
     }
 

@@ -467,34 +467,33 @@ impl<B: SessionAgentBuilder + 'static>
         reopen_recommended: bool,
     ) {
         let Some(service) = self.service.upgrade() else {
+            tracing::info!(
+                %session_id,
+                channel = %channel_id,
+                ?reason,
+                not_published = ?meerkat_session::LiveChannelClosedNotPublished::SessionNotRunning,
+                "a committed live channel close has no session service to publish on"
+            );
             return;
         };
         // The runtime calls this inside the committed close. The session
         // publishes through its own command loop, which a running member
-        // turn can hold for that turn's whole duration, so the close must
-        // never wait on it: hand the event to the session and return.
-        let session_id = session_id.clone();
-        let channel_id = channel_id.clone();
-        tokio::spawn(async move {
-            match service
-                .publish_live_channel_closed(
-                    &session_id,
-                    channel_id.clone(),
-                    reason,
-                    reopen_recommended,
-                )
-                .await
-            {
-                Ok(()) | Err(meerkat_core::service::SessionError::NotFound { .. }) => {}
-                Err(error) => tracing::warn!(
-                    %session_id,
-                    channel = %channel_id,
-                    ?reason,
-                    %error,
-                    "a committed live channel close was not published on the session event stream"
-                ),
-            }
-        });
+        // turn holds for the turn's whole duration, so the close only
+        // enqueues: the session's close outbox carries the event onto its
+        // command queue in close order and the actor publishes it after the
+        // turn. Close settlement never depends on that publication.
+        if let Err(not_published) = service
+            .enqueue_live_channel_closed(session_id, channel_id.clone(), reason, reopen_recommended)
+            .await
+        {
+            tracing::info!(
+                %session_id,
+                channel = %channel_id,
+                ?reason,
+                ?not_published,
+                "a committed live channel close has no session event stream to publish on"
+            );
+        }
     }
 }
 

@@ -775,6 +775,13 @@ them.
   `ServiceMemberLiveHost::new`). Facade: `close_live_channel_for` and
   `close_experimental_live_channel_for` name a close's reason;
   `meerkat_live::LiveChannelCloseObservation::reason()`.
+  A close never waits on the session: a member session busy in a long turn
+  receives the event after the turn, in close order. Session API:
+  `EphemeralSessionService::enqueue_live_channel_closed` and
+  `PersistentSessionService::enqueue_live_channel_closed`, plus
+  `meerkat_session::LiveChannelClosedNotPublished` (`SessionNotRunning`,
+  `ActorExited`, `ActorDraining`). When a close is not published, the reason
+  is logged.
 
 
 - `meerkat_runtime::MeerkatMachine::wait_input_admitted_by_idempotency_key`

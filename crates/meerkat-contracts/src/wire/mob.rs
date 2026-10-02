@@ -2143,6 +2143,11 @@ pub struct MobLifecycleResult {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destroy_report: Option<Value>,
+    /// For `stop`: what the stop did to each member's run and whether its
+    /// run starts are held (#1500). A member reported `not_holdable` may
+    /// still start a turn while the mob is stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_report: Option<Value>,
 }
 
 /// Request payload for `mob/append_system_context`.
@@ -4028,6 +4033,7 @@ mod tests {
             action: WireMobLifecycleAction::Complete,
             ok: true,
             destroy_report: None,
+            stop_report: None,
         };
 
         let json = serde_json::to_value(&result).expect("serialize lifecycle result");

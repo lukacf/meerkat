@@ -68455,6 +68455,62 @@ async fn test_reset_failure_from_stopped_stays_stopped() {
     );
 }
 
+/// #1500: Stop does not send the orchestrator an "is stopping" notice (its run
+/// starts are held, so it could only read it after Resume); Resume tells it
+/// the pause happened.
+#[tokio::test]
+async fn test_resume_tells_the_orchestrator_about_the_stop_and_stop_does_not() {
+    let mut def = sample_definition();
+    if let Some(profile) = def
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .and_then(|b| b.as_inline_mut())
+    {
+        profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    }
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(def, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("lead"), AgentIdentity::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    let mob_id = handle.definition().id.clone();
+
+    handle.stop().await.expect("stop");
+    let baseline_start_turn_calls = service.start_turn_call_count();
+    assert!(
+        !service
+            .recorded_prompts()
+            .await
+            .iter()
+            .any(|(_, prompt)| prompt.contains("is stopping")),
+        "Stop sends no lifecycle notice"
+    );
+
+    handle.resume().await.expect("resume");
+    wait_for_start_turn_call_count(
+        service.as_ref(),
+        baseline_start_turn_calls + 1,
+        "the resume notice reaches the orchestrator",
+    )
+    .await;
+    let expected = format!("Mob '{mob_id}' resumed after stop.");
+    assert!(
+        service
+            .recorded_prompts()
+            .await
+            .iter()
+            .any(|(_, prompt)| prompt.contains(&expected)),
+        "the orchestrator is told the pause happened"
+    );
+    handle.shutdown().await.expect("shutdown");
+}
+
 #[tokio::test]
 async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
     // Create a definition with a TurnDriven orchestrator so lifecycle
@@ -68469,7 +68525,7 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
     }
 
     let service = Arc::new(MockSessionService::new());
-    let runtime_adapter = service.enable_runtime_adapter();
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(def, storage)
         .with_session_service(service.clone())
@@ -68483,19 +68539,19 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
         .await
         .expect("spawn lead");
 
-    // Make start_turn hang for 10 minutes — simulates a stuck backend.
-    service.set_start_turn_delay_ms(600_000);
-
-    // Stop the mob. This fires a lifecycle notification on the JoinSet, so
-    // stop itself returns immediately. The stop holds the orchestrator's run
-    // starts (#1500), so the notification's turn is admitted and then parked
-    // until a Resume: a lifecycle task that does not finish on its own.
-    let mut parks = runtime_adapter.run_start_held_parks();
+    // Stop pauses the mob without notifying the orchestrator (#1500); Resume
+    // notifies it. Make start_turn hang for 10 minutes (a stuck backend) so
+    // the resume notice is a lifecycle task that does not finish on its own.
     handle.stop().await.expect("stop");
-    tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
-        .await
-        .expect("the stopping notification is parked behind the hold")
-        .expect("park signal");
+    service.set_start_turn_delay_ms(600_000);
+    let baseline_start_turn_calls = service.start_turn_call_count();
+    handle.resume().await.expect("resume");
+    wait_for_start_turn_call_count(
+        service.as_ref(),
+        baseline_start_turn_calls + 1,
+        "stuck resume lifecycle notification must enter start_turn before shutdown",
+    )
+    .await;
 
     // Shutdown must complete quickly despite the stuck notification task.
     // abort_all cancels in-flight tasks instead of awaiting them.

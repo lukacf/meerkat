@@ -14,7 +14,7 @@ use meerkat_core::lifecycle::RunId;
 use crate::AgentIdentity;
 
 /// What a mob Stop did to each member.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MobStopReport {
     /// One outcome per member the stop reached, by identity.
     pub members: BTreeMap<AgentIdentity, MemberStopOutcome>,
@@ -34,7 +34,7 @@ impl MobStopReport {
 }
 
 /// One member's stop outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MemberStopOutcome {
     /// The member's run when the stop reached it.
     pub run: MemberStopRun,
@@ -43,7 +43,8 @@ pub struct MemberStopOutcome {
 }
 
 /// The member's run when the stop reached it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "run", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum MemberStopRun {
     /// The member had no run, so there was nothing to cancel.
@@ -61,7 +62,8 @@ pub enum MemberStopRun {
 }
 
 /// Whether a member's run starts are held until Resume.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "starts", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum MemberRunStarts {
     /// No new run starts until Resume.
@@ -72,7 +74,8 @@ pub enum MemberRunStarts {
 }
 
 /// Why a member's run starts could not be held.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum NotHoldableReason {
     /// A remote member whose host does not support the run-start hold.

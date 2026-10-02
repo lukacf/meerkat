@@ -20878,7 +20878,23 @@ impl MobActor {
         }
         // The mob runs again: release the run starts its Stop held (#1500),
         // so input admitted before the stop runs now.
-        self.release_all_member_run_starts().await
+        let released = self.release_all_member_run_starts().await;
+        // The orchestrator's first turn after the pause learns of it. Lifecycle
+        // delivery is a real fault, not best-effort.
+        let notified = self
+            .notify_orchestrator_lifecycle(format!(
+                "Mob '{}' resumed after stop.",
+                self.definition.id
+            ))
+            .await;
+        if let Err(error) = &notified {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "resume encountered orchestrator lifecycle delivery error"
+            );
+        }
+        released.and(notified)
     }
 
     /// Release every member's run-start hold (#1500). Every member is
@@ -26328,11 +26344,6 @@ impl MobActor {
                         reply_tx.send(Ok(self.machine_projection_for_identity(&agent_identity)));
                 }
                 MobCommand::Stop { reply_tx } => {
-                    let stop_intent_preexisting = self
-                        .dsl_authority
-                        .state()
-                        .placed_completion_lifecycle_intent
-                        == Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Stop);
                     let result = if self.state() == MobState::Destroyed {
                         Err(self.invalid_transition_to(MobState::Stopped))
                     } else if let Err(error) = self
@@ -26359,26 +26370,11 @@ impl MobActor {
                                     {
                                         stop_result = Err(error);
                                     }
-                                    // Lifecycle delivery is a real fault, not
-                                    // best-effort: fold a failure into the stop
-                                    // result rather than swallowing it. Cleanup
-                                    // still proceeds so the mob can stop.
-                                    if stop_result.is_ok()
-                                        && !stop_intent_preexisting
-                                        && let Err(error) = self
-                                            .notify_orchestrator_lifecycle(format!(
-                                                "Mob '{}' is stopping.",
-                                                self.definition.id
-                                            ))
-                                            .await
-                                    {
-                                        tracing::warn!(
-                                            mob_id = %self.definition.id,
-                                            error = %error,
-                                            "stop encountered orchestrator lifecycle delivery error"
-                                        );
-                                        stop_result = Err(error);
-                                    }
+                                    // No "is stopping" notice to the orchestrator
+                                    // (#1500): its run starts are about to be
+                                    // held, so it could only read the notice
+                                    // after Resume, when it is stale. Resume
+                                    // tells it the pause happened instead.
                                     // Cancel checkpointer gates before stopping host loops so
                                     // in-flight saves that complete after the loop stops don't
                                     // race with subsequent external cleanup (e.g. DML deletes).

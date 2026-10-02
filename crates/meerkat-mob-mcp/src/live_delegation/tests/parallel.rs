@@ -1165,26 +1165,43 @@ async fn a_continuation_that_misses_the_workers_last_model_call_is_not_delivered
 
     fx.commit_continuation("continuation-1", "something else entirely")
         .await;
-    let coordinator = Arc::clone(&fx.coordinator);
-    let provider_binding = fx.provider_binding.clone();
-    let steer = tokio::spawn(async move {
-        coordinator
-            .steer_continuation(PendingContinuation {
-                provider_binding,
-                delegation: LiveSidebandDelegationRef::__from_provider_observation(
-                    "split-delegation".to_string(),
-                    "split-provider-delegation".to_string(),
-                )
-                .expect("delegation"),
-                continuation_id: "continuation-1".to_string(),
-                transcript: " into a file called notes dot md".to_string(),
-            })
-            .await;
-    });
-    wait_until(WAIT, || async { fx.steered("continuation-1").await }).await;
-    // The model returns final text: the run ends with no further boundary.
+    // The steer returns once authorized while the worker is still parked on
+    // its model call: the channel's observation loop never waits for a
+    // worker's next boundary (a running tool call can hold one for as long
+    // as the tool runs), so later delegation requests are never held back.
+    // The clock is paused around the steer: a steer that waited for the
+    // boundary would leave the runtime idle, the paused clock would advance
+    // straight to the deadline, and the test fails at once (a deadlock
+    // detector, not a wall-clock margin).
+    tokio::time::pause();
+    let steered = tokio::time::timeout(
+        WAIT,
+        fx.coordinator.steer_continuation(PendingContinuation {
+            provider_binding: fx.provider_binding.clone(),
+            delegation: LiveSidebandDelegationRef::__from_provider_observation(
+                "split-delegation".to_string(),
+                "split-provider-delegation".to_string(),
+            )
+            .expect("delegation"),
+            continuation_id: "continuation-1".to_string(),
+            transcript: " into a file called notes dot md".to_string(),
+        }),
+    )
+    .await;
+    tokio::time::resume();
+    steered.expect("the steer returns without waiting for the worker's model boundary");
+    assert!(fx.steered("continuation-1").await);
+    // The model returns final text: the run ends with no further boundary,
+    // so the delivery resolves as a missed run and the machine records it.
     fx.client.release(0);
-    steer.await.expect("steer task");
+    wait_until(WAIT, || async {
+        fx.runtime
+            .live_delegation_steer_delivered(&fx.session_id, "continuation-1")
+            .await
+            .expect("machine state")
+            .is_some()
+    })
+    .await;
     assert_eq!(
         fx.runtime
             .live_delegation_steer_delivered(&fx.session_id, "continuation-1")

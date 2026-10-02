@@ -5816,15 +5816,17 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
 
 /// Tokens the monologue plants; the single executor input must carry all.
 const S103_TOKENS: [&str; 4] = ["marigold", "tuesday", "copenhagen", "pelican"];
-/// The barge-in lands this long after the brief readout's first audio.
-const S103_BARGE_IN_OFFSET_MS: u64 = 1500;
-/// Overlap bound for the two interruptions (provider VAD/stop latency).
+/// The barge-in starts at the onset of the first assistant audio after the
+/// brief's commentary. That audio is often a short acknowledgement ("Okay,
+/// I'm on it.") rather than the readout, and a 1500 ms offset landed after
+/// it ended in 2 of 5 runs, so the barge-in interrupted nothing. At the onset
+/// it always lands on assistant speech.
+const S103_BARGE_IN_OFFSET_MS: u64 = 0;
+/// Overlap bound for the two interruptions. gpt-live-1 owns interruption: the
+/// browser's media runs to the provider directly and Meerkat sends no cancel,
+/// so the assistant stops when the provider's turn detection yields (measured
+/// 1.2-1.5 s after onset).
 const S103_BARGE_IN_OVERLAP_BOUND_MS: u64 = 2500;
-/// Tolerant bound: assistant energy off within this of the barge-in onset.
-/// Not achievable with this provider (measured 868 and 2248 ms here, 1200-1700
-/// ms in S100): kept as the design's target, reported, never a gate. The
-/// overlap gate stays at `S103_BARGE_IN_OVERLAP_BOUND_MS`.
-const S103_QUIET_BOUND_MS: i64 = 800;
 
 /// Wait until every delegated executor turn is terminal and the assistant
 /// has produced no new event for `quiet`; bounded.
@@ -5863,9 +5865,9 @@ async fn wait_for_settled(
 }
 
 /// Scenario 103: a 27 s monologue with disfluencies and three 700-900 ms
-/// mid-sentence pauses ends in a request whose readout is long; 1500 ms
-/// into that readout the user barges in with a correction, and 300 ms after
-/// that clip ends corrects again.
+/// mid-sentence pauses ends in a request whose readout is long; at the first
+/// assistant audio after the brief lands the user barges in with a
+/// correction, and 300 ms after that clip ends corrects again.
 ///
 /// Deterministic, but provider-dependent: the monologue produces exactly
 /// one client delegation and its executor input carries all four planted
@@ -5880,8 +5882,12 @@ async fn wait_for_settled(
 /// duplicate readout; see `unprompted_assistant_response_starts`, the
 /// repetition is a browser fault);
 /// overlap beyond the bound only inside the two interruption windows; close
-/// converges. Tolerant: assistant energy off within 800 ms of the barge-in
-/// onset; the last executor input carries "friday"; open -> connected < 5 s.
+/// converges; the barge-in lands on assistant speech and is answered (the
+/// provider's next response or delegation closes its input, and an assistant
+/// row follows its canonical row); every input final commits as a canonical
+/// spoken row. The public protocol has no response lifecycle (no interrupted
+/// or cancelled event, no truncation signal), so there is no interruption
+/// event to assert against. Tolerant: open -> connected < 5 s.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_103_gpt_live_public_interrupt_and_recover()
@@ -6106,15 +6112,6 @@ async fn run_s103_interrupt_and_recover(
             barge_in_timing.as_ref().map(|t| t.input_text.as_str()),
             correction_timing.as_ref().map(|t| t.input_text.as_str())
         );
-        record_tolerant(
-            &evidence,
-            channel,
-            "S103",
-            "assistant_quiet_within_800ms_of_barge_in",
-            assistant_quiet_after_onset_ms.is_some_and(|ms| ms <= S103_QUIET_BOUND_MS),
-            format!("onset_to_assistant_quiet_ms={assistant_quiet_after_onset_ms:?}"),
-            &mut tolerant_failures,
-        )?;
 
         // Readout integrity after the barge-in: every assistant response
         // starts after a new input final or a commentary append.
@@ -6187,6 +6184,11 @@ async fn run_s103_interrupt_and_recover(
                 "interruption overlap beyond the bound: barge_in={barge_in_overlap_ms} correction={correction_overlap_ms} bound={S103_BARGE_IN_OVERLAP_BOUND_MS}"
             ));
         }
+        if barge_in_overlap_ms == 0 {
+            deterministic_failures.push(
+                "the barge-in did not land on assistant speech, so it interrupted nothing".to_owned(),
+            );
+        }
         if !unprompted_starts.is_empty() {
             deterministic_failures.push(format!(
                 "assistant audio started without a new input final or commentary at ms {unprompted_starts:?} (duplicate readout)"
@@ -6198,19 +6200,63 @@ async fn run_s103_interrupt_and_recover(
                 "an assistant response repeated readout lines after the barge-in (duplicate readout): {repeated_lines:?}"
             ));
         }
-        record_tolerant(
-            &evidence,
-            channel,
-            "S103",
-            "last_executor_input_carries_friday",
-            rows
-                .executor_inputs
-                .last()
-                .is_some_and(|task| split_executor_task(task).0.contains("friday"))
-                || rows.spoken.iter().any(|row| row.contains("friday")),
-            format!("executor_inputs={:?}", rows.executor_inputs),
-            &mut tolerant_failures,
-        )?;
+        // Barge-in contract. gpt-live-1's public protocol carries no response
+        // lifecycle: no done, cancelled or interrupted event and no truncation
+        // signal, so an interrupted assistant turn is indistinguishable from a
+        // finished one and "no audio after the interruption" has no event to
+        // order against. What it does carry is causal order: the peer closes
+        // the barge-in's input transcript only when the provider's next output
+        // transcript delta or delegation for it arrives (`closed_by`). So the
+        // barge-in must be answered that way, and its canonical row must be
+        // followed by an assistant row; neither depends on the model's words.
+        let barge_in_final = timeline.iter().find(|e| {
+            e.kind == TimelineKind::InputFinal
+                && e.detail_u64("closed_at_ms").is_some_and(|t| t >= barge_in_start_ms)
+        });
+        match barge_in_final.and_then(|e| e.detail.get("closed_by").and_then(|c| c.as_str())) {
+            Some("response" | "delegation") => {}
+            other => deterministic_failures.push(format!(
+                "the barge-in was never answered: no provider response or delegation closed its input (closed_by={other:?})"
+            )),
+        }
+        if let Some(heard) = barge_in_final
+            .and_then(|e| e.detail.get("text").and_then(|t| t.as_str()))
+            .map(normalize_words)
+            .filter(|heard| !heard.is_empty())
+        {
+            let messages = history["messages"].as_array().cloned().unwrap_or_default();
+            let row = messages.iter().position(|m| {
+                m["role"].as_str() == Some("user")
+                    && normalize_words(&history_text(&json!({"messages":[m]}))).contains(heard.as_str())
+            });
+            let answered = row.is_some_and(|row| {
+                messages[row + 1..]
+                    .iter()
+                    .any(|m| m["role"].as_str().is_some_and(|role| role.contains("assistant")))
+            });
+            if !answered {
+                deterministic_failures.push(format!(
+                    "the barge-in's canonical row ({row:?}) is not followed by an assistant row"
+                ));
+            }
+        }
+        // Every utterance the provider finalized commits as a canonical
+        // spoken row. Whether "Friday" is among them is the provider's
+        // transcription: when the assistant answers "Actually," at once, the
+        // provider closes that turn and has been seen never to transcribe
+        // the rest.
+        let spoken: Vec<String> = rows.spoken.iter().map(|row| normalize_words(row)).collect();
+        let uncommitted: Vec<String> = timeline
+            .iter()
+            .filter(|e| e.kind == TimelineKind::InputFinal)
+            .filter_map(|e| e.detail.get("text").and_then(|t| t.as_str()).map(normalize_words))
+            .filter(|heard| !heard.is_empty() && !spoken.iter().any(|row| row.contains(heard.as_str())))
+            .collect();
+        if !uncommitted.is_empty() {
+            deterministic_failures.push(format!(
+                "input finals never committed as canonical spoken rows: {uncommitted:?}"
+            ));
+        }
 
         let report = live.peer.energy().await?;
         evidence.record(EvidenceRecord::Energy {
@@ -7795,21 +7841,20 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
 /// Quick question and second job offsets after job 1's delegation.created.
 const S101_QUICK_OFFSET_MS: u64 = 5000;
 const S101_JOB2_OFFSET_MS: u64 = 12_000;
-/// Tolerant bound: the quick question's input final -> its commentary.
-const S101_QUICK_ANSWER_BOUND_MS: i64 = 3000;
 
 /// Scenario 101: with the WorkGraph-scheduled DurableFork policy, a slow
 /// executor job (shell sleep 25 s, then marker-one.txt) is running when the
 /// user asks an unrelated quick question at +5 s and starts a second slow job
 /// (sleep 20 s, marker-two.txt) at +12 s.
 ///
-/// Deterministic: three client delegations; every executor turn reaches
-/// Completed (job 1 is not cancelled by supersede); at least two delegations
-/// run concurrently (parallel scheduling, journaled with the WorkGraph
-/// items); both marker files exist; a commentary append landed for each
-/// finished job while the channel was live; three executor inputs committed
-/// to the canonical session; graceful close. Tolerant: the quick question's
-/// input final -> first commentary under 3 s.
+/// Deterministic: three client delegations; the quick question's worker
+/// starts while job 1's shell command is still running (no marker file yet),
+/// so a busy worker never holds a later request back; every executor turn
+/// reaches Completed (job 1 is not cancelled by supersede); at least two
+/// delegations run concurrently (parallel scheduling, journaled with the
+/// WorkGraph items); both marker files exist; a commentary append landed for
+/// each finished job while the channel was live; three executor inputs
+/// committed to the canonical session; graceful close.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_101_gpt_live_public_busy_backend() -> Result<(), Box<dyn std::error::Error>> {
@@ -7836,7 +7881,9 @@ async fn e2e_scenario_101_gpt_live_public_busy_backend() -> Result<(), Box<dyn s
 async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+            // Executor-level detail (agent loop, tool calls, the executor
+            // model's requests) so a slow delegated turn is attributable.
+            "meerkat_openai=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp=debug,meerkat_mob=debug,meerkat_core::agent=debug,meerkat_tools=debug,meerkat_client=debug",
         )
         .with_test_writer()
         .try_init();
@@ -7896,6 +7943,53 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
                 timeline_find(t, TimelineKind::DelegationCreated, job1_start_ms).map(|e| e.t_ms)
             })
             .await?;
+        // Watch worker starts from here on. Each operation's first sighting
+        // records whether a marker file existed yet: job 1's shell command
+        // (`sleep 25 && touch marker-one.txt`) creates the first marker, so a
+        // worker first seen before any marker started while job 1's tool
+        // call was still running.
+        let start_watch = {
+            let runtime = live.shared()?.0.runtime.clone();
+            let session_id = live.session_id.clone();
+            let workspace = workspace.clone();
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let task_stop = Arc::clone(&stop);
+            let task = tokio::spawn(async move {
+                let mut first_seen: Vec<(String, bool)> = Vec::new();
+                let mut max_running = 0usize;
+                loop {
+                    if let Ok(snapshots) = runtime.live_delegation_recovery_snapshots(&session_id).await {
+                        max_running = max_running.max(
+                            snapshots
+                                .iter()
+                                .filter(|s| {
+                                    s.phase() == meerkat_runtime::live_execution::LiveDelegationRecoveryPhase::Running
+                                })
+                                .count(),
+                        );
+                        let marker_exists = std::fs::read_dir(&workspace)
+                            .map(|entries| {
+                                entries.flatten().any(|entry| {
+                                    entry.file_name().to_string_lossy().to_lowercase().contains("marker")
+                                })
+                            })
+                            .unwrap_or(false);
+                        for snapshot in &snapshots {
+                            let operation = snapshot.operation_id().to_string();
+                            if !first_seen.iter().any(|(seen, _)| seen == &operation) {
+                                first_seen.push((operation, marker_exists));
+                            }
+                        }
+                    }
+                    if first_seen.len() >= 3 || task_stop.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                }
+                (first_seen, max_running)
+            });
+            (stop, task)
+        };
         let quick = live
             .peer
             .play_at(
@@ -7933,7 +8027,12 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
             let snapshots = runtime
                 .live_delegation_recovery_snapshots(&live.session_id)
                 .await?;
-            let running = snapshots.iter().filter(|s| s.terminal().is_none()).count();
+            // Only workers actually started count; a delegation queued behind
+            // another (start authorized, worker not running) is not parallel.
+            let running = snapshots
+                .iter()
+                .filter(|s| s.phase() == meerkat_runtime::live_execution::LiveDelegationRecoveryPhase::Running)
+                .count();
             max_concurrent = max_concurrent.max(running);
             for snapshot in snapshots.iter().filter(|s| s.terminal().is_some()) {
                 terminal_at
@@ -7969,6 +8068,23 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
                     "delegation {operation} ended {terminal} at {at_ms} ms (a running job must not be cancelled by supersede)"
                 ));
             }
+        }
+        let (watch_stop, watch_task) = start_watch;
+        watch_stop.store(true, std::sync::atomic::Ordering::Release);
+        let (worker_starts, watch_max_running) = watch_task.await?;
+        max_concurrent = max_concurrent.max(watch_max_running);
+        println!(
+            "GPT_LIVE_S101_WORKER_STARTS first_seen_with_marker={worker_starts:?} max_running_while_starting={watch_max_running}"
+        );
+        match worker_starts.get(1) {
+            Some((_, false)) => {}
+            Some((operation, true)) => deterministic_failures.push(format!(
+                "the quick question's worker ({operation}) did not start until job 1's shell command \
+                 returned: a busy worker held a later request back"
+            )),
+            None => deterministic_failures.push(format!(
+                "the quick question's worker never started: {worker_starts:?}"
+            )),
         }
         if max_concurrent < 2 {
             deterministic_failures.push(format!(
@@ -8011,15 +8127,6 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
             quick_timing.as_ref().map(|t| t.input_text.as_str()),
             job2_timing.as_ref().map(|t| t.input_text.as_str())
         );
-        record_tolerant(
-            &evidence,
-            channel,
-            "S101",
-            "quick_question_answered_under_3s",
-            quick_answer_ms.is_some_and(|ms| ms < S101_QUICK_ANSWER_BOUND_MS),
-            format!("quick_input_final_to_first_commentary_ms={quick_answer_ms:?}"),
-            &mut tolerant_failures,
-        )?;
         // The recognizer renders "marker-one.txt" as "marker1" or "marker
         // one"; the executor follows what it heard, so the deterministic fact
         // is two distinct marker files, not their exact spelling.

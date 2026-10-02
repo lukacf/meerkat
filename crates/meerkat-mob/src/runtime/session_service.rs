@@ -13,10 +13,6 @@ use meerkat_core::service::{
     SessionError, SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt,
 };
 use meerkat_core::{InputId, RunId};
-#[cfg(feature = "runtime-adapter")]
-use std::collections::HashMap;
-#[cfg(feature = "runtime-adapter")]
-use std::sync::{Mutex, OnceLock, Weak};
 
 #[cfg(feature = "openai-live")]
 fn start_live_bridge_on_session_actor(
@@ -944,32 +940,6 @@ fn build_runtime_receipt(
         conversation_digest: Some(conversation_digest),
         message_count: session.messages().len(),
     })
-}
-
-#[cfg(feature = "runtime-adapter")]
-fn ephemeral_runtime_adapter_cache()
--> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>> {
-    static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-#[cfg(feature = "runtime-adapter")]
-fn cached_runtime_adapter(
-    cache: &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>,
-    key: usize,
-    init: impl FnOnce() -> Arc<meerkat_runtime::MeerkatMachine>,
-) -> Arc<meerkat_runtime::MeerkatMachine> {
-    let mut cache = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cache.retain(|_, adapter| adapter.strong_count() > 0);
-    if let Some(existing) = cache.get(&key).and_then(Weak::upgrade) {
-        return existing;
-    }
-    let adapter = init();
-    cache.insert(key, Arc::downgrade(&adapter));
-    adapter
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -2446,14 +2416,10 @@ where
             .await
     }
 
+    /// The machine this service instance owns.
     #[cfg(feature = "runtime-adapter")]
     fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
-        let key = std::ptr::from_ref(self) as usize;
-        Some(cached_runtime_adapter(
-            ephemeral_runtime_adapter_cache(),
-            key,
-            || Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
-        ))
+        Some(meerkat_session::EphemeralSessionService::<B>::canonical_runtime_adapter(self))
     }
 
     #[cfg(feature = "runtime-adapter")]

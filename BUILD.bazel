@@ -697,6 +697,7 @@ test_suite(
         "//crates/meerkat-mob:cross_host_live_test",
         "//crates/meerkat-mob:cross_host_wiring_test",
         "//crates/meerkat-mob:dispatcher_rule_synthetic_injection_test",
+        "//crates/meerkat-mob:ephemeral_service_owns_its_machine_test",
         "//crates/meerkat-mob:flow_frame_recovery_tests_test",
         "//crates/meerkat-mob:forked_participant_attached_spawn_test",
         "//crates/meerkat-mob:forked_participant_capabilities_test",

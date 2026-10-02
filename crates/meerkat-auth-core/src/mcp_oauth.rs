@@ -716,6 +716,17 @@ impl McpOAuthAuthority {
         Ok(self)
     }
 
+    /// This authority without its interactive strategy: stored-credential use
+    /// for unselected (no `oauth_account`) targets, with the semantics they
+    /// had before any interactive strategy was installed. The interactive
+    /// authority itself keeps refusing unselected targets.
+    pub fn stored_only(&self) -> Self {
+        Self {
+            interactive: None,
+            ..self.clone()
+        }
+    }
+
     /// Check local prerequisites before a surface performs discovery preflight.
     /// This does not authorize network effects or verify provider account data.
     pub fn validate_interactive_selection(

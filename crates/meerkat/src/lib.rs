@@ -341,7 +341,7 @@ pub use host_auth::{
 pub use meerkat_providers::auth_store::{ProviderAuthPersistence, TokenStoreBackend};
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_providers::mcp_oauth::{
-    MCP_INTERACTIVE_LOGIN_TIMEOUT, MCP_OAUTH_CALLBACK_PATH, McpOAuthAccountStrategy,
+    MCP_INTERACTIVE_LOGIN_TIMEOUT, MCP_OAUTH_CALLBACK_PATH, McpAuthMode, McpOAuthAccountStrategy,
     McpOAuthAuthority, McpOAuthBrowserLaunch, McpOAuthCallback, McpOAuthCeremonyContext,
     McpOAuthError, McpOAuthLoginComplete, McpOAuthLoginDisposition, McpOAuthLoginStart,
     McpOAuthLoopbackBegin, McpOAuthPendingLogin, McpServerIdentity, OidcUserInfoAccountStrategy,
@@ -560,8 +560,8 @@ pub use meerkat_tools::{FileTaskStore, ensure_rkat_dir, find_project_root};
 // Re-export MCP client
 #[cfg(feature = "mcp")]
 pub use meerkat_mcp::{
-    McpApplyDelta, McpApplyResult, McpConnection, McpError, McpLifecycleAction, McpLifecyclePhase,
-    McpReloadTarget, McpRouter, McpRouterAdapter, McpServerLifecycleState,
+    McpApplyDelta, McpApplyResult, McpAuthResolver, McpConnection, McpError, McpLifecycleAction,
+    McpLifecyclePhase, McpReloadTarget, McpRouter, McpRouterAdapter, McpServerLifecycleState,
 };
 #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
 pub mod mcp;

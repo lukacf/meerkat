@@ -303,6 +303,10 @@ them.
     blocking pool and return the advisory `McpOAuthBrowserLaunch`, which never
     retries or cancels the attempt.
   - `PkceChallenge::s256_for_verifier`.
+  - `McpOAuthAuthority::stored_only`. The `McpAuthResolver` impl and the CLI
+    resolver keep stored-only semantics for servers without `oauth_account`,
+    so servers that need no OAuth connect as before. Interactive login for
+    such a server is refused with `AccountSelectionRequired`.
 - `meerkat_auth_core::OidcUserInfoAccountStrategy`: the production MCP
   account strategy. It requests `openid`, calls the issuer's UserInfo
   endpoint with the new access token and binds `sub` to the server's
@@ -321,7 +325,8 @@ them.
   The `host_auth` docs state the host obligation: the browser context must be
   unobservable by agent tools.
 - `meerkat::AgentFactory::mcp_auth_resolver` installs the default MCP
-  credential source for factory builds.
+  credential source for factory builds. The facade re-exports `McpAuthResolver` and
+  `McpAuthMode`.
 - Typed host status for MCP servers awaiting human authorization:
   `McpRouter::servers_awaiting_authorization` and
   `McpRouterAdapter::servers_awaiting_authorization`. This is not an agent

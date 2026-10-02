@@ -9612,7 +9612,9 @@ impl meerkat_mcp::McpAuthResolver for CliMcpHostAuthResolver {
         &self,
         target: &meerkat::McpServerIdentity,
     ) -> Result<Option<String>, meerkat::McpOAuthError> {
-        self.authority.stored_bearer_token(target).await
+        // The native resolver keeps stored-only semantics for unselected
+        // targets, so servers that need no OAuth connect as before.
+        meerkat_mcp::McpAuthResolver::stored_bearer_token(&self.authority, target).await
     }
 
     async fn interactive_login(
@@ -9621,6 +9623,9 @@ impl meerkat_mcp::McpAuthResolver for CliMcpHostAuthResolver {
         www_authenticate: Option<&str>,
     ) -> Result<String, meerkat::McpOAuthError> {
         use std::io::IsTerminal;
+        if target.expected_account().is_none() {
+            return Err(meerkat::McpOAuthError::AccountSelectionRequired);
+        }
         if self.mode != CliMcpAuthMode::Interactive || !std::io::stderr().is_terminal() {
             return Err(meerkat::McpOAuthError::HumanAuthorizationRequired {
                 server_name: target.server_name().to_owned(),

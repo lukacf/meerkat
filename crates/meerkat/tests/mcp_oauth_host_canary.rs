@@ -64,6 +64,7 @@ async fn spawn_fixture() -> String {
     let state = Arc::new(Fixture::default());
     let app = Router::new()
         .route("/mcp", post(mcp))
+        .route("/public", post(public_mcp))
         .route(
             "/.well-known/oauth-protected-resource/mcp",
             get(|headers: HeaderMap| async move {
@@ -152,7 +153,12 @@ async fn token(Form(body): Form<HashMap<String, String>>) -> Json<Value> {
     }))
 }
 
-async fn mcp(headers: HeaderMap, Json(request): Json<Value>) -> impl IntoResponse {
+/// An MCP server that needs no authorization at all.
+async fn public_mcp(Json(request): Json<Value>) -> axum::response::Response {
+    mcp_reply(request)
+}
+
+async fn mcp(headers: HeaderMap, Json(request): Json<Value>) -> axum::response::Response {
     if bearer(&headers) != Some(ACCESS_CANARY) {
         return (
             StatusCode::UNAUTHORIZED,
@@ -163,6 +169,10 @@ async fn mcp(headers: HeaderMap, Json(request): Json<Value>) -> impl IntoRespons
         )
             .into_response();
     }
+    mcp_reply(request)
+}
+
+fn mcp_reply(request: Value) -> axum::response::Response {
     let Some(id) = request.get("id").cloned() else {
         return StatusCode::ACCEPTED.into_response();
     };
@@ -420,4 +430,63 @@ async fn mcp_oauth_secrets_never_reach_agent_observation_or_logs() {
             );
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_http_mcp_server_without_account_connects_under_the_native_resolver() {
+    let base = spawn_fixture().await;
+    let temp = tempfile::tempdir().unwrap();
+    let factory = AgentFactory::new(temp.path().join("sessions"));
+    let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+    let service = HostAuthService::new(
+        ProviderAuthPersistence::new(
+            Arc::new(EphemeralTokenStore::new()),
+            Arc::new(InMemoryCoordinator::new()),
+        ),
+        runtime.provider_auth_runtime_authority(),
+    );
+    // No `oauth_account`: an unselected server must keep connecting without
+    // credentials, exactly as before a resolver was installed.
+    let server =
+        McpServerConfig::streamable_http("public", format!("{base}/public"), HashMap::new());
+    let (_events, transcript) = run_agent(&factory, &service, &server).await;
+    assert!(
+        transcript.contains(ECHO_REPLY),
+        "a public MCP server must stay usable under the default resolver"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unselected_server_demanding_oauth_is_refused_with_typed_account_selection() {
+    let base = spawn_fixture().await;
+    let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+    let service = HostAuthService::new(
+        ProviderAuthPersistence::new(
+            Arc::new(EphemeralTokenStore::new()),
+            Arc::new(InMemoryCoordinator::new()),
+        ),
+        runtime.provider_auth_runtime_authority(),
+    );
+    let server = McpServerConfig::streamable_http("guarded", format!("{base}/mcp"), HashMap::new());
+    let resolver: Arc<dyn meerkat::McpAuthResolver> =
+        Arc::new(service.mcp_oauth_authority().unwrap());
+    let error = match meerkat::McpConnection::connect_with_mcp_auth(
+        &server,
+        meerkat::McpAuthMode::Interactive,
+        Some(resolver),
+    )
+    .await
+    {
+        Ok(_) => panic!("an OAuth-protected server must not connect without credentials"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error,
+            meerkat::McpError::OAuthAccountRejected(
+                meerkat::McpOAuthError::AccountSelectionRequired
+            )
+        ),
+        "got {error:?}"
+    );
 }

@@ -205,20 +205,29 @@ pub trait McpAuthResolver: Send + Sync {
 
 #[async_trait]
 impl McpAuthResolver for meerkat_auth_core::McpOAuthAuthority {
+    /// Unselected targets (no `oauth_account`) keep their stored-only
+    /// semantics, so servers that need no OAuth connect as before.
     async fn stored_bearer_token(
         &self,
         target: &McpServerIdentity,
     ) -> Result<Option<String>, McpOAuthError> {
+        if target.expected_account().is_none() {
+            return self.stored_only().stored_bearer_token(target).await;
+        }
         self.stored_bearer_token(target).await
     }
 
     /// The native authority has no browser: human authorization is a host
     /// obligation, reported as typed status instead of opening anything.
+    /// Interactive login needs a selected account.
     async fn interactive_login(
         &self,
         target: &McpServerIdentity,
         _www_authenticate: Option<&str>,
     ) -> Result<String, McpOAuthError> {
+        if target.expected_account().is_none() {
+            return Err(McpOAuthError::AccountSelectionRequired);
+        }
         Err(McpOAuthError::HumanAuthorizationRequired {
             server_name: target.server_name().to_owned(),
         })

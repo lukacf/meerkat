@@ -1376,6 +1376,9 @@ pub enum SupervisorBridgeCommandKind {
     HardCancelMember,
     CancelTrackedMemberInput,
     StopMemberRun,
+    /// Mob Stop's run-start hold and its Resume release (#1500).
+    HoldRunStarts,
+    ReleaseRunStarts,
     RetireMember,
     DestroyMember,
     WireMember,
@@ -1419,6 +1422,8 @@ impl SupervisorBridgeCommandKind {
         Self::HardCancelMember,
         Self::CancelTrackedMemberInput,
         Self::StopMemberRun,
+        Self::HoldRunStarts,
+        Self::ReleaseRunStarts,
         Self::RetireMember,
         Self::DestroyMember,
         Self::WireMember,
@@ -1458,6 +1463,8 @@ impl SupervisorBridgeCommandKind {
             Self::HardCancelMember => "HardCancelMember",
             Self::CancelTrackedMemberInput => "CancelTrackedMemberInput",
             Self::StopMemberRun => "StopMemberRun",
+            Self::HoldRunStarts => "HoldRunStarts",
+            Self::ReleaseRunStarts => "ReleaseRunStarts",
             Self::RetireMember => "RetireMember",
             Self::DestroyMember => "DestroyMember",
             Self::WireMember => "WireMember",
@@ -1500,6 +1507,8 @@ impl SupervisorBridgeCommandKind {
             | Self::HardCancelMember
             | Self::CancelTrackedMemberInput
             | Self::StopMemberRun
+            | Self::HoldRunStarts
+            | Self::ReleaseRunStarts
             | Self::RetireMember
             | Self::DestroyMember
             | Self::WireMember
@@ -1552,6 +1561,9 @@ impl SupervisorBridgeCommandKind {
             | Self::HardCancelMember
             | Self::CancelTrackedMemberInput
             | Self::StopMemberRun
+            // #1500: the member drain serves the run-start hold pair.
+            | Self::HoldRunStarts
+            | Self::ReleaseRunStarts
             | Self::ReadMemberHistory
             | Self::PollMemberEvents
             // Phase 6b (§16): the live-channel family gained member-drain

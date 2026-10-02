@@ -93,6 +93,12 @@ impl BridgeRequestFailure {
     }
 }
 
+/// A run-start release a Resume owes a peer that was not bound (#1500).
+#[derive(Debug, Clone)]
+pub(crate) struct OwedRunStartRelease {
+    pub(crate) expected_member: Option<super::bridge_protocol::BridgeMemberIncarnation>,
+}
+
 pub(crate) struct MobSupervisorBridge {
     participant_name: String,
     endpoint_config: SupervisorBridgeEndpointConfig,
@@ -158,8 +164,7 @@ pub(crate) struct MobSupervisorBridge {
     /// Run-start releases a Resume owes peers it could not reach because they
     /// were not bound (#1500), by peer id; the peer's next successful bind
     /// sends the release.
-    pending_run_start_releases:
-        StdMutex<HashMap<String, Option<super::bridge_protocol::BridgeMemberIncarnation>>>,
+    pending_run_start_releases: StdMutex<HashMap<String, OwedRunStartRelease>>,
 }
 
 /// Linear owner for one bridge request correlation.
@@ -588,7 +593,7 @@ impl MobSupervisorBridge {
         self.pending_run_start_releases
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(peer_id.to_string(), expected_member);
+            .insert(peer_id.to_string(), OwedRunStartRelease { expected_member });
     }
 
     /// Take the run-start release owed to `peer_id`, if any. A new hold
@@ -596,7 +601,7 @@ impl MobSupervisorBridge {
     pub(crate) fn take_run_start_release_pending(
         &self,
         peer_id: &str,
-    ) -> Option<Option<super::bridge_protocol::BridgeMemberIncarnation>> {
+    ) -> Option<OwedRunStartRelease> {
         self.pending_run_start_releases
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

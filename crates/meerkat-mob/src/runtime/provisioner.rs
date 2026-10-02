@@ -14641,14 +14641,14 @@ impl MultiBackendProvisioner {
                 // A Resume that could not reach this peer while it was unbound
                 // owes it a run-start release (#1500): send it now that the
                 // peer is bound again, so it starts runs again.
-                if let Some(expected_member) = self
+                if let Some(owed) = self
                     .supervisor_bridge
                     .take_run_start_release_pending(&payload.peer_id)
                 {
                     self.release_run_starts_on_bound_peer(
                         peer,
                         &payload.peer_id,
-                        expected_member,
+                        owed.expected_member,
                         timeout,
                     )
                     .await;

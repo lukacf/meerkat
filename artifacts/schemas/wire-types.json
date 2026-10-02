@@ -13090,6 +13090,13 @@
             "default": false,
             "type": "boolean"
           },
+          "deny": {
+            "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -21417,6 +21424,13 @@
           "comms": {
             "default": false,
             "type": "boolean"
+          },
+          "deny": {
+            "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "image_generation": {
             "default": false,
@@ -59886,6 +59900,13 @@
             "default": false,
             "type": "boolean"
           },
+          "deny": {
+            "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -70037,6 +70058,13 @@
           "comms": {
             "default": false,
             "type": "boolean"
+          },
+          "deny": {
+            "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "image_generation": {
             "default": false,
@@ -104588,6 +104616,13 @@
             "default": false,
             "type": "boolean"
           },
+          "deny": {
+            "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -108027,6 +108062,13 @@
           "comms": {
             "default": false,
             "type": "boolean"
+          },
+          "deny": {
+            "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; each name must\nbelong to the profile's composed tool families.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "image_generation": {
             "default": false,
@@ -116006,6 +116048,13 @@
             "default": false,
             "type": "boolean"
           },
+          "deny": {
+            "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; omitted when empty\nfor the same compatibility reason.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -117175,6 +117224,13 @@
           "comms": {
             "default": false,
             "type": "boolean"
+          },
+          "deny": {
+            "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; omitted when empty\nfor the same compatibility reason.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "image_generation": {
             "default": false,
@@ -122339,6 +122395,13 @@
             "default": false,
             "type": "boolean"
           },
+          "deny": {
+            "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -123870,6 +123933,13 @@
           "comms": {
             "default": false,
             "type": "boolean"
+          },
+          "deny": {
+            "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "image_generation": {
             "default": false,
@@ -125646,6 +125716,13 @@
       "comms": {
         "default": false,
         "type": "boolean"
+      },
+      "deny": {
+        "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
       },
       "image_generation": {
         "default": false,
@@ -161768,6 +161845,13 @@
             "default": false,
             "type": "boolean"
           },
+          "deny": {
+            "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; omitted when empty\nfor the same compatibility reason.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -163192,6 +163276,13 @@
       "comms": {
         "default": false,
         "type": "boolean"
+      },
+      "deny": {
+        "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; omitted when empty\nfor the same compatibility reason.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
       },
       "image_generation": {
         "default": false,

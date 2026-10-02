@@ -437,6 +437,21 @@ pub enum AgentError {
     #[error("Session identity already active: {0}")]
     SessionIdentityInUse(SessionId),
 
+    /// A configuration's declared tool restriction denies a tool that none of
+    /// the agent's statically composed tool families provides (a stale or
+    /// mistyped name). MCP and host-bundle tools are not part of that
+    /// surface and cannot be named.
+    #[error(
+        "{declared_by} denies tool '{tool}', which none of its enabled tool families provides \
+         (enabled: {}); MCP and host-bundle tools cannot be denied by name",
+        enabled_families.join(", ")
+    )]
+    DeclaredToolUnknown {
+        declared_by: String,
+        tool: String,
+        enabled_families: Vec<String>,
+    },
+
     /// MeerkatMachine DSL observed an auth lease in `reauth_required`
     /// state at a CallingLlm boundary; the lease cannot proceed
     /// until the user re-authenticates (`rkat auth login`). This is a

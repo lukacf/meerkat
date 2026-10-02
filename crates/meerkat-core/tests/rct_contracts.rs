@@ -120,6 +120,7 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
             image_generation: meerkat_core::ToolCategoryOverride::Disable,
             web_search: meerkat_core::ToolCategoryOverride::Disable,
             tool_access_policy: None,
+            spawn_tool_access_policy: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             active_skills: None,
         },

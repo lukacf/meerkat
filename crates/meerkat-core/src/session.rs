@@ -8636,6 +8636,18 @@ pub struct SessionTooling {
     /// by spawning).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_access_policy: Option<crate::ops::ToolAccessPolicy>,
+    /// The launch part of [`Self::tool_access_policy`]: the policy a host or
+    /// parent granted, without any [`crate::ops::DeclaredToolRestriction`]
+    /// (a mob profile's read-only or deny declaration). A resume restores
+    /// this and recomputes the declaration from the current configuration.
+    ///
+    /// `None` only on sessions persisted before the launch part was recorded
+    /// (an unrestricted launch is [`crate::ops::SpawnToolAccessPolicy::Unrestricted`]).
+    /// Their `tool_access_policy` may already include an older declaration,
+    /// so a resume treats it as the launch policy: still contained, possibly
+    /// narrower than the current configuration asks for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_tool_access_policy: Option<crate::ops::SpawnToolAccessPolicy>,
     /// Stable application policy identity governing consequence narrowing.
     #[serde(default)]
     pub application_tool_policy: crate::ApplicationToolPolicyBinding,

@@ -218,7 +218,9 @@ impl TurnFailureSourceKind {
             // fail-closed if a diagnostic caller asks for a turn source.
             AgentError::StickyModelFallbackAuthorityUnknown { .. }
             | AgentError::SessionDurableProjectionAuthorityUnknown { .. } => Self::InternalError,
-            AgentError::BuildError(_) | AgentError::SessionIdentityInUse(_) => Self::BuildError,
+            AgentError::BuildError(_)
+            | AgentError::SessionIdentityInUse(_)
+            | AgentError::DeclaredToolUnknown { .. } => Self::BuildError,
             AgentError::AuthReauthRequired { .. } => Self::AuthReauthRequired,
             AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. } => {
                 Self::CallbackPending

@@ -7893,6 +7893,7 @@ mod tests {
                             tool_access_policy: build
                                 .as_ref()
                                 .and_then(|options| options.tool_access_policy.clone()),
+                            spawn_tool_access_policy: None,
                             application_tool_policy: build
                                 .as_ref()
                                 .map(|options| options.application_tool_policy.clone())

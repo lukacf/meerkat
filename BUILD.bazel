@@ -729,6 +729,7 @@ test_suite(
         "//crates/meerkat-mob:multi_host_machine_test",
         "//crates/meerkat-mob:placed_member_respawn_test",
         "//crates/meerkat-mob:placed_spawn_carrier_store_test",
+        "//crates/meerkat-mob:profile_tool_deny_test",
         "//crates/meerkat-mob:remote_spawn_ladder_test",
         "//crates/meerkat-mob:remote_spawn_materialization_test",
         "//crates/meerkat-mob:scope_matrix_test",

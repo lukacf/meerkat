@@ -336,11 +336,11 @@ pub use model_registry::{
 };
 pub use oauth_identity::OAuthProviderIdentity;
 pub use ops::{
-    AsyncOpRef, ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent,
-    OperationId, OperationPolicy, OperationResult, OperationSpec, ResultShape, SessionEffect,
-    SpawnSpec, ToolAccessConstraint, ToolAccessPolicy, ToolDispatchOutcome,
-    ToolDispatchTerminalCause, ToolDispatchTerminalErrorKind, ToolDispatchTimeoutPolicy,
-    WaitPolicy, WorkKind,
+    AsyncOpRef, ConcurrencyLimits, ContextStrategy, DeclaredToolRestriction, ForkBranch,
+    ForkBudgetPolicy, OpEvent, OperationId, OperationPolicy, OperationResult, OperationSpec,
+    ResultShape, SessionEffect, SpawnSpec, SpawnToolAccessPolicy, ToolAccessConstraint,
+    ToolAccessPolicy, ToolDispatchOutcome, ToolDispatchTerminalCause,
+    ToolDispatchTerminalErrorKind, ToolDispatchTimeoutPolicy, WaitPolicy, WorkKind,
 };
 pub use ops_lifecycle::{
     OperationCompletionWatch, OperationCompletionWatchError, OperationKind,

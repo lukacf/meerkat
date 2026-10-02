@@ -1618,6 +1618,41 @@ comms = true
     }
 
     #[test]
+    fn from_toml_reads_profile_tool_deny_and_round_trips_it() {
+        let toml_str = r#"
+[mob]
+id = "home"
+
+[profiles.peer]
+model = "claude-sonnet-4-5"
+
+[profiles.peer.tools]
+comms = true
+mob = true
+deny = ["mob_wire", "mob_unwire", "mob_spawn_member"]
+"#;
+        let def = MobDefinition::from_toml(toml_str).expect("deny is a declared tools key");
+        let peer = def.profiles[&ProfileName::from("peer")]
+            .as_inline()
+            .expect("inline profile");
+        assert_eq!(
+            peer.tools.deny,
+            vec!["mob_wire", "mob_unwire", "mob_spawn_member"]
+        );
+        let reparsed: ToolConfig =
+            toml::from_str(&toml::to_string(&peer.tools).expect("tools serialize"))
+                .expect("tools reparse");
+        assert_eq!(reparsed, peer.tools);
+
+        // Empty deny stays out of the serialized form (digest stability).
+        let open = toml::to_string(&ToolConfig::default()).expect("tools serialize");
+        assert!(
+            !open.contains("deny"),
+            "empty deny must not serialize: {open}"
+        );
+    }
+
+    #[test]
     fn from_toml_accepts_declared_profile_keys_and_bare_realm_refs() {
         // Serialize a populated `Profile` instead of hand-writing the table so
         // the accepted key set is the one the serializer emits; a rename on
@@ -1633,6 +1668,7 @@ comms = true
             skills: vec!["worker-skill".to_string()],
             tools: ToolConfig {
                 comms: true,
+                deny: vec!["send".to_string()],
                 ..ToolConfig::default()
             },
             peer_description: "Writes code".to_string(),

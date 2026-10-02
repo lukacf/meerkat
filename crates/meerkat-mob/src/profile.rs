@@ -60,6 +60,20 @@ pub struct ToolConfig {
     /// (provider-native tools, MCP tools, and `shell` are not read-only).
     #[serde(default)]
     pub read_only: bool,
+    /// Tool names members of this profile may not execute, although their
+    /// families are enabled (for example `mob = true` with the topology
+    /// tools `mob_wire`, `mob_unwire`, `mob_spawn_member` denied, so peers
+    /// cannot rewire themselves).
+    ///
+    /// An enforcement declaration like [`Self::read_only`]: it conjoins with
+    /// the per-spawn tool access policy (a spawn cannot widen it) and is
+    /// recomputed from the current definition on every build, including a
+    /// resume. Each name must belong to one of the profile's statically
+    /// composed tool families; a stale or mistyped name fails the member's
+    /// build with a typed error. MCP and host-bundle tools cannot be named
+    /// here; leave their server out of [`Self::mcp`] instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
     /// MCP server names this profile connects to.
     #[serde(default)]
     pub mcp: Vec<String>,
@@ -103,6 +117,7 @@ impl ToolConfig {
         "schedule",
         "image_generation",
         "read_only",
+        "deny",
         "mcp",
         "mcp_servers",
         "rust_bundles",
@@ -615,6 +630,7 @@ mod tests {
             schedule: true,
             image_generation: true,
             read_only: false,
+            deny: Vec::new(),
             mcp: vec!["server-a".to_string(), "server-b".to_string()],
             mcp_servers: vec![],
             rust_bundles: vec!["custom-tools".to_string()],
@@ -636,6 +652,7 @@ mod tests {
             schedule: false,
             image_generation: false,
             read_only: false,
+            deny: Vec::new(),
             mcp: vec!["mcp-server".to_string()],
             mcp_servers: vec![],
             rust_bundles: Vec::new(),
@@ -666,6 +683,7 @@ mod tests {
                 schedule: false,
                 image_generation: false,
                 read_only: false,
+                deny: Vec::new(),
                 mcp: vec![],
                 mcp_servers: vec![],
                 rust_bundles: vec![],
@@ -704,6 +722,7 @@ mod tests {
                 schedule: false,
                 image_generation: false,
                 read_only: false,
+                deny: Vec::new(),
                 mcp: vec!["code-server".to_string()],
                 mcp_servers: vec![],
                 rust_bundles: vec!["custom".to_string()],

@@ -371,6 +371,28 @@ them.
   `MeerkatMachineEffectVariant::*` and kernel `Input::*`, `InputKind::*`,
   `Effect::*`, `EffectKind::*`, `TransitionId::*`. Exhaustive matches must
   handle the new variants.
+- Per-profile tool deny list (see Added). Struct literals and exhaustive
+  matches must handle the new members:
+  - `meerkat_mob::ToolConfig` gains `deny: Vec<String>` (omitted when empty).
+  - `meerkat_contracts::PortableToolConfig`, `WireMobToolConfig` and
+    `MobToolConfigInput` gain `deny: Vec<String>` (omitted when empty).
+  - `meerkat_mob::DiagnosticCode` gains `MalformedToolDeny`.
+  - `meerkat::BuildAgentError` gains `DeclaredToolUnknown { declared_by,
+    tool, enabled_families }`. (`meerkat_core::error::AgentError` gains the
+    matching variant too; it is `#[non_exhaustive]`, so that is additive.)
+  - `meerkat::AgentBuildConfig` and `meerkat_core::service::SessionBuildOptions`
+    gain `declared_tool_restriction: Option<DeclaredToolRestriction>`; the new
+    `meerkat_core::ops::DeclaredToolRestriction` carries it. Both new types
+    are re-exported at the `meerkat_core` root.
+  - `meerkat_core::SessionTooling` gains `spawn_tool_access_policy:
+    Option<SpawnToolAccessPolicy>` (omitted when absent); the new
+    `meerkat_core::ops::SpawnToolAccessPolicy` (`Unrestricted` or
+    `Restricted { policy }`) records the launch part.
+- Behaviour-only (not measured by the gate): a mob profile's `read_only`
+  declaration no longer enters `AgentBuildConfig::tool_access_policy` from
+  `meerkat_mob` build helpers. It travels as `declared_tool_restriction` and
+  the factory conjoins it, so the effective gate is unchanged but code that
+  read `tool_access_policy` off a built config no longer sees it.
 
 ### Security
 
@@ -804,6 +826,30 @@ them.
   idempotency key and returns its id. The driver signals every accepted
   input, so the wait is woken by the admission rather than re-reading on a
   timer. It returns `Ok(None)` for a session without a live registration.
+- Per-profile tool deny list for mob members: `[profiles.<name>.tools]
+  deny = ["mob_wire", "mob_unwire"]`. Members of the profile cannot execute
+  the named tools although their families stay enabled (the list-preserving
+  execution gate returns `access_denied`; the tools stay visible). It
+  conjoins with `read_only` and the per-spawn tool access policy, so a spawn
+  cannot widen it, and children inherit it through the persisted effective
+  policy. It is carried by portable specs, RPC/MCP mob definitions and
+  `mob.toml`.
+  - Each name must be a tool of the member's statically composed families. A
+    stale or mistyped name fails the member's build with the typed
+    `DeclaredToolUnknown` error naming the profile, the tool and the enabled
+    families; MCP and host-bundle tools cannot be denied by name. Empty or
+    whitespace entries are a `malformed_tool_deny` definition diagnostic.
+  - The declaration is recomputed from the current definition on every build,
+    including a resume, so adding or removing a deny entry or toggling
+    `read_only` takes effect when the member resumes. Sessions now persist the
+    launch (spawn-site) policy separately as
+    `SessionTooling::spawn_tool_access_policy`, beside the effective policy.
+  - Limitation: a session persisted before this release records only its
+    effective policy, which may include its profile's `read_only` at the time.
+    It resumes with that policy as its launch policy, so the old restriction
+    stays in force (contained, possibly narrower) until the member is
+    respawned. The same applies to a member session recovered through a
+    generic surface path with no profile (for example `rkat resume`).
 - `release-workflow-dispatch --mode assets --assets-run-id RUN_ID` (workflow
   input `assets_run_id`, or `ASSETS_RUN_ID=RUN_ID make release-assets`)
   publishes the archives an earlier asset recovery run built, instead of
@@ -1085,6 +1131,10 @@ them.
   spawned command (URL included) at debug level, and the CLI forwards
   `log` records into its tracing output under `RUST_LOG=debug`. It now uses
   the same non-logging `open_system_browser` as the MCP login.
+- Turning a mob profile's `read_only` off now takes effect when its members
+  resume. The declaration used to be folded into the persisted tool access
+  policy, which a resume restored, so the old restriction stayed in force.
+
 - A prompt admitted to a session while its executor attachment was still
   being prepared could stay queued forever. The attachment read its queue to
   decide whether to wake its runtime loop, then handed the session mutation

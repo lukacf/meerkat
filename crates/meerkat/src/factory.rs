@@ -696,6 +696,13 @@ pub struct AgentBuildConfig {
     /// `SessionMetadata.tooling.tool_access_policy` so children can inherit
     /// it transitively.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    /// Tool restriction declared by the agent's configuration (a mob
+    /// profile's read-only and deny declarations). The factory conjoins it
+    /// with `tool_access_policy` into the effective gate policy, persists the
+    /// launch part separately as `SessionMetadata.tooling.spawn_tool_access_policy`,
+    /// and rejects a deny name that no statically composed tool family
+    /// provides. Recomputed by every build, never restored from metadata.
+    pub declared_tool_restriction: Option<meerkat_core::ops::DeclaredToolRestriction>,
     /// Process-local authority awaited at the outermost actual dispatcher.
     /// It is not persisted; live delegation reconstructs it from generated
     /// operation admission when rematerialization is supported.
@@ -933,6 +940,7 @@ impl AgentBuildConfig {
             initial_tool_visibility_state: None,
             initial_tool_filter: None,
             tool_access_policy: None,
+            declared_tool_restriction: None,
             tool_dispatch_admission: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
@@ -1058,6 +1066,7 @@ impl AgentBuildConfig {
         self.initial_metadata_entries = build.initial_metadata_entries.clone();
         self.initial_tool_filter = build.initial_tool_filter.clone();
         self.tool_access_policy = build.tool_access_policy.clone();
+        self.declared_tool_restriction = build.declared_tool_restriction.clone();
         self.tool_dispatch_admission = build.tool_dispatch_admission.clone();
         self.application_tool_policy = build.application_tool_policy.clone();
         self.tool_consequence_policy_registry = build.tool_consequence_policy_registry.clone();
@@ -1134,6 +1143,7 @@ impl AgentBuildConfig {
             initial_metadata_entries: self.initial_metadata_entries.clone(),
             initial_tool_filter: self.initial_tool_filter.clone(),
             tool_access_policy: self.tool_access_policy.clone(),
+            declared_tool_restriction: self.declared_tool_restriction.clone(),
             tool_dispatch_admission: self.tool_dispatch_admission.clone(),
             application_tool_policy: self.application_tool_policy.clone(),
             tool_consequence_policy_registry: self.tool_consequence_policy_registry.clone(),
@@ -1216,6 +1226,19 @@ pub enum BuildAgentError {
     /// Configuration error.
     #[error("Config error: {0}")]
     Config(String),
+
+    /// The build's declared tool restriction denies a tool none of the
+    /// agent's statically composed families provides.
+    #[error(
+        "{declared_by} denies tool '{tool}', which none of its enabled tool families provides \
+         (enabled: {}); MCP and host-bundle tools cannot be denied by name",
+        enabled_families.join(", ")
+    )]
+    DeclaredToolUnknown {
+        declared_by: String,
+        tool: String,
+        enabled_families: Vec<String>,
+    },
 
     /// An explicit tool-category `Enable` could not be satisfied.
     ///
@@ -4253,11 +4276,20 @@ impl AgentFactory {
         if !mask.preload_skills {
             build_config.preload_skills = metadata.tooling.active_skills.clone();
         }
-        // Effective call-level tool access policy: restore the persisted
-        // policy unless the caller supplied an explicit one — a restricted
-        // session must not escape its execution gate by being resumed.
+        // Launch tool access policy: restore the persisted launch part unless
+        // the caller supplied an explicit one - a restricted session must not
+        // escape its execution gate by being resumed. The declared
+        // restriction (a mob profile's read-only/deny) is not restored: the
+        // build recomputes it from the current configuration. A session
+        // persisted before the launch part was recorded separately has only
+        // the effective policy, which may include an older declaration; it is
+        // restored as the launch policy (contained, possibly narrower).
         if !mask.tool_access_policy && build_config.tool_access_policy.is_none() {
-            build_config.tool_access_policy = metadata.tooling.tool_access_policy.clone();
+            build_config.tool_access_policy =
+                match metadata.tooling.spawn_tool_access_policy.clone() {
+                    Some(spawn) => spawn.into_launch(),
+                    None => metadata.tooling.tool_access_policy.clone(),
+                };
         }
         if !mask.application_tool_policy {
             build_config.application_tool_policy = metadata.tooling.application_tool_policy.clone();
@@ -6538,6 +6570,39 @@ impl AgentFactory {
             ));
         }
 
+        // Effective call-level policy: the launch part conjoined with the
+        // configuration's declared restriction. Every consumer below (the
+        // execution gate, the scheduler's and mob tools' creator policy, the
+        // parent authority children inherit from, and the persisted
+        // effective policy) sees the effective policy; only the launch part is
+        // additionally persisted as the session's spawn policy.
+        let spawn_tool_access_policy = build_config.tool_access_policy.clone();
+        let declared_tool_restriction = build_config
+            .declared_tool_restriction
+            .clone()
+            .filter(|restriction| !restriction.is_unrestricted());
+        if let Some(restriction) = &declared_tool_restriction {
+            build_config.tool_access_policy = restriction
+                .conjoin_with_launch_policy(build_config.tool_access_policy.take())
+                .map_err(|err| {
+                    BuildAgentError::Config(format!(
+                        "failed to compose the tool restriction declared by {}: {err}",
+                        restriction.declared_by
+                    ))
+                })?;
+        }
+        // External tools (MCP servers, host bundles) are not part of the
+        // statically composed surface a declared deny list may name.
+        let external_tool_names: std::collections::HashSet<String> =
+            match (&declared_tool_restriction, &build_config.external_tools) {
+                (Some(_), Some(external)) => external
+                    .tools()
+                    .iter()
+                    .map(|tool| tool.name.to_string())
+                    .collect(),
+                _ => std::collections::HashSet::new(),
+            };
+
         // Build the tool dispatcher. Wait-tool-specific binding was removed
         // along with the generic wait tool.
         //
@@ -7328,6 +7393,10 @@ impl AgentFactory {
             // Effective (resolved) policy only — an unresolved `Inherit`
             // failed the build above, so `Inherit` can never persist here.
             metadata.tooling.tool_access_policy = build_config.tool_access_policy.clone();
+            metadata.tooling.spawn_tool_access_policy =
+                Some(meerkat_core::ops::SpawnToolAccessPolicy::from_launch(
+                    spawn_tool_access_policy.clone(),
+                ));
             metadata.tooling.application_tool_policy = build_config.application_tool_policy.clone();
             if build_config.resume_override_mask.preload_skills || active_skill_ids.is_some() {
                 metadata.tooling.active_skills = active_skill_ids.clone();
@@ -7368,6 +7437,11 @@ impl AgentFactory {
                     // Effective (resolved) policy only — an unresolved
                     // `Inherit` failed the build above.
                     tool_access_policy: build_config.tool_access_policy.clone(),
+                    spawn_tool_access_policy: Some(
+                        meerkat_core::ops::SpawnToolAccessPolicy::from_launch(
+                            spawn_tool_access_policy.clone(),
+                        ),
+                    ),
                     application_tool_policy: build_config.application_tool_policy.clone(),
                     active_skills: active_skill_ids.clone(),
                 },
@@ -7669,6 +7743,38 @@ impl AgentFactory {
                 control_dispatcher,
             ]));
             hoisted_control_visibility_provider = Some(visibility_provider);
+        }
+
+        // 12i-pre. A declared deny list names tools of the statically composed
+        // families only: a name none of them provides (stale or mistyped) is
+        // a typed configuration error, never a silently inert entry.
+        if let Some(restriction) = &declared_tool_restriction {
+            let composed: std::collections::HashSet<String> = tools
+                .tools()
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .chain(
+                    tools
+                        .tool_catalog()
+                        .iter()
+                        .map(|entry| entry.tool.name.to_string()),
+                )
+                .filter(|name| !external_tool_names.contains(name))
+                .collect();
+            let mut unknown = restriction
+                .deny
+                .iter()
+                .map(|name| name.as_str().to_string())
+                .filter(|name| !composed.contains(name))
+                .collect::<Vec<_>>();
+            unknown.sort();
+            if let Some(tool) = unknown.into_iter().next() {
+                return Err(BuildAgentError::DeclaredToolUnknown {
+                    declared_by: restriction.declared_by.clone(),
+                    tool,
+                    enabled_families: restriction.enabled_families.clone(),
+                });
+            }
         }
 
         // 12i. Call-level tool execution gate — the OUTERMOST composition.

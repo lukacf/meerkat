@@ -718,24 +718,31 @@ impl RuntimeDeliveryInbox {
         let authorities = self.store.list_runtime_delivery_authorities().await?;
         let mut total = 0_u64;
         for (runtime_id, record) in authorities {
-            let authority = decode_authority(&record)?;
-            let state = authority.state();
-            // The machine declares applied_cursor <= next_sequence. A store
-            // that violates it is corrupt, and a saturating subtraction would
-            // answer 0 - substituting "nothing pending" for "this file is
-            // broken", which is the one answer that must never be fabricated.
-            let pending = state
-                .next_sequence
-                .checked_sub(state.applied_cursor)
-                .ok_or_else(|| {
-                    RuntimeDeliveryError::Corrupt(format!(
-                        "runtime {runtime_id} applied cursor {} is ahead of committed sequence {}",
-                        state.applied_cursor, state.next_sequence
-                    ))
-                })?;
-            total = total.saturating_add(pending);
+            total = total.saturating_add(pending_delivery_count(&runtime_id, &record)?);
         }
         Ok(total)
+    }
+
+    /// Every runtime holding committed-but-unapplied deliveries, read from
+    /// the delivery authority itself.
+    ///
+    /// This is the population a drain must visit. Deriving it from another
+    /// record set (for example job rows read through a bounded window) misses
+    /// runtimes whose producers aged out of that window while their rows stay
+    /// pending. Uncapped for the same reason as
+    /// [`Self::pending_delivery_total`]; ordered by runtime id.
+    pub async fn runtimes_with_pending_deliveries(
+        &self,
+    ) -> Result<Vec<LogicalRuntimeId>, RuntimeDeliveryError> {
+        let authorities = self.store.list_runtime_delivery_authorities().await?;
+        let mut runtimes = Vec::new();
+        for (runtime_id, record) in authorities {
+            if pending_delivery_count(&runtime_id, &record)? > 0 {
+                runtimes.push(runtime_id);
+            }
+        }
+        runtimes.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(runtimes)
     }
 
     pub async fn applied_cursor(
@@ -783,6 +790,29 @@ fn encode_authority(
         state: PersistedAuthorityState::from(authority.state()),
     })
     .map_err(|error| RuntimeDeliveryError::Corrupt(error.to_string()))
+}
+
+/// Committed-but-unapplied delivery count for one runtime's authority.
+///
+/// The machine declares `applied_cursor <= next_sequence`. A store that
+/// violates it is corrupt, and a saturating subtraction would answer 0,
+/// substituting "nothing pending" for "this file is broken", which is the one
+/// answer that must never be fabricated.
+fn pending_delivery_count(
+    runtime_id: &LogicalRuntimeId,
+    record: &RuntimeDeliveryAuthorityRecord,
+) -> Result<u64, RuntimeDeliveryError> {
+    let authority = decode_authority(record)?;
+    let state = authority.state();
+    state
+        .next_sequence
+        .checked_sub(state.applied_cursor)
+        .ok_or_else(|| {
+            RuntimeDeliveryError::Corrupt(format!(
+                "runtime {runtime_id} applied cursor {} is ahead of committed sequence {}",
+                state.applied_cursor, state.next_sequence
+            ))
+        })
 }
 
 fn decode_authority(

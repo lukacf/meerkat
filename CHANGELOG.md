@@ -1421,6 +1421,14 @@ them.
   stays held until an explicit close or rollback retires it. The
   string-only `ExperimentalLiveChannelCloseError::LifecycleAuthority` sources
   carry no typed kind yet and are treated as permanent.
+- rkat-rpc's durable job delivery drain now visits every session that holds
+  undrained runtime deliveries for its realm (#1497). It used to read sessions
+  from a bounded job-row window (`list_all(10_000)`, ordered by job id), so a
+  session whose jobs aged out of that window kept its pending rows forever.
+  The population now comes from the runtime delivery authority:
+  - New `RuntimeDeliveryInbox::runtimes_with_pending_deliveries`.
+  - New `JobOutboxProjector::sessions_with_pending_deliveries`, scoped to the
+    projector realm by each runtime's first pending row.
 - A delivery whose caller left while it was parked behind a member's
   in-flight admission no longer runs as a ghost turn. The admission lane
   skips such a delivery by checking its reply channel, but `SubmitWork` ran

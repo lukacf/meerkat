@@ -296,6 +296,27 @@ async fn apply_subscriptions(
     Ok(applications)
 }
 
+/// Job id and origin session named by a job-sourced runtime delivery row.
+/// `None` for a kind this module does not produce.
+fn pending_delivery_provenance(
+    record: &RuntimeDeliveryRecord,
+) -> Result<Option<(JobId, meerkat_core::SessionId)>, JobOutboxProjectionError> {
+    let payload = record.submission.payload();
+    match record.submission.kind() {
+        RuntimeDeliveryKind::JobTerminal => {
+            let decoded: JobTerminalDeliveryPayload = serde_json::from_slice(payload)
+                .map_err(|error| JobOutboxProjectionError::Corrupt(error.to_string()))?;
+            Ok(Some((decoded.job_id, decoded.origin_session_id)))
+        }
+        RuntimeDeliveryKind::JobNotification => {
+            let decoded: JobNotificationDeliveryPayload = serde_json::from_slice(payload)
+                .map_err(|error| JobOutboxProjectionError::Corrupt(error.to_string()))?;
+            Ok(Some((decoded.job_id, decoded.origin_session_id)))
+        }
+        _ => Ok(None),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PreparedJobDelivery {
     pub runtime_id: LogicalRuntimeId,
@@ -399,6 +420,51 @@ impl JobOutboxProjector {
     pub fn bound_to_realm(mut self, realm_id: impl Into<String>) -> Self {
         self.realm_id = Some(realm_id.into());
         self
+    }
+
+    /// Origin sessions holding committed-but-unapplied runtime deliveries for
+    /// jobs this projector owns.
+    ///
+    /// The population comes from the runtime delivery authority (every
+    /// runtime with rows past its applied cursor), not from job rows. A
+    /// session whose jobs fell outside a bounded job-row read still holds its
+    /// pending rows and must still be drained. Ownership is decided by the
+    /// provenance of the runtime's first pending row: its job must exist and
+    /// belong to this projector's realm. A runtime whose first row is foreign,
+    /// of an unknown kind, or names a missing job is left untouched for its
+    /// own owner, exactly as before.
+    pub async fn sessions_with_pending_deliveries(
+        &self,
+    ) -> Result<Vec<meerkat_core::SessionId>, JobOutboxProjectionError> {
+        let mut sessions = Vec::new();
+        for runtime_id in self
+            .runtime_inbox
+            .runtimes_with_pending_deliveries()
+            .await?
+        {
+            let Some(first) = self
+                .runtime_inbox
+                .list_pending(&runtime_id, 1)
+                .await?
+                .into_iter()
+                .next()
+            else {
+                continue;
+            };
+            let Some((job_id, origin_session_id)) = pending_delivery_provenance(&first)? else {
+                continue;
+            };
+            if LogicalRuntimeId::for_session(&origin_session_id) != runtime_id {
+                continue;
+            }
+            let Some(job) = self.job_store.get(&job_id).await? else {
+                continue;
+            };
+            if self.owns_job(&job) {
+                sessions.push(origin_session_id);
+            }
+        }
+        Ok(sessions)
     }
 
     fn owns_job(&self, job: &meerkat_jobs::StoredJob) -> bool {

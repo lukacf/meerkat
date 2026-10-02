@@ -734,6 +734,18 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
 
+      # actions/checkout marks the workspace safe in the host user's Git
+      # config. Linux release builds run inside the Bullseye container as a
+      # different user, and setup-rust-ci's first step
+      # (scripts/ci-pin-rust-toolchain-env) asks Git for the repository root,
+      # so this must run before it: placed later, every GitHub-hosted Linux
+      # binary job failed in its first minute with "detected dubious
+      # ownership" (v0.8.49 run 36727820146, v0.8.50 run 36946048903).
+      - name: Trust the workspace in the Linux release container
+        if: runner.os == 'Linux'
+        shell: bash
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
       - uses: ./.github/actions/setup-rust-ci
 
       - name: Add release target
@@ -744,11 +756,9 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
-      # actions/checkout marks the workspace safe in the host user's Git
-      # config. Linux release builds run inside the Bullseye container as a
-      # different user, so repo-cargo's first git query otherwise fails with
-      # "detected dubious ownership" before Cargo starts. audiopus-sys also
-      # falls back to building bundled Opus and requires CMake 3.x (bundled
+      # The workspace is trusted for Git in the step after Checkout (see
+      # there). audiopus-sys falls back to building bundled Opus and requires
+      # CMake 3.x (bundled
       # Opus declares cmake_minimum_required 3.1, which CMake 4 refuses).
       # Bullseye's apt cmake is not used: on 2026-09-18 bullseye-security's
       # pool had dropped libarchive13 deb11u5 while the CDN still served the
@@ -760,7 +770,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           cmake_version_pin="3.31.12"
           case "$(uname -m)" in
             x86_64)

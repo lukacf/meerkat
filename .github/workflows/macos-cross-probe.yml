@@ -1,0 +1,54 @@
+name: macOS x86_64 cross-build probe (throwaway)
+
+# Throwaway: cross-compiles rkat for x86_64-apple-darwin on the free arm64
+# macos-15 runner (the #1506 build step), runs it under Rosetta, and checks
+# whether a free Intel macOS label is offered. Closed after one run.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/macos-cross-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  cross:
+    name: Cross-build rkat x86_64 on macos-15
+    runs-on: macos-15
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-rust-ci
+      - run: rustup target add x86_64-apple-darwin
+      - name: Runner facts
+        run: |
+          uname -m; sw_vers; sysctl -n hw.ncpu hw.memsize; xcrun --show-sdk-version
+          arch -x86_64 /usr/bin/true && echo "rosetta present" || echo "rosetta missing"
+      - name: Build rkat for x86_64-apple-darwin
+        env:
+          CARGO_TARGET_DIR: target
+        run: |
+          set -euo pipefail
+          export CMAKE_OSX_ARCHITECTURES=x86_64
+          start=$(date +%s)
+          cargo build --locked -p rkat --release --target x86_64-apple-darwin
+          echo "PROBE build_seconds=$(( $(date +%s) - start ))"
+      - name: Run under Rosetta
+        run: |
+          set -euo pipefail
+          src=target/x86_64-apple-darwin/release/rkat
+          version="$(awk -F '"' '/^\[workspace.package\]/{f=1} f && $1 ~ /^version/ {print $2; exit}' Cargo.toml)"
+          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then softwareupdate --install-rosetta --agree-to-license; fi
+          file "$src"
+          lipo -archs "$src"
+          otool -L "$src" | head -20
+          reported="$(arch -x86_64 "$src" --version)"
+          echo "PROBE rosetta_version=${reported} expected=${version}"
+          grep -qF -- "$version" <<<"$reported"
+
+  intel:
+    name: Free Intel macOS label available?
+    runs-on: macos-15-intel
+    timeout-minutes: 10
+    steps:
+      - run: uname -m; sw_vers; sysctl -n machdep.cpu.brand_string hw.ncpu

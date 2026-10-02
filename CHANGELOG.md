@@ -232,6 +232,20 @@ them.
   and WorkAttention now declare it with
   `MachineSchemaMetadata::with_state_bound_input_field`, and every generated
   model is byte-identical.
+- `meerkat_machine_schema` exposes the semantic coverage validator that
+  `xtask` used privately, so a catalog outside Meerkat validates its coverage
+  manifests with the same rules: `validate_coverage_catalog`,
+  `validate_machine_coverage`, `validate_composition_coverage`,
+  `validate_machine_anchor_target`, `validate_composition_anchor_target` and
+  `validate_semantic_entries`, each returning a typed
+  `CoverageValidationError`. The checks are pure (no filesystem access, so
+  anchor file existence stays with the catalog owner). The mode is always
+  explicit and has no default: `CoverageValidationMode::RequireEntries` is
+  today's rule (every element has an entry; an honestly unclaimed entry is
+  permitted) and is what Meerkat's own catalog uses;
+  `CoverageValidationMode::RequireClaims` additionally requires every entry to
+  name a code anchor and a scenario. `xtask` now calls the library, and every
+  refusal keeps its previous message.
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a

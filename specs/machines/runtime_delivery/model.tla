@@ -50,9 +50,9 @@ CommitNewDelivery(delivery_id, source_sequence) ==
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ delivery_ids' = (delivery_ids \cup {delivery_id})
-    /\ delivery_sequences' = MapSet(delivery_sequences, delivery_id, (next_sequence) + 1)
+    /\ delivery_sequences' = MapSet(delivery_sequences, delivery_id, ((next_sequence) + 1))
     /\ delivery_source_sequences' = MapSet(delivery_source_sequences, delivery_id, source_sequence)
-    /\ committed_sequences' = (committed_sequences \cup {(next_sequence) + 1})
+    /\ committed_sequences' = (committed_sequences \cup {((next_sequence) + 1)})
     /\ next_sequence' = (next_sequence) + 1
     /\ UnchangedFrame_9ba8eb3711879fba
 

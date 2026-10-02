@@ -62842,9 +62842,10 @@ async fn test_shutdown_releases_the_supervisor_name_for_a_same_id_successor() {
 /// failure instead of a hang.
 const ACTOR_DEADLOCK_BOUND: Duration = Duration::from_secs(60);
 
-/// The lead's turn is held by the mock executor's typed hold. An unrelated
-/// spawn must complete while that turn is still held, with a queued steer
-/// in flight: the steer must not park the mob actor.
+/// The lead's turn is held by the mock executor's typed hold. A steer sent
+/// mid-turn is admitted (its delivery receipt returns) while the turn is
+/// still held, and an unrelated spawn after it also completes: the steer must
+/// not park the mob actor.
 #[tokio::test]
 async fn test_queued_steer_during_running_turn_does_not_block_actor_commands() {
     let (handle, service) = create_test_mob(sample_definition()).await;
@@ -62891,9 +62892,19 @@ async fn test_queued_steer_during_running_turn_does_not_block_actor_commands() {
             )
             .await
     });
-    // Ordering aid only: give the steer a chance to reach the actor first.
-    // A steer that arrives later makes the check weaker, never a failure.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The actor's typed admission reply: the steer's delivery receipt
+    // returns while the turn is still held, before the unrelated spawn is
+    // sent.
+    let steer_receipt = tokio::time::timeout(ACTOR_DEADLOCK_BOUND, steer_task)
+        .await
+        .expect("the actor should admit the queued steer while the turn is held")
+        .expect("steer task should not panic")
+        .expect("queued steer should be admitted");
+    assert_eq!(
+        steer_receipt.handling_mode,
+        HandlingMode::Steer,
+        "the steer is admitted as a steer, not demoted to a queued turn"
+    );
 
     tokio::time::timeout(
         ACTOR_DEADLOCK_BOUND,
@@ -62914,7 +62925,6 @@ async fn test_queued_steer_during_running_turn_does_not_block_actor_commands() {
         "the spawn completed while the lead's turn was still held"
     );
 
-    steer_task.abort();
     service.release_held_start_turns();
 }
 

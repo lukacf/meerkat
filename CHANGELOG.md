@@ -233,7 +233,8 @@ them.
     `McpOAuthAuthority::with_http` is now `with_http(persistence, http,
     auth_lease)`; the browser parameter is gone.
   - `McpOAuthError::Browser` and `McpOAuthError::InteractiveRequiresTty` are
-    removed; `McpOAuthError` gains `HumanAuthorizationRequired { server_name }`.
+    removed; `McpOAuthError` gains `HumanAuthorizationRequired { server_name }`
+    and `Callback { server_name, reason }`.
   - `meerkat_mcp::McpError` gains `AuthorizationRequired { target }`.
   - Behaviour-only (not measured by the gate): the `McpAuthResolver` impl for
     `McpOAuthAuthority` returns `HumanAuthorizationRequired` from
@@ -268,7 +269,9 @@ them.
   - Behaviour-only: provider `auth/login/start` and `auth/login/complete`
     params now refuse unknown fields (they were ignored), and
     `auth/status/get` refuses a case-variant `mcp` key instead of falling back
-    to a binding status.
+    to a binding status. The `auth/status/get` binding arm (`BindingIdParams`)
+    deliberately keeps tolerating other unknown fields for compatibility; only
+    the MCP target arms deny unknown fields.
 
 ### Added
 

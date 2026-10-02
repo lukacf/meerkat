@@ -610,6 +610,10 @@ pub trait PublicGptLiveProvisionalCaptionSink: Send + Sync {
 #[doc(hidden)]
 pub use meerkat_openai::public_live::thinking_capture;
 
+#[cfg(feature = "test-realtime-fixtures")]
+#[doc(hidden)]
+pub use meerkat_openai::public_live::provider_recording;
+
 /// How long a close waits for the provider's confirmation when a quiet
 /// context append is still pending injection. Such an append settles only at
 /// an input frame stall, so waiting longer buys nothing while media flows.

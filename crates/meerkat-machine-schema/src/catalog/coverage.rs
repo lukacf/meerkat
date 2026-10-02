@@ -1453,24 +1453,31 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 "runtime_delivery_authority",
                 "RuntimeDeliveryMachine",
                 "crates/meerkat-runtime/src/delivery_inbox.rs",
-                "generated runtime delivery identity, sequence, and ordered application authority with mechanical store CAS",
+                "generated runtime delivery identity, sequence, ordered application, and out-of-band acknowledgement authority with mechanical store CAS",
                 CoverageClaims::none()
                     .transitions(&[
                         "CommitNewDelivery",
                         "ReuseCommittedDelivery",
                         "ApplyNextDelivery",
                         "ObserveAlreadyAppliedDelivery",
+                        "AcknowledgeNextDelivery",
+                        "AcknowledgeAheadOfCursor",
+                        "ObserveAlreadyAppliedAcknowledgement",
+                        "AdvanceOverAcknowledgedDelivery",
                     ])
                     .effects(&[
                         "DeliveryCommitted",
                         "DeliveryReused",
                         "DeliveryApplied",
+                        "DeliveryAcknowledged",
+                        "AcknowledgedPrefixAdvanced",
                     ])
                     .invariants(&[
                         "applied_cursor_does_not_pass_committed_sequence",
                         "empty_delivery_set_has_zero_sequence",
                         "delivery_identity_and_sequence_cardinality_match",
                         "committed_sequence_cardinality_tracks_high_water",
+                        "applied_cursor_is_never_acknowledged_pending",
                     ]),
             )],
             &[
@@ -1490,6 +1497,23 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "ObserveAlreadyAppliedDelivery",
                         ])
                         .effects(&["DeliveryApplied"]),
+                ),
+                scenario(
+                    "runtime_delivery_out_of_band_acknowledgement",
+                    "an acknowledgement at the cursor applies the row; one ahead of the cursor is recorded instead of refused, and the cursor later advances over the contiguous acknowledged prefix without re-application, so out-of-order acknowledgement never wedges the queue",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "AcknowledgeNextDelivery",
+                            "AcknowledgeAheadOfCursor",
+                            "ObserveAlreadyAppliedAcknowledgement",
+                            "AdvanceOverAcknowledgedDelivery",
+                        ])
+                        .effects(&[
+                            "DeliveryApplied",
+                            "DeliveryAcknowledged",
+                            "AcknowledgedPrefixAdvanced",
+                        ])
+                        .invariants(&["applied_cursor_is_never_acknowledged_pending"]),
                 ),
             ],
         ),

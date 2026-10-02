@@ -95,30 +95,31 @@ RouteDeliveryKind(route_name) ==
 
 RouteTargetActor(route_name) == ActorOfMachine(RouteTargetMachine(route_name))
 
-VARIABLES job_phase, job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs
-vars == << job_phase, job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+VARIABLES job_phase, job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs
+vars == << job_phase, job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 \* Named UNCHANGED frames. One definition per distinct frame; every action
 \* that leaves those variables unchanged references the definition by name.
-UnchangedFrame_06a9fe065af660c2 == UNCHANGED << job_phase, job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_0e39766e26872e59 == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_13355e76fc4fc5c6 == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_1ae8469023999b6d == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_246a61d1dad1fba6 == UNCHANGED << job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_3098c595b5961583 == UNCHANGED << job_phase, job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
-UnchangedFrame_3ef6a49169b063dd == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_5bcbed9900f7c0f8 == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_75efcad217af2c20 == UNCHANGED << job_phase, job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_77834eed18a9ee70 == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_8504a04e9f9481e7 == UNCHANGED << job_job_id, job_restart_class, job_checkpoint_ref, job_progress_cursor, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_018a49bc2bd63904 == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_021b438e8a07527f == UNCHANGED << job_phase, job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_024ca8541cf91c76 == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_0f96f7326f4c2704 == UNCHANGED << job_phase, job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
+UnchangedFrame_10539fa07a7f988e == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_16c141553d41eb1a == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_1e4704ec3e88a6d7 == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_209a61bf0cba8faf == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_2356bcde48b10f95 == UNCHANGED << job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_391e6e081a77046b == UNCHANGED << job_phase, job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_4521647c53bebdc6 == UNCHANGED << job_job_id, job_restart_class, job_checkpoint_ref, job_progress_cursor, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_49b85b869cf737f1 == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_6d1a1e92dfeebe89 == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_6fb4222d0cd63f2e == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_7481adceb89f5e74 == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_861bb9fbfdb08d75 == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
 UnchangedFrame_98b28bcbf8ca44eb == UNCHANGED << job_phase, job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_9b60841bbbee474f == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_a6f48e314ada4c77 == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_ab8ca6a109f1fb9a == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_ad002677d77b6373 == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_b843cf6bc2e496af == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_cc0ec66a6d850892 == UNCHANGED << job_phase, job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
 UnchangedFrame_e8ca2096fd1c3377 == UNCHANGED << job_phase, job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_eb584526ca8d0812 == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_retry_due_at_ms, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_f6c14cc266c438a8 == UNCHANGED << job_job_id, job_restart_class, job_attempt_count, job_current_attempt_id, job_current_fence, job_current_worker_id, job_lease_expires_at_ms, job_heartbeat_at_ms, job_checkpoint_ref, job_runner_handle, job_progress_cursor, job_lease_expired, job_cancel_requested, job_delivery_sequence, job_notification_ids, job_notification_idempotency_keys, job_notification_id_by_key, job_notification_delivery_ids, job_notification_sequences, job_notification_applied, job_terminal_kind, job_terminal_delivery_sequence, job_terminal_delivery_applied, runtime_delivery_phase, runtime_delivery_delivery_ids, runtime_delivery_delivery_sequences, runtime_delivery_delivery_source_sequences, runtime_delivery_committed_sequences, runtime_delivery_next_sequence, runtime_delivery_applied_cursor, runtime_delivery_acknowledged_sequences, witness_current_script_input, witness_remaining_script_inputs >>
 
 RoutePackets == SeqElements(pending_routes) \cup delivered_routes
 PendingActors == {ActorOfMachine(packet.machine) : packet \in SeqElements(pending_inputs)}
@@ -157,6 +158,7 @@ BaseInit ==
     /\ runtime_delivery_committed_sequences = {}
     /\ runtime_delivery_next_sequence = 0
     /\ runtime_delivery_applied_cursor = 0
+    /\ runtime_delivery_acknowledged_sequences = {}
     /\ model_step_count = 0
     /\ pending_routes = <<>>
     /\ delivered_routes = {}
@@ -203,7 +205,7 @@ job_SubmitQueued(arg_job_id, arg_restart_class) ==
        /\ job_phase' = "Queued"
        /\ job_job_id' = packet.payload.job_id
        /\ job_restart_class' = packet.payload.restart_class
-       /\ UnchangedFrame_246a61d1dad1fba6
+       /\ UnchangedFrame_2356bcde48b10f95
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -236,12 +238,12 @@ job_ClaimQueued(arg_attempt_id, arg_worker_id, arg_claimed_at_ms, arg_lease_expi
        /\ job_lease_expired' = FALSE
        /\ job_retry_due_at_ms' = None
        /\ job_cancel_requested' = FALSE
-       /\ UnchangedFrame_8504a04e9f9481e7
+       /\ UnchangedFrame_4521647c53bebdc6
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "AttemptClaimed", payload |-> [attempt_count |-> ((job_attempt_count) + 1), attempt_id |-> packet.payload.attempt_id, fence |-> ((job_current_fence) + 1), lease_expires_at_ms |-> packet.payload.lease_expires_at_ms, resume_checkpoint |-> job_checkpoint_ref], effect_id |-> (model_step_count + 1), source_transition |-> "ClaimQueued"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "AttemptClaimed", payload |-> [attempt_count |-> (job_attempt_count) + 1, attempt_id |-> packet.payload.attempt_id, fence |-> (job_current_fence) + 1, lease_expires_at_ms |-> packet.payload.lease_expires_at_ms, resume_checkpoint |-> job_checkpoint_ref], effect_id |-> (model_step_count + 1), source_transition |-> "ClaimQueued"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "job", transition |-> "ClaimQueued", actor |-> "job_authority", step |-> (model_step_count + 1), from_phase |-> job_phase, to_phase |-> "Running"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -269,12 +271,12 @@ job_ClaimRetryScheduled(arg_attempt_id, arg_worker_id, arg_claimed_at_ms, arg_le
        /\ job_lease_expired' = FALSE
        /\ job_retry_due_at_ms' = None
        /\ job_cancel_requested' = FALSE
-       /\ UnchangedFrame_8504a04e9f9481e7
+       /\ UnchangedFrame_4521647c53bebdc6
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "AttemptClaimed", payload |-> [attempt_count |-> ((job_attempt_count) + 1), attempt_id |-> packet.payload.attempt_id, fence |-> ((job_current_fence) + 1), lease_expires_at_ms |-> packet.payload.lease_expires_at_ms, resume_checkpoint |-> job_checkpoint_ref], effect_id |-> (model_step_count + 1), source_transition |-> "ClaimRetryScheduled"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "AttemptClaimed", payload |-> [attempt_count |-> (job_attempt_count) + 1, attempt_id |-> packet.payload.attempt_id, fence |-> (job_current_fence) + 1, lease_expires_at_ms |-> packet.payload.lease_expires_at_ms, resume_checkpoint |-> job_checkpoint_ref], effect_id |-> (model_step_count + 1), source_transition |-> "ClaimRetryScheduled"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "job", transition |-> "ClaimRetryScheduled", actor |-> "job_authority", step |-> (model_step_count + 1), from_phase |-> job_phase, to_phase |-> "Running"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -293,7 +295,7 @@ job_RenewRunningLease(arg_attempt_id, arg_fence, arg_heartbeat_at_ms, arg_lease_
        /\ job_phase' = "Running"
        /\ job_lease_expires_at_ms' = Some(packet.payload.lease_expires_at_ms)
        /\ job_heartbeat_at_ms' = Some(packet.payload.heartbeat_at_ms)
-       /\ UnchangedFrame_ab8ca6a109f1fb9a
+       /\ UnchangedFrame_49b85b869cf737f1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -317,7 +319,7 @@ job_RenewExternalWaitLease(arg_attempt_id, arg_fence, arg_heartbeat_at_ms, arg_l
        /\ job_phase' = "WaitingExternal"
        /\ job_lease_expires_at_ms' = Some(packet.payload.lease_expires_at_ms)
        /\ job_heartbeat_at_ms' = Some(packet.payload.heartbeat_at_ms)
-       /\ UnchangedFrame_ab8ca6a109f1fb9a
+       /\ UnchangedFrame_49b85b869cf737f1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -340,7 +342,7 @@ job_ReportRunningProgress(arg_attempt_id, arg_fence, arg_cursor, arg_observed_at
        /\ ((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.observed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)) /\ (packet.payload.cursor > job_progress_cursor))
        /\ job_phase' = "Running"
        /\ job_progress_cursor' = packet.payload.cursor
-       /\ UnchangedFrame_3ef6a49169b063dd
+       /\ UnchangedFrame_018a49bc2bd63904
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -363,7 +365,7 @@ job_ReportExternalWaitProgress(arg_attempt_id, arg_fence, arg_cursor, arg_observ
        /\ ((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.observed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)) /\ (packet.payload.cursor > job_progress_cursor))
        /\ job_phase' = "WaitingExternal"
        /\ job_progress_cursor' = packet.payload.cursor
-       /\ UnchangedFrame_3ef6a49169b063dd
+       /\ UnchangedFrame_018a49bc2bd63904
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -392,13 +394,13 @@ job_EmitRunningNotification(arg_attempt_id, arg_fence, arg_notification_id, arg_
        /\ job_notification_idempotency_keys' = (job_notification_idempotency_keys \cup {packet.payload.idempotency_key})
        /\ job_notification_id_by_key' = MapSet(job_notification_id_by_key, packet.payload.idempotency_key, packet.payload.notification_id)
        /\ job_notification_delivery_ids' = MapSet(job_notification_delivery_ids, packet.payload.notification_id, packet.payload.runtime_delivery_id)
-       /\ job_notification_sequences' = MapSet(job_notification_sequences, packet.payload.notification_id, ((job_delivery_sequence) + 1))
-       /\ UnchangedFrame_ad002677d77b6373
+       /\ job_notification_sequences' = MapSet(job_notification_sequences, packet.payload.notification_id, (job_delivery_sequence) + 1)
+       /\ UnchangedFrame_16c141553d41eb1a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_notification_enters_runtime_inbox", source_machine |-> "job", effect |-> "NotificationCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> packet.payload.notification_id, source_sequence |-> ((job_delivery_sequence) + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "EmitRunningNotification"])
+       /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_notification_enters_runtime_inbox", source_machine |-> "job", effect |-> "NotificationCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> packet.payload.notification_id, source_sequence |-> (job_delivery_sequence) + 1], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "EmitRunningNotification"])
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "NotificationCommitted", payload |-> [delivery_sequence |-> ((job_delivery_sequence) + 1), idempotency_key |-> packet.payload.idempotency_key, notification_id |-> packet.payload.notification_id, runtime_delivery_id |-> packet.payload.runtime_delivery_id], effect_id |-> (model_step_count + 1), source_transition |-> "EmitRunningNotification"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "NotificationCommitted", payload |-> [delivery_sequence |-> (job_delivery_sequence) + 1, idempotency_key |-> packet.payload.idempotency_key, notification_id |-> packet.payload.notification_id, runtime_delivery_id |-> packet.payload.runtime_delivery_id], effect_id |-> (model_step_count + 1), source_transition |-> "EmitRunningNotification"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "job", transition |-> "EmitRunningNotification", actor |-> "job_authority", step |-> (model_step_count + 1), from_phase |-> job_phase, to_phase |-> "Running"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -422,13 +424,13 @@ job_EmitExternalWaitNotification(arg_attempt_id, arg_fence, arg_notification_id,
        /\ job_notification_idempotency_keys' = (job_notification_idempotency_keys \cup {packet.payload.idempotency_key})
        /\ job_notification_id_by_key' = MapSet(job_notification_id_by_key, packet.payload.idempotency_key, packet.payload.notification_id)
        /\ job_notification_delivery_ids' = MapSet(job_notification_delivery_ids, packet.payload.notification_id, packet.payload.runtime_delivery_id)
-       /\ job_notification_sequences' = MapSet(job_notification_sequences, packet.payload.notification_id, ((job_delivery_sequence) + 1))
-       /\ UnchangedFrame_ad002677d77b6373
+       /\ job_notification_sequences' = MapSet(job_notification_sequences, packet.payload.notification_id, (job_delivery_sequence) + 1)
+       /\ UnchangedFrame_16c141553d41eb1a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_notification_enters_runtime_inbox", source_machine |-> "job", effect |-> "NotificationCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> packet.payload.notification_id, source_sequence |-> ((job_delivery_sequence) + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "EmitExternalWaitNotification"])
+       /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_notification_enters_runtime_inbox", source_machine |-> "job", effect |-> "NotificationCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> packet.payload.notification_id, source_sequence |-> (job_delivery_sequence) + 1], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "EmitExternalWaitNotification"])
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "NotificationCommitted", payload |-> [delivery_sequence |-> ((job_delivery_sequence) + 1), idempotency_key |-> packet.payload.idempotency_key, notification_id |-> packet.payload.notification_id, runtime_delivery_id |-> packet.payload.runtime_delivery_id], effect_id |-> (model_step_count + 1), source_transition |-> "EmitExternalWaitNotification"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "NotificationCommitted", payload |-> [delivery_sequence |-> (job_delivery_sequence) + 1, idempotency_key |-> packet.payload.idempotency_key, notification_id |-> packet.payload.notification_id, runtime_delivery_id |-> packet.payload.runtime_delivery_id], effect_id |-> (model_step_count + 1), source_transition |-> "EmitExternalWaitNotification"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "job", transition |-> "EmitExternalWaitNotification", actor |-> "job_authority", step |-> (model_step_count + 1), from_phase |-> job_phase, to_phase |-> "WaitingExternal"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -447,7 +449,7 @@ job_SuppressRunningNotificationReplay(arg_attempt_id, arg_fence, arg_notificatio
        /\ job_phase = "Running"
        /\ ((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.observed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)) /\ (packet.payload.notification_id # "") /\ (packet.payload.runtime_delivery_id # "") /\ (packet.payload.idempotency_key \in job_notification_idempotency_keys))
        /\ job_phase' = "Running"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -471,7 +473,7 @@ job_SuppressExternalWaitNotificationReplay(arg_attempt_id, arg_fence, arg_notifi
        /\ job_phase = "WaitingExternal"
        /\ ((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.observed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)) /\ (packet.payload.notification_id # "") /\ (packet.payload.runtime_delivery_id # "") /\ (packet.payload.idempotency_key \in job_notification_idempotency_keys))
        /\ job_phase' = "WaitingExternal"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -494,7 +496,7 @@ job_RecordRunningCheckpoint(arg_attempt_id, arg_fence, arg_checkpoint_ref, arg_o
        /\ ((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.observed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)) /\ (packet.payload.checkpoint_ref # ""))
        /\ job_phase' = "Running"
        /\ job_checkpoint_ref' = Some(packet.payload.checkpoint_ref)
-       /\ UnchangedFrame_b843cf6bc2e496af
+       /\ UnchangedFrame_6fb4222d0cd63f2e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -517,7 +519,7 @@ job_RecordExternalWaitCheckpoint(arg_attempt_id, arg_fence, arg_checkpoint_ref, 
        /\ ((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.observed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)) /\ (packet.payload.checkpoint_ref # ""))
        /\ job_phase' = "WaitingExternal"
        /\ job_checkpoint_ref' = Some(packet.payload.checkpoint_ref)
-       /\ UnchangedFrame_b843cf6bc2e496af
+       /\ UnchangedFrame_6fb4222d0cd63f2e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -538,7 +540,7 @@ job_WaitExternalFromRunning(arg_attempt_id, arg_fence, arg_observed_at_ms) ==
        /\ job_phase = "Running"
        /\ ((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.observed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)))
        /\ job_phase' = "WaitingExternal"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -559,7 +561,7 @@ job_ResumeRunningFromExternal(arg_attempt_id, arg_fence, arg_observed_at_ms) ==
        /\ job_phase = "WaitingExternal"
        /\ ((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.observed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)))
        /\ job_phase' = "Running"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -578,7 +580,7 @@ job_RequestCancelRunning ==
        /\ (job_cancel_requested = FALSE)
        /\ job_phase' = "Running"
        /\ job_cancel_requested' = TRUE
-       /\ UnchangedFrame_13355e76fc4fc5c6
+       /\ UnchangedFrame_861bb9fbfdb08d75
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -597,7 +599,7 @@ job_RequestCancelWaitingExternal ==
        /\ (job_cancel_requested = FALSE)
        /\ job_phase' = "WaitingExternal"
        /\ job_cancel_requested' = TRUE
-       /\ UnchangedFrame_13355e76fc4fc5c6
+       /\ UnchangedFrame_861bb9fbfdb08d75
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -615,7 +617,7 @@ job_RequestCancelAlreadyRequestedRunning ==
        /\ job_phase = "Running"
        /\ job_cancel_requested
        /\ job_phase' = "Running"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -633,7 +635,7 @@ job_RequestCancelAlreadyRequestedWaitingExternal ==
        /\ job_phase = "WaitingExternal"
        /\ job_cancel_requested
        /\ job_phase' = "WaitingExternal"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -650,7 +652,7 @@ job_RequestCancelAlreadyCancelled ==
        /\ ~HigherPriorityReady("job_authority")
        /\ job_phase = "Cancelled"
        /\ job_phase' = "Cancelled"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -671,7 +673,7 @@ job_RequestCancelQueued ==
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("Cancelled")
        /\ job_terminal_delivery_sequence' = (job_delivery_sequence + 1)
-       /\ UnchangedFrame_77834eed18a9ee70
+       /\ UnchangedFrame_209a61bf0cba8faf
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_terminal_enters_runtime_inbox", source_machine |-> "job", effect |-> "TerminalCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> (job_delivery_sequence + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "RequestCancelQueued"])
@@ -692,7 +694,7 @@ job_RequestCancelRetryScheduled ==
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("Cancelled")
        /\ job_terminal_delivery_sequence' = (job_delivery_sequence + 1)
-       /\ UnchangedFrame_77834eed18a9ee70
+       /\ UnchangedFrame_209a61bf0cba8faf
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_terminal_enters_runtime_inbox", source_machine |-> "job", effect |-> "TerminalCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> (job_delivery_sequence + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "RequestCancelRetryScheduled"])
@@ -713,7 +715,7 @@ job_RequestCancelLossObserved ==
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("Cancelled")
        /\ job_terminal_delivery_sequence' = (job_delivery_sequence + 1)
-       /\ UnchangedFrame_77834eed18a9ee70
+       /\ UnchangedFrame_209a61bf0cba8faf
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_terminal_enters_runtime_inbox", source_machine |-> "job", effect |-> "TerminalCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> (job_delivery_sequence + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "RequestCancelLossObserved"])
@@ -735,7 +737,7 @@ job_LeaseExpiresRunning(arg_attempt_id, arg_fence, arg_observed_at_ms) ==
        /\ ((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.observed_at_ms > (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)))
        /\ job_phase' = "LossObserved"
        /\ job_lease_expired' = TRUE
-       /\ UnchangedFrame_a6f48e314ada4c77
+       /\ UnchangedFrame_024ca8541cf91c76
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -757,7 +759,7 @@ job_LeaseExpiresWaitingExternal(arg_attempt_id, arg_fence, arg_observed_at_ms) =
        /\ ((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.observed_at_ms > (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)))
        /\ job_phase' = "LossObserved"
        /\ job_lease_expired' = TRUE
-       /\ UnchangedFrame_a6f48e314ada4c77
+       /\ UnchangedFrame_024ca8541cf91c76
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -777,7 +779,7 @@ job_ScheduleRetryAfterLoss(arg_retry_due_at_ms) ==
        /\ (job_lease_expired /\ (job_restart_class # "NonResumable") /\ (IF (job_restart_class # "CheckpointResumable") THEN TRUE ELSE (job_checkpoint_ref # None)) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.retry_due_at_ms > (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)))
        /\ job_phase' = "RetryScheduled"
        /\ job_retry_due_at_ms' = Some(packet.payload.retry_due_at_ms)
-       /\ UnchangedFrame_0e39766e26872e59
+       /\ UnchangedFrame_f6c14cc266c438a8
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -799,7 +801,7 @@ job_ClassifyNonResumableWorkerLoss(arg_observed_at_ms) ==
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("WorkerLost")
        /\ job_terminal_delivery_sequence' = (job_delivery_sequence + 1)
-       /\ UnchangedFrame_1ae8469023999b6d
+       /\ UnchangedFrame_7481adceb89f5e74
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_terminal_enters_runtime_inbox", source_machine |-> "job", effect |-> "TerminalCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> (job_delivery_sequence + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyNonResumableWorkerLoss"])
@@ -823,7 +825,7 @@ job_CompleteRunningAttempt(arg_attempt_id, arg_fence, arg_completed_at_ms) ==
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("Succeeded")
        /\ job_terminal_delivery_sequence' = (job_delivery_sequence + 1)
-       /\ UnchangedFrame_1ae8469023999b6d
+       /\ UnchangedFrame_7481adceb89f5e74
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_terminal_enters_runtime_inbox", source_machine |-> "job", effect |-> "TerminalCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> (job_delivery_sequence + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "CompleteRunningAttempt"])
@@ -847,7 +849,7 @@ job_CompleteWaitingExternalAttempt(arg_attempt_id, arg_fence, arg_completed_at_m
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("Succeeded")
        /\ job_terminal_delivery_sequence' = (job_delivery_sequence + 1)
-       /\ UnchangedFrame_1ae8469023999b6d
+       /\ UnchangedFrame_7481adceb89f5e74
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_terminal_enters_runtime_inbox", source_machine |-> "job", effect |-> "TerminalCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> (job_delivery_sequence + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "CompleteWaitingExternalAttempt"])
@@ -871,7 +873,7 @@ job_FailRunningAttempt(arg_attempt_id, arg_fence, arg_failed_at_ms) ==
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("Failed")
        /\ job_terminal_delivery_sequence' = (job_delivery_sequence + 1)
-       /\ UnchangedFrame_1ae8469023999b6d
+       /\ UnchangedFrame_7481adceb89f5e74
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_terminal_enters_runtime_inbox", source_machine |-> "job", effect |-> "TerminalCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> (job_delivery_sequence + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "FailRunningAttempt"])
@@ -895,7 +897,7 @@ job_FailWaitingExternalAttempt(arg_attempt_id, arg_fence, arg_failed_at_ms) ==
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("Failed")
        /\ job_terminal_delivery_sequence' = (job_delivery_sequence + 1)
-       /\ UnchangedFrame_1ae8469023999b6d
+       /\ UnchangedFrame_7481adceb89f5e74
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_terminal_enters_runtime_inbox", source_machine |-> "job", effect |-> "TerminalCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> (job_delivery_sequence + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "FailWaitingExternalAttempt"])
@@ -919,7 +921,7 @@ job_AcknowledgeRunningCancel(arg_attempt_id, arg_fence, arg_acknowledged_at_ms) 
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("Cancelled")
        /\ job_terminal_delivery_sequence' = (job_delivery_sequence + 1)
-       /\ UnchangedFrame_1ae8469023999b6d
+       /\ UnchangedFrame_7481adceb89f5e74
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_terminal_enters_runtime_inbox", source_machine |-> "job", effect |-> "TerminalCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> (job_delivery_sequence + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "AcknowledgeRunningCancel"])
@@ -943,7 +945,7 @@ job_AcknowledgeWaitingExternalCancel(arg_attempt_id, arg_fence, arg_acknowledged
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("Cancelled")
        /\ job_terminal_delivery_sequence' = (job_delivery_sequence + 1)
-       /\ UnchangedFrame_1ae8469023999b6d
+       /\ UnchangedFrame_7481adceb89f5e74
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_terminal_enters_runtime_inbox", source_machine |-> "job", effect |-> "TerminalCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> (job_delivery_sequence + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "AcknowledgeWaitingExternalCancel"])
@@ -965,7 +967,7 @@ job_MarkQueuedNeedsAttention(arg_observed_at_ms) ==
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("NeedsAttention")
        /\ job_terminal_delivery_sequence' = (job_delivery_sequence + 1)
-       /\ UnchangedFrame_1ae8469023999b6d
+       /\ UnchangedFrame_7481adceb89f5e74
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_terminal_enters_runtime_inbox", source_machine |-> "job", effect |-> "TerminalCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> (job_delivery_sequence + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "MarkQueuedNeedsAttention"])
@@ -987,7 +989,7 @@ job_MarkRunningNeedsAttention(arg_observed_at_ms) ==
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("NeedsAttention")
        /\ job_terminal_delivery_sequence' = (job_delivery_sequence + 1)
-       /\ UnchangedFrame_1ae8469023999b6d
+       /\ UnchangedFrame_7481adceb89f5e74
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_terminal_enters_runtime_inbox", source_machine |-> "job", effect |-> "TerminalCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> (job_delivery_sequence + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "MarkRunningNeedsAttention"])
@@ -1009,7 +1011,7 @@ job_MarkWaitingExternalNeedsAttention(arg_observed_at_ms) ==
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("NeedsAttention")
        /\ job_terminal_delivery_sequence' = (job_delivery_sequence + 1)
-       /\ UnchangedFrame_1ae8469023999b6d
+       /\ UnchangedFrame_7481adceb89f5e74
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_terminal_enters_runtime_inbox", source_machine |-> "job", effect |-> "TerminalCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> (job_delivery_sequence + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "MarkWaitingExternalNeedsAttention"])
@@ -1031,7 +1033,7 @@ job_MarkLossObservedNeedsAttention(arg_observed_at_ms) ==
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("NeedsAttention")
        /\ job_terminal_delivery_sequence' = (job_delivery_sequence + 1)
-       /\ UnchangedFrame_1ae8469023999b6d
+       /\ UnchangedFrame_7481adceb89f5e74
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_terminal_enters_runtime_inbox", source_machine |-> "job", effect |-> "TerminalCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> (job_delivery_sequence + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "MarkLossObservedNeedsAttention"])
@@ -1053,7 +1055,7 @@ job_MarkRetryScheduledNeedsAttention(arg_observed_at_ms) ==
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("NeedsAttention")
        /\ job_terminal_delivery_sequence' = (job_delivery_sequence + 1)
-       /\ UnchangedFrame_1ae8469023999b6d
+       /\ UnchangedFrame_7481adceb89f5e74
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_terminal_enters_runtime_inbox", source_machine |-> "job", effect |-> "TerminalCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> "terminal", source_sequence |-> (job_delivery_sequence + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "MarkRetryScheduledNeedsAttention"])
@@ -1074,7 +1076,7 @@ job_ApplySucceededDelivery(arg_delivery_id, arg_delivery_sequence) ==
        /\ ((packet.payload.delivery_id = "terminal") /\ (job_terminal_delivery_applied = FALSE) /\ (packet.payload.delivery_sequence = job_terminal_delivery_sequence))
        /\ job_phase' = "Succeeded"
        /\ job_terminal_delivery_applied' = TRUE
-       /\ UnchangedFrame_eb584526ca8d0812
+       /\ UnchangedFrame_6d1a1e92dfeebe89
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1095,7 +1097,7 @@ job_ApplyFailedDelivery(arg_delivery_id, arg_delivery_sequence) ==
        /\ ((packet.payload.delivery_id = "terminal") /\ (job_terminal_delivery_applied = FALSE) /\ (packet.payload.delivery_sequence = job_terminal_delivery_sequence))
        /\ job_phase' = "Failed"
        /\ job_terminal_delivery_applied' = TRUE
-       /\ UnchangedFrame_eb584526ca8d0812
+       /\ UnchangedFrame_6d1a1e92dfeebe89
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1116,7 +1118,7 @@ job_ApplyCancelledDelivery(arg_delivery_id, arg_delivery_sequence) ==
        /\ ((packet.payload.delivery_id = "terminal") /\ (job_terminal_delivery_applied = FALSE) /\ (packet.payload.delivery_sequence = job_terminal_delivery_sequence))
        /\ job_phase' = "Cancelled"
        /\ job_terminal_delivery_applied' = TRUE
-       /\ UnchangedFrame_eb584526ca8d0812
+       /\ UnchangedFrame_6d1a1e92dfeebe89
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1137,7 +1139,7 @@ job_ApplyWorkerLostDelivery(arg_delivery_id, arg_delivery_sequence) ==
        /\ ((packet.payload.delivery_id = "terminal") /\ (job_terminal_delivery_applied = FALSE) /\ (packet.payload.delivery_sequence = job_terminal_delivery_sequence))
        /\ job_phase' = "WorkerLost"
        /\ job_terminal_delivery_applied' = TRUE
-       /\ UnchangedFrame_eb584526ca8d0812
+       /\ UnchangedFrame_6d1a1e92dfeebe89
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1158,7 +1160,7 @@ job_ApplyNeedsAttentionDelivery(arg_delivery_id, arg_delivery_sequence) ==
        /\ ((packet.payload.delivery_id = "terminal") /\ (job_terminal_delivery_applied = FALSE) /\ (packet.payload.delivery_sequence = job_terminal_delivery_sequence))
        /\ job_phase' = "NeedsAttention"
        /\ job_terminal_delivery_applied' = TRUE
-       /\ UnchangedFrame_eb584526ca8d0812
+       /\ UnchangedFrame_6d1a1e92dfeebe89
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1178,7 +1180,7 @@ job_ObserveSucceededDeliveryAlreadyApplied(arg_delivery_id, arg_delivery_sequenc
        /\ job_phase = "Succeeded"
        /\ ((packet.payload.delivery_id = "terminal") /\ job_terminal_delivery_applied /\ (packet.payload.delivery_sequence = job_terminal_delivery_sequence))
        /\ job_phase' = "Succeeded"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1198,7 +1200,7 @@ job_ObserveFailedDeliveryAlreadyApplied(arg_delivery_id, arg_delivery_sequence) 
        /\ job_phase = "Failed"
        /\ ((packet.payload.delivery_id = "terminal") /\ job_terminal_delivery_applied /\ (packet.payload.delivery_sequence = job_terminal_delivery_sequence))
        /\ job_phase' = "Failed"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1218,7 +1220,7 @@ job_ObserveCancelledDeliveryAlreadyApplied(arg_delivery_id, arg_delivery_sequenc
        /\ job_phase = "Cancelled"
        /\ ((packet.payload.delivery_id = "terminal") /\ job_terminal_delivery_applied /\ (packet.payload.delivery_sequence = job_terminal_delivery_sequence))
        /\ job_phase' = "Cancelled"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1238,7 +1240,7 @@ job_ObserveWorkerLostDeliveryAlreadyApplied(arg_delivery_id, arg_delivery_sequen
        /\ job_phase = "WorkerLost"
        /\ ((packet.payload.delivery_id = "terminal") /\ job_terminal_delivery_applied /\ (packet.payload.delivery_sequence = job_terminal_delivery_sequence))
        /\ job_phase' = "WorkerLost"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1258,7 +1260,7 @@ job_ObserveNeedsAttentionDeliveryAlreadyApplied(arg_delivery_id, arg_delivery_se
        /\ job_phase = "NeedsAttention"
        /\ ((packet.payload.delivery_id = "terminal") /\ job_terminal_delivery_applied /\ (packet.payload.delivery_sequence = job_terminal_delivery_sequence))
        /\ job_phase' = "NeedsAttention"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1279,7 +1281,7 @@ job_ApplyRunningNotificationDelivery(arg_delivery_id, arg_delivery_sequence) ==
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ ((packet.payload.delivery_id \in job_notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "Running"
        /\ job_notification_applied' = (job_notification_applied \cup {packet.payload.delivery_id})
-       /\ UnchangedFrame_5bcbed9900f7c0f8
+       /\ UnchangedFrame_1e4704ec3e88a6d7
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1300,7 +1302,7 @@ job_ApplyWaitingExternalNotificationDelivery(arg_delivery_id, arg_delivery_seque
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ ((packet.payload.delivery_id \in job_notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "WaitingExternal"
        /\ job_notification_applied' = (job_notification_applied \cup {packet.payload.delivery_id})
-       /\ UnchangedFrame_5bcbed9900f7c0f8
+       /\ UnchangedFrame_1e4704ec3e88a6d7
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1321,7 +1323,7 @@ job_ApplyLossObservedNotificationDelivery(arg_delivery_id, arg_delivery_sequence
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ ((packet.payload.delivery_id \in job_notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "LossObserved"
        /\ job_notification_applied' = (job_notification_applied \cup {packet.payload.delivery_id})
-       /\ UnchangedFrame_5bcbed9900f7c0f8
+       /\ UnchangedFrame_1e4704ec3e88a6d7
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1342,7 +1344,7 @@ job_ApplyRetryScheduledNotificationDelivery(arg_delivery_id, arg_delivery_sequen
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ ((packet.payload.delivery_id \in job_notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "RetryScheduled"
        /\ job_notification_applied' = (job_notification_applied \cup {packet.payload.delivery_id})
-       /\ UnchangedFrame_5bcbed9900f7c0f8
+       /\ UnchangedFrame_1e4704ec3e88a6d7
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1363,7 +1365,7 @@ job_ApplySucceededNotificationDelivery(arg_delivery_id, arg_delivery_sequence) =
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ ((packet.payload.delivery_id \in job_notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "Succeeded"
        /\ job_notification_applied' = (job_notification_applied \cup {packet.payload.delivery_id})
-       /\ UnchangedFrame_5bcbed9900f7c0f8
+       /\ UnchangedFrame_1e4704ec3e88a6d7
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1384,7 +1386,7 @@ job_ApplyFailedNotificationDelivery(arg_delivery_id, arg_delivery_sequence) ==
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ ((packet.payload.delivery_id \in job_notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "Failed"
        /\ job_notification_applied' = (job_notification_applied \cup {packet.payload.delivery_id})
-       /\ UnchangedFrame_5bcbed9900f7c0f8
+       /\ UnchangedFrame_1e4704ec3e88a6d7
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1405,7 +1407,7 @@ job_ApplyCancelledNotificationDelivery(arg_delivery_id, arg_delivery_sequence) =
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ ((packet.payload.delivery_id \in job_notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "Cancelled"
        /\ job_notification_applied' = (job_notification_applied \cup {packet.payload.delivery_id})
-       /\ UnchangedFrame_5bcbed9900f7c0f8
+       /\ UnchangedFrame_1e4704ec3e88a6d7
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1426,7 +1428,7 @@ job_ApplyWorkerLostNotificationDelivery(arg_delivery_id, arg_delivery_sequence) 
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ ((packet.payload.delivery_id \in job_notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "WorkerLost"
        /\ job_notification_applied' = (job_notification_applied \cup {packet.payload.delivery_id})
-       /\ UnchangedFrame_5bcbed9900f7c0f8
+       /\ UnchangedFrame_1e4704ec3e88a6d7
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1447,7 +1449,7 @@ job_ApplyNeedsAttentionNotificationDelivery(arg_delivery_id, arg_delivery_sequen
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ ((packet.payload.delivery_id \in job_notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "NeedsAttention"
        /\ job_notification_applied' = (job_notification_applied \cup {packet.payload.delivery_id})
-       /\ UnchangedFrame_5bcbed9900f7c0f8
+       /\ UnchangedFrame_1e4704ec3e88a6d7
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1467,7 +1469,7 @@ job_ObserveRunningNotificationDeliveryAlreadyApplied(arg_delivery_id, arg_delive
        /\ job_phase = "Running"
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ (packet.payload.delivery_id \in job_notification_applied) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "Running"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1487,7 +1489,7 @@ job_ObserveWaitingExternalNotificationDeliveryAlreadyApplied(arg_delivery_id, ar
        /\ job_phase = "WaitingExternal"
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ (packet.payload.delivery_id \in job_notification_applied) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "WaitingExternal"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1507,7 +1509,7 @@ job_ObserveLossObservedNotificationDeliveryAlreadyApplied(arg_delivery_id, arg_d
        /\ job_phase = "LossObserved"
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ (packet.payload.delivery_id \in job_notification_applied) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "LossObserved"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1527,7 +1529,7 @@ job_ObserveRetryScheduledNotificationDeliveryAlreadyApplied(arg_delivery_id, arg
        /\ job_phase = "RetryScheduled"
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ (packet.payload.delivery_id \in job_notification_applied) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "RetryScheduled"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1547,7 +1549,7 @@ job_ObserveSucceededNotificationDeliveryAlreadyApplied(arg_delivery_id, arg_deli
        /\ job_phase = "Succeeded"
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ (packet.payload.delivery_id \in job_notification_applied) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "Succeeded"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1567,7 +1569,7 @@ job_ObserveFailedNotificationDeliveryAlreadyApplied(arg_delivery_id, arg_deliver
        /\ job_phase = "Failed"
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ (packet.payload.delivery_id \in job_notification_applied) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "Failed"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1587,7 +1589,7 @@ job_ObserveCancelledNotificationDeliveryAlreadyApplied(arg_delivery_id, arg_deli
        /\ job_phase = "Cancelled"
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ (packet.payload.delivery_id \in job_notification_applied) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "Cancelled"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1607,7 +1609,7 @@ job_ObserveWorkerLostNotificationDeliveryAlreadyApplied(arg_delivery_id, arg_del
        /\ job_phase = "WorkerLost"
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ (packet.payload.delivery_id \in job_notification_applied) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "WorkerLost"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1627,7 +1629,7 @@ job_ObserveNeedsAttentionNotificationDeliveryAlreadyApplied(arg_delivery_id, arg
        /\ job_phase = "NeedsAttention"
        /\ ((packet.payload.delivery_id \in job_notification_ids) /\ (packet.payload.delivery_id \in job_notification_applied) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN job_notification_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN job_notification_sequences THEN job_notification_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence))
        /\ job_phase' = "NeedsAttention"
-       /\ UnchangedFrame_9b60841bbbee474f
+       /\ UnchangedFrame_10539fa07a7f988e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1657,16 +1659,16 @@ runtime_delivery_CommitNewDelivery(arg_delivery_id, arg_source_sequence) ==
        /\ (((packet.payload.delivery_id \in runtime_delivery_delivery_ids) = FALSE) /\ (packet.payload.source_sequence > 0) /\ (runtime_delivery_next_sequence < RustU64Max))
        /\ runtime_delivery_phase' = "Active"
        /\ runtime_delivery_delivery_ids' = (runtime_delivery_delivery_ids \cup {packet.payload.delivery_id})
-       /\ runtime_delivery_delivery_sequences' = MapSet(runtime_delivery_delivery_sequences, packet.payload.delivery_id, ((runtime_delivery_next_sequence) + 1))
+       /\ runtime_delivery_delivery_sequences' = MapSet(runtime_delivery_delivery_sequences, packet.payload.delivery_id, (runtime_delivery_next_sequence) + 1)
        /\ runtime_delivery_delivery_source_sequences' = MapSet(runtime_delivery_delivery_source_sequences, packet.payload.delivery_id, packet.payload.source_sequence)
-       /\ runtime_delivery_committed_sequences' = (runtime_delivery_committed_sequences \cup {((runtime_delivery_next_sequence) + 1)})
+       /\ runtime_delivery_committed_sequences' = (runtime_delivery_committed_sequences \cup {(runtime_delivery_next_sequence) + 1})
        /\ runtime_delivery_next_sequence' = (runtime_delivery_next_sequence) + 1
-       /\ UnchangedFrame_75efcad217af2c20
+       /\ UnchangedFrame_021b438e8a07527f
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "runtime_delivery_commit_acknowledges_job_outbox", source_machine |-> "runtime_delivery", effect |-> "DeliveryCommitted", target_machine |-> "job", target_input |-> "MarkDeliveryApplied", payload |-> [delivery_id |-> packet.payload.delivery_id, delivery_sequence |-> packet.payload.source_sequence], actor |-> "job_authority", effect_id |-> (model_step_count + 1), source_transition |-> "CommitNewDelivery"])
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_delivery", variant |-> "DeliveryCommitted", payload |-> [delivery_id |-> packet.payload.delivery_id, delivery_sequence |-> ((runtime_delivery_next_sequence) + 1), source_sequence |-> packet.payload.source_sequence], effect_id |-> (model_step_count + 1), source_transition |-> "CommitNewDelivery"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_delivery", variant |-> "DeliveryCommitted", payload |-> [delivery_id |-> packet.payload.delivery_id, delivery_sequence |-> (runtime_delivery_next_sequence) + 1, source_sequence |-> packet.payload.source_sequence], effect_id |-> (model_step_count + 1), source_transition |-> "CommitNewDelivery"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_delivery", transition |-> "CommitNewDelivery", actor |-> "runtime_delivery_authority", step |-> (model_step_count + 1), from_phase |-> runtime_delivery_phase, to_phase |-> "Active"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -1681,7 +1683,7 @@ runtime_delivery_ReuseCommittedDelivery(arg_delivery_id, arg_source_sequence) ==
        /\ runtime_delivery_phase = "Active"
        /\ ((packet.payload.delivery_id \in runtime_delivery_delivery_ids) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_source_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_source_sequences THEN runtime_delivery_delivery_source_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_source_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_source_sequences THEN runtime_delivery_delivery_source_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.source_sequence))
        /\ runtime_delivery_phase' = "Active"
-       /\ UnchangedFrame_98b28bcbf8ca44eb
+       /\ UnchangedFrame_cc0ec66a6d850892
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "runtime_delivery_reuse_acknowledges_job_outbox", source_machine |-> "runtime_delivery", effect |-> "DeliveryReused", target_machine |-> "job", target_input |-> "MarkDeliveryApplied", payload |-> [delivery_id |-> packet.payload.delivery_id, delivery_sequence |-> packet.payload.source_sequence], actor |-> "job_authority", effect_id |-> (model_step_count + 1), source_transition |-> "ReuseCommittedDelivery"])
@@ -1702,6 +1704,7 @@ runtime_delivery_ApplyNextDelivery(arg_delivery_id, arg_delivery_sequence) ==
        /\ ((packet.payload.delivery_id \in runtime_delivery_delivery_ids) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence) /\ (packet.payload.delivery_sequence > runtime_delivery_applied_cursor) /\ ((packet.payload.delivery_sequence - 1) = runtime_delivery_applied_cursor))
        /\ runtime_delivery_phase' = "Active"
        /\ runtime_delivery_applied_cursor' = packet.payload.delivery_sequence
+       /\ runtime_delivery_acknowledged_sequences' = (runtime_delivery_acknowledged_sequences \ {packet.payload.delivery_sequence})
        /\ UnchangedFrame_e8ca2096fd1c3377
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -1722,7 +1725,7 @@ runtime_delivery_ObserveAlreadyAppliedDelivery(arg_delivery_id, arg_delivery_seq
        /\ runtime_delivery_phase = "Active"
        /\ ((packet.payload.delivery_id \in runtime_delivery_delivery_ids) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence) /\ (packet.payload.delivery_sequence <= runtime_delivery_applied_cursor))
        /\ runtime_delivery_phase' = "Active"
-       /\ UnchangedFrame_98b28bcbf8ca44eb
+       /\ UnchangedFrame_cc0ec66a6d850892
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1732,10 +1735,94 @@ runtime_delivery_ObserveAlreadyAppliedDelivery(arg_delivery_id, arg_delivery_seq
        /\ model_step_count' = model_step_count + 1
 
 
+runtime_delivery_AcknowledgeNextDelivery(arg_delivery_id, arg_delivery_sequence) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "runtime_delivery"
+       /\ packet.variant = "AcknowledgeDelivery"
+       /\ packet.payload.delivery_id = arg_delivery_id
+       /\ packet.payload.delivery_sequence = arg_delivery_sequence
+       /\ ~HigherPriorityReady("runtime_delivery_authority")
+       /\ runtime_delivery_phase = "Active"
+       /\ ((packet.payload.delivery_id \in runtime_delivery_delivery_ids) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence) /\ (packet.payload.delivery_sequence > runtime_delivery_applied_cursor) /\ ((packet.payload.delivery_sequence - 1) = runtime_delivery_applied_cursor))
+       /\ runtime_delivery_phase' = "Active"
+       /\ runtime_delivery_applied_cursor' = packet.payload.delivery_sequence
+       /\ runtime_delivery_acknowledged_sequences' = (runtime_delivery_acknowledged_sequences \ {packet.payload.delivery_sequence})
+       /\ UnchangedFrame_e8ca2096fd1c3377
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_delivery", variant |-> "DeliveryApplied", payload |-> [delivery_id |-> packet.payload.delivery_id, delivery_sequence |-> packet.payload.delivery_sequence], effect_id |-> (model_step_count + 1), source_transition |-> "AcknowledgeNextDelivery"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_delivery", transition |-> "AcknowledgeNextDelivery", actor |-> "runtime_delivery_authority", step |-> (model_step_count + 1), from_phase |-> runtime_delivery_phase, to_phase |-> "Active"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+runtime_delivery_AcknowledgeAheadOfCursor(arg_delivery_id, arg_delivery_sequence) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "runtime_delivery"
+       /\ packet.variant = "AcknowledgeDelivery"
+       /\ packet.payload.delivery_id = arg_delivery_id
+       /\ packet.payload.delivery_sequence = arg_delivery_sequence
+       /\ ~HigherPriorityReady("runtime_delivery_authority")
+       /\ runtime_delivery_phase = "Active"
+       /\ ((packet.payload.delivery_id \in runtime_delivery_delivery_ids) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence) /\ (packet.payload.delivery_sequence > runtime_delivery_applied_cursor) /\ ((packet.payload.delivery_sequence - 1) > runtime_delivery_applied_cursor))
+       /\ runtime_delivery_phase' = "Active"
+       /\ runtime_delivery_acknowledged_sequences' = (runtime_delivery_acknowledged_sequences \cup {packet.payload.delivery_sequence})
+       /\ UnchangedFrame_98b28bcbf8ca44eb
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_delivery", variant |-> "DeliveryAcknowledged", payload |-> [delivery_id |-> packet.payload.delivery_id, delivery_sequence |-> packet.payload.delivery_sequence], effect_id |-> (model_step_count + 1), source_transition |-> "AcknowledgeAheadOfCursor"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_delivery", transition |-> "AcknowledgeAheadOfCursor", actor |-> "runtime_delivery_authority", step |-> (model_step_count + 1), from_phase |-> runtime_delivery_phase, to_phase |-> "Active"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+runtime_delivery_ObserveAlreadyAppliedAcknowledgement(arg_delivery_id, arg_delivery_sequence) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "runtime_delivery"
+       /\ packet.variant = "AcknowledgeDelivery"
+       /\ packet.payload.delivery_id = arg_delivery_id
+       /\ packet.payload.delivery_sequence = arg_delivery_sequence
+       /\ ~HigherPriorityReady("runtime_delivery_authority")
+       /\ runtime_delivery_phase = "Active"
+       /\ ((packet.payload.delivery_id \in runtime_delivery_delivery_ids) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence) /\ (packet.payload.delivery_sequence <= runtime_delivery_applied_cursor))
+       /\ runtime_delivery_phase' = "Active"
+       /\ UnchangedFrame_cc0ec66a6d850892
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_delivery", variant |-> "DeliveryApplied", payload |-> [delivery_id |-> packet.payload.delivery_id, delivery_sequence |-> packet.payload.delivery_sequence], effect_id |-> (model_step_count + 1), source_transition |-> "ObserveAlreadyAppliedAcknowledgement"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_delivery", transition |-> "ObserveAlreadyAppliedAcknowledgement", actor |-> "runtime_delivery_authority", step |-> (model_step_count + 1), from_phase |-> runtime_delivery_phase, to_phase |-> "Active"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+runtime_delivery_AdvanceOverAcknowledgedDelivery ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "runtime_delivery"
+       /\ packet.variant = "AdvanceAcknowledgedPrefix"
+       /\ ~HigherPriorityReady("runtime_delivery_authority")
+       /\ runtime_delivery_phase = "Active"
+       /\ ((runtime_delivery_applied_cursor < runtime_delivery_next_sequence) /\ ((runtime_delivery_applied_cursor + 1) \in runtime_delivery_acknowledged_sequences))
+       /\ runtime_delivery_phase' = "Active"
+       /\ runtime_delivery_applied_cursor' = (runtime_delivery_applied_cursor) + 1
+       /\ runtime_delivery_acknowledged_sequences' = (runtime_delivery_acknowledged_sequences \ {(runtime_delivery_applied_cursor + 1)})
+       /\ UnchangedFrame_e8ca2096fd1c3377
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_delivery", variant |-> "AcknowledgedPrefixAdvanced", payload |-> [delivery_sequence |-> (runtime_delivery_applied_cursor) + 1], effect_id |-> (model_step_count + 1), source_transition |-> "AdvanceOverAcknowledgedDelivery"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_delivery", transition |-> "AdvanceOverAcknowledgedDelivery", actor |-> "runtime_delivery_authority", step |-> (model_step_count + 1), from_phase |-> runtime_delivery_phase, to_phase |-> "Active"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 runtime_delivery_applied_cursor_does_not_pass_committed_sequence == (runtime_delivery_applied_cursor <= runtime_delivery_next_sequence)
 runtime_delivery_empty_delivery_set_has_zero_sequence == (IF (Cardinality(runtime_delivery_delivery_ids) # 0) THEN TRUE ELSE (runtime_delivery_next_sequence = 0))
 runtime_delivery_delivery_identity_and_sequence_cardinality_match == (Cardinality(runtime_delivery_delivery_ids) = Cardinality(runtime_delivery_committed_sequences))
 runtime_delivery_committed_sequence_cardinality_tracks_high_water == (Cardinality(runtime_delivery_committed_sequences) = runtime_delivery_next_sequence)
+runtime_delivery_applied_cursor_is_never_acknowledged_pending == ((runtime_delivery_applied_cursor \in runtime_delivery_acknowledged_sequences) = FALSE)
 
 EntryPacketAdmissible_job(packet) ==
     \/ /\ (packet.variant = "Submit") /\ (job_phase = "Unsubmitted") /\ ((packet.payload.job_id # ""))
@@ -1810,6 +1897,10 @@ EntryPacketAdmissible_runtime_delivery(packet) ==
     \/ /\ (packet.variant = "CommitDelivery") /\ (runtime_delivery_phase = "Active") /\ (((packet.payload.delivery_id \in runtime_delivery_delivery_ids) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_source_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_source_sequences THEN runtime_delivery_delivery_source_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_source_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_source_sequences THEN runtime_delivery_delivery_source_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.source_sequence)))
     \/ /\ (packet.variant = "MarkDeliveryApplied") /\ (runtime_delivery_phase = "Active") /\ (((packet.payload.delivery_id \in runtime_delivery_delivery_ids) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence) /\ (packet.payload.delivery_sequence > runtime_delivery_applied_cursor) /\ ((packet.payload.delivery_sequence - 1) = runtime_delivery_applied_cursor)))
     \/ /\ (packet.variant = "MarkDeliveryApplied") /\ (runtime_delivery_phase = "Active") /\ (((packet.payload.delivery_id \in runtime_delivery_delivery_ids) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence) /\ (packet.payload.delivery_sequence <= runtime_delivery_applied_cursor)))
+    \/ /\ (packet.variant = "AcknowledgeDelivery") /\ (runtime_delivery_phase = "Active") /\ (((packet.payload.delivery_id \in runtime_delivery_delivery_ids) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence) /\ (packet.payload.delivery_sequence > runtime_delivery_applied_cursor) /\ ((packet.payload.delivery_sequence - 1) = runtime_delivery_applied_cursor)))
+    \/ /\ (packet.variant = "AcknowledgeDelivery") /\ (runtime_delivery_phase = "Active") /\ (((packet.payload.delivery_id \in runtime_delivery_delivery_ids) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence) /\ (packet.payload.delivery_sequence > runtime_delivery_applied_cursor) /\ ((packet.payload.delivery_sequence - 1) > runtime_delivery_applied_cursor)))
+    \/ /\ (packet.variant = "AcknowledgeDelivery") /\ (runtime_delivery_phase = "Active") /\ (((packet.payload.delivery_id \in runtime_delivery_delivery_ids) /\ ((IF "value" \in DOMAIN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences) THEN Some((IF packet.payload.delivery_id \in DOMAIN runtime_delivery_delivery_sequences THEN runtime_delivery_delivery_sequences[packet.payload.delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = packet.payload.delivery_sequence) /\ (packet.payload.delivery_sequence <= runtime_delivery_applied_cursor)))
+    \/ /\ (packet.variant = "AdvanceAcknowledgedPrefix") /\ (runtime_delivery_phase = "Active") /\ (((runtime_delivery_applied_cursor < runtime_delivery_next_sequence) /\ ((runtime_delivery_applied_cursor + 1) \in runtime_delivery_acknowledged_sequences)))
 
 EntryPacketAdmissible(packet) ==
     CASE
@@ -1825,7 +1916,7 @@ DeliverQueuedRoute ==
        /\ model_step_count' = model_step_count + 1
        /\ pending_inputs' = AppendIfMissing(pending_inputs, [machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id]}
-       /\ UnchangedFrame_06a9fe065af660c2
+       /\ UnchangedFrame_391e6e081a77046b
 
 QuiescentStutter ==
     /\ Len(pending_routes) = 0
@@ -1847,7 +1938,7 @@ WitnessInjectNext_runtime_delivery_first_commit ==
     /\ witness_current_script_input' = next_script_input
     /\ witness_remaining_script_inputs' = next_remaining_script_inputs
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_3098c595b5961583
+    /\ UnchangedFrame_0f96f7326f4c2704
 
 WitnessInjectNext_runtime_delivery_notification_commit ==
     LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input
@@ -1864,7 +1955,7 @@ WitnessInjectNext_runtime_delivery_notification_commit ==
     /\ witness_current_script_input' = next_script_input
     /\ witness_remaining_script_inputs' = next_remaining_script_inputs
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_3098c595b5961583
+    /\ UnchangedFrame_0f96f7326f4c2704
 
 WitnessInjectNext_runtime_delivery_crash_retry_reuse ==
     LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input
@@ -1881,7 +1972,7 @@ WitnessInjectNext_runtime_delivery_crash_retry_reuse ==
     /\ witness_current_script_input' = next_script_input
     /\ witness_remaining_script_inputs' = next_remaining_script_inputs
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_3098c595b5961583
+    /\ UnchangedFrame_0f96f7326f4c2704
 
 WitnessScriptComplete_runtime_delivery_first_commit ==
     /\ Len(witness_remaining_script_inputs) = 0
@@ -2038,6 +2129,10 @@ CoreNext ==
     \/ \E arg_delivery_id \in StringValues : \E arg_source_sequence \in 0..2 : runtime_delivery_ReuseCommittedDelivery(arg_delivery_id, arg_source_sequence)
     \/ \E arg_delivery_id \in StringValues : \E arg_delivery_sequence \in 0..2 : runtime_delivery_ApplyNextDelivery(arg_delivery_id, arg_delivery_sequence)
     \/ \E arg_delivery_id \in StringValues : \E arg_delivery_sequence \in 0..2 : runtime_delivery_ObserveAlreadyAppliedDelivery(arg_delivery_id, arg_delivery_sequence)
+    \/ \E arg_delivery_id \in StringValues : \E arg_delivery_sequence \in 0..2 : runtime_delivery_AcknowledgeNextDelivery(arg_delivery_id, arg_delivery_sequence)
+    \/ \E arg_delivery_id \in StringValues : \E arg_delivery_sequence \in 0..2 : runtime_delivery_AcknowledgeAheadOfCursor(arg_delivery_id, arg_delivery_sequence)
+    \/ \E arg_delivery_id \in StringValues : \E arg_delivery_sequence \in 0..2 : runtime_delivery_ObserveAlreadyAppliedAcknowledgement(arg_delivery_id, arg_delivery_sequence)
+    \/ runtime_delivery_AdvanceOverAcknowledgedDelivery
     \/ QuiescentStutter
 
 InjectNext ==
@@ -2093,11 +2188,11 @@ RouteObserved_runtime_delivery_reuse_acknowledges_job_outbox == \E packet \in de
 RouteCoverage_runtime_delivery_reuse_acknowledges_job_outbox == (RouteObserved_runtime_delivery_reuse_acknowledges_job_outbox \/ ~RouteObserved_runtime_delivery_reuse_acknowledges_job_outbox)
 CoverageInstrumentation == RouteCoverage_job_terminal_enters_runtime_inbox /\ RouteCoverage_job_notification_enters_runtime_inbox /\ RouteCoverage_runtime_delivery_commit_acknowledges_job_outbox /\ RouteCoverage_runtime_delivery_reuse_acknowledges_job_outbox
 
-CiStateConstraint == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 10 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 0 /\ Cardinality(emitted_effects) <= 0 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(job_notification_ids) <= 0 /\ Cardinality(job_notification_idempotency_keys) <= 0 /\ Cardinality(DOMAIN job_notification_id_by_key) <= 0 /\ Cardinality(DOMAIN job_notification_delivery_ids) <= 0 /\ Cardinality(DOMAIN job_notification_sequences) <= 0 /\ Cardinality(job_notification_applied) <= 0 /\ Cardinality(runtime_delivery_delivery_ids) <= 0 /\ Cardinality(DOMAIN runtime_delivery_delivery_sequences) <= 0 /\ Cardinality(DOMAIN runtime_delivery_delivery_source_sequences) <= 0 /\ Cardinality(runtime_delivery_committed_sequences) <= 0
-DeepStateConstraint == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 12 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 2 /\ Cardinality(emitted_effects) <= 2 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(job_notification_ids) <= 2 /\ Cardinality(job_notification_idempotency_keys) <= 2 /\ Cardinality(DOMAIN job_notification_id_by_key) <= 2 /\ Cardinality(DOMAIN job_notification_delivery_ids) <= 2 /\ Cardinality(DOMAIN job_notification_sequences) <= 2 /\ Cardinality(job_notification_applied) <= 2 /\ Cardinality(runtime_delivery_delivery_ids) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_sequences) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_source_sequences) <= 2 /\ Cardinality(runtime_delivery_committed_sequences) <= 2
-WitnessStateConstraint_runtime_delivery_first_commit == /\ model_step_count <= 12 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 13 /\ Len(pending_routes) <= 4 /\ Cardinality(delivered_routes) <= 3 /\ Cardinality(emitted_effects) <= 6 /\ Cardinality(observed_transitions) <= 12 /\ Cardinality(job_notification_ids) <= 2 /\ Cardinality(job_notification_idempotency_keys) <= 2 /\ Cardinality(DOMAIN job_notification_id_by_key) <= 2 /\ Cardinality(DOMAIN job_notification_delivery_ids) <= 2 /\ Cardinality(DOMAIN job_notification_sequences) <= 2 /\ Cardinality(job_notification_applied) <= 2 /\ Cardinality(runtime_delivery_delivery_ids) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_sequences) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_source_sequences) <= 2 /\ Cardinality(runtime_delivery_committed_sequences) <= 2
-WitnessStateConstraint_runtime_delivery_notification_commit == /\ model_step_count <= 12 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 13 /\ Len(pending_routes) <= 4 /\ Cardinality(delivered_routes) <= 3 /\ Cardinality(emitted_effects) <= 6 /\ Cardinality(observed_transitions) <= 12 /\ Cardinality(job_notification_ids) <= 2 /\ Cardinality(job_notification_idempotency_keys) <= 2 /\ Cardinality(DOMAIN job_notification_id_by_key) <= 2 /\ Cardinality(DOMAIN job_notification_delivery_ids) <= 2 /\ Cardinality(DOMAIN job_notification_sequences) <= 2 /\ Cardinality(job_notification_applied) <= 2 /\ Cardinality(runtime_delivery_delivery_ids) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_sequences) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_source_sequences) <= 2 /\ Cardinality(runtime_delivery_committed_sequences) <= 2
-WitnessStateConstraint_runtime_delivery_crash_retry_reuse == /\ model_step_count <= 12 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 13 /\ Len(pending_routes) <= 4 /\ Cardinality(delivered_routes) <= 3 /\ Cardinality(emitted_effects) <= 6 /\ Cardinality(observed_transitions) <= 12 /\ Cardinality(job_notification_ids) <= 2 /\ Cardinality(job_notification_idempotency_keys) <= 2 /\ Cardinality(DOMAIN job_notification_id_by_key) <= 2 /\ Cardinality(DOMAIN job_notification_delivery_ids) <= 2 /\ Cardinality(DOMAIN job_notification_sequences) <= 2 /\ Cardinality(job_notification_applied) <= 2 /\ Cardinality(runtime_delivery_delivery_ids) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_sequences) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_source_sequences) <= 2 /\ Cardinality(runtime_delivery_committed_sequences) <= 2
+CiStateConstraint == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 10 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 0 /\ Cardinality(emitted_effects) <= 0 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(job_notification_ids) <= 0 /\ Cardinality(job_notification_idempotency_keys) <= 0 /\ Cardinality(DOMAIN job_notification_id_by_key) <= 0 /\ Cardinality(DOMAIN job_notification_delivery_ids) <= 0 /\ Cardinality(DOMAIN job_notification_sequences) <= 0 /\ Cardinality(job_notification_applied) <= 0 /\ Cardinality(runtime_delivery_delivery_ids) <= 0 /\ Cardinality(DOMAIN runtime_delivery_delivery_sequences) <= 0 /\ Cardinality(DOMAIN runtime_delivery_delivery_source_sequences) <= 0 /\ Cardinality(runtime_delivery_committed_sequences) <= 0 /\ Cardinality(runtime_delivery_acknowledged_sequences) <= 0
+DeepStateConstraint == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 12 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 2 /\ Cardinality(emitted_effects) <= 2 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(job_notification_ids) <= 2 /\ Cardinality(job_notification_idempotency_keys) <= 2 /\ Cardinality(DOMAIN job_notification_id_by_key) <= 2 /\ Cardinality(DOMAIN job_notification_delivery_ids) <= 2 /\ Cardinality(DOMAIN job_notification_sequences) <= 2 /\ Cardinality(job_notification_applied) <= 2 /\ Cardinality(runtime_delivery_delivery_ids) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_sequences) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_source_sequences) <= 2 /\ Cardinality(runtime_delivery_committed_sequences) <= 2 /\ Cardinality(runtime_delivery_acknowledged_sequences) <= 2
+WitnessStateConstraint_runtime_delivery_first_commit == /\ model_step_count <= 12 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 13 /\ Len(pending_routes) <= 4 /\ Cardinality(delivered_routes) <= 3 /\ Cardinality(emitted_effects) <= 6 /\ Cardinality(observed_transitions) <= 12 /\ Cardinality(job_notification_ids) <= 2 /\ Cardinality(job_notification_idempotency_keys) <= 2 /\ Cardinality(DOMAIN job_notification_id_by_key) <= 2 /\ Cardinality(DOMAIN job_notification_delivery_ids) <= 2 /\ Cardinality(DOMAIN job_notification_sequences) <= 2 /\ Cardinality(job_notification_applied) <= 2 /\ Cardinality(runtime_delivery_delivery_ids) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_sequences) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_source_sequences) <= 2 /\ Cardinality(runtime_delivery_committed_sequences) <= 2 /\ Cardinality(runtime_delivery_acknowledged_sequences) <= 2
+WitnessStateConstraint_runtime_delivery_notification_commit == /\ model_step_count <= 12 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 13 /\ Len(pending_routes) <= 4 /\ Cardinality(delivered_routes) <= 3 /\ Cardinality(emitted_effects) <= 6 /\ Cardinality(observed_transitions) <= 12 /\ Cardinality(job_notification_ids) <= 2 /\ Cardinality(job_notification_idempotency_keys) <= 2 /\ Cardinality(DOMAIN job_notification_id_by_key) <= 2 /\ Cardinality(DOMAIN job_notification_delivery_ids) <= 2 /\ Cardinality(DOMAIN job_notification_sequences) <= 2 /\ Cardinality(job_notification_applied) <= 2 /\ Cardinality(runtime_delivery_delivery_ids) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_sequences) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_source_sequences) <= 2 /\ Cardinality(runtime_delivery_committed_sequences) <= 2 /\ Cardinality(runtime_delivery_acknowledged_sequences) <= 2
+WitnessStateConstraint_runtime_delivery_crash_retry_reuse == /\ model_step_count <= 12 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 13 /\ Len(pending_routes) <= 4 /\ Cardinality(delivered_routes) <= 3 /\ Cardinality(emitted_effects) <= 6 /\ Cardinality(observed_transitions) <= 12 /\ Cardinality(job_notification_ids) <= 2 /\ Cardinality(job_notification_idempotency_keys) <= 2 /\ Cardinality(DOMAIN job_notification_id_by_key) <= 2 /\ Cardinality(DOMAIN job_notification_delivery_ids) <= 2 /\ Cardinality(DOMAIN job_notification_sequences) <= 2 /\ Cardinality(job_notification_applied) <= 2 /\ Cardinality(runtime_delivery_delivery_ids) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_sequences) <= 2 /\ Cardinality(DOMAIN runtime_delivery_delivery_source_sequences) <= 2 /\ Cardinality(runtime_delivery_committed_sequences) <= 2 /\ Cardinality(runtime_delivery_acknowledged_sequences) <= 2
 
 Spec ==
     /\ Init
@@ -2154,5 +2249,6 @@ THEOREM Spec => []runtime_delivery_applied_cursor_does_not_pass_committed_sequen
 THEOREM Spec => []runtime_delivery_empty_delivery_set_has_zero_sequence
 THEOREM Spec => []runtime_delivery_delivery_identity_and_sequence_cardinality_match
 THEOREM Spec => []runtime_delivery_committed_sequence_cardinality_tracks_high_water
+THEOREM Spec => []runtime_delivery_applied_cursor_is_never_acknowledged_pending
 
 =============================================================================

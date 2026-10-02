@@ -8,11 +8,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RuntimeDeliveryMachine`
 
 ### Code Anchors
-- `runtime_delivery_authority` (machine `RuntimeDeliveryMachine`): `crates/meerkat-runtime/src/delivery_inbox.rs` — generated runtime delivery identity, sequence, and ordered application authority with mechanical store CAS
+- `runtime_delivery_authority` (machine `RuntimeDeliveryMachine`): `crates/meerkat-runtime/src/delivery_inbox.rs` — generated runtime delivery identity, sequence, ordered application, and out-of-band acknowledgement authority with mechanical store CAS
 
 ### Scenarios
 - `runtime_delivery_idempotent_commit` — a stable delivery identity receives one generated sequence and exact replay reuses it
 - `runtime_delivery_ordered_application` — generated cursor authority applies each committed delivery exactly once in order
+- `runtime_delivery_out_of_band_acknowledgement` — an acknowledgement at the cursor applies the row; one ahead of the cursor is recorded instead of refused, and the cursor later advances over the contiguous acknowledged prefix without re-application, so out-of-order acknowledgement never wedges the queue
 
 ### Transitions
 - `CommitNewDelivery`
@@ -27,6 +28,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ObserveAlreadyAppliedDelivery`
   - anchors: `runtime_delivery_authority`
   - scenarios: `runtime_delivery_ordered_application`
+- `AcknowledgeNextDelivery`
+  - anchors: `runtime_delivery_authority`
+  - scenarios: `runtime_delivery_out_of_band_acknowledgement`
+- `AcknowledgeAheadOfCursor`
+  - anchors: `runtime_delivery_authority`
+  - scenarios: `runtime_delivery_out_of_band_acknowledgement`
+- `ObserveAlreadyAppliedAcknowledgement`
+  - anchors: `runtime_delivery_authority`
+  - scenarios: `runtime_delivery_out_of_band_acknowledgement`
+- `AdvanceOverAcknowledgedDelivery`
+  - anchors: `runtime_delivery_authority`
+  - scenarios: `runtime_delivery_out_of_band_acknowledgement`
 
 ### Effects
 - `DeliveryCommitted`
@@ -37,7 +50,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `runtime_delivery_idempotent_commit`
 - `DeliveryApplied`
   - anchors: `runtime_delivery_authority`
-  - scenarios: `runtime_delivery_ordered_application`
+  - scenarios: `runtime_delivery_ordered_application`, `runtime_delivery_out_of_band_acknowledgement`
+- `DeliveryAcknowledged`
+  - anchors: `runtime_delivery_authority`
+  - scenarios: `runtime_delivery_out_of_band_acknowledgement`
+- `AcknowledgedPrefixAdvanced`
+  - anchors: `runtime_delivery_authority`
+  - scenarios: `runtime_delivery_out_of_band_acknowledgement`
 
 ### Invariants
 - `applied_cursor_does_not_pass_committed_sequence`
@@ -52,6 +71,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `committed_sequence_cardinality_tracks_high_water`
   - anchors: `runtime_delivery_authority`
   - scenarios: (unclaimed)
+- `applied_cursor_is_never_acknowledged_pending`
+  - anchors: `runtime_delivery_authority`
+  - scenarios: `runtime_delivery_out_of_band_acknowledgement`
 
 
 <!-- GENERATED_COVERAGE_END -->

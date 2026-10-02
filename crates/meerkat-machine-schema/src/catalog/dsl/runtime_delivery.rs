@@ -15,6 +15,12 @@ machine! {
             committed_sequences: Set<u64>,
             next_sequence: u64,
             applied_cursor: u64,
+            // Committed sequences ahead of the cursor whose effect already
+            // reached their runtime out of band (for example the shell's own
+            // completion projection). The cursor still advances strictly in
+            // order; an acknowledged row is consumed when the cursor reaches
+            // it, so an out-of-order acknowledgement never wedges the queue.
+            acknowledged_sequences: Set<u64>,
         }
 
         init(Active) {
@@ -24,6 +30,7 @@ machine! {
             committed_sequences = EmptySet,
             next_sequence = 0,
             applied_cursor = 0,
+            acknowledged_sequences = EmptySet,
         }
 
         terminal []
@@ -41,6 +48,16 @@ machine! {
                 delivery_id: String,
                 delivery_sequence: u64,
             },
+            // The delivery's effect reached its runtime by another path. At
+            // the cursor this applies it; ahead of the cursor it is recorded
+            // and consumed later by AdvanceAcknowledgedPrefix.
+            AcknowledgeDelivery {
+                delivery_id: String,
+                delivery_sequence: u64,
+            },
+            // Advance the cursor over the next sequence when it was already
+            // acknowledged. The shell drives this while it is enabled.
+            AdvanceAcknowledgedPrefix {},
         }
 
         effect RuntimeDeliveryEffect {
@@ -56,6 +73,13 @@ machine! {
             },
             DeliveryApplied {
                 delivery_id: String,
+                delivery_sequence: u64,
+            },
+            DeliveryAcknowledged {
+                delivery_id: String,
+                delivery_sequence: u64,
+            },
+            AcknowledgedPrefixAdvanced {
                 delivery_sequence: u64,
             },
         }
@@ -76,9 +100,15 @@ machine! {
             self.committed_sequences.len() == self.next_sequence
         }
 
+        invariant applied_cursor_is_never_acknowledged_pending {
+            self.acknowledged_sequences.contains(self.applied_cursor) == false
+        }
+
         disposition DeliveryCommitted => routed [DetachedJobMachine] seam NoOwnerRealization,
         disposition DeliveryReused => routed [DetachedJobMachine] seam NoOwnerRealization,
         disposition DeliveryApplied => local seam OwnerRealizationOnly,
+        disposition DeliveryAcknowledged => local seam OwnerRealizationOnly,
+        disposition AcknowledgedPrefixAdvanced => local seam OwnerRealizationOnly,
 
         transition CommitNewDelivery {
             on input CommitDelivery { delivery_id, source_sequence }
@@ -130,6 +160,7 @@ machine! {
             }
             update {
                 self.applied_cursor = delivery_sequence;
+                self.acknowledged_sequences.remove(delivery_sequence);
             }
             to Active
             emit DeliveryApplied {
@@ -151,6 +182,78 @@ machine! {
             emit DeliveryApplied {
                 delivery_id: delivery_id,
                 delivery_sequence: delivery_sequence
+            }
+        }
+
+        transition AcknowledgeNextDelivery {
+            on input AcknowledgeDelivery { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::Active
+                    && self.delivery_ids.contains(delivery_id)
+                    && self.delivery_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+                    && delivery_sequence > self.applied_cursor
+                    && delivery_sequence - 1 == self.applied_cursor
+            }
+            update {
+                self.applied_cursor = delivery_sequence;
+                self.acknowledged_sequences.remove(delivery_sequence);
+            }
+            to Active
+            emit DeliveryApplied {
+                delivery_id: delivery_id,
+                delivery_sequence: delivery_sequence
+            }
+        }
+
+        transition AcknowledgeAheadOfCursor {
+            on input AcknowledgeDelivery { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::Active
+                    && self.delivery_ids.contains(delivery_id)
+                    && self.delivery_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+                    && delivery_sequence > self.applied_cursor
+                    && delivery_sequence - 1 > self.applied_cursor
+            }
+            update {
+                self.acknowledged_sequences.insert(delivery_sequence);
+            }
+            to Active
+            emit DeliveryAcknowledged {
+                delivery_id: delivery_id,
+                delivery_sequence: delivery_sequence
+            }
+        }
+
+        transition ObserveAlreadyAppliedAcknowledgement {
+            on input AcknowledgeDelivery { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::Active
+                    && self.delivery_ids.contains(delivery_id)
+                    && self.delivery_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+                    && delivery_sequence <= self.applied_cursor
+            }
+            update {}
+            to Active
+            emit DeliveryApplied {
+                delivery_id: delivery_id,
+                delivery_sequence: delivery_sequence
+            }
+        }
+
+        transition AdvanceOverAcknowledgedDelivery {
+            on input AdvanceAcknowledgedPrefix {}
+            guard {
+                self.lifecycle_phase == Phase::Active
+                    && self.applied_cursor < self.next_sequence
+                    && self.acknowledged_sequences.contains(self.applied_cursor + 1)
+            }
+            update {
+                self.acknowledged_sequences.remove(self.applied_cursor + 1);
+                self.applied_cursor += 1;
+            }
+            to Active
+            emit AcknowledgedPrefixAdvanced {
+                delivery_sequence: self.applied_cursor
             }
         }
     }

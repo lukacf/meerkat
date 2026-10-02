@@ -534,8 +534,8 @@ pub use completion::{
     CompletionCleanupObservation, CompletionHandle, CompletionOutcome, CompletionWaitError,
 };
 pub use delivery_inbox::{
-    RuntimeDeliveryError, RuntimeDeliveryId, RuntimeDeliveryInbox, RuntimeDeliveryKind,
-    RuntimeDeliveryReceipt, RuntimeDeliveryRecord, RuntimeDeliverySubmission,
+    RuntimeDeliveryAcknowledgement, RuntimeDeliveryError, RuntimeDeliveryId, RuntimeDeliveryInbox,
+    RuntimeDeliveryKind, RuntimeDeliveryReceipt, RuntimeDeliveryRecord, RuntimeDeliverySubmission,
 };
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
 pub use exact_operation::{

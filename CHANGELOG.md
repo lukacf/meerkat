@@ -381,6 +381,25 @@ them.
   equality would have aborted TLC with a non-boolean IF condition. The Rust
   kernels were unaffected, and every existing invariant, audit and witness
   result is unchanged on the regenerated models.
+- Out-of-order acknowledgement no longer wedges a session's runtime delivery
+  cursor (#1497).
+  - The cursor wedged in two ways:
+    - The shell acknowledged a job terminal while an earlier row (a monitor
+      notification, or another job's terminal that completed later) was still
+      pending. `mark_applied` refused it as out of order, the failure was only
+      logged, and every later delivery for that session stayed blocked.
+    - The same happened when two concurrent shell jobs completed out of order.
+  - `RuntimeDeliveryInbox::acknowledge` now records an out-of-band
+    acknowledgement ahead of the cursor in generated `RuntimeDeliveryMachine`
+    authority (new `AcknowledgeDelivery` / `AdvanceAcknowledgedPrefix`
+    inputs). The cursor still moves strictly in order and advances over the
+    contiguous acknowledged prefix.
+  - The job applier marks acknowledged rows applied without re-running their
+    sinks. `RuntimeDeliveryInbox::acknowledged_pending_sequences` and
+    `RuntimeDeliveryAcknowledgement` are new.
+  - Delivering an off-RPC monitor notification itself still needs the library
+    applier, which is held with the ingress work.
+
 - A prompt admitted to a session while its executor attachment was still
   being prepared could stay queued forever. The attachment read its queue to
   decide whether to wake its runtime loop, then handed the session mutation

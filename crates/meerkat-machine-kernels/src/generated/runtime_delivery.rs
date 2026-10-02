@@ -32,6 +32,7 @@ pub struct State {
     pub committed_sequences: std::collections::BTreeSet<u64>,
     pub next_sequence: u64,
     pub applied_cursor: u64,
+    pub acknowledged_sequences: std::collections::BTreeSet<u64>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -52,18 +53,29 @@ pub mod inputs {
         pub delivery_id: String,
         pub delivery_sequence: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AcknowledgeDelivery {
+        pub delivery_id: String,
+        pub delivery_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdvanceAcknowledgedPrefix {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Input {
     CommitDelivery(inputs::CommitDelivery),
     MarkDeliveryApplied(inputs::MarkDeliveryApplied),
+    AcknowledgeDelivery(inputs::AcknowledgeDelivery),
+    AdvanceAcknowledgedPrefix(inputs::AdvanceAcknowledgedPrefix),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
         match self {
             Self::CommitDelivery(_) => InputKind::CommitDelivery,
             Self::MarkDeliveryApplied(_) => InputKind::MarkDeliveryApplied,
+            Self::AcknowledgeDelivery(_) => InputKind::AcknowledgeDelivery,
+            Self::AdvanceAcknowledgedPrefix(_) => InputKind::AdvanceAcknowledgedPrefix,
         }
     }
 }
@@ -71,6 +83,8 @@ impl Input {
 pub enum InputKind {
     CommitDelivery,
     MarkDeliveryApplied,
+    AcknowledgeDelivery,
+    AdvanceAcknowledgedPrefix,
 }
 
 pub mod effects {
@@ -93,6 +107,15 @@ pub mod effects {
         pub delivery_id: String,
         pub delivery_sequence: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeliveryAcknowledged {
+        pub delivery_id: String,
+        pub delivery_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AcknowledgedPrefixAdvanced {
+        pub delivery_sequence: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -100,12 +123,16 @@ pub enum Effect {
     DeliveryCommitted(effects::DeliveryCommitted),
     DeliveryReused(effects::DeliveryReused),
     DeliveryApplied(effects::DeliveryApplied),
+    DeliveryAcknowledged(effects::DeliveryAcknowledged),
+    AcknowledgedPrefixAdvanced(effects::AcknowledgedPrefixAdvanced),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
     DeliveryCommitted,
     DeliveryReused,
     DeliveryApplied,
+    DeliveryAcknowledged,
+    AcknowledgedPrefixAdvanced,
 }
 
 #[allow(non_camel_case_types)]
@@ -115,6 +142,10 @@ pub enum TransitionId {
     ReuseCommittedDelivery,
     ApplyNextDelivery,
     ObserveAlreadyAppliedDelivery,
+    AcknowledgeNextDelivery,
+    AcknowledgeAheadOfCursor,
+    ObserveAlreadyAppliedAcknowledgement,
+    AdvanceOverAcknowledgedDelivery,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -193,5 +224,6 @@ pub fn initial_state() -> State {
         committed_sequences: Default::default(),
         next_sequence: 0,
         applied_cursor: 0,
+        acknowledged_sequences: Default::default(),
     }
 }

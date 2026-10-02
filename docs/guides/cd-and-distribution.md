@@ -282,6 +282,21 @@ attestation artifact. Narrow `assets`,
 `packages`, `web-sdk`, and `web-sdk-publish` modes repair one publication
 surface without rebuilding or republishing unrelated surfaces.
 
+An `assets` recovery runs main's workflow against the tag, so its build
+attestations name main's commit. Each build job therefore checks that its
+checkout is the tag commit and attests a `<archive>.source-commit` stamp
+naming it; the publisher requires every archive and stamp to be attested by
+`release.yml` at the run's commit on `refs/heads/main`, and the stamp to name
+the tag commit. When an earlier `assets` run built everything but failed to
+publish, `--assets-run-id RUN_ID` (`ASSETS_RUN_ID=RUN_ID make
+release-assets`) publishes that run's archives without rebuilding: the run
+must be a `release.yml` dispatch on main at a commit in main's history whose
+`Release binary build gate` succeeded, and every archive must be attested by
+`release.yml` at that commit on `refs/heads/main`. A run from before archives
+were stamped is accepted only if every path changed between the tag and its
+commit is under `.github/` or `CHANGELOG.md`. Every published binary must
+embed the release version in either case.
+
 This CI-artifact exception does not bypass the semver gate. An ordinary
 explicit-`release_tag` package recovery still consumes main-push readiness
 evidence. When this gate applies, a manual dispatch with neither `release_tag`

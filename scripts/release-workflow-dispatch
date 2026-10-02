@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-usage: release-workflow-dispatch [--mode full|assets|packages|web-sdk|web-sdk-publish] [--version vX.Y.Z] [--backend auto|github-hosted|buildbuddy] [--ref REF] [--web-sdk-artifact-run-id RUN_ID] [--semver-evidence-run-id RUN_ID --semver-evidence-job-id JOB_ID] [--dry-run]
+usage: release-workflow-dispatch [--mode full|assets|packages|web-sdk|web-sdk-publish] [--version vX.Y.Z] [--backend auto|github-hosted|buildbuddy] [--ref REF] [--web-sdk-artifact-run-id RUN_ID] [--assets-run-id RUN_ID] [--semver-evidence-run-id RUN_ID --semver-evidence-job-id JOB_ID] [--dry-run]
 
 Dispatches the release workflow through the same public/default vs owner-only
 BuildBuddy backend split used by CI.
@@ -21,6 +21,9 @@ Environment equivalents:
   RELEASE_REF                Workflow ref. Defaults to the tag for full and main for recovery modes.
   REGISTRY_DRY_RUN           true/false for package publish dry-runs.
   WEB_SDK_ARTIFACT_RUN_ID    Existing workflow run id containing rkat-web-package.
+  ASSETS_RUN_ID              --mode assets only: publish the attested archives of
+                              this earlier main-dispatched asset recovery run
+                              instead of rebuilding them.
   SEMVER_EVIDENCE_RUN_ID     Exact failed tag-run id with a completed semver measurement.
   SEMVER_EVIDENCE_JOB_ID     Exact failed semver job id from that run.
   RELEASE_WORKFLOW_DRY_RUN   true/false to print the gh command without dispatching.
@@ -36,6 +39,7 @@ version="${VERSION:-${RELEASE_TAG:-}}"
 backend="${RELEASE_BACKEND:-auto}"
 workflow_ref="${RELEASE_REF:-}"
 web_sdk_artifact_run_id="${WEB_SDK_ARTIFACT_RUN_ID:-}"
+assets_run_id="${ASSETS_RUN_ID:-}"
 semver_evidence_run_id="${SEMVER_EVIDENCE_RUN_ID:-}"
 semver_evidence_job_id="${SEMVER_EVIDENCE_JOB_ID:-}"
 case "${RELEASE_WORKFLOW_DRY_RUN:-false}" in
@@ -67,6 +71,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --web-sdk-artifact-run-id)
       web_sdk_artifact_run_id="${2:?--web-sdk-artifact-run-id requires a value}"
+      shift 2
+      ;;
+    --assets-run-id)
+      assets_run_id="${2:?--assets-run-id requires a value}"
       shift 2
       ;;
     --semver-evidence-run-id)
@@ -168,6 +176,21 @@ if [[ -z "${workflow_ref}" ]]; then
   esac
 fi
 
+if [[ -n "${assets_run_id}" ]]; then
+  if [[ "${mode}" != "assets" ]]; then
+    echo "--assets-run-id is supported only for --mode assets" >&2
+    exit 2
+  fi
+  if [[ ! "${assets_run_id}" =~ ^[0-9]+$ ]]; then
+    echo "--assets-run-id must be a workflow run id: ${assets_run_id}" >&2
+    exit 2
+  fi
+  if [[ "${workflow_ref}" != "main" ]]; then
+    echo "--assets-run-id requires the main workflow ref (got ${workflow_ref})" >&2
+    exit 2
+  fi
+fi
+
 if [[ -n "${semver_evidence_run_id}" || -n "${semver_evidence_job_id}" ]]; then
   if [[ -z "${semver_evidence_run_id}" || -z "${semver_evidence_job_id}" ]]; then
     echo "semver recovery requires both --semver-evidence-run-id and --semver-evidence-job-id" >&2
@@ -204,6 +227,9 @@ case "${mode}" in
     args+=(
       -f "publish_release_assets_only=true"
     )
+    if [[ -n "${assets_run_id}" ]]; then
+      args+=(-f "assets_run_id=${assets_run_id}")
+    fi
     ;;
   packages)
     args+=(
@@ -236,6 +262,9 @@ printf 'release workflow backend: %s\n' "${backend}"
 printf 'release workflow mode: %s\n' "${mode}"
 printf 'release workflow ref: %s\n' "${workflow_ref}"
 printf 'release workflow tag: %s\n' "${version}"
+if [[ -n "${assets_run_id}" ]]; then
+  printf 'release workflow assets from run: %s (no rebuild)\n' "${assets_run_id}"
+fi
 if [[ -n "${semver_evidence_run_id}" ]]; then
   printf 'release workflow semver evidence: run %s, job %s\n' "${semver_evidence_run_id}" "${semver_evidence_job_id}"
 fi

@@ -4654,7 +4654,7 @@ impl SessionRuntime {
     > {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, None)
             .report_experimental_live_media_health(host, authority, channel_id, report)
             .await
     }

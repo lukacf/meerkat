@@ -108,6 +108,38 @@ them.
     Binding mob callback tools to the creating connection is tracked in #1459.
   - Stdio and embedded servers that pre-create the channel with
     `SessionRuntime::init_callback_channel` are unchanged.
+- Keyed WorkGraph admission (#1496, see Added) adds the create identity to the
+  generated `WorkGraphLifecycleMachine` vocabulary. Struct literals and
+  exhaustive matches must handle the new members:
+  - `meerkat_machine_schema` `WorkGraphLifecycleInput::CreateOpen` and
+    `WorkGraphLifecycleInput::CreateBlocked` gain
+    `admission_key: Option<WorkAdmissionKeyRef>` and
+    `admission_request_digest: Option<WorkAdmissionDigestRef>` (`None` for an
+    unkeyed create); the matching `meerkat_machine_kernels` `CreateOpen` and
+    `CreateBlocked` input structs gain the same fields.
+  - `WorkGraphLifecycleEffect::Created` changes from a unit variant to
+    `Created { admission_key, admission_request_digest }`; the
+    `meerkat_machine_kernels` `Created` effect struct gains `admission_key` and
+    `admission_request_digest`.
+  - `WorkGraphLifecycleEffect` and `WorkGraphLifecycleEffectVariant` gain the
+    variant `UnpairedAdmissionIdentityRejected`; in `meerkat_machine_kernels`
+    the work-graph lifecycle `Effect` and `EffectKind` gain it too, and
+    `TransitionId` gains `CreateOpenRejectedUnpairedAdmission` and
+    `CreateBlockedRejectedUnpairedAdmission` (appended, so existing
+    discriminants are unchanged).
+  - `meerkat_workgraph::WorkGraphError` gains the variants
+    `UnpairedAdmissionIdentity { admission_key_present, request_digest_present }`
+    and `SchemaMismatch { version, missing_objects, unexpected_objects,
+    changed_objects }`; the generated `WorkGraphErrorKind` gains
+    `UnpairedAdmissionIdentity` (classified `invalid_arguments`) and
+    `SchemaMismatch` (classified `store_error`), both appended.
+- `meerkat_sqlite::SqliteStoreError` gains `CurrentSchemaMismatch { domain,
+  version, missing_objects, unexpected_objects, changed_objects }`. A file
+  whose ledger row stamps a domain's CURRENT version but whose owned catalog is
+  not that schema is now reported with it, naming the missing, unexpected and
+  changed objects, instead of `SchemaFingerprintMismatch` (which remains for
+  released predecessors and post-migration self-checks). Exhaustive matches
+  must handle the new variant.
 - Typed tool choice (see Added). Struct literals and exhaustive matches must
   handle the new members:
   - `meerkat_llm_core::LlmRequest` gains `tool_choice: ToolChoice` (serde
@@ -291,6 +323,42 @@ them.
     stays correct but unbounded, and `PersistentSessionService` warns about
     it once at construction.
 
+- Exact keyed WorkGraph item admission (#1496):
+  `meerkat_workgraph::WorkGraphService::create_idempotent(admission_key, request)`
+  returns `WorkAdmissionOutcome::{Created, Replayed, Conflict { admission_key,
+  existing_item_id }}`.
+  - Within a realm and namespace a `WorkAdmissionKey` admits one item.
+  - The same key with the same request returns the existing item unchanged,
+    in any phase, terminal included, and writes nothing.
+  - The same key with a different request is a typed conflict and writes
+    nothing.
+  - The owner computes a domain-separated SHA-256 digest of the exact request
+    (with scope resolved). The new `WorkItemAdmissionMachine` owns the item's
+    admission identity and decides replay versus conflict
+    (`ClassifyAdmissionReplay`). It is bound to `WorkGraphLifecycleMachine` in
+    the `workgraph_attention_bundle` composition: every lifecycle `Created`
+    routes to the admission `Bind`, and `Bind` originates only from that
+    route, so no keyed item exists without its admission and no admission
+    without its item. The lifecycle machine's state space is unchanged.
+  - A create with a half-present identity (a key without a digest, or the
+    reverse) is a typed machine refusal (`UnpairedAdmissionIdentityRejected`),
+    surfaced as the new `WorkGraphError::UnpairedAdmissionIdentity`
+    (public class `invalid_arguments`), never a guard failure.
+  - Item JSON is unchanged; existing items load as unkeyed.
+  - A file stamped workgraph schema version 4 whose catalog is not this v4
+    (for example a development file from an unreleased build that used v4 for
+    a different admissions table) is refused with
+    `WorkGraphError::SchemaMismatch` naming the missing or changed objects, on
+    open and on every operation; it is never treated as current. Recreate such
+    files.
+  - SQLite indexes the key in the new `workgraph_item_admissions` table
+    (workgraph schema version 4; version 3 files migrate on open), in the
+    same transaction as the item and its event: a failure between the writes
+    leaves none of them. Concurrent admissions of one key create exactly once.
+  - New store capability `WorkGraphStore::insert_item_admitted` returns
+    `WorkItemAdmissionInsert::{Inserted, Existing}`. It defaults to
+    unsupported; the memory and SQLite stores implement it.
+  - `ExternalWorkRef` stays provenance only and is never a dedupe key.
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a

@@ -621,7 +621,8 @@ mod tests {
         .expect_err("partial current must be refused");
         assert!(matches!(
             err,
-            SqliteStoreError::SchemaFingerprintMismatch { version: 1, .. }
+            SqliteStoreError::CurrentSchemaMismatch { version: 1, ref changed_objects, .. }
+                if changed_objects == &vec!["table:preflight_t".to_string()]
         ));
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .expect("reopen raw");

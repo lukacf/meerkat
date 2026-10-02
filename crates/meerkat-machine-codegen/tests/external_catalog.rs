@@ -27,21 +27,49 @@ fn renamed(mut machine: MachineSchema, id: &str) -> MachineSchema {
     machine
 }
 
+const EXTERNAL_ATTENTION: &str = "ExternalAttentionMachine";
+
 /// workgraph_attention_bundle with its attention instance pointed at an
-/// external machine id.
-fn external_attention_bundle(external_id: &str) -> (CompositionSchema, Vec<MachineSchema>) {
+/// external machine id. The supplied catalog is derived from the
+/// composition's own instances (canonical machines for every other instance,
+/// the renamed attention machine for the external one), so a machine added to
+/// the composition later is picked up instead of failing as unknown.
+fn external_attention_bundle() -> (CompositionSchema, Vec<MachineSchema>) {
     let mut composition = workgraph_attention_bundle_composition();
-    let attention_name = dsl_work_attention_lifecycle_machine().machine;
+    let attention = dsl_work_attention_lifecycle_machine();
     for instance in &mut composition.machines {
-        if instance.machine_name == attention_name {
-            instance.machine_name = MachineId::parse(external_id).expect("machine slug");
+        if instance.machine_name == attention.machine {
+            instance.machine_name = MachineId::parse(EXTERNAL_ATTENTION).expect("machine slug");
         }
     }
-    let catalog = vec![
-        dsl_workgraph_lifecycle_machine(),
-        renamed(dsl_work_attention_lifecycle_machine(), external_id),
-    ];
+    let canonical = canonical_machine_schemas();
+    let mut catalog: Vec<MachineSchema> = Vec::new();
+    for instance in &composition.machines {
+        if catalog
+            .iter()
+            .any(|machine| machine.machine == instance.machine_name)
+        {
+            continue;
+        }
+        let machine = if instance.machine_name.as_str() == EXTERNAL_ATTENTION {
+            renamed(attention.clone(), EXTERNAL_ATTENTION)
+        } else {
+            canonical
+                .iter()
+                .find(|machine| machine.machine == instance.machine_name)
+                .cloned()
+                .expect("canonical machine for a composition instance")
+        };
+        catalog.push(machine);
+    }
     (composition, catalog)
+}
+
+fn machine_mut<'a>(catalog: &'a mut [MachineSchema], id: &str) -> &'a mut MachineSchema {
+    catalog
+        .iter_mut()
+        .find(|machine| machine.machine.as_str() == id)
+        .expect("machine in the supplied catalog")
 }
 
 #[test]
@@ -97,7 +125,7 @@ fn the_canonical_catalog_renders_byte_identically_through_the_catalog_entry_poin
 
 #[test]
 fn an_external_machine_renders_only_through_its_own_catalog() {
-    let (composition, catalog) = external_attention_bundle("ExternalAttentionMachine");
+    let (composition, catalog) = external_attention_bundle();
     let model = render_composition_semantic_model_with_catalog(&composition, &catalog)
         .expect("external catalog renders");
     assert!(model.contains("attention_phase"));
@@ -124,16 +152,18 @@ fn a_supplied_machine_may_not_shadow_a_canonical_machine() {
 
 #[test]
 fn a_supplied_catalog_refuses_duplicate_and_invalid_machines() {
-    let (composition, mut catalog) = external_attention_bundle("ExternalAttentionMachine");
-    catalog.push(catalog[1].clone());
+    let (composition, mut catalog) = external_attention_bundle();
+    let duplicate = machine_mut(&mut catalog, EXTERNAL_ATTENTION).clone();
+    catalog.push(duplicate);
     assert!(matches!(
         render_composition_semantic_model_with_catalog(&composition, &catalog),
         Err(CompositionTlaError::DuplicateSuppliedMachine { machine }) if machine == "ExternalAttentionMachine"
     ));
 
-    let (composition, mut catalog) = external_attention_bundle("ExternalAttentionMachine");
-    let first = catalog[1].transitions[0].clone();
-    catalog[1].transitions.push(first);
+    let (composition, mut catalog) = external_attention_bundle();
+    let external = machine_mut(&mut catalog, EXTERNAL_ATTENTION);
+    let first = external.transitions[0].clone();
+    external.transitions.push(first);
     assert!(matches!(
         render_composition_semantic_model_with_catalog(&composition, &catalog),
         Err(CompositionTlaError::InvalidSuppliedMachine { machine, .. }) if machine == "ExternalAttentionMachine"
@@ -142,8 +172,9 @@ fn a_supplied_catalog_refuses_duplicate_and_invalid_machines() {
 
 #[test]
 fn composition_machines_must_agree_on_shared_named_types() {
-    let (composition, mut catalog) = external_attention_bundle("ExternalAttentionMachine");
-    let shared = catalog[0]
+    let (composition, mut catalog) = external_attention_bundle();
+    let workgraph = dsl_workgraph_lifecycle_machine().machine;
+    let shared = machine_mut(&mut catalog, workgraph.as_str())
         .named_types
         .iter()
         .find(|binding| matches!(binding.rust, RustTypeAtom::String))
@@ -151,10 +182,11 @@ fn composition_machines_must_agree_on_shared_named_types() {
         .expect("a string-bound WorkGraph named type");
     let mut divergent = shared.clone();
     divergent.rust = RustTypeAtom::U64;
-    catalog[1]
+    let external = machine_mut(&mut catalog, EXTERNAL_ATTENTION);
+    external
         .named_types
         .retain(|binding| binding.name != shared.name);
-    catalog[1].named_types.push(divergent);
+    external.named_types.push(divergent);
     assert!(matches!(
         render_composition_semantic_model_with_catalog(&composition, &catalog),
         Err(CompositionTlaError::DivergentNamedTypeBinding { named_type, .. }) if named_type == shared.name.as_str()

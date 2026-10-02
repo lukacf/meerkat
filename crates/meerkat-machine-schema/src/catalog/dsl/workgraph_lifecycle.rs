@@ -61,6 +61,51 @@ impl<T: Into<String>> From<T> for WorkDependencyPathKey {
     }
 }
 
+/// Caller-owned exact admission key of a keyed work item create. The
+/// lifecycle machine carries it through `Created` to `WorkItemAdmissionMachine`,
+/// which records it and owns the replay-versus-conflict verdict.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct WorkAdmissionKeyRef(pub String);
+
+impl<T: Into<String>> From<T> for WorkAdmissionKeyRef {
+    fn from(value: T) -> Self {
+        Self(value.into())
+    }
+}
+
+/// Canonical SHA-256 digest of the exact admitted create request, computed by
+/// the WorkGraph owner (never supplied by the caller).
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct WorkAdmissionDigestRef(pub String);
+
+impl<T: Into<String>> From<T> for WorkAdmissionDigestRef {
+    fn from(value: T) -> Self {
+        Self(value.into())
+    }
+}
+
 #[derive(
     Debug,
     Clone,
@@ -267,6 +312,8 @@ pub enum WorkGraphErrorKind {
     UnsupportedBackend,
     AttentionTargetRealmMismatch,
     BackingStoreUnavailable,
+    UnpairedAdmissionIdentity,
+    SchemaMismatch,
 }
 
 /// Machine-owned public error classification surfaced to REST/RPC callers. The
@@ -619,6 +666,10 @@ machine! {
                 unresolved_blocker_count: u64,
                 failed_child_join_policy: Enum<FailedChildJoinPolicy>,
                 cancelled_child_join_policy: Enum<CancelledChildJoinPolicy>,
+                // Keyed admission identity of this create. Not lifecycle
+                // state: it rides `Created` to WorkItemAdmissionMachine.
+                admission_key: Option<WorkAdmissionKeyRef>,
+                admission_request_digest: Option<WorkAdmissionDigestRef>,
             },
             CreateBlocked {
                 due_at_utc_ms: Option<u64>,
@@ -630,6 +681,10 @@ machine! {
                 unresolved_blocker_count: u64,
                 failed_child_join_policy: Enum<FailedChildJoinPolicy>,
                 cancelled_child_join_policy: Enum<CancelledChildJoinPolicy>,
+                // Keyed admission identity of this create. Not lifecycle
+                // state: it rides `Created` to WorkItemAdmissionMachine.
+                admission_key: Option<WorkAdmissionKeyRef>,
+                admission_request_digest: Option<WorkAdmissionDigestRef>,
             },
             Update {
                 expected_revision: u64,
@@ -797,7 +852,10 @@ machine! {
         }
 
         effect WorkGraphLifecycleEffect {
-            Created,
+            Created {
+                admission_key: Option<WorkAdmissionKeyRef>,
+                admission_request_digest: Option<WorkAdmissionDigestRef>,
+            },
             Updated,
             Claimed { owner_key: WorkOwnerKey },
             Released,
@@ -832,6 +890,9 @@ machine! {
             },
             WorkItemReadinessClassified { ready: bool },
             ChildJoinClassified { disposition: Enum<ChildJoinDisposition> },
+            // A create whose admission identity is half present (a key without
+            // a digest, or a digest without a key) is refused, never created.
+            UnpairedAdmissionIdentityRejected,
         }
 
         invariant absent_has_zero_revision {
@@ -1093,7 +1154,8 @@ machine! {
                 || self.completion_reviewer_quorum_threshold == None
         }
 
-        disposition Created => local seam NoOwnerRealization,
+        disposition Created => routed [WorkItemAdmissionMachine] seam NoOwnerRealization,
+        disposition UnpairedAdmissionIdentityRejected => local seam SurfaceResultAlignment,
         disposition Updated => local seam NoOwnerRealization,
         disposition Claimed => local seam NoOwnerRealization,
         disposition Released => local seam NoOwnerRealization,
@@ -1117,10 +1179,14 @@ machine! {
         disposition ChildJoinClassified => local seam SurfaceResultAlignment,
 
         transition CreateOpen {
-            on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy }
+            on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest }
             guard { self.lifecycle_phase == Phase::Absent }
             guard "completion_policy_payload_valid" {
                 completion_policy_payload_valid(completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold)
+            }
+            guard "admission_identity_paired" {
+                (admission_key == None && admission_request_digest == None)
+                    || (admission_key != None && admission_request_digest != None)
             }
             update {
                 self.revision = 1;
@@ -1135,14 +1201,21 @@ machine! {
                 self.cancelled_child_join_policy = cancelled_child_join_policy;
             }
             to Open
-            emit Created
+            emit Created {
+                admission_key: admission_key,
+                admission_request_digest: admission_request_digest
+            }
         }
 
         transition CreateBlocked {
-            on input CreateBlocked { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy }
+            on input CreateBlocked { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest }
             guard { self.lifecycle_phase == Phase::Absent }
             guard "completion_policy_payload_valid" {
                 completion_policy_payload_valid(completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold)
+            }
+            guard "admission_identity_paired" {
+                (admission_key == None && admission_request_digest == None)
+                    || (admission_key != None && admission_request_digest != None)
             }
             update {
                 self.revision = 1;
@@ -1157,7 +1230,10 @@ machine! {
                 self.cancelled_child_join_policy = cancelled_child_join_policy;
             }
             to Blocked
-            emit Created
+            emit Created {
+                admission_key: admission_key,
+                admission_request_digest: admission_request_digest
+            }
         }
 
         transition UpdateOpen {
@@ -1891,6 +1967,7 @@ machine! {
                 kind == WorkGraphErrorKind::InvalidInput
                 || kind == WorkGraphErrorKind::InvalidTimestampMillis
                 || kind == WorkGraphErrorKind::AttentionTargetRealmMismatch
+                || kind == WorkGraphErrorKind::UnpairedAdmissionIdentity
             }
             update {}
             to Absent
@@ -1921,6 +1998,7 @@ machine! {
                 kind == WorkGraphErrorKind::Store
                     || kind == WorkGraphErrorKind::BackingStoreUnavailable
                     || kind == WorkGraphErrorKind::NamespaceAssignmentRequired
+                    || kind == WorkGraphErrorKind::SchemaMismatch
             }
             update {}
             to Absent
@@ -2490,6 +2568,38 @@ machine! {
             update {}
             to Absent
             emit ConfirmationAdmissionClassified { admission: WorkConfirmationAdmissionKind::Admitted }
+        }
+
+        // Declared last so the generated TransitionId ordinals of every
+        // released transition stay unchanged.
+        // Typed refusal of a half-present admission identity: exactly one of
+        // the key and the digest is present. Absent stays Absent, nothing is
+        // created and no Created effect routes to WorkItemAdmissionMachine.
+        transition CreateOpenRejectedUnpairedAdmission {
+            on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest }
+            guard { self.lifecycle_phase == Phase::Absent }
+            guard "admission_identity_unpaired" {
+                (admission_key != None && admission_request_digest == None)
+                    || (admission_key == None && admission_request_digest != None)
+            }
+            update {}
+            to Absent
+            emit UnpairedAdmissionIdentityRejected
+        }
+
+        // Typed refusal of a half-present admission identity: exactly one of
+        // the key and the digest is present. Absent stays Absent, nothing is
+        // created and no Created effect routes to WorkItemAdmissionMachine.
+        transition CreateBlockedRejectedUnpairedAdmission {
+            on input CreateBlocked { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest }
+            guard { self.lifecycle_phase == Phase::Absent }
+            guard "admission_identity_unpaired" {
+                (admission_key != None && admission_request_digest == None)
+                    || (admission_key == None && admission_request_digest != None)
+            }
+            update {}
+            to Absent
+            emit UnpairedAdmissionIdentityRejected
         }
     }
 }

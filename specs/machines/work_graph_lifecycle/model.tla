@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for WorkGraphLifecycleMachine.
 
-CONSTANTS BooleanValues, CancelledChildJoinPolicyValues, ChildJoinDispositionValues, FailedChildJoinPolicyValues, NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkCloseStatusAdmissionKindValues, WorkCompletionPolicyMutationAdmissionKindValues, WorkCompletionPolicyValues, WorkConfirmationAdmissionKindValues, WorkConfirmationEvidenceObservationValues, WorkCreateCompletionPolicyAdmissionKindValues, WorkCreateStatusAdmissionKindValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkGraphErrorKindValues, WorkGraphPublicErrorClassValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues, WorkOwnerKindValues, WorkPolicyEscalationAdmissionKindValues, WorkPublicConfirmationAdmissionKindValues
+CONSTANTS BooleanValues, CancelledChildJoinPolicyValues, ChildJoinDispositionValues, FailedChildJoinPolicyValues, NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkAdmissionDigestRefValues, WorkAdmissionKeyRefValues, WorkCloseStatusAdmissionKindValues, WorkCompletionPolicyMutationAdmissionKindValues, WorkCompletionPolicyValues, WorkConfirmationAdmissionKindValues, WorkConfirmationEvidenceObservationValues, WorkCreateCompletionPolicyAdmissionKindValues, WorkCreateStatusAdmissionKindValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkGraphErrorKindValues, WorkGraphPublicErrorClassValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues, WorkOwnerKindValues, WorkPolicyEscalationAdmissionKindValues, WorkPublicConfirmationAdmissionKindValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -23,6 +23,8 @@ WorkEdgeKeyValuesDeep == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1",
 WorkOwnerKeyValuesDeep == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}
 
 OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
+OptionWorkAdmissionDigestRefValues == {None} \cup {Some(x) : x \in WorkAdmissionDigestRefValues}
+OptionWorkAdmissionKeyRefValues == {None} \cup {Some(x) : x \in WorkAdmissionKeyRefValues}
 OptionWorkOwnerKeyValues == {None} \cup {Some(x) : x \in WorkOwnerKeyValues}
 OptionWorkOwnerKindValues == {None} \cup {Some(x) : x \in WorkOwnerKindValues}
 
@@ -98,9 +100,10 @@ UnchangedFrame_cdb06b1cc475a560 == UNCHANGED << unresolved_blocker_count, topolo
 UnchangedFrame_d98d5f8c941e6bc0 == UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys, failed_child_join_policy, cancelled_child_join_policy >>
 UnchangedFrame_ea30709c66621d98 == UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
-CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy) ==
+CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, admission_key, admission_request_digest) ==
     /\ phase = "Absent"
     /\ completion_policy_payload_valid(arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold)
+    /\ (IF ((admission_key = None) /\ (admission_request_digest = None)) THEN TRUE ELSE ((admission_key # None) /\ (admission_request_digest # None)))
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = 1
@@ -116,9 +119,10 @@ CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, a
     /\ UnchangedFrame_ea30709c66621d98
 
 
-CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy) ==
+CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, admission_key, admission_request_digest) ==
     /\ phase = "Absent"
     /\ completion_policy_payload_valid(arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold)
+    /\ (IF ((admission_key = None) /\ (admission_request_digest = None)) THEN TRUE ELSE ((admission_key # None) /\ (admission_request_digest # None)))
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = 1
@@ -781,7 +785,7 @@ ClassifyPublicErrorInvalidTransitionFailed(kind) ==
 
 ClassifyPublicErrorInvalidArgumentsAbsent(kind) ==
     /\ phase = "Absent"
-    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (kind = "AttentionTargetRealmMismatch")))
+    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (kind = "UnpairedAdmissionIdentity"))))
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -789,7 +793,7 @@ ClassifyPublicErrorInvalidArgumentsAbsent(kind) ==
 
 ClassifyPublicErrorInvalidArgumentsOpen(kind) ==
     /\ phase = "Open"
-    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (kind = "AttentionTargetRealmMismatch")))
+    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (kind = "UnpairedAdmissionIdentity"))))
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -797,7 +801,7 @@ ClassifyPublicErrorInvalidArgumentsOpen(kind) ==
 
 ClassifyPublicErrorInvalidArgumentsInProgress(kind) ==
     /\ phase = "InProgress"
-    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (kind = "AttentionTargetRealmMismatch")))
+    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (kind = "UnpairedAdmissionIdentity"))))
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -805,7 +809,7 @@ ClassifyPublicErrorInvalidArgumentsInProgress(kind) ==
 
 ClassifyPublicErrorInvalidArgumentsBlocked(kind) ==
     /\ phase = "Blocked"
-    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (kind = "AttentionTargetRealmMismatch")))
+    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (kind = "UnpairedAdmissionIdentity"))))
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -813,7 +817,7 @@ ClassifyPublicErrorInvalidArgumentsBlocked(kind) ==
 
 ClassifyPublicErrorInvalidArgumentsCompleted(kind) ==
     /\ phase = "Completed"
-    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (kind = "AttentionTargetRealmMismatch")))
+    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (kind = "UnpairedAdmissionIdentity"))))
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -821,7 +825,7 @@ ClassifyPublicErrorInvalidArgumentsCompleted(kind) ==
 
 ClassifyPublicErrorInvalidArgumentsCancelled(kind) ==
     /\ phase = "Cancelled"
-    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (kind = "AttentionTargetRealmMismatch")))
+    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (kind = "UnpairedAdmissionIdentity"))))
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -829,7 +833,7 @@ ClassifyPublicErrorInvalidArgumentsCancelled(kind) ==
 
 ClassifyPublicErrorInvalidArgumentsFailed(kind) ==
     /\ phase = "Failed"
-    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (kind = "AttentionTargetRealmMismatch")))
+    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (kind = "UnpairedAdmissionIdentity"))))
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -893,7 +897,7 @@ ClassifyPublicErrorCapabilityUnavailableFailed(kind) ==
 
 ClassifyPublicErrorStoreErrorAbsent(kind) ==
     /\ phase = "Absent"
-    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (kind = "NamespaceAssignmentRequired")))
+    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (kind = "SchemaMismatch"))))
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -901,7 +905,7 @@ ClassifyPublicErrorStoreErrorAbsent(kind) ==
 
 ClassifyPublicErrorStoreErrorOpen(kind) ==
     /\ phase = "Open"
-    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (kind = "NamespaceAssignmentRequired")))
+    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (kind = "SchemaMismatch"))))
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -909,7 +913,7 @@ ClassifyPublicErrorStoreErrorOpen(kind) ==
 
 ClassifyPublicErrorStoreErrorInProgress(kind) ==
     /\ phase = "InProgress"
-    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (kind = "NamespaceAssignmentRequired")))
+    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (kind = "SchemaMismatch"))))
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -917,7 +921,7 @@ ClassifyPublicErrorStoreErrorInProgress(kind) ==
 
 ClassifyPublicErrorStoreErrorBlocked(kind) ==
     /\ phase = "Blocked"
-    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (kind = "NamespaceAssignmentRequired")))
+    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (kind = "SchemaMismatch"))))
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -925,7 +929,7 @@ ClassifyPublicErrorStoreErrorBlocked(kind) ==
 
 ClassifyPublicErrorStoreErrorCompleted(kind) ==
     /\ phase = "Completed"
-    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (kind = "NamespaceAssignmentRequired")))
+    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (kind = "SchemaMismatch"))))
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -933,7 +937,7 @@ ClassifyPublicErrorStoreErrorCompleted(kind) ==
 
 ClassifyPublicErrorStoreErrorCancelled(kind) ==
     /\ phase = "Cancelled"
-    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (kind = "NamespaceAssignmentRequired")))
+    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (kind = "SchemaMismatch"))))
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -941,7 +945,7 @@ ClassifyPublicErrorStoreErrorCancelled(kind) ==
 
 ClassifyPublicErrorStoreErrorFailed(kind) ==
     /\ phase = "Failed"
-    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (kind = "NamespaceAssignmentRequired")))
+    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (kind = "SchemaMismatch"))))
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -2935,9 +2939,25 @@ ClassifyConfirmationAdmissionAdmittedFailed(arg_completion_policy, arg_completio
     /\ UnchangedFrame_11dfc16157be893f
 
 
+CreateOpenRejectedUnpairedAdmission(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, admission_key, admission_request_digest) ==
+    /\ phase = "Absent"
+    /\ (IF ((admission_key # None) /\ (admission_request_digest = None)) THEN TRUE ELSE ((admission_key = None) /\ (admission_request_digest # None)))
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_11dfc16157be893f
+
+
+CreateBlockedRejectedUnpairedAdmission(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, admission_key, admission_request_digest) ==
+    /\ phase = "Absent"
+    /\ (IF ((admission_key # None) /\ (admission_request_digest = None)) THEN TRUE ELSE ((admission_key = None) /\ (admission_request_digest # None)))
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_11dfc16157be893f
+
+
 Next ==
-    \/ (phase = "Absent") /\ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy)
-    \/ (phase = "Absent") /\ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy)
+    \/ (phase = "Absent") /\ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : \E admission_key \in OptionWorkAdmissionKeyRefValues : \E admission_request_digest \in OptionWorkAdmissionDigestRefValues : CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, admission_key, admission_request_digest)
+    \/ (phase = "Absent") /\ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : \E admission_key \in OptionWorkAdmissionKeyRefValues : \E admission_request_digest \in OptionWorkAdmissionDigestRefValues : CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, admission_key, admission_request_digest)
     \/ (phase = "Open") /\ \E expected_revision \in {revision} : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : UpdateOpen(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
     \/ (phase = "InProgress") /\ \E expected_revision \in {revision} : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : UpdateInProgress(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
     \/ (phase = "Blocked") /\ \E expected_revision \in {revision} : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : UpdateBlocked(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
@@ -3268,6 +3288,8 @@ Next ==
     \/ (phase = "Completed") /\ \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E requested_principal_kind \in OptionWorkOwnerKindValues : \E supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : ClassifyConfirmationAdmissionAdmittedCompleted(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
     \/ (phase = "Cancelled") /\ \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E requested_principal_kind \in OptionWorkOwnerKindValues : \E supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : ClassifyConfirmationAdmissionAdmittedCancelled(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
     \/ (phase = "Failed") /\ \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E requested_principal_kind \in OptionWorkOwnerKindValues : \E supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : ClassifyConfirmationAdmissionAdmittedFailed(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+    \/ (phase = "Absent") /\ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : \E admission_key \in OptionWorkAdmissionKeyRefValues : \E admission_request_digest \in OptionWorkAdmissionDigestRefValues : CreateOpenRejectedUnpairedAdmission(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, admission_key, admission_request_digest)
+    \/ (phase = "Absent") /\ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : \E admission_key \in OptionWorkAdmissionKeyRefValues : \E admission_request_digest \in OptionWorkAdmissionDigestRefValues : CreateBlockedRejectedUnpairedAdmission(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, admission_key, admission_request_digest)
     \/ TerminalStutter
 
 absent_has_zero_revision == (IF (phase # "Absent") THEN TRUE ELSE (revision = 0))

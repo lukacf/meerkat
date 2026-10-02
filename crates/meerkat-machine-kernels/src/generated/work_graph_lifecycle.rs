@@ -179,6 +179,62 @@ impl std::fmt::Display for FailedChildJoinPolicy {
         f.write_str(self.as_str())
     }
 }
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct WorkAdmissionDigestRef(pub String);
+impl From<String> for WorkAdmissionDigestRef {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for WorkAdmissionDigestRef {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for WorkAdmissionDigestRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct WorkAdmissionKeyRef(pub String);
+impl From<String> for WorkAdmissionKeyRef {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for WorkAdmissionKeyRef {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for WorkAdmissionKeyRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -764,6 +820,10 @@ pub enum WorkGraphErrorKind {
     AttentionTargetRealmMismatch,
     #[serde(rename = "BackingStoreUnavailable")]
     BackingStoreUnavailable,
+    #[serde(rename = "UnpairedAdmissionIdentity")]
+    UnpairedAdmissionIdentity,
+    #[serde(rename = "SchemaMismatch")]
+    SchemaMismatch,
 }
 impl WorkGraphErrorKind {
     pub fn as_str(&self) -> &'static str {
@@ -780,6 +840,8 @@ impl WorkGraphErrorKind {
             Self::UnsupportedBackend => "UnsupportedBackend",
             Self::AttentionTargetRealmMismatch => "AttentionTargetRealmMismatch",
             Self::BackingStoreUnavailable => "BackingStoreUnavailable",
+            Self::UnpairedAdmissionIdentity => "UnpairedAdmissionIdentity",
+            Self::SchemaMismatch => "SchemaMismatch",
         }
     }
 }
@@ -799,6 +861,8 @@ impl std::convert::TryFrom<&str> for WorkGraphErrorKind {
             "UnsupportedBackend" => Ok(Self::UnsupportedBackend),
             "AttentionTargetRealmMismatch" => Ok(Self::AttentionTargetRealmMismatch),
             "BackingStoreUnavailable" => Ok(Self::BackingStoreUnavailable),
+            "UnpairedAdmissionIdentity" => Ok(Self::UnpairedAdmissionIdentity),
+            "SchemaMismatch" => Ok(Self::SchemaMismatch),
             other => Err(format!("invalid WorkGraphErrorKind value `{other}`")),
         }
     }
@@ -1209,6 +1273,8 @@ pub mod inputs {
         pub unresolved_blocker_count: u64,
         pub failed_child_join_policy: FailedChildJoinPolicy,
         pub cancelled_child_join_policy: CancelledChildJoinPolicy,
+        pub admission_key: Option<WorkAdmissionKeyRef>,
+        pub admission_request_digest: Option<WorkAdmissionDigestRef>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CreateBlocked {
@@ -1221,6 +1287,8 @@ pub mod inputs {
         pub unresolved_blocker_count: u64,
         pub failed_child_join_policy: FailedChildJoinPolicy,
         pub cancelled_child_join_policy: CancelledChildJoinPolicy,
+        pub admission_key: Option<WorkAdmissionKeyRef>,
+        pub admission_request_digest: Option<WorkAdmissionDigestRef>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Update {
@@ -1455,7 +1523,10 @@ pub mod effects {
     #[allow(unused_imports)]
     use super::*;
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct Created {}
+    pub struct Created {
+        pub admission_key: Option<WorkAdmissionKeyRef>,
+        pub admission_request_digest: Option<WorkAdmissionDigestRef>,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Updated {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1528,6 +1599,8 @@ pub mod effects {
     pub struct ChildJoinClassified {
         pub disposition: ChildJoinDisposition,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct UnpairedAdmissionIdentityRejected {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1556,6 +1629,7 @@ pub enum Effect {
     ConfirmationAdmissionClassified(effects::ConfirmationAdmissionClassified),
     WorkItemReadinessClassified(effects::WorkItemReadinessClassified),
     ChildJoinClassified(effects::ChildJoinClassified),
+    UnpairedAdmissionIdentityRejected(effects::UnpairedAdmissionIdentityRejected),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -1581,6 +1655,7 @@ pub enum EffectKind {
     ConfirmationAdmissionClassified,
     WorkItemReadinessClassified,
     ChildJoinClassified,
+    UnpairedAdmissionIdentityRejected,
 }
 
 #[allow(non_camel_case_types)]
@@ -1918,6 +1993,8 @@ pub enum TransitionId {
     ClassifyConfirmationAdmissionAdmittedCompleted,
     ClassifyConfirmationAdmissionAdmittedCancelled,
     ClassifyConfirmationAdmissionAdmittedFailed,
+    CreateOpenRejectedUnpairedAdmission,
+    CreateBlockedRejectedUnpairedAdmission,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

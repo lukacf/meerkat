@@ -26,7 +26,7 @@ use super::{
         dsl_schedule_lifecycle_machine, dsl_session_document_machine,
         dsl_session_turn_admission_machine, dsl_temporary_council_lifecycle_machine,
         dsl_work_attention_lifecycle_machine, dsl_work_execution_lifecycle_machine,
-        dsl_workgraph_lifecycle_machine,
+        dsl_work_item_admission_machine, dsl_workgraph_lifecycle_machine,
     },
 };
 
@@ -1899,11 +1899,13 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 "workgraph_lifecycle",
                 "WorkGraphLifecycleMachine",
                 "crates/meerkat-workgraph/src/machine.rs",
-                "WorkGraphMachine domain-facing lifecycle transition seam over CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ClassifyTerminalityAbsent, ClassifyTerminalityOpen, ClassifyTerminalityInProgress, ClassifyTerminalityBlocked, ClassifyTerminalityCompleted, ClassifyTerminalityCancelled, ClassifyTerminalityFailed, ValidateLink, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, ClassifyCreateStatusAdmissionOpen, ClassifyCreateStatusAdmissionBlocked, ClassifyCreateStatusAdmissionDeniedAbsent, ClassifyCreateStatusAdmissionDeniedInProgress, ClassifyCreateStatusAdmissionDeniedCompleted, ClassifyCreateStatusAdmissionDeniedCancelled, ClassifyCreateStatusAdmissionDeniedFailed, ClassifyPublicConfirmationAdmissionSelfAttest, ClassifyPublicConfirmationAdmissionHostConfirmed, ClassifyPublicConfirmationAdmissionPrincipalConfirmed, ClassifyPublicConfirmationAdmissionSupervisor, ClassifyPublicConfirmationAdmissionReviewerQuorum, ClassifyCompletionPolicyMutationAdmissionUnchanged, ClassifyCompletionPolicyMutationAdmissionChanged; effects Created, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LifecycleTerminal, LifecycleNonTerminal, LinkValidated, Closed, EvidenceAdded, CreateStatusAdmissionClassified, PublicConfirmationAdmissionClassified, CompletionPolicyMutationAdmissionClassified; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, public status defaults, terminality classification, create status admission, public confirmation admission, completion policy mutation admission, and topology legality",
+                "WorkGraphMachine domain-facing lifecycle transition seam over CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, CreateOpenRejectedUnpairedAdmission, CreateBlockedRejectedUnpairedAdmission, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ClassifyTerminalityAbsent, ClassifyTerminalityOpen, ClassifyTerminalityInProgress, ClassifyTerminalityBlocked, ClassifyTerminalityCompleted, ClassifyTerminalityCancelled, ClassifyTerminalityFailed, ValidateLink, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, ClassifyCreateStatusAdmissionOpen, ClassifyCreateStatusAdmissionBlocked, ClassifyCreateStatusAdmissionDeniedAbsent, ClassifyCreateStatusAdmissionDeniedInProgress, ClassifyCreateStatusAdmissionDeniedCompleted, ClassifyCreateStatusAdmissionDeniedCancelled, ClassifyCreateStatusAdmissionDeniedFailed, ClassifyPublicConfirmationAdmissionSelfAttest, ClassifyPublicConfirmationAdmissionHostConfirmed, ClassifyPublicConfirmationAdmissionPrincipalConfirmed, ClassifyPublicConfirmationAdmissionSupervisor, ClassifyPublicConfirmationAdmissionReviewerQuorum, ClassifyCompletionPolicyMutationAdmissionUnchanged, ClassifyCompletionPolicyMutationAdmissionChanged; effects Created, UnpairedAdmissionIdentityRejected, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LifecycleTerminal, LifecycleNonTerminal, LinkValidated, Closed, EvidenceAdded, CreateStatusAdmissionClassified, PublicConfirmationAdmissionClassified, CompletionPolicyMutationAdmissionClassified; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, public status defaults, terminality classification, create status admission, public confirmation admission, completion policy mutation admission, and topology legality",
                 CoverageClaims::none()
                     .transitions(&[
                         "CreateOpen",
                         "CreateBlocked",
+                        "CreateOpenRejectedUnpairedAdmission",
+                        "CreateBlockedRejectedUnpairedAdmission",
                         "UpdateOpen",
                         "UpdateInProgress",
                         "UpdateBlocked",
@@ -2131,6 +2133,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     ])
                     .effects(&[
                         "Created",
+                        "UnpairedAdmissionIdentityRejected",
                         "Updated",
                         "Claimed",
                         "Released",
@@ -2158,11 +2161,13 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[
                 scenario(
                     "workgraph_create_update_ready_claim",
-                    "CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, Created, Updated, ClaimOpen, ClaimExpiredInProgress, Claimed, due eligibility, blocker satisfaction, public create status defaulting, create status admission classifies open and blocked as admissible creation states and denies the rest, and CAS revision",
+                    "CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, a half-present admission identity refused (CreateOpenRejectedUnpairedAdmission, CreateBlockedRejectedUnpairedAdmission, UnpairedAdmissionIdentityRejected), UpdateOpen, UpdateInProgress, UpdateBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, Created, Updated, ClaimOpen, ClaimExpiredInProgress, Claimed, due eligibility, blocker satisfaction, public create status defaulting, create status admission classifies open and blocked as admissible creation states and denies the rest, and CAS revision",
                     CoverageClaims::none()
                         .transitions(&[
                             "CreateOpen",
                             "CreateBlocked",
+                            "CreateOpenRejectedUnpairedAdmission",
+                            "CreateBlockedRejectedUnpairedAdmission",
                             "UpdateOpen",
                             "UpdateInProgress",
                             "UpdateBlocked",
@@ -2175,7 +2180,13 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "RefreshEligibilityInProgress",
                             "RefreshEligibilityBlocked",
                         ])
-                        .effects(&["Created", "Updated", "Claimed", "Blocked"]),
+                        .effects(&[
+                            "Created",
+                            "UnpairedAdmissionIdentityRejected",
+                            "Updated",
+                            "Claimed",
+                            "Blocked",
+                        ]),
                 ),
                 scenario(
                     "workgraph_claim_release_recovery",
@@ -2241,6 +2252,47 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         .effects(&["Blocked", "LinkValidated"]),
                 ),
             ],
+        ),
+        machine_manifest_from_schema(
+            &dsl_work_item_admission_machine(),
+            &[machine_anchor(
+                "work_item_admission",
+                "WorkItemAdmissionMachine",
+                "crates/meerkat-workgraph/src/machine.rs",
+                "WorkItemAdmissionMachine owner of a work item's exact keyed admission identity: BindKeyed and BindUnkeyed record (or decline) the identity delivered by the lifecycle Created route, and ClassifyAdmissionReplayExact, ClassifyAdmissionReplayConflict and ClassifyAdmissionReplayKeyMismatch decide, over the recovered identity, whether a keyed create that found an existing item is an exact replay, a typed conflict, or a store-index mismatch; effects Bound, AdmissionReplayClassified; invariants admitted_has_identity, non_admitted_has_no_identity",
+                CoverageClaims::none()
+                    .transitions(&[
+                        "BindKeyed",
+                        "BindUnkeyed",
+                        "ClassifyAdmissionReplayExactUnkeyed",
+                        "ClassifyAdmissionReplayExactAdmitted",
+                        "ClassifyAdmissionReplayConflictUnkeyed",
+                        "ClassifyAdmissionReplayConflictAdmitted",
+                        "ClassifyAdmissionReplayKeyMismatchAbsent",
+                        "ClassifyAdmissionReplayKeyMismatchUnkeyed",
+                        "ClassifyAdmissionReplayKeyMismatchAdmitted",
+                    ])
+                    .effects(&["Bound", "AdmissionReplayClassified"])
+                    .invariants(&["admitted_has_identity", "non_admitted_has_no_identity"]),
+            )],
+            &[scenario(
+                "work_item_admission_replay",
+                "a keyed create binds its identity once; an exact replay under the same key and digest is Replayed, the same key with another digest is Conflict, and another key (or an unkeyed or never-bound item) is KeyMismatch, in every phase",
+                CoverageClaims::none()
+                    .transitions(&[
+                        "BindKeyed",
+                        "BindUnkeyed",
+                        "ClassifyAdmissionReplayExactUnkeyed",
+                        "ClassifyAdmissionReplayExactAdmitted",
+                        "ClassifyAdmissionReplayConflictUnkeyed",
+                        "ClassifyAdmissionReplayConflictAdmitted",
+                        "ClassifyAdmissionReplayKeyMismatchAbsent",
+                        "ClassifyAdmissionReplayKeyMismatchUnkeyed",
+                        "ClassifyAdmissionReplayKeyMismatchAdmitted",
+                    ])
+                    .effects(&["Bound", "AdmissionReplayClassified"])
+                    .invariants(&["admitted_has_identity", "non_admitted_has_no_identity"]),
+            )],
         ),
         machine_manifest_from_schema(
             &dsl_work_attention_lifecycle_machine(),

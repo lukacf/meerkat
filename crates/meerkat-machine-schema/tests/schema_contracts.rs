@@ -76,6 +76,9 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             // WorkGraph: realm-scoped commitment graph lifecycle,
             // readiness, claim state, and topology validation.
             "WorkGraphLifecycleMachine",
+            // Work item admission owns one item's exact keyed admission
+            // identity and the replay-versus-conflict verdict.
+            "WorkItemAdmissionMachine",
             // Work attention owns goal/attention queue lifecycle.
             "WorkAttentionLifecycleMachine",
             // Work execution owns durable Mob Flow realization lifecycle.

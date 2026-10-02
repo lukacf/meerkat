@@ -12,6 +12,9 @@ use rusqlite::{
 };
 
 use crate::WorkGraphError;
+use crate::machines::work_item_admission::WorkItemAdmissionPhase;
+use crate::machines::workgraph_lifecycle::{WorkAdmissionDigestRef, WorkAdmissionKeyRef};
+use crate::types::WorkItemAdmissionState;
 use crate::types::{
     AttentionListRequest, AttentionPruneRequest, ClaimWorkItemRequest, ObserveReadinessRequest,
     WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionStatus, WorkEdge,
@@ -83,6 +86,26 @@ pub trait WorkGraphStore: Send + Sync {
         item: WorkItem,
         event: WorkGraphEvent,
     ) -> Result<WorkItem, WorkGraphError>;
+
+    /// Atomically admit one keyed work item.
+    ///
+    /// `admission` must be the `Admitted` state `WorkItemAdmissionMachine`
+    /// bound for this create. When its key is not yet admitted in the item's
+    /// realm/namespace, the item, `event` and the recorded admission identity
+    /// are written in ONE transaction, so no item exists without its identity
+    /// and no identity without its item. When the key is already admitted,
+    /// nothing is written and the existing item is returned with its recorded
+    /// identity: the store never judges replay versus conflict; the caller
+    /// classifies that through the admission machine. Concurrent admissions of
+    /// one key serialize to one `Inserted` and `Existing` for the rest.
+    async fn insert_item_admitted(
+        &self,
+        _item: WorkItem,
+        _event: WorkGraphEvent,
+        _admission: WorkItemAdmissionState,
+    ) -> Result<WorkItemAdmissionInsert, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
 
     async fn update_item_cas(
         &self,
@@ -553,6 +576,51 @@ fn unsupported(kind: WorkGraphStoreKind) -> WorkGraphError {
     WorkGraphError::UnsupportedBackend(kind.to_string())
 }
 
+/// Store-level result of [`WorkGraphStore::insert_item_admitted`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkItemAdmissionInsert {
+    /// The key was new; the item, its event and its identity were written.
+    Inserted(WorkItem),
+    /// The key was already admitted; the item that owns it and the identity
+    /// recorded for it, both unchanged.
+    Existing {
+        item: WorkItem,
+        admission: WorkItemAdmissionState,
+    },
+}
+
+/// Key and digest of the `Admitted` identity handed to
+/// [`WorkGraphStore::insert_item_admitted`]. Any other admission state is
+/// refused rather than written without an index entry.
+fn admitted_identity(
+    item: &WorkItem,
+    admission: &WorkItemAdmissionState,
+) -> Result<(String, String), WorkGraphError> {
+    match (
+        admission.lifecycle_phase,
+        admission.admission_key.as_ref(),
+        admission.request_digest.as_ref(),
+    ) {
+        (WorkItemAdmissionPhase::Admitted, Some(key), Some(digest)) => {
+            Ok((key.0.clone(), digest.0.clone()))
+        }
+        _ => Err(WorkGraphError::InvalidInput(format!(
+            "keyed admission of work item {} requires an Admitted identity with key and digest",
+            item.id
+        ))),
+    }
+}
+
+/// The admission state recorded for an admitted key: what
+/// `WorkItemAdmissionMachine` reached when it bound that identity.
+fn recorded_admission_state(key: String, digest: String) -> WorkItemAdmissionState {
+    WorkItemAdmissionState {
+        lifecycle_phase: WorkItemAdmissionPhase::Admitted,
+        admission_key: Some(WorkAdmissionKeyRef(key)),
+        request_digest: Some(WorkAdmissionDigestRef(digest)),
+    }
+}
+
 #[derive(Default)]
 pub struct MemoryWorkGraphStore {
     inner: Arc<RwLock<MemoryWorkGraphState>>,
@@ -565,6 +633,9 @@ struct MemoryWorkGraphState {
     execution_bindings:
         BTreeMap<(String, WorkNamespace, WorkExecutionBindingId), WorkExecutionBinding>,
     execution_recovery: std::collections::BTreeSet<(String, WorkNamespace, WorkExecutionBindingId)>,
+    // (realm, namespace, admission key) -> the one item admitted under it and
+    // its recorded request digest.
+    item_admissions: BTreeMap<(String, WorkNamespace, String), (WorkItemId, String)>,
     edges: Vec<WorkEdge>,
     events: Vec<WorkGraphEvent>,
     next_event_seq: i64,
@@ -611,6 +682,56 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         guard.items.insert(key, item.clone());
         guard.append_event(event);
         Ok(item)
+    }
+
+    async fn insert_item_admitted(
+        &self,
+        mut item: WorkItem,
+        mut event: WorkGraphEvent,
+        admission: WorkItemAdmissionState,
+    ) -> Result<WorkItemAdmissionInsert, WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
+        let (admission_key, request_digest) = admitted_identity(&item, &admission)?;
+        let mut guard = self.inner.write().await;
+        let admission_index = (
+            item.realm_id.clone(),
+            item.namespace.clone(),
+            admission_key.clone(),
+        );
+        if let Some((existing_id, existing_digest)) = guard.item_admissions.get(&admission_index) {
+            let existing = guard
+                .items
+                .get(&item_key(&item.realm_id, &item.namespace, existing_id))
+                .ok_or_else(|| {
+                    WorkGraphError::Store(format!(
+                        "work item admission index points to missing work item {existing_id}"
+                    ))
+                })?;
+            return Ok(WorkItemAdmissionInsert::Existing {
+                item: existing.clone(),
+                admission: recorded_admission_state(admission_key, existing_digest.clone()),
+            });
+        }
+        let key = item_key(&item.realm_id, &item.namespace, &item.id);
+        if guard.items.contains_key(&key) {
+            return Err(WorkGraphError::Conflict(format!(
+                "work item {} already exists",
+                item.id
+            )));
+        }
+        enrich_item_transition_facts(
+            None,
+            &mut item,
+            guard.items.values(),
+            guard.edges.iter(),
+            &mut event,
+        )?;
+        guard
+            .item_admissions
+            .insert(admission_index, (item.id.clone(), request_digest));
+        guard.items.insert(key, item.clone());
+        guard.append_event(event);
+        Ok(WorkItemAdmissionInsert::Inserted(item))
     }
 
     async fn update_item_cas(
@@ -2242,9 +2363,12 @@ impl SqliteWorkGraphStore {
                     ..Default::default()
                 },
             )
-            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-            meerkat_sqlite::apply_domain_migrations(&mut conn, &WORKGRAPH_DOMAIN)
-                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            .map_err(|err| {
+                workgraph_schema_error(err, |err| WorkGraphError::Store(err.to_string()))
+            })?;
+            meerkat_sqlite::apply_domain_migrations(&mut conn, &WORKGRAPH_DOMAIN).map_err(
+                |err| workgraph_schema_error(err, |err| WorkGraphError::Store(err.to_string())),
+            )?;
         }
         Ok(store)
     }
@@ -2316,8 +2440,9 @@ impl SqliteWorkGraphStore {
                 WORKGRAPH_DOMAIN.supported_version(),
             )));
         }
-        meerkat_sqlite::preflight_schema_eligibility(&tx, &WORKGRAPH_DOMAIN)
-            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        meerkat_sqlite::preflight_schema_eligibility(&tx, &WORKGRAPH_DOMAIN).map_err(|err| {
+            workgraph_schema_error(err, |err| WorkGraphError::Store(err.to_string()))
+        })?;
         let result = f(&tx)?;
         tx.commit()
             .map_err(|err| WorkGraphError::Store(err.to_string()))?;
@@ -2374,7 +2499,7 @@ impl SqliteWorkGraphStore {
                 ..Default::default()
             },
         )
-        .map_err(|err| self.backing_store_unavailable(err))?;
+        .map_err(|err| workgraph_schema_error(err, |err| self.backing_store_unavailable(err)))?;
         let version = meerkat_sqlite::domain_version(&conn, WORKGRAPH_DOMAIN.name)
             .map_err(|err| WorkGraphError::Store(err.to_string()))?;
         if version != Some(WORKGRAPH_DOMAIN.supported_version()) {
@@ -2384,6 +2509,31 @@ impl SqliteWorkGraphStore {
             )));
         }
         f(&mut conn)
+    }
+}
+
+/// A file stamped with the current workgraph version whose catalog is not
+/// that schema is a typed refusal naming the differing objects; every other
+/// open or preflight failure keeps the call site's existing mapping.
+#[cfg(not(target_arch = "wasm32"))]
+fn workgraph_schema_error(
+    error: meerkat_sqlite::SqliteStoreError,
+    otherwise: impl FnOnce(meerkat_sqlite::SqliteStoreError) -> WorkGraphError,
+) -> WorkGraphError {
+    match error {
+        meerkat_sqlite::SqliteStoreError::CurrentSchemaMismatch {
+            version,
+            missing_objects,
+            unexpected_objects,
+            changed_objects,
+            ..
+        } => WorkGraphError::SchemaMismatch {
+            version,
+            missing_objects,
+            unexpected_objects,
+            changed_objects,
+        },
+        other => otherwise(other),
     }
 }
 
@@ -2479,6 +2629,57 @@ impl WorkGraphStore for SqliteWorkGraphStore {
             tx.commit()
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
             Ok(item)
+        })
+    }
+
+    async fn insert_item_admitted(
+        &self,
+        mut item: WorkItem,
+        mut event: WorkGraphEvent,
+        admission: WorkItemAdmissionState,
+    ) -> Result<WorkItemAdmissionInsert, WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
+        let (admission_key, request_digest) = admitted_identity(&item, &admission)?;
+        self.with_connection(|conn| {
+            // IMMEDIATE takes the write lock before the index read, so two
+            // connections admitting one key serialize: the second observes
+            // the first's committed row and returns it as Existing.
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            if let Some((existing_id, existing_digest)) =
+                select_item_admission(&tx, &item.realm_id, &item.namespace, &admission_key)?
+            {
+                let existing = select_item(&tx, &item.realm_id, &item.namespace, &existing_id)?
+                    .ok_or_else(|| {
+                        WorkGraphError::Store(format!(
+                            "work item admission index points to missing work item {existing_id}"
+                        ))
+                    })?;
+                tx.commit()
+                    .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+                return Ok(WorkItemAdmissionInsert::Existing {
+                    item: existing,
+                    admission: recorded_admission_state(admission_key, existing_digest),
+                });
+            }
+            let items = list_sqlite_items(
+                &tx,
+                &WorkItemFilter {
+                    realm_id: Some(item.realm_id.clone()),
+                    namespace: Some(item.namespace.clone()),
+                    include_terminal: true,
+                    ..WorkItemFilter::default()
+                },
+            )?;
+            let edges = list_sqlite_edges(&tx, &item.realm_id, &item.namespace, None)?;
+            enrich_item_transition_facts(None, &mut item, items.iter(), edges.iter(), &mut event)?;
+            insert_item_tx(&tx, &item)?;
+            insert_item_admission_tx(&tx, &item, &admission_key, &request_digest)?;
+            insert_event_tx(&tx, &event)?;
+            tx.commit()
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            Ok(WorkItemAdmissionInsert::Inserted(item))
         })
     }
 
@@ -3644,13 +3845,100 @@ fn verify_released_0_8_15_workgraph_schema(conn: &Connection) -> Result<(), Stri
     )
 }
 
+/// Schema version 3, released from 0.8.16 through 0.8.51: the 0.8.15 schema
+/// plus the execution-binding table and its indexes.
+#[cfg(not(target_arch = "wasm32"))]
+fn build_released_0_8_16_workgraph_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    migration_0001_workgraph_schema(tx)?;
+    migration_0002_attention_query_columns(tx)?;
+    migration_0003_execution_bindings(tx)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn build_released_0_8_16_workgraph_schema_for_tests(
+    tx: &Transaction<'_>,
+) -> Result<(), rusqlite::Error> {
+    build_released_0_8_16_workgraph_schema(tx)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const RELEASED_0_8_16_WORKGRAPH_OBJECTS: &[meerkat_sqlite::SchemaObject] = &[
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "workgraph_items",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "idx_workgraph_items_realm_namespace_updated",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "workgraph_attention",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "idx_workgraph_attention_realm_namespace_updated",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "idx_workgraph_attention_scope_status",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "workgraph_edges",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "workgraph_execution_bindings",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "idx_workgraph_execution_bindings_item",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "idx_workgraph_execution_bindings_root",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "idx_workgraph_execution_bindings_supersedes",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "idx_workgraph_execution_bindings_target_run",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "idx_workgraph_execution_bindings_recovery",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "workgraph_events",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "idx_workgraph_events_realm_namespace_seq",
+    },
+];
+
+#[cfg(not(target_arch = "wasm32"))]
+fn verify_released_0_8_16_workgraph_schema(conn: &Connection) -> Result<(), String> {
+    meerkat_sqlite::verify_released_schema_fingerprint(
+        conn,
+        &WORKGRAPH_DOMAIN,
+        RELEASED_0_8_16_WORKGRAPH_OBJECTS,
+        build_released_0_8_16_workgraph_schema,
+    )
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 /// The workgraph store's schema domain in the per-file migration ledger.
 ///
 /// Migration 0001 is the base DDL; 0002 lifts the historical attention
 /// query-column upgrade (previously re-run on every open, idempotent only
 /// via "duplicate column name" error matching) into a once-per-file,
-/// transaction-wrapped migration with a `table_info` guard.
+/// transaction-wrapped migration with a `table_info` guard; 0003 adds
+/// execution bindings; 0004 adds the exact keyed item admission index.
 #[cfg(not(target_arch = "wasm32"))]
 pub const WORKGRAPH_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
     name: "workgraph",
@@ -3670,14 +3958,25 @@ pub const WORKGRAPH_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::Schem
             name: "execution-bindings",
             apply: migration_0003_execution_bindings,
         },
+        meerkat_sqlite::Migration {
+            version: 4,
+            name: "item-admissions",
+            apply: migration_0004_item_admissions,
+        },
     ],
     initialize_current: initialize_current_workgraph_schema,
-    allowed_existing_versions: &[2, 3],
+    allowed_existing_versions: &[2, 3, 4],
     bridge_recoverable_versions: &[1, 2],
-    released_predecessors: &[meerkat_sqlite::SchemaPredecessor {
-        version: 2,
-        verify: verify_released_0_8_15_workgraph_schema,
-    }],
+    released_predecessors: &[
+        meerkat_sqlite::SchemaPredecessor {
+            version: 2,
+            verify: verify_released_0_8_15_workgraph_schema,
+        },
+        meerkat_sqlite::SchemaPredecessor {
+            version: 3,
+            verify: verify_released_0_8_16_workgraph_schema,
+        },
+    ],
     owned_objects: &[
         meerkat_sqlite::SchemaObject {
             kind: meerkat_sqlite::SchemaObjectKind::Table,
@@ -3735,6 +4034,10 @@ pub const WORKGRAPH_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::Schem
             kind: meerkat_sqlite::SchemaObjectKind::Index,
             name: "idx_workgraph_events_realm_namespace_seq",
         },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "workgraph_item_admissions",
+        },
     ],
     retired_objects: &[],
 };
@@ -3743,7 +4046,29 @@ pub const WORKGRAPH_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::Schem
 fn initialize_current_workgraph_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     migration_0001_workgraph_schema(tx)?;
     migration_0002_attention_query_columns(tx)?;
-    migration_0003_execution_bindings(tx)
+    migration_0003_execution_bindings(tx)?;
+    migration_0004_item_admissions(tx)
+}
+
+/// Exact keyed item admission index. One row per admitted key; the item row
+/// itself carries the machine-owned admission identity, this table makes the
+/// key unique per realm/namespace and lets a replay find its item.
+#[cfg(not(target_arch = "wasm32"))]
+fn migration_0004_item_admissions(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(
+        r"
+        CREATE TABLE IF NOT EXISTS workgraph_item_admissions (
+            realm_id TEXT NOT NULL,
+            namespace TEXT NOT NULL,
+            admission_key TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            request_digest TEXT NOT NULL,
+            admitted_at_utc TEXT NOT NULL,
+            PRIMARY KEY (realm_id, namespace, admission_key),
+            UNIQUE (realm_id, namespace, item_id)
+        );
+        ",
+    )
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -4417,6 +4742,50 @@ fn select_item(
     )
     .optional()
     .map_err(|err| WorkGraphError::Store(err.to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn select_item_admission(
+    conn: &Connection,
+    realm_id: &str,
+    namespace: &WorkNamespace,
+    admission_key: &str,
+) -> Result<Option<(WorkItemId, String)>, WorkGraphError> {
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT item_id, request_digest FROM workgraph_item_admissions
+              WHERE realm_id = ?1 AND namespace = ?2 AND admission_key = ?3",
+            params![realm_id, namespace.as_str(), admission_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    row.map(|(item_id, digest)| WorkItemId::new(item_id).map(|id| (id, digest)))
+        .transpose()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn insert_item_admission_tx(
+    tx: &Transaction<'_>,
+    item: &WorkItem,
+    admission_key: &str,
+    request_digest: &str,
+) -> Result<(), WorkGraphError> {
+    tx.execute(
+        "INSERT INTO workgraph_item_admissions
+            (realm_id, namespace, admission_key, item_id, request_digest, admitted_at_utc)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            item.realm_id,
+            item.namespace.as_str(),
+            admission_key,
+            item.id.as_str(),
+            request_digest,
+            item.created_at.to_rfc3339(),
+        ],
+    )
+    .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -6551,7 +6920,7 @@ mod legacy_schema_tests {
         )
         .expect("bridge exact v2 catalog");
         assert_eq!(report.from_version, 2);
-        assert_eq!(report.to_version, 3);
+        assert_eq!(report.to_version, WORKGRAPH_DOMAIN.supported_version());
         assert_eq!(report.prepared, 1);
         let projections = conn
             .query_row(
@@ -6563,7 +6932,7 @@ mod legacy_schema_tests {
         assert_eq!(projections, (expected_status, expected_target_key));
         assert_eq!(
             meerkat_sqlite::domain_version(&conn, WORKGRAPH_DOMAIN.name).expect("ledger"),
-            Some(3)
+            Some(WORKGRAPH_DOMAIN.supported_version())
         );
 
         let rerun = meerkat_sqlite::bridge_unledgered_domain(
@@ -6574,8 +6943,8 @@ mod legacy_schema_tests {
             Some(prepare_pre_0_8_10_workgraph_attention),
         )
         .expect("idempotent target rerun");
-        assert_eq!(rerun.from_version, 3);
-        assert_eq!(rerun.to_version, 3);
+        assert_eq!(rerun.from_version, WORKGRAPH_DOMAIN.supported_version());
+        assert_eq!(rerun.to_version, WORKGRAPH_DOMAIN.supported_version());
         assert_eq!(rerun.prepared, 0);
     }
 

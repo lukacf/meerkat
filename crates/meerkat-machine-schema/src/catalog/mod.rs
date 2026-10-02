@@ -57,6 +57,7 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         dsl::dsl_session_document_machine(),
         dsl::dsl_session_turn_admission_machine(),
         dsl::dsl_workgraph_lifecycle_machine(),
+        dsl::dsl_work_item_admission_machine(),
         dsl::dsl_work_attention_lifecycle_machine(),
         dsl::dsl_work_execution_lifecycle_machine(),
         dsl::dsl_forked_participant_lifecycle_machine(),
@@ -134,6 +135,11 @@ pub fn canonical_machine_production_owner_relations() -> Vec<MachineProductionOw
             "WorkGraphLifecycleMachine",
             dsl::WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_CRATE,
             dsl::WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_MODULE,
+        ),
+        MachineProductionOwnerRelation::new(
+            "WorkItemAdmissionMachine",
+            dsl::WORK_ITEM_ADMISSION_PRODUCTION_RUST_CRATE,
+            dsl::WORK_ITEM_ADMISSION_PRODUCTION_RUST_MODULE,
         ),
         MachineProductionOwnerRelation::new(
             "WorkAttentionLifecycleMachine",

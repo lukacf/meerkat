@@ -69,8 +69,63 @@ It re-checks its output and refuses to write if anything forbidden remains.
 `scripts/gpt-live-scrub-provider-stream check DIR` is the committed-fixture
 gate: it exits nonzero on any finding and prints only `file:line: rule`, never
 the matched text. It runs as the `gpt-live-replay-fixture-scrubbed`
-pre-commit hook on every fixture here, and the replay tests apply the same
-rules to each fixture they load, so PR CI rejects an unscrubbed fixture.
+pre-commit hook on every fixture here. In PR CI,
+`gpt_live_replay::replay_fixtures_are_scrubbed` applies the credential, SDP,
+home-path and voice-audio rules to every embedded fixture, so an unscrubbed
+fixture fails the lane.
 
 Scenario content (instructions, transcripts, injected context) is synthetic
 test fixture text, so it is kept: replay needs it.
+
+## Replay
+
+`tests/integration/tests/gpt_live_replay.rs` (feature `gpt-live-replay`, a
+normal non-live target: no provider, no key) replays each fixture against the
+same host graph the live scenario drives: RPC server, mob, executor, and the
+shared exact-receipt live host with a concurrent bootstrap summary.
+
+```bash
+cargo test -p meerkat-integration-tests --features gpt-live-replay --test gpt_live_replay
+```
+
+PR CI runs it as the `gpt-live-replay` integration suite
+(`scripts/ci-cargo-lanes.mjs`) whenever a package on the public Live path,
+this directory or the harness changes.
+
+- **Provider:** `support/gpt_live_replay.rs`'s `Cassette` serves the fixture
+  as a local public Live API, reached through
+  `ExperimentalGptLiveOpenAuthority::with_test_base_url`. Each channel's tape
+  is walked in recorded order:
+  - a server frame is sent;
+  - a recorded client event is awaited until Meerkat sends one with the same
+    type and `event_id` (early arrival counts; payloads are not compared);
+  - a marker is awaited until the test steps it with `Cassette::release`;
+  - the receiver end closes the sideband.
+
+  Nothing waits on a clock.
+- **LLMs:** the executor's and the delegation worker's turns are a scripted
+  client keyed by purpose:
+  - the conversational ordinal;
+  - the delegated job (its request carries
+    `LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE`);
+  - the source member's reply to a merged post-close result.
+
+  Answers whose length shapes the client events (an appended reply is split
+  into 500-byte fragments, and the fragment index is in the `event_id`) are
+  taken from the fixture itself. The summary is a fixed stub.
+- **Ordering the product leaves open:** the test fixes it with typed gates,
+  matching what the recorded run did. For S104, the job's worker turn is
+  released after channel 1 is closed, and the merge reply after channel 2 is
+  connected. Each browser step is taken only once the host reached the state
+  the live run had reached; for example, the disconnect waits until the job's
+  worker has started.
+- **Assertions:**
+  - the replay records its own provider stream through the same journal hook,
+    and its client events per channel must equal the fixture's;
+  - each open's seed shape must match;
+  - the scenario's own contract holds (S104: the merged job's reply reaches the
+    reopened channel as runtime work carrying the result token).
+
+A divergence fails with where the tape is parked (the marker or client event
+it waits for). `REPLAY_DUMP_REQUESTS=1` prints every scripted LLM request with
+its classified purpose.

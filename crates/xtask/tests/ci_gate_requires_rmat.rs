@@ -234,7 +234,10 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "require_ran \"Example web suites\"",
         "require_ran \"WASM timer ownership\"",
         "require_ran \"Integration tests\"",
-        "--test '*' --profile ci-pr",
+        // Every tests/*.rs binary of an integration suite, unless the suite
+        // names its targets (the gpt-live replay suite runs one).
+        "test_flags=(--test '*')",
+        "\"${test_flags[@]}\" --profile ci-pr",
         "a build-relevant change produced no lanes",
         "neither a unit lane nor a deferred package list",
         "unit tests deferred to the push-to-main run",

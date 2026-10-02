@@ -845,6 +845,15 @@ impl MobOperatorToolDispatcher {
     }
 }
 
+/// Names of the mob operator tools a `mob` profile's members mount as external
+/// tools, for the profile's declared tool restriction.
+pub(crate) fn mob_operator_tool_names() -> meerkat_core::ToolNameSet {
+    local_operator_tool_defs()
+        .iter()
+        .map(|tool| meerkat_core::ToolName::new(tool.name.to_string()))
+        .collect()
+}
+
 /// The member-session operator tool definitions, local flavor: exactly what
 /// `MobOperatorToolDispatcher` advertises to a member whose profile enables
 /// mob tools. The remote flavor a member reaches through the upcall surface

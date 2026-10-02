@@ -382,7 +382,8 @@ them.
     matching variant too; it is `#[non_exhaustive]`, so that is additive.)
   - `meerkat::AgentBuildConfig` and `meerkat_core::service::SessionBuildOptions`
     gain `declared_tool_restriction: Option<DeclaredToolRestriction>`; the new
-    `meerkat_core::ops::DeclaredToolRestriction` carries it. Both new types
+    `meerkat_core::ops::DeclaredToolRestriction` carries it, including the
+    `mob_operator_tools` a `mob` profile mounts as external tools. Both new types
     are re-exported at the `meerkat_core` root.
   - `meerkat_core::SessionTooling` gains `spawn_tool_access_policy:
     Option<SpawnToolAccessPolicy>` (omitted when absent); the new
@@ -828,8 +829,10 @@ them.
   timer. It returns `Ok(None)` for a session without a live registration.
 - Per-profile tool deny list for mob members: `[profiles.<name>.tools]
   deny = ["mob_wire", "mob_unwire"]`. Members of the profile cannot execute
-  the named tools although their families stay enabled (the list-preserving
-  execution gate returns `access_denied`; the tools stay visible). It
+  the named tools although their families stay enabled. Denied tools stay
+  listed to the model (the cache prefix does not change) and every call to
+  one is refused with `access_denied` by the list-preserving execution gate,
+  exactly like `read_only` and the per-spawn deny. It
   conjoins with `read_only` and the per-spawn tool access policy, so a spawn
   cannot widen it, and children inherit it through the persisted effective
   policy. It is carried by portable specs, RPC/MCP mob definitions and
@@ -837,8 +840,12 @@ them.
   - Each name must be a tool of the member's statically composed families. A
     stale or mistyped name fails the member's build with the typed
     `DeclaredToolUnknown` error naming the profile, the tool and the enabled
-    families; MCP and host-bundle tools cannot be denied by name. Empty or
-    whitespace entries are a `malformed_tool_deny` definition diagnostic.
+    families. A `mob` profile may also deny the mob operator tools its members
+    mount (`spawn_member`, `spawn_many_members`, `wire_members`,
+    `unwire_members`, ...) next to the agent mob tools (`mob_spawn_member`,
+    `mob_wire`, `mob_create`, ...); MCP and host-bundle tools cannot be denied
+    by name. Empty or whitespace entries are a `malformed_tool_deny`
+    definition diagnostic.
   - The declaration is recomputed from the current definition on every build,
     including a resume, so adding or removing a deny entry or toggling
     `read_only` takes effect when the member resumes. Sessions now persist the

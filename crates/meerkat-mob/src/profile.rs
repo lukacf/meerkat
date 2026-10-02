@@ -69,9 +69,11 @@ pub struct ToolConfig {
     /// the per-spawn tool access policy (a spawn cannot widen it) and is
     /// recomputed from the current definition on every build, including a
     /// resume. Each name must belong to one of the profile's statically
-    /// composed tool families; a stale or mistyped name fails the member's
-    /// build with a typed error. MCP and host-bundle tools cannot be named
-    /// here; leave their server out of [`Self::mcp`] instead.
+    /// composed tool families, or be a mob operator tool (`spawn_member`,
+    /// `spawn_many_members`, `wire_members`, `unwire_members`, ...) that a
+    /// `mob` profile's members mount; a stale or mistyped name fails the
+    /// member's build with a typed error. MCP and host-bundle tools cannot be
+    /// named here; leave their server out of [`Self::mcp`] instead.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
     /// MCP server names this profile connects to.

@@ -4173,6 +4173,7 @@ fn declared_restriction(
         enabled_families: vec!["builtins".to_string(), "comms".to_string()],
         read_only,
         deny: deny.iter().copied().collect(),
+        mob_operator_tools: meerkat_core::ToolNameSet::new(),
     }
 }
 

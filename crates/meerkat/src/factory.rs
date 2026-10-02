@@ -6593,12 +6593,20 @@ impl AgentFactory {
         }
         // External tools (MCP servers, host bundles) are not part of the
         // statically composed surface a declared deny list may name.
+        // Deferred catalog entries count too: a deferred external tool (an MCP
+        // tool not yet loaded) is still external, never a composed family tool.
         let external_tool_names: std::collections::HashSet<String> =
             match (&declared_tool_restriction, &build_config.external_tools) {
                 (Some(_), Some(external)) => external
                     .tools()
                     .iter()
                     .map(|tool| tool.name.to_string())
+                    .chain(
+                        external
+                            .tool_catalog()
+                            .iter()
+                            .map(|entry| entry.tool.name.to_string()),
+                    )
                     .collect(),
                 _ => std::collections::HashSet::new(),
             };
@@ -7746,8 +7754,10 @@ impl AgentFactory {
         }
 
         // 12i-pre. A declared deny list names tools of the statically composed
-        // families only: a name none of them provides (stale or mistyped) is
-        // a typed configuration error, never a silently inert entry.
+        // families, or the declaring mob profile's operator tools that this
+        // build actually mounted as external tools. Any other name (stale,
+        // mistyped, MCP, or an operator tool not mounted here) is a typed
+        // configuration error, never a silently inert entry.
         if let Some(restriction) = &declared_tool_restriction {
             let composed: std::collections::HashSet<String> = tools
                 .tools()
@@ -7760,6 +7770,13 @@ impl AgentFactory {
                         .map(|entry| entry.tool.name.to_string()),
                 )
                 .filter(|name| !external_tool_names.contains(name))
+                .chain(
+                    restriction
+                        .mob_operator_tools
+                        .iter()
+                        .map(|name| name.as_str().to_string())
+                        .filter(|name| external_tool_names.contains(name)),
+                )
                 .collect();
             let mut unknown = restriction
                 .deny

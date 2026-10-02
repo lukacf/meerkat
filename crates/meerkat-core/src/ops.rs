@@ -449,8 +449,13 @@ pub struct DeclaredToolRestriction {
     /// Only tools their owning dispatcher declares read-only may execute.
     pub read_only: bool,
     /// Tool names that may not execute. Each must name a tool of the agent's
-    /// statically composed families; the build rejects a name that does not.
+    /// statically composed families, or one of [`Self::mob_operator_tools`]
+    /// the build actually mounted; the build rejects any other name.
     pub deny: ToolNameSet,
+    /// Mob operator tools (`spawn_member`, `wire_members`, ...) the declaring
+    /// mob profile mounts as external tools. A deny entry may name one only
+    /// when the build actually composed it.
+    pub mob_operator_tools: ToolNameSet,
 }
 
 impl DeclaredToolRestriction {
@@ -706,6 +711,7 @@ mod tests {
             enabled_families: vec!["mob".to_string()],
             read_only: false,
             deny: ["mob_wire"].into_iter().collect(),
+            mob_operator_tools: ToolNameSet::new(),
         };
         assert!(!restriction.is_unrestricted());
         assert_eq!(

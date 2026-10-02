@@ -1,0 +1,207 @@
+//! HomeCore's per-profile deny set, end to end over the production session
+//! service with the real agent mob tools: a `mob` profile denies the tools a
+//! child identity agent could use to spawn or rewire broader same-mob members,
+//! while keeping fork_off, council, mob_check_member and mob_retire_member.
+//!
+//! The deny list covers both mob tool sources: the agent mob tools composed
+//! as the `mob` family (`mob_spawn_member`, `mob_wire`, ...) and the mob
+//! operator tools mounted as external tools (`spawn_member`, `wire_members`,
+//! ...). Every call goes through the member's own model turn, so it reaches
+//! the member's outermost execution gate.
+#![cfg(not(target_arch = "wasm32"))]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
+mod support;
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use meerkat_core::{ContentInput, HandlingMode, Message};
+use meerkat_mob::{
+    AgentIdentity, MobBackendKind, MobControlPrincipal, MobDefinition, MobId, ProfileBinding,
+    ProfileName,
+};
+use meerkat_mob_mcp::MobMcpState;
+use support::{ScriptedCouncilClient, ScriptedTurn, last_user_text, participant_profile};
+
+const PROBE: &str = "HOMECORE-DENY-PROBE";
+
+const DENIED: &[&str] = &[
+    "spawn_member",
+    "spawn_many_members",
+    "mob_spawn_member",
+    "wire_members",
+    "unwire_members",
+    "mob_wire",
+    "mob_unwire",
+    "mob_create",
+    "mob_destroy",
+];
+
+const KEPT: &[&str] = &[
+    "fork_off",
+    "council",
+    "mob_check_member",
+    "mob_retire_member",
+];
+
+fn homecore_definition(mob_id: &MobId) -> MobDefinition {
+    let mut profile = participant_profile("household identity agent");
+    profile.tools.mob = true;
+    // The test drives the member's own turn from outside the mob.
+    profile.external_addressable = true;
+    profile.tools.deny = DENIED.iter().map(|name| (*name).to_string()).collect();
+    let mut profiles = BTreeMap::new();
+    profiles.insert(
+        ProfileName::from("participant"),
+        ProfileBinding::Inline(Box::new(profile)),
+    );
+    let mut definition = MobDefinition::explicit(mob_id.clone());
+    definition.profiles = profiles;
+    definition
+}
+
+/// The production composition: a runtime-backed persistent service whose
+/// builder carries the agent mob tool factory (`wire_mob_tools`), so a `mob`
+/// profile's members mount the real agent mob tools.
+fn wired_state(root: &std::path::Path, client: ScriptedCouncilClient) -> Arc<MobMcpState> {
+    let project_root = root.join("project-root");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    std::fs::write(project_root.join("AGENTS.md"), "# deny fixture\n").expect("AGENTS.md");
+    let factory = meerkat::AgentFactory::new(root.join("factory-store"))
+        .user_config_root(root.join("user-config"))
+        .runtime_root(root.join("runtime-root"))
+        .project_root(project_root.clone())
+        .context_root(project_root)
+        .builtins(false)
+        .comms(true);
+    let mut builder = meerkat::FactoryAgentBuilder::new(factory, meerkat::Config::default());
+    builder.default_llm_client = Some(Arc::new(client));
+    let store = Arc::new(meerkat_store::JsonlStore::new(root.join("sessions-jsonl")));
+    builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(store.clone())));
+    let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
+    let store_dyn: Arc<dyn meerkat::SessionStore> = store;
+    let (service, runtime) = meerkat::surface::build_runtime_backed_service(
+        builder,
+        32,
+        meerkat::PersistenceBundle::new(
+            store_dyn,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        ),
+    );
+    meerkat_mob_mcp::wire_mob_tools(
+        &mob_tools_slot,
+        Arc::new(service),
+        Some(runtime),
+        None,
+        MobControlPrincipal::Owner,
+    )
+}
+
+/// The tool-result text of each call in `messages`, keyed by call id.
+fn tool_results(messages: &[Message]) -> BTreeMap<String, String> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::ToolResults { results, .. } => Some(results),
+            _ => None,
+        })
+        .flatten()
+        .map(|result| (result.tool_use_id.clone(), result.text_content()))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn homecore_deny_set_gates_denied_mob_tools_and_keeps_the_rest() {
+    let probes: Vec<&'static str> = DENIED.iter().chain(KEPT).copied().collect();
+    let final_results: Arc<Mutex<Option<BTreeMap<String, String>>>> = Arc::default();
+    let script_probes = probes.clone();
+    let script_results = Arc::clone(&final_results);
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = wired_state(
+        temp.path(),
+        ScriptedCouncilClient::new(move |request| {
+            if !last_user_text(request).contains(PROBE) {
+                return ScriptedTurn::Text("ok".to_string());
+            }
+            // One call per probe, in order; each later request carries the
+            // results so far.
+            let results = tool_results(&request.messages);
+            match script_probes.get(results.len()) {
+                Some(tool) => ScriptedTurn::ToolCall {
+                    id: format!("call-{tool}"),
+                    name: (*tool).to_string(),
+                    args: serde_json::json!({}),
+                },
+                None => {
+                    *script_results.lock().unwrap() = Some(results);
+                    ScriptedTurn::Text("probed".to_string())
+                }
+            }
+        }),
+    );
+    let mob_id = MobId::from(format!("homecore-{}", uuid::Uuid::new_v4().simple()));
+    state
+        .mob_create_definition(homecore_definition(&mob_id))
+        .await
+        .expect("create the mob");
+    // The member build must accept every name: a name the member does not
+    // compose would fail the spawn as `DeclaredToolUnknown`.
+    state
+        .mob_spawn(
+            &mob_id,
+            ProfileName::from("participant"),
+            AgentIdentity::from("kitchen"),
+            Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+            Some(MobBackendKind::Session),
+            None,
+        )
+        .await
+        .expect("spawn the member with the HomeCore deny set");
+    let handle = state.handle_for(&mob_id).await.expect("mob handle");
+    let turn = handle
+        .member(&AgentIdentity::from("kitchen"))
+        .await
+        .expect("member handle")
+        .start_turn(
+            ContentInput::Text(PROBE.to_string()),
+            HandlingMode::Queue,
+            meerkat_mob::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("probe turn admitted");
+    tokio::time::timeout(Duration::from_secs(60), turn.wait())
+        .await
+        .expect("the probe turn completes")
+        .expect("gate denials do not fail the turn");
+
+    let results = final_results
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the probe turn reached its final request");
+    for tool in DENIED {
+        let text = results
+            .get(&format!("call-{tool}"))
+            .unwrap_or_else(|| panic!("{tool} was called"));
+        assert!(
+            text.contains("\"error\":\"access_denied\""),
+            "{tool} is denied by the profile: {text}"
+        );
+    }
+    for tool in KEPT {
+        let text = results
+            .get(&format!("call-{tool}"))
+            .unwrap_or_else(|| panic!("{tool} was called"));
+        // Empty arguments make the kept tools fail their own validation; what
+        // matters is that the execution gate let them through.
+        assert!(
+            !text.contains("\"error\":\"access_denied\""),
+            "{tool} is kept: {text}"
+        );
+    }
+    let _ = state.mob_destroy(&mob_id).await;
+}

@@ -419,6 +419,14 @@ pub async fn build_agent_config(
             }
             deny
         },
+        // A `mob` profile's members mount the mob operator tools as external
+        // tools; the factory lets the deny list name them only when this
+        // build actually mounted them.
+        mob_operator_tools: if profile.tools.mob {
+            crate::runtime::mob_operator_tool_names()
+        } else {
+            meerkat_core::ToolNameSet::new()
+        },
     };
     config.declared_tool_restriction = (!restriction.is_unrestricted()).then_some(restriction);
 

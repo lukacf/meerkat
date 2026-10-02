@@ -735,9 +735,6 @@ jobs:
           - runs-on: macos-15
             target: aarch64-apple-darwin
             archive_ext: tar.gz
-          - runs-on: macos-15-large
-            target: x86_64-apple-darwin
-            archive_ext: tar.gz
         surface:
           - package: rkat
             bin: rkat
@@ -747,6 +744,22 @@ jobs:
             bin: rkat-rest
           - package: meerkat-mcp-server
             bin: rkat-mcp
+        # macos-15-large is a billed larger runner (the standard runners are
+        # free on this public repository). Split per package it would
+        # rebuild the units the sequential loop shares: measured on v0.8.50
+        # the loop took 257 billed min (rkat 80, rpc 40, rest 66, mcp 67),
+        # split an estimated 320-330 min. So x86_64 macOS keeps one job that
+        # builds the four packages in sequence, each with its own
+        # `cargo build -p` (no feature unification either way), at the cost
+        # of being the release's longest job (about 4.3 h). `all` selects it.
+        include:
+          - platform:
+              runs-on: macos-15-large
+              target: x86_64-apple-darwin
+              archive_ext: tar.gz
+            surface:
+              package: all
+              bin: all
 
     steps:
       - name: Checkout
@@ -856,16 +869,31 @@ jobs:
             cargo_cmd=(cargo --config 'profile.release.package.meerkat-machine-schema.opt-level=1')
           fi
 
-          # This job's one package (binary names differ via [[bin]], see the
-          # matrix). Building it alone keeps its own feature resolution.
-          "${cargo_cmd[@]}" build --locked -p "${{ matrix.surface.package }}" --release --target "${{ matrix.platform.target }}"
+          # This job's package (binary names differ via [[bin]], see the
+          # matrix); `all` builds the four in sequence, each alone. Either way
+          # every package keeps its own feature resolution.
+          if [[ "${{ matrix.surface.package }}" == "all" ]]; then
+            PACKAGES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
+          else
+            PACKAGES=("${{ matrix.surface.package }}")
+          fi
+          for pkg in "${PACKAGES[@]}"; do
+            "${cargo_cmd[@]}" build --locked -p "$pkg" --release --target "${{ matrix.platform.target }}"
+          done
 
       - name: Ad-hoc codesign macOS binaries
         if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
-          codesign --force --sign - "target/${{ matrix.platform.target }}/release/${{ matrix.surface.bin }}"
+          if [[ "${{ matrix.surface.bin }}" == "all" ]]; then
+            BINARIES=("rkat" "rkat-rpc" "rkat-rest" "rkat-mcp")
+          else
+            BINARIES=("${{ matrix.surface.bin }}")
+          fi
+          for bin in "${BINARIES[@]}"; do
+            codesign --force --sign - "target/${{ matrix.platform.target }}/release/${bin}"
+          done
 
       - name: Package artifacts
         shell: bash
@@ -875,7 +903,11 @@ jobs:
           ARCHIVE_EXT: ${{ matrix.platform.archive_ext }}
         run: |
           set -euo pipefail
-          BINARIES=("${{ matrix.surface.bin }}")
+          if [[ "${{ matrix.surface.bin }}" == "all" ]]; then
+            BINARIES=("rkat" "rkat-rpc" "rkat-rest" "rkat-mcp")
+          else
+            BINARIES=("${{ matrix.surface.bin }}")
+          fi
           mkdir -p dist
           VERSION="${VERSION#v}"
           VERSION="${VERSION//\//-}"

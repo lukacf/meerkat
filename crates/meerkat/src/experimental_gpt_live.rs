@@ -2983,6 +2983,11 @@ impl ExperimentalGptLiveActivationGate {
         self.started.notify_waiters();
     }
 
+    /// Wait until `expected` sideband actors have started, or the gate is
+    /// cancelled. No deadline: every actor holds an
+    /// [`ExperimentalGptLiveActivationStartLease`], so an actor that ends
+    /// before it starts (aborted, panicked or dropped) cancels the gate and
+    /// ends this wait typed.
     async fn wait_for_started_tasks(&self, expected: u64) -> bool {
         loop {
             if self.cancelled.load(Ordering::Acquire) {
@@ -2991,8 +2996,13 @@ impl ExperimentalGptLiveActivationGate {
             if self.started_tasks.load(Ordering::Acquire) >= expected {
                 return true;
             }
+            // `notify_waiters` keeps no permit: register first, then re-read
+            // both facts, so a start or a cancel landing between the reads
+            // above and this registration is not lost.
             let started = self.started.notified();
-            if self.started_tasks.load(Ordering::Acquire) >= expected {
+            if self.cancelled.load(Ordering::Acquire)
+                || self.started_tasks.load(Ordering::Acquire) >= expected
+            {
                 continue;
             }
             started.await;
@@ -3009,6 +3019,43 @@ impl ExperimentalGptLiveActivationGate {
                 return;
             }
             changed.await;
+        }
+    }
+}
+
+/// The number of sideband actors an activation commit waits for: the
+/// observation reader, the control consumer and the adapter pump.
+const EXPERIMENTAL_GPT_LIVE_ACTIVATION_ACTORS: u64 = 3;
+
+/// One sideband actor's obligation to start on its activation gate.
+///
+/// Each actor owns its lease from spawn. `mark_started` discharges it. A lease
+/// dropped undischarged (the actor was aborted, panicked or was dropped
+/// before it started, or it saw the gate cancelled) cancels the gate, so an
+/// activation commit waiting for the actors to start fails typed instead of
+/// waiting forever.
+struct ExperimentalGptLiveActivationStartLease {
+    gate: Option<Arc<ExperimentalGptLiveActivationGate>>,
+}
+
+impl ExperimentalGptLiveActivationStartLease {
+    fn new(gate: &Arc<ExperimentalGptLiveActivationGate>) -> Self {
+        Self {
+            gate: Some(Arc::clone(gate)),
+        }
+    }
+
+    fn mark_started(&mut self) {
+        if let Some(gate) = self.gate.take() {
+            gate.mark_started();
+        }
+    }
+}
+
+impl Drop for ExperimentalGptLiveActivationStartLease {
+    fn drop(&mut self) {
+        if let Some(gate) = self.gate.take() {
+            gate.cancel();
         }
     }
 }
@@ -6377,12 +6424,8 @@ impl ExperimentalGptLiveWebrtcTransport {
         }
         gate.committed.store(true, Ordering::Release);
         gate.changed.notify_waiters();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            gate.wait_for_started_tasks(3),
-        )
-        .await
-        .unwrap_or(false)
+        gate.wait_for_started_tasks(EXPERIMENTAL_GPT_LIVE_ACTIVATION_ACTORS)
+            .await
     }
 
     async fn answer_provider_offer(
@@ -7024,6 +7067,7 @@ fn spawn_sideband_actors(
     let observation_sideband = Arc::clone(&sideband);
     let observation_binding = binding.clone();
     let observation_gate = Arc::clone(&activation_gate);
+    let mut observation_start = ExperimentalGptLiveActivationStartLease::new(&activation_gate);
     let observation_adapter = Arc::clone(&adapter);
     let observation_drain = Arc::clone(&drain);
     let observation_actor = tokio::spawn(async move {
@@ -7031,7 +7075,7 @@ fn spawn_sideband_actors(
             observation_adapter.close_stream();
             return;
         };
-        observation_gate.mark_started();
+        observation_start.mark_started();
         // Reader-owned: a typed between-speech boundary was admitted, so the
         // next snapshot delta opens a new unmeasured segment and needs its
         // own ordinal, admitted after the boundary.
@@ -7253,12 +7297,13 @@ fn spawn_sideband_actors(
     });
 
     let control_gate = Arc::clone(&activation_gate);
+    let mut control_start = ExperimentalGptLiveActivationStartLease::new(&activation_gate);
     let control_drain = Arc::clone(&drain);
     let control_actor = tokio::spawn(async move {
         let Some(activation) = control_gate.wait_for_commit().await else {
             return;
         };
-        control_gate.mark_started();
+        control_start.mark_started();
         activation
             .activator
             .run_bound_channel(
@@ -7273,6 +7318,7 @@ fn spawn_sideband_actors(
     });
 
     let pump_gate = Arc::clone(&activation_gate);
+    let mut pump_start = ExperimentalGptLiveActivationStartLease::new(&activation_gate);
     let pump_binding = binding.clone();
     let pump_drain = Arc::clone(&drain);
     let pump_adapter = Arc::clone(&adapter);
@@ -7289,7 +7335,7 @@ fn spawn_sideband_actors(
         let Some(activation) = pump_gate.wait_for_commit().await else {
             return;
         };
-        pump_gate.mark_started();
+        pump_start.mark_started();
         let mut pending_projection: Option<(
             LiveAdapterObservation,
             Option<meerkat_live::ObservationOutcome>,
@@ -12908,6 +12954,208 @@ mod tests {
         }
     }
 
+    /// Fixture: an activated binding whose sideband actors have gone quiet
+    /// (no reader, projection or control receipt), the state the close tests
+    /// below drive. Aborting the actors before they start drops their start
+    /// leases, which cancels the gate; the fixture asserts that and then
+    /// restores the activated, selectable state. Production never reaches
+    /// it: an actor that ends before it starts leaves its binding cancelled.
+    async fn silence_actors_as_activated(active: &mut ActiveExperimentalGptLiveBinding) {
+        for actor in [
+            &mut active.observation_actor,
+            &mut active.adapter_pump,
+            &mut active.control_actor,
+        ] {
+            // The close path joins these handles itself: hand it a fresh
+            // finished task and join the aborted original here.
+            let original = std::mem::replace(actor, tokio::spawn(async {}));
+            original.abort();
+            let _ = original.await;
+        }
+        assert!(
+            active.activation_gate.cancelled.load(Ordering::Acquire),
+            "an actor that ends before it starts cancels its activation gate"
+        );
+        active
+            .activation_gate
+            .cancelled
+            .store(false, Ordering::Release);
+        active
+            .activation_gate
+            .committed
+            .store(true, Ordering::Release);
+    }
+
+    fn activation_fixture(
+        session_id: &meerkat_core::SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+        transport: &Arc<ExperimentalGptLiveWebrtcTransport>,
+    ) -> (ProviderWebrtcBinding, ActiveExperimentalGptLiveBinding) {
+        let binding = ProviderWebrtcBinding::new(
+            channel_id.clone(),
+            session_id.clone(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(1),
+            meerkat_live::LiveRuntimeBindingFence::new(1),
+        );
+        let sideband: Arc<dyn ProviderWebrtcSidebandSession> = Arc::new(QuietSideband);
+        let (retirement_tx, _retirement_rx) = mpsc::channel(1);
+        let active = spawn_sideband_actors(
+            binding.clone(),
+            sideband,
+            test_deferred_adapter(),
+            1,
+            retirement_tx,
+            Arc::clone(&transport.pending_deliveries),
+        );
+        (binding, active)
+    }
+
+    /// A provider sideband that stays open and silent: its stream never ends
+    /// on its own, so the actors run until the test drops them.
+    struct QuietSideband;
+
+    #[async_trait]
+    impl ProviderWebrtcSidebandSession for QuietSideband {
+        async fn send_command(
+            &self,
+            _command: LiveSidebandCommand,
+        ) -> Result<LiveSidebandCommandDelivery, ProviderWebrtcBrokerError> {
+            Ok(LiveSidebandCommandDelivery::Accepted)
+        }
+
+        async fn next_observation(
+            &self,
+        ) -> Result<Option<LiveSidebandObservation>, ProviderWebrtcBrokerError> {
+            std::future::pending().await
+        }
+
+        async fn close(&self) -> Result<(), ProviderWebrtcBrokerError> {
+            Ok(())
+        }
+    }
+
+    async fn prepare_fixture_activation(
+        active: &ActiveExperimentalGptLiveBinding,
+        session_id: &meerkat_core::SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+        transport: &Arc<ExperimentalGptLiveWebrtcTransport>,
+    ) {
+        *active.activation_gate.prepared.lock().await =
+            Some(Arc::new(PreparedExperimentalGptLiveActivation {
+                runtime: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+                runtime_binding:
+                    meerkat_runtime::live_execution::LiveDelegationRuntimeBinding::__test_new(
+                        session_id.clone(),
+                        channel_id.clone(),
+                        meerkat_runtime::identifiers::LogicalRuntimeId::new("fixture-runtime"),
+                        1,
+                        1,
+                    ),
+                activator: Arc::new(NoopBoundChannelActivator)
+                    as Arc<dyn ExperimentalLiveBoundChannelActivator>,
+                control: Arc::clone(transport) as Arc<dyn ExperimentalGptLiveControlPlane>,
+                live_adapter_host: Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+                    meerkat_live::NoOpProjectionSink,
+                ))),
+                public_observation_publisher: Arc::new(NoopPublicObservationPublisher),
+            }));
+    }
+
+    #[tokio::test]
+    async fn activation_commit_succeeds_once_every_actor_started() {
+        let gate = Arc::new(ExperimentalGptLiveActivationGate::new());
+        let mut leases = [
+            ExperimentalGptLiveActivationStartLease::new(&gate),
+            ExperimentalGptLiveActivationStartLease::new(&gate),
+            ExperimentalGptLiveActivationStartLease::new(&gate),
+        ];
+        let waiter = tokio::spawn({
+            let gate = Arc::clone(&gate);
+            async move {
+                gate.wait_for_started_tasks(EXPERIMENTAL_GPT_LIVE_ACTIVATION_ACTORS)
+                    .await
+            }
+        });
+        for lease in &mut leases {
+            lease.mark_started();
+        }
+        assert!(
+            waiter.await.expect("activation waiter joins"),
+            "the wait returns once the reader, control consumer and pump started"
+        );
+        drop(leases);
+        assert!(!gate.cancelled.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn a_pump_that_dies_before_it_starts_fails_activation_by_cancel() {
+        let session_id = meerkat_core::SessionId::new();
+        let channel_id = meerkat_live::LiveChannelId::new("activation-pump-dies-before-start");
+        let transport = Arc::new(ExperimentalGptLiveWebrtcTransport::new());
+        let (_binding, active) = activation_fixture(&session_id, &channel_id, &transport);
+        prepare_fixture_activation(&active, &session_id, &channel_id, &transport).await;
+        let gate = Arc::clone(&active.activation_gate);
+        // The pump is still waiting for the commit: abort it before it starts.
+        active.adapter_pump.abort();
+        // Its start lease is dropped undischarged and cancels the gate. The
+        // wait is the gate's own typed cancellation, not a deadline.
+        gate.cancelled().await;
+        transport
+            .active_by_session
+            .lock()
+            .await
+            .insert(session_id.clone(), active);
+
+        assert!(
+            !transport
+                .commit_bound_channel_activation(&session_id, &channel_id, 1, 1)
+                .await,
+            "an actor that died before starting fails the activation typed"
+        );
+        assert_eq!(gate.started_tasks.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn activation_commit_ends_when_an_actor_dies_while_the_commit_waits() {
+        let gate = Arc::new(ExperimentalGptLiveActivationGate::new());
+        let mut reader = ExperimentalGptLiveActivationStartLease::new(&gate);
+        let mut control = ExperimentalGptLiveActivationStartLease::new(&gate);
+        let pump = ExperimentalGptLiveActivationStartLease::new(&gate);
+        reader.mark_started();
+        control.mark_started();
+        let waiter = tokio::spawn({
+            let gate = Arc::clone(&gate);
+            async move {
+                gate.wait_for_started_tasks(EXPERIMENTAL_GPT_LIVE_ACTIVATION_ACTORS)
+                    .await
+            }
+        });
+        // The pump ends undischarged while the commit is already waiting.
+        drop(pump);
+        assert!(
+            !waiter.await.expect("activation waiter joins"),
+            "the third actor's undischarged lease ends the wait as cancelled"
+        );
+        // Discharged leases never cancel: dropping them after the fact is inert.
+        drop(reader);
+        drop(control);
+        assert_eq!(gate.started_tasks.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn a_discharged_start_lease_never_cancels_the_gate() {
+        let gate = Arc::new(ExperimentalGptLiveActivationGate::new());
+        let mut lease = ExperimentalGptLiveActivationStartLease::new(&gate);
+        lease.mark_started();
+        drop(lease);
+        assert!(!gate.cancelled.load(Ordering::Acquire));
+        assert_eq!(gate.started_tasks.load(Ordering::Acquire), 1);
+
+        let undischarged = ExperimentalGptLiveActivationStartLease::new(&gate);
+        drop(undischarged);
+        assert!(gate.cancelled.load(Ordering::Acquire));
+    }
+
     #[tokio::test]
     async fn refused_lifecycle_observation_does_not_end_the_provider_stream() {
         let session_id = meerkat_core::SessionId::new();
@@ -14666,7 +14914,7 @@ mod tests {
             meerkat_live::LiveRuntimeBindingFence::new(1),
         );
         let (retirement_tx, _retirement_rx) = mpsc::channel(1);
-        let active = spawn_sideband_actors(
+        let mut active = spawn_sideband_actors(
             binding.clone(),
             Arc::new(ControlledAmbiguousSideband::new()),
             test_deferred_adapter(),
@@ -14675,13 +14923,7 @@ mod tests {
             Arc::clone(&transport.pending_deliveries),
         );
         let drain = Arc::clone(&active.drain);
-        active.observation_actor.abort();
-        active.adapter_pump.abort();
-        active.control_actor.abort();
-        active
-            .activation_gate
-            .committed
-            .store(true, Ordering::Release);
+        silence_actors_as_activated(&mut active).await;
         transport
             .active_by_session
             .lock()
@@ -14751,7 +14993,7 @@ mod tests {
         // The provider accepts the append; its acknowledgement never comes.
         sideband.hold_context_ack.store(true, Ordering::Release);
         let (retirement_tx, _retirement_rx) = mpsc::channel(1);
-        let active = spawn_sideband_actors(
+        let mut active = spawn_sideband_actors(
             binding.clone(),
             Arc::clone(&sideband) as Arc<dyn ProviderWebrtcSidebandSession>,
             test_deferred_adapter(),
@@ -14759,13 +15001,7 @@ mod tests {
             retirement_tx,
             Arc::clone(&transport.pending_deliveries),
         );
-        active.observation_actor.abort();
-        active.adapter_pump.abort();
-        active.control_actor.abort();
-        active
-            .activation_gate
-            .committed
-            .store(true, Ordering::Release);
+        silence_actors_as_activated(&mut active).await;
         transport
             .active_by_session
             .lock()
@@ -14924,7 +15160,7 @@ mod tests {
         let sideband = Arc::new(ControlledAmbiguousSideband::new());
         sideband.fail_close.store(true, Ordering::Release);
         let (retirement_tx, _retirement_rx) = mpsc::channel(1);
-        let active = spawn_sideband_actors(
+        let mut active = spawn_sideband_actors(
             binding.clone(),
             Arc::clone(&sideband) as Arc<dyn ProviderWebrtcSidebandSession>,
             test_deferred_adapter(),
@@ -14933,13 +15169,7 @@ mod tests {
             Arc::clone(&transport.pending_deliveries),
         );
         let drain = Arc::clone(&active.drain);
-        active.observation_actor.abort();
-        active.adapter_pump.abort();
-        active.control_actor.abort();
-        active
-            .activation_gate
-            .committed
-            .store(true, Ordering::Release);
+        silence_actors_as_activated(&mut active).await;
         transport
             .active_by_session
             .lock()
@@ -15009,7 +15239,7 @@ mod tests {
             meerkat_live::LiveRuntimeBindingFence::new(1),
         );
         let (retirement_tx, _retirement_rx) = mpsc::channel(1);
-        let active = spawn_sideband_actors(
+        let mut active = spawn_sideband_actors(
             binding.clone(),
             Arc::new(ControlledAmbiguousSideband::new()),
             test_deferred_adapter(),
@@ -15018,13 +15248,7 @@ mod tests {
             Arc::clone(&transport.pending_deliveries),
         );
         let drain = Arc::clone(&active.drain);
-        active.observation_actor.abort();
-        active.adapter_pump.abort();
-        active.control_actor.abort();
-        active
-            .activation_gate
-            .committed
-            .store(true, Ordering::Release);
+        silence_actors_as_activated(&mut active).await;
         transport
             .active_by_session
             .lock()
@@ -15097,7 +15321,7 @@ mod tests {
         let sideband = Arc::new(ControlledAmbiguousSideband::new());
         sideband.fail_close.store(true, Ordering::Release);
         let (retirement_tx, _retirement_rx) = mpsc::channel(1);
-        let active = spawn_sideband_actors(
+        let mut active = spawn_sideband_actors(
             binding.clone(),
             sideband,
             test_deferred_adapter(),
@@ -15105,13 +15329,7 @@ mod tests {
             retirement_tx,
             Arc::clone(&transport.pending_deliveries),
         );
-        active.observation_actor.abort();
-        active.adapter_pump.abort();
-        active.control_actor.abort();
-        active
-            .activation_gate
-            .committed
-            .store(true, Ordering::Release);
+        silence_actors_as_activated(&mut active).await;
         transport
             .active_by_session
             .lock()

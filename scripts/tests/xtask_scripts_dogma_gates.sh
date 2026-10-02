@@ -312,6 +312,8 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # live_unregister_cleanup_audit.sh also walks a TLC state-graph dump
 # (-dump dot <base>), so the fake writes a one-state graph whose state is
 # unregistered.
+# live_media_health_audit.sh also requires a non-empty trace for each goal and
+# firing run, so the fake prints one trace state.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -333,6 +335,7 @@ printf '%s\n' \
   'echo "Error: Invariant NotGoalSilentReopen is violated."' \
   'echo "Error: Invariant NotGoalSilentExhausted is violated."' \
   'echo "Error: Invariant NotGoalFaultedChannelReportsClosed is violated."' \
+  'echo "Error: Invariant NotGoalReRegisteredSilentReopen is violated."' \
   'echo "Error: Action property NeverRequestAttached is violated."' \
   'echo "Error: Action property NeverRequestRunning is violated."' \
   'echo "Error: Action property NeverAudibleAttached is violated."' \
@@ -341,6 +344,7 @@ printf '%s\n' \
   'echo "Error: Action property NeverSilentReopenRunning is violated."' \
   'echo "Error: Action property NeverSilentExhaustedAttached is violated."' \
   'echo "Error: Action property NeverSilentExhaustedRunning is violated."' \
+  'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
 

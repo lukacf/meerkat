@@ -7713,3 +7713,74 @@ fn a_second_media_fault_on_a_session_does_not_recommend_another_reopen() {
         Some(false)
     );
 }
+
+/// Media health is per session lifetime: once the runtime stops and the
+/// stopped session resumes with a fresh runtime binding, the media-health
+/// state is cleared and a new first output earns the reopen again.
+#[test]
+fn a_resumed_session_earns_its_media_fault_reopen_again() {
+    let mut authority = opened_attached_authority();
+    bind_only(&mut authority);
+    request_media_health(&mut authority, "output-1", true).expect("requested");
+    let first = observe_media_health(&mut authority, "output-1", 0, 0).expect("silent");
+    assert_eq!(media_health_judged(&first), Some((true, true)));
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::StopRuntimeExecutor {
+            reason: "stop".to_string(),
+        },
+    )
+    .expect("stop requested");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RuntimeExecutorExited,
+    )
+    .expect("executor exits to stopped");
+    assert_eq!(authority.state().lifecycle_phase, mm::MeerkatPhase::Stopped);
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RegisterSession {
+            session_id: mm::SessionId(SESSION.to_string()),
+            runtime_epoch_id: None,
+        },
+    )
+    .expect("the stopped session resumes");
+    let state = authority.state();
+    assert!(state.live_media_fault_reopens_by_session.is_empty());
+    assert!(
+        state
+            .live_media_fault_reopen_recommended_by_channel
+            .is_empty()
+    );
+    assert!(state.live_media_health_judged_channels.is_empty());
+    assert!(
+        state
+            .live_media_health_requested_output_by_channel
+            .is_empty()
+    );
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::PrepareBindings {
+            agent_runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: Some(generation()),
+            runtime_epoch_id: None,
+            session_id: mm::SessionId(SESSION.to_string()),
+        },
+    )
+    .expect("a fresh runtime binding");
+    request_media_health(&mut authority, "output-2", true)
+        .expect("the new lifetime's first output is requested");
+    let second = observe_media_health(&mut authority, "output-2", 0, 0).expect("silent again");
+    assert!(second.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveChannelMediaHealthJudged {
+            output_id,
+            media_faulted: true,
+            reopen_recommended: true,
+            ..
+        } if output_id == "output-2"
+    )));
+}

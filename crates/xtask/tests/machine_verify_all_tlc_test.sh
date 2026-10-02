@@ -184,15 +184,16 @@ TLC_WORKERS="${tlc_workers}" "${live_unregister_audit}" "${LIVE_UNREGISTER_AUDIT
 # live_media_health_budget_and_verdicts_are_consistent) plus its own
 # invariants and action properties (judged once, first output only). It
 # proves every judgement reachable by requiring a counterexample to its
-# negation, and every new transition firing (each Never* action property must
-# be violated). The exhausted budget needs 12 steps; about a minute at 16.
+# negation (including a session earning its reopen again after its runtime
+# stops and it resumes), and every new transition firing (each Never* action
+# property must be violated). The re-earned reopen needs 20 steps; about 70 s.
 live_media_health_audit="${workspace_root}/specs/machines/meerkat_machine/live_media_health_audit.sh"
 if [[ ! -x "${live_media_health_audit}" ]]; then
   echo "error: live media health audit runner is missing from workspace runfiles: ${live_media_health_audit}" >&2
   exit 1
 fi
 echo "running bounded live media health TLC audit"
-TLC_WORKERS="${tlc_workers}" "${live_media_health_audit}" "${LIVE_MEDIA_HEALTH_AUDIT_MAX_STEPS:-16}"
+TLC_WORKERS="${tlc_workers}" "${live_media_health_audit}" "${LIVE_MEDIA_HEALTH_AUDIT_MAX_STEPS:-20}"
 
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
 # codegen defects. `machine-verify` still validates drift and the generated

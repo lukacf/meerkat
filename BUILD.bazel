@@ -727,6 +727,7 @@ test_suite(
         "//crates/meerkat-mob:mob_host_binding_authority_test",
         "//crates/meerkat-mob:mob_orchestrator_kernel_test",
         "//crates/meerkat-mob:multi_host_machine_test",
+        "//crates/meerkat-mob:owned_retirement_shutdown_test",
         "//crates/meerkat-mob:placed_member_respawn_test",
         "//crates/meerkat-mob:placed_spawn_carrier_store_test",
         "//crates/meerkat-mob:remote_spawn_ladder_test",

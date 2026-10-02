@@ -25,6 +25,8 @@ pub(super) mod resume_topology;
 #[cfg(feature = "runtime-adapter")]
 mod resume_topology_control;
 mod retirement_io;
+mod shutdown_teardown;
+pub(in crate::runtime) use shutdown_teardown::ShutdownUnregisterOutcome;
 pub(super) mod spawn_activation;
 mod spawn_admission_io;
 pub(super) mod spawn_preparation;
@@ -177,12 +179,19 @@ pub(super) const RETIRE_LOCAL_TRUST_CLEANUP_CONCURRENCY: usize = 32;
 
 const ROLLBACK_AUTONOMOUS_STOP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const ROLLBACK_AUTONOMOUS_STOP_DEADLINE: Duration = Duration::from_secs(10);
-/// Hang guard for a deferred Stop or Shutdown awaiting the end of its
-/// interrupted members' turns. Correctness never depends on it: each member's
-/// end of turn is a typed signal, and the guard only turns a turn that never
-/// ends into a typed `LifecycleOperationProgressStalled` naming the member.
+/// Member lifecycle hang guard: the failure bound for a lifecycle step whose
+/// typed signal never arrives. Correctness never depends on it, and it is
+/// never a completion signal.
+///
+/// - A deferred Stop or Shutdown awaits the end of its interrupted members'
+///   turns as typed signals; the guard only turns a turn that never ends into
+///   a typed `LifecycleOperationProgressStalled` naming the member.
+/// - A durably started member retirement's stages each settle on their own
+///   typed signal; the guard only bounds a stage whose signal never arrives,
+///   which then settles the retirement as `Stuck` (owned, re-drivable).
+///
 /// It matches the patience the handle-level lifecycle retry used to grant.
-const AUTONOMOUS_STOP_IDLE_HANG_GUARD: Duration = Duration::from_secs(600);
+const MEMBER_LIFECYCLE_HANG_GUARD: Duration = Duration::from_secs(600);
 /// A status projection is observational and must never hold the single mob
 /// actor behind a slow or wedged session-runtime read. Unknown progress is a
 /// truthful result; delaying lifecycle commands is not.
@@ -1955,7 +1964,8 @@ pub(super) struct PendingAutonomousStop {
     ticket: u64,
     kind: PendingAutonomousStopKind,
     phase: PendingAutonomousStopPhase,
-    /// The hang guard over both phases (`AUTONOMOUS_STOP_IDLE_HANG_GUARD`).
+    /// The hang guard over both phases (`MEMBER_LIFECYCLE_HANG_GUARD`, or a
+    /// Shutdown's own deadline).
     deadline: Instant,
     /// The result of the lifecycle steps before the member stops. Shutdown
     /// keeps stopping members after an earlier non-fatal failure and reports
@@ -1964,6 +1974,13 @@ pub(super) struct PendingAutonomousStop {
     reply_tx: LifecycleReplyTx,
     /// Same-kind commands that arrived while this one was pending; they
     /// receive its result.
+    joined: Vec<LifecycleReplyTx>,
+}
+
+/// A completed Shutdown's reply, held until the actor has processed the
+/// actor completions it retained while joining its work.
+pub(super) struct PendingShutdownExit {
+    reply_tx: LifecycleReplyTx,
     joined: Vec<LifecycleReplyTx>,
 }
 
@@ -2037,12 +2054,56 @@ pub(super) async fn member_stop_within_hang_guard(
     remaining: Duration,
     stop: impl std::future::Future<Output = Result<(), MobError>>,
 ) -> Result<(), MobError> {
+    let stage = AutonomousMemberStopStage::default();
+    member_stop_within_hang_guard_at(identity, remaining, &stage, stop).await
+}
+
+/// The step an autonomous member's stop is waiting on, reported when the
+/// hang guard passes.
+pub(super) struct AutonomousMemberStopStage(std::sync::Mutex<&'static str>);
+
+impl Default for AutonomousMemberStopStage {
+    fn default() -> Self {
+        Self(std::sync::Mutex::new(AUTONOMOUS_MEMBER_STOP_IDLE_STAGE))
+    }
+}
+
+impl AutonomousMemberStopStage {
+    fn enter(&self, stage: &'static str) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = stage;
+    }
+
+    fn current(&self) -> &'static str {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// The member's session still reports its interrupted turn active.
+const AUTONOMOUS_MEMBER_STOP_IDLE_STAGE: &str = "autonomous_member_stop_idle";
+/// The session reports its turn over; the runtime has not yet recorded the
+/// interrupted run's end.
+const AUTONOMOUS_MEMBER_STOP_RUN_SETTLEMENT_STAGE: &str = "runtime_run_settlement";
+
+/// [`member_stop_within_hang_guard`], reporting the stage `stage` names when
+/// the guard passes.
+async fn member_stop_within_hang_guard_at(
+    identity: &AgentIdentity,
+    remaining: Duration,
+    stage: &AutonomousMemberStopStage,
+    stop: impl std::future::Future<Output = Result<(), MobError>>,
+) -> Result<(), MobError> {
     match tokio::time::timeout(remaining, stop).await {
         Ok(result) => result,
         Err(_elapsed) => Err(MobError::LifecycleOperationProgressStalled {
             intent: format!("stopped member {identity} is still winding down its interrupted turn"),
             member_id: Some(identity.clone()),
-            stage: "autonomous_member_stop_idle",
+            stage: stage.current(),
         }),
     }
 }
@@ -7150,6 +7211,12 @@ pub(super) struct MobActor {
     /// Lifecycle controls that arrived while a stop was pending and run once
     /// it resolves (the `pending_resume_controls` precedent).
     pub(super) pending_autonomous_stop_controls: VecDeque<RoutedMobCommand>,
+    /// Actor completions a Shutdown step received while it joined actor-owned
+    /// work (see `serve_refusals_while`); processed first, in arrival order.
+    pub(super) retained_actor_completions: VecDeque<RoutedMobCommand>,
+    /// A completed Shutdown waiting for its retained completions before it
+    /// replies and the actor exits.
+    pub(super) shutdown_exit: Option<PendingShutdownExit>,
     pub(super) next_spawn_ticket: u64,
     /// Monotonically increasing fence token counter.
     /// Each spawn/respawn/reset issues a strictly newer token.
@@ -7227,6 +7294,19 @@ pub(super) struct MobActor {
     >,
     pub(super) next_member_effect_ticket: u64,
     pub(super) retirements: BTreeMap<AgentIdentity, retirement_io::RetirementContinuation>,
+    /// Retirements that durably started and then stopped at a stage. Each
+    /// stays owned here until a typed re-drive (explicit or on resume) or a
+    /// Shutdown report accounts for it; it is never dropped.
+    pub(super) stuck_retirements: BTreeMap<AgentIdentity, retirement_io::StuckRetirement>,
+    /// Per-member outcomes of the Shutdown in progress.
+    pub(super) shutdown_report: super::MobShutdownReport,
+    /// Caller-owned bound of the Shutdown in progress (`ShutdownOptions`).
+    pub(super) shutdown_deadline: Option<Instant>,
+    /// A Shutdown parked while its runtime teardown runs off the actor loop.
+    pub(super) pending_shutdown_teardown: Option<shutdown_teardown::PendingShutdownTeardown>,
+    /// Stuck retirements a resume handed back for re-drive, started one at a
+    /// time from the actor loop.
+    pub(super) pending_stuck_redrives: VecDeque<AgentIdentity>,
     pub(super) next_retirement_ticket: u64,
     pub(super) retirement_batch: Option<retirement_io::RetirementBatch>,
     pub(super) wiring_io_tasks: tokio::task::JoinSet<wiring_io::WiringIoCompletion>,
@@ -7315,6 +7395,8 @@ pub(super) struct MobActor {
     pub(super) spawn_cleanup_waiters: Vec<(AgentIdentity, oneshot::Sender<()>)>,
     /// Handle-readable gauge of parked deliveries per member.
     pub(super) member_admission_backlog: Arc<super::handle::MemberAdmissionBacklogGauge>,
+    /// Per-member retirement settlements; the actor is the sole writer.
+    pub(super) lifecycle_observations: Arc<super::MemberLifecycleObservations>,
     /// Warns when one inline loop step exceeds its budget (#1102).
     pub(super) inline_step_watchdog: ActorInlineStepWatchdog,
     /// Explicit Resume whose per-member readiness fan-out is running detached;
@@ -7544,6 +7626,10 @@ pub(super) enum MemberLiveMutationTarget {
 }
 
 pub(super) enum MemberLiveMutationCompletion {
+    /// Test-only task that awaited this actor's reply (see
+    /// `MobCommand::SpawnLiveMutationAwaitingActorForTest`); it owns no effect.
+    #[cfg(test)]
+    AwaitedActorForTest,
     Open {
         agent_identity: AgentIdentity,
         target: MemberLiveMutationTarget,
@@ -10672,8 +10758,54 @@ impl MobActor {
     /// lifecycle barrier instead — `begin_placed_completion_lifecycle_quiesce`
     /// (Stop/Complete/Reset/Destroy/RetireAll) and the `Shutdown` arm, where
     /// `drain_wiring_io_for_lifecycle` already runs.
+    #[inline(never)]
+    fn log_shutdown_admitted(&self) {
+        tracing::info!(
+            mob_id = %self.definition.id,
+            in_flight_retirements = self.retirements.len(),
+            stuck_retirements = self.stuck_retirements.len(),
+            member_effect_tasks = self.member_effect_tasks.len(),
+            "mob shutdown admitted"
+        );
+    }
+
+    #[inline(never)]
+    fn log_shutdown_step(&self, step: &'static str, started: Instant) {
+        tracing::info!(
+            mob_id = %self.definition.id,
+            step,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "mob shutdown step completed"
+        );
+    }
+
+    /// A Shutdown that defers behind in-flight retirements interrupts them
+    /// cooperatively, so they settle (as stuck, if durably started) instead of
+    /// holding the Shutdown behind a stage that may never get its signal.
+    #[inline(never)]
+    fn interrupt_owned_retirements_for_deferred_shutdown(&self, command: &MobCommand) {
+        if matches!(command, MobCommand::Shutdown { .. }) && !self.retirements.is_empty() {
+            self.interrupt_owned_retirements();
+        }
+    }
+
     fn resume_member_control_is_pending(&self, command: &MobCommand) -> bool {
         if self.submit_work_pump_control_is_pending(command) {
+            return true;
+        }
+        // A Shutdown parked on its off-actor runtime teardown still owns the
+        // mob's lifecycle: other lifecycle verbs wait for it (a Shutdown joins
+        // it in its dispatch arm instead).
+        let waits_on_shutdown_teardown = matches!(
+            command,
+            MobCommand::Stop { .. }
+                | MobCommand::Complete { .. }
+                | MobCommand::Reset { .. }
+                | MobCommand::Destroy { .. }
+                | MobCommand::RetireAll { .. }
+                | MobCommand::ResumeLifecycle { .. }
+        );
+        if self.pending_shutdown_teardown.is_some() && waits_on_shutdown_teardown {
             return true;
         }
         if matches!(
@@ -11051,7 +11183,7 @@ impl MobActor {
     /// holds members for a Stop, and releases them on Resume, only as the
     /// generated transition says. `hold` selects which effect must (and the
     /// other must not) be present; `None` requires neither.
-    fn require_member_run_start_effect(
+    pub(super) fn require_member_run_start_effect(
         transition: &mob_dsl::MobMachineTransition,
         hold: Option<bool>,
         context: &str,
@@ -13571,6 +13703,7 @@ impl MobActor {
             flow_target_provisioner: Arc::clone(&self.flow_target_provisioner),
             explicit_resume_operations: Arc::clone(&self.explicit_resume_operations),
             member_admission_backlog: Arc::clone(&self.member_admission_backlog),
+            lifecycle_observations: Arc::clone(&self.lifecycle_observations),
             per_spawn_external_tools: Arc::clone(&self.per_spawn_external_tools),
         }
     }
@@ -15630,135 +15763,100 @@ impl MobActor {
         }
     }
 
-    async fn teardown_session_runtime_bindings_from_machine(&mut self) -> Result<(), MobError> {
-        #[cfg(feature = "runtime-adapter")]
-        if let Some(adapter) = self.runtime_adapter.clone() {
-            let state = self.dsl_authority.state();
-            let mut session_ids = state
-                .member_session_bindings
-                .iter()
-                .filter(|(identity, _)| !state.member_placement.contains_key(*identity))
-                .map(|(_, session_id)| session_id)
-                .map(|session_id| {
-                    SessionId::parse(&session_id.0).map_err(|error| {
-                        MobError::Internal(format!(
-                            "shutdown found invalid machine-owned session binding '{}': {error}",
-                            session_id.0
-                        ))
-                    })
-                })
-                .collect::<Result<HashSet<_>, MobError>>()?;
-            session_ids.extend(self.shutdown_runtime_unregister_observers.keys().cloned());
-            let mut failures = Vec::new();
-            let mut unregister_pending = false;
-            for session_id in session_ids {
-                if let Some(observer) = self.shutdown_runtime_unregister_observers.get(&session_id)
-                {
-                    let result = match observer.try_result() {
-                        Ok(Some(result)) => result,
-                        Ok(None) => {
-                            unregister_pending = true;
-                            continue;
-                        }
-                        Err(error) => {
-                            failures.push(format!(
-                                "failed to observe runtime unregister for session {session_id} during mob teardown: {error}"
-                            ));
-                            self.shutdown_runtime_unregister_observers
-                                .remove(&session_id);
-                            continue;
-                        }
-                    };
-                    let registration = observer.registration().clone();
-                    match result {
-                        Err(error) => {
-                            self.shutdown_runtime_unregister_observers
-                                .remove(&session_id);
-                            failures.push(format!(
-                                "failed to unregister runtime session {session_id} during mob teardown: {error}"
-                            ));
-                        }
-                        Ok(()) => match adapter
-                            .current_session_registration_witness(&session_id)
-                            .await
-                        {
-                            None => {}
-                            Some(current) if current == registration => failures.push(format!(
-                                "runtime unregister coordinator for session {session_id} published success while its exact registration remained current"
-                            )),
-                            Some(_) => failures.push(format!(
-                                "runtime session {session_id} was replaced during exact mob shutdown teardown"
-                            )),
-                        },
-                    }
-                    continue;
-                }
-                let Some(registration) = adapter
-                    .current_session_registration_witness(&session_id)
-                    .await
-                else {
-                    continue;
-                };
-                // Exact-current unregister runs the two-phase drain internally
-                // (0.7.2 D1). Capturing the opaque registration witness before
-                // admission prevents a same-SessionId replacement from being
-                // reached by this Shutdown attempt or its retained observer.
-                match adapter
-                    .observe_unregister_session_registration_if_current(&registration)
-                    .await
-                {
-                    Ok(meerkat_runtime::RuntimeSessionUnregisterAdmission::Completed) => {
-                        match adapter
-                            .current_session_registration_witness(&session_id)
-                            .await
-                        {
-                            None => {}
-                            Some(current) if current == registration => failures.push(format!(
-                                "runtime unregister coordinator for session {session_id} completed while its exact registration remained current"
-                            )),
-                            Some(_) => failures.push(format!(
-                                "runtime session {session_id} was replaced during exact mob shutdown teardown"
-                            )),
-                        }
-                    }
-                    Ok(meerkat_runtime::RuntimeSessionUnregisterAdmission::NotCurrent) => {
-                        if adapter
-                            .current_session_registration_witness(&session_id)
-                            .await
-                            .is_some()
-                        {
-                            failures.push(format!(
-                                "runtime session {session_id} changed before exact mob shutdown teardown admission"
-                            ));
-                        }
-                    }
-                    Ok(meerkat_runtime::RuntimeSessionUnregisterAdmission::Pending(observer)) => {
-                        // The runtime coordinator is independently owned and
-                        // exact-registration fenced. Retain only its read-only
-                        // result observer, so later actor commands never wait,
-                        // restart cleanup, or acquire authority over a
-                        // same-SessionId replacement.
-                        self.shutdown_runtime_unregister_observers
-                            .insert(session_id.clone(), observer);
-                        unregister_pending = true;
-                    }
-                    Err(error) => {
-                        failures.push(format!(
-                            "failed to unregister runtime session {session_id} during mob teardown: {error}"
-                        ));
-                    }
-                }
-            }
-            if !failures.is_empty() {
-                return Err(MobError::Internal(failures.join("; ")));
-            }
-            if unregister_pending {
-                return Err(MobError::LifecycleOperationPending {
-                    intent: "shutdown_runtime_unregister".to_string(),
-                });
-            }
+    /// The bound for one Shutdown wait: the caller's remaining deadline, or
+    /// the member lifecycle hang guard without one.
+    fn shutdown_wait_budget(&self) -> Duration {
+        match self.shutdown_deadline {
+            Some(deadline) => deadline
+                .saturating_duration_since(Instant::now())
+                .min(MEMBER_LIFECYCLE_HANG_GUARD),
+            None => MEMBER_LIFECYCLE_HANG_GUARD,
         }
-        Ok(())
+    }
+
+    /// Record and log one member's Shutdown outcome as it settles, so a
+    /// process killed mid-Shutdown still leaves a per-member record.
+    pub(super) fn record_shutdown_outcome(
+        &mut self,
+        member: AgentIdentity,
+        outcome: super::MemberShutdownOutcome,
+    ) {
+        if outcome.is_clean() {
+            tracing::info!(
+                mob_id = %self.definition.id,
+                agent_identity = %member,
+                ?outcome,
+                "shutdown member outcome"
+            );
+        } else {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                agent_identity = %member,
+                ?outcome,
+                "shutdown member outcome"
+            );
+        }
+        self.shutdown_report.record(member, outcome);
+    }
+
+    pub(super) fn record_shutdown_unregistered(&mut self, member: Option<&AgentIdentity>) {
+        if let Some(member) = member {
+            self.record_shutdown_outcome(
+                member.clone(),
+                super::MemberShutdownOutcome::Unregistered,
+            );
+        }
+    }
+
+    pub(super) fn record_shutdown_unregister_pending(
+        &mut self,
+        member: Option<&AgentIdentity>,
+        stage: &'static str,
+    ) {
+        if let Some(member) = member {
+            self.record_shutdown_outcome(
+                member.clone(),
+                super::MemberShutdownOutcome::UnregisterPending {
+                    stage: stage.to_string(),
+                },
+            );
+        }
+    }
+
+    /// Finish the Shutdown report: account for every owned stuck retirement
+    /// (including those this Shutdown interrupted), publish it for
+    /// `shutdown_with_report`, and log it.
+    fn finish_shutdown_report(&mut self) {
+        let stuck = self
+            .stuck_retirements
+            .iter()
+            .map(|(identity, stuck)| (identity.clone(), stuck.stage, Arc::clone(&stuck.cause)))
+            .collect::<Vec<_>>();
+        for (identity, stage, cause) in stuck {
+            let outcome = if matches!(cause.as_ref(), MobError::RetirementInterrupted { .. }) {
+                super::MemberShutdownOutcome::RetirementInterrupted { stage }
+            } else {
+                super::MemberShutdownOutcome::RetirementStuck { stage, cause }
+            };
+            // A retirement outcome is the more specific account of a member
+            // whose session was also unregistered.
+            self.shutdown_report.members.remove(&identity);
+            self.record_shutdown_outcome(identity, outcome);
+        }
+        let report = std::mem::take(&mut self.shutdown_report);
+        self.shutdown_deadline = None;
+        let outstanding = report
+            .members
+            .values()
+            .filter(|outcome| !outcome.is_clean())
+            .count();
+        tracing::info!(
+            mob_id = %self.definition.id,
+            members = report.members.len(),
+            outstanding,
+            "mob shutdown report complete"
+        );
+        self.lifecycle_observations.store_shutdown_report(report);
     }
 
     async fn ensure_autonomous_dispatch_capability_for_provisioner(
@@ -17029,6 +17127,7 @@ impl DetachedMemberReadinessContext {
         &self,
         agent_identity: &AgentIdentity,
         target: &AutonomousStopInterrupted,
+        stage: &AutonomousMemberStopStage,
     ) -> Result<(), MobError> {
         let member_ref = &target.incarnation.member_ref;
         let expected_member = target.incarnation.expected_member.as_ref();
@@ -17073,6 +17172,19 @@ impl DetachedMemberReadinessContext {
                 .bridge_session_id()
                 .map(stop_idle_wait_probe::enter);
             activity.wait_inactive().await;
+            // The session reports its turn over before the runtime records
+            // the interrupted run's end. The stop is over only once the
+            // runtime has, so a later unregister (Shutdown) or resume never
+            // meets the stopped run as still current. The member's run-start
+            // hold, set before the interrupt, keeps a queued input from
+            // starting another run meanwhile.
+            #[cfg(feature = "runtime-adapter")]
+            if let (Some(adapter), Some(session_id)) =
+                (&self.runtime_adapter, member_ref.bridge_session_id())
+            {
+                stage.enter(AUTONOMOUS_MEMBER_STOP_RUN_SETTLEMENT_STAGE);
+                adapter.wait_current_run_settled(session_id).await;
+            }
         }
         Ok(())
     }
@@ -17089,10 +17201,12 @@ impl DetachedMemberReadinessContext {
     ) -> Vec<AutonomousMemberStopOutcome> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         futures::future::join_all(targets.into_iter().map(|(identity, target)| async move {
-            let result = member_stop_within_hang_guard(
+            let stage = AutonomousMemberStopStage::default();
+            let result = member_stop_within_hang_guard_at(
                 &identity,
                 remaining,
-                self.finish_autonomous_member_stop(&identity, &target),
+                &stage,
+                self.finish_autonomous_member_stop(&identity, &target, &stage),
             )
             .await;
             AutonomousMemberStopOutcome {
@@ -17157,6 +17271,7 @@ impl MobActor {
     fn drive_autonomous_stop_interrupts(
         &mut self,
         entries: &[RosterEntry],
+        kind: PendingAutonomousStopKind,
     ) -> Result<(), MobError> {
         let mut incarnations = BTreeMap::new();
         for entry in entries {
@@ -17197,8 +17312,22 @@ impl MobActor {
             match result {
                 Ok(Ok((activity, outcome))) => {
                     if let Some(task) = self.autonomous_stop_interrupts.remove(&agent_identity) {
-                        self.stop_member_outcomes
-                            .insert(agent_identity.clone(), outcome.clone());
+                        // A Stop reports outcomes in its Stop report; a
+                        // Shutdown reports its members' runs in its own.
+                        match kind {
+                            PendingAutonomousStopKind::Stop => {
+                                self.stop_member_outcomes
+                                    .insert(agent_identity.clone(), outcome.clone());
+                            }
+                            PendingAutonomousStopKind::Shutdown => {
+                                self.shutdown_report
+                                    .runs
+                                    .insert(agent_identity.clone(), outcome.run.clone());
+                                self.shutdown_report
+                                    .run_starts
+                                    .insert(agent_identity.clone(), outcome.starts.clone());
+                            }
+                        }
                         self.autonomous_stop_interrupted.insert(
                             agent_identity,
                             AutonomousStopInterrupted {
@@ -17282,14 +17411,23 @@ impl MobActor {
                     Ok(None)
                 };
                 // Hold the member's run starts and cancel exactly the run the
-                // hold found current (#1500); the outcome says which.
-                let result = match activity {
-                    Ok(activity) => converge_autonomous_stop_member_result(
+                // hold found current (#1500); the outcome says which. A Stop
+                // cancels it at its next boundary, a Shutdown immediately.
+                let stopped = match kind {
+                    PendingAutonomousStopKind::Stop => {
                         provisioner
                             .stop_member_runtime(&member_ref, expected_member.as_ref(), true)
-                            .await,
-                    )
-                    .map(|outcome| (activity, outcome)),
+                            .await
+                    }
+                    PendingAutonomousStopKind::Shutdown => {
+                        provisioner
+                            .stop_member_runtime_now(&member_ref, expected_member.as_ref())
+                            .await
+                    }
+                };
+                let result = match activity {
+                    Ok(activity) => converge_autonomous_stop_member_result(stopped)
+                        .map(|outcome| (activity, outcome)),
                     Err(error) => Err(error),
                 };
                 let _ = result_tx.send(result);
@@ -17527,11 +17665,16 @@ impl MobActor {
         }
     }
 
-    /// Hold every member's run starts for a Stop (#1500), before any stop
-    /// interrupt: from here no member starts a new run from input admitted
-    /// before the stop. Each autonomous member is held again with its exact
-    /// cancel by its interrupt task, whose outcome then replaces this one.
-    async fn hold_all_member_run_starts_for_stop(&mut self) -> Result<(), MobError> {
+    /// Hold roster members' run starts (#1500), returning each member's
+    /// outcome. Shared by Stop, which holds every member and records the
+    /// outcomes in its report, and Shutdown (OB3), which holds only the
+    /// members whose runtime this mob hosts (`local_only`): a remote member's
+    /// host is not contacted during Shutdown, which never probes a placed
+    /// member it has no live channel to.
+    async fn hold_all_member_run_starts(
+        &mut self,
+        local_only: bool,
+    ) -> Result<BTreeMap<AgentIdentity, super::stop_report::MemberStopOutcome>, MobError> {
         let entries = {
             let roster = self.roster.read().await;
             roster.list().cloned().collect::<Vec<_>>()
@@ -17549,6 +17692,16 @@ impl MobActor {
                 continue;
             }
             let incarnation = self.autonomous_stop_interrupt_incarnation(entry)?;
+            if local_only
+                && (incarnation.expected_member.is_some()
+                    || incarnation.member_ref.bridge_session_id().is_none())
+            {
+                self.shutdown_report.run_starts.insert(
+                    entry.agent_identity.clone(),
+                    super::stop_report::MemberRunStarts::DelegatedToHost,
+                );
+                continue;
+            }
             let outcome = converge_autonomous_stop_member_result(
                 self.provisioner
                     .stop_member_runtime(
@@ -17560,6 +17713,15 @@ impl MobActor {
             )?;
             outcomes.insert(entry.agent_identity.clone(), outcome);
         }
+        Ok(outcomes)
+    }
+
+    /// Hold every member's run starts for a Stop (#1500), before any stop
+    /// interrupt: from here no member starts a new run from input admitted
+    /// before the stop. Each autonomous member is held again with its exact
+    /// cancel by its interrupt task, whose outcome then replaces this one.
+    async fn hold_all_member_run_starts_for_stop(&mut self) -> Result<(), MobError> {
+        let mut outcomes = self.hold_all_member_run_starts(false).await?;
         // A retried Stop keeps the outcomes of interrupts that already
         // completed for the same incarnation.
         for (identity, completed) in &self.autonomous_stop_interrupted {
@@ -17571,6 +17733,7 @@ impl MobActor {
 
     async fn prepare_all_autonomous_member_stops(
         &mut self,
+        kind: PendingAutonomousStopKind,
     ) -> Result<Vec<(AgentIdentity, AutonomousStopInterrupted)>, MobError> {
         let entries = {
             let roster = self.roster.read().await;
@@ -17648,7 +17811,7 @@ impl MobActor {
 
         // Phase 2 launches all exact interrupts together and returns without
         // waiting for their bridge I/O. A later retry observes completion.
-        self.drive_autonomous_stop_interrupts(&entries)?;
+        self.drive_autonomous_stop_interrupts(&entries, kind)?;
 
         entries
             .into_iter()
@@ -17665,6 +17828,16 @@ impl MobActor {
                     })
             })
             .collect()
+    }
+
+    /// Whether a Shutdown has started and is parked (on its members' stops
+    /// or on its runtime teardown) rather than finished.
+    fn shutdown_in_progress(&self) -> bool {
+        self.pending_shutdown_teardown.is_some()
+            || self
+                .pending_autonomous_stop
+                .as_ref()
+                .is_some_and(|pending| pending.kind == PendingAutonomousStopKind::Shutdown)
     }
 
     fn is_lifecycle_control(cmd: &MobCommand) -> bool {
@@ -17699,7 +17872,8 @@ impl MobActor {
             MobCommand::Stop { reply_tx } if pending.kind == PendingAutonomousStopKind::Stop => {
                 pending.joined.push(LifecycleReplyTx::Stop(reply_tx));
             }
-            MobCommand::Shutdown { reply_tx }
+            // A joining Shutdown adopts the pending Shutdown's deadline.
+            MobCommand::Shutdown { reply_tx, .. }
                 if pending.kind == PendingAutonomousStopKind::Shutdown =>
             {
                 pending.joined.push(LifecycleReplyTx::Unit(reply_tx));
@@ -17734,7 +17908,14 @@ impl MobActor {
             ticket: self.next_autonomous_stop_ticket,
             kind,
             phase: PendingAutonomousStopPhase::Interrupting,
-            deadline: Instant::now() + AUTONOMOUS_STOP_IDLE_HANG_GUARD,
+            // A Shutdown's waits are bounded by its own deadline when the
+            // caller gave one (`ShutdownOptions`), else the hang guard.
+            deadline: Instant::now()
+                + if matches!(kind, PendingAutonomousStopKind::Shutdown) {
+                    self.shutdown_wait_budget()
+                } else {
+                    MEMBER_LIFECYCLE_HANG_GUARD
+                },
             prior,
             reply_tx,
             joined: Vec::new(),
@@ -17794,7 +17975,10 @@ impl MobActor {
     /// interrupt the window now admits, and once every member is interrupted
     /// moves on to awaiting their end of turn. A resume rollback waiting on
     /// interrupts re-drives the same way.
-    async fn redrive_after_autonomous_stop_interrupt(&mut self) -> ActorLoopControl {
+    async fn redrive_after_autonomous_stop_interrupt(
+        &mut self,
+        command_rx: &mut mpsc::Receiver<RoutedMobCommand>,
+    ) -> ActorLoopControl {
         if let Some(attempt) = self
             .pending_resume_rollback
             .as_mut()
@@ -17806,11 +17990,11 @@ impl MobActor {
         {
             Box::pin(self.drive_explicit_resume_rollback(attempt)).await;
         }
-        let Some(deadline) = self
+        let Some((deadline, kind)) = self
             .pending_autonomous_stop
             .as_ref()
             .filter(|pending| pending.phase == PendingAutonomousStopPhase::Interrupting)
-            .map(|pending| pending.deadline)
+            .map(|pending| (pending.deadline, pending.kind))
         else {
             return ActorLoopControl::ProceedBoundary;
         };
@@ -17823,9 +18007,10 @@ impl MobActor {
                 member_id: None,
                 stage: "autonomous_member_stop_interrupt",
             });
-            return Box::pin(self.finish_pending_autonomous_stop(pending, stalled)).await;
+            return Box::pin(self.finish_pending_autonomous_stop(pending, stalled, command_rx))
+                .await;
         }
-        match Box::pin(self.prepare_all_autonomous_member_stops()).await {
+        match Box::pin(self.prepare_all_autonomous_member_stops(kind)).await {
             Err(MobError::AutonomousStopInterruptsPending { .. }) => {
                 ActorLoopControl::ProceedBoundary
             }
@@ -17837,7 +18022,12 @@ impl MobActor {
                 let Some(pending) = self.pending_autonomous_stop.take() else {
                     return ActorLoopControl::ProceedBoundary;
                 };
-                Box::pin(self.finish_pending_autonomous_stop(pending, result.map(|_| ()))).await
+                Box::pin(self.finish_pending_autonomous_stop(
+                    pending,
+                    result.map(|_| ()),
+                    command_rx,
+                ))
+                .await
             }
         }
     }
@@ -17848,6 +18038,7 @@ impl MobActor {
         &mut self,
         ticket: u64,
         outcomes: Vec<AutonomousMemberStopOutcome>,
+        command_rx: &mut mpsc::Receiver<RoutedMobCommand>,
     ) -> ActorLoopControl {
         let Some(pending) = self.pending_autonomous_stop.take_if(|pending| {
             pending.ticket == ticket
@@ -17861,7 +18052,7 @@ impl MobActor {
             return ActorLoopControl::ProceedBoundary;
         };
         let members = self.settle_autonomous_member_stop_outcomes(outcomes);
-        Box::pin(self.finish_pending_autonomous_stop(pending, members)).await
+        Box::pin(self.finish_pending_autonomous_stop(pending, members, command_rx)).await
     }
 
     /// Run a parked Stop's or Shutdown's tail with its members' result.
@@ -17869,6 +18060,7 @@ impl MobActor {
         &mut self,
         pending: PendingAutonomousStop,
         members: Result<(), MobError>,
+        command_rx: &mut mpsc::Receiver<RoutedMobCommand>,
     ) -> ActorLoopControl {
         let PendingAutonomousStop {
             kind,
@@ -17887,7 +18079,10 @@ impl MobActor {
                 ActorLoopControl::ProceedBoundary
             }
             PendingAutonomousStopKind::Shutdown => {
-                Box::pin(self.complete_shutdown_after_member_stops(result, reply_tx, joined)).await
+                Box::pin(
+                    self.complete_shutdown_after_member_stops(result, reply_tx, joined, command_rx),
+                )
+                .await
             }
         }
     }
@@ -17963,9 +18158,10 @@ impl MobActor {
     /// The Shutdown tail after its members' turns ended.
     async fn complete_shutdown_after_member_stops(
         &mut self,
-        mut result: Result<(), MobError>,
+        result: Result<(), MobError>,
         reply_tx: LifecycleReplyTx,
         joined: Vec<LifecycleReplyTx>,
+        command_rx: &mut mpsc::Receiver<RoutedMobCommand>,
     ) -> ActorLoopControl {
         // Lifecycle notifications are actor-owned mechanical delivery, not
         // teardown retry anchors. A notification can be blocked in the session
@@ -17974,31 +18170,88 @@ impl MobActor {
         // teardown. The full background-work barrier below is idempotent and
         // still owns every other task/listener.
         if result.is_ok() {
+            let step = Instant::now();
             self.abort_and_join_lifecycle_tasks().await;
+            self.log_shutdown_step("lifecycle_tasks_joined", step);
         }
         // The member-stop phase owns the exact executor attachments. Preserve
         // them as retry anchors when an interrupt is still pending; tearing
         // them down here would make the handle-level lifecycle retry target an
         // authority this failed attempt already removed.
-        if result.is_ok()
-            && let Err(error) = self.teardown_session_runtime_bindings_from_machine().await
-        {
-            tracing::warn!(error = %error, "shutdown session binding teardown failed");
-            result = Err(error);
-        }
         if result.is_ok() {
-            self.shutdown_actor_owned_background_work().await;
-            if let Err(error) = self.apply_command_admission(
-                mob_dsl::MobMachineInput::Shutdown,
-                MobState::Stopped,
-                "shutdown_input",
-            ) {
+            // Runtime teardown runs off the actor loop, concurrently per
+            // session and bounded by the Shutdown's budget; the Shutdown
+            // re-enters through `resolve_shutdown_teardown`.
+            match self.park_shutdown_teardown(result, reply_tx, joined) {
+                Ok(()) => return ActorLoopControl::SkipBoundary,
+                Err(tail) => {
+                    let shutdown_teardown::InlineShutdownTail {
+                        prior,
+                        reply_tx,
+                        joined,
+                    } = *tail;
+                    return Box::pin(self.finish_shutdown(prior, reply_tx, joined, command_rx))
+                        .await;
+                }
+            }
+        }
+        Box::pin(self.finish_shutdown(result, reply_tx, joined, command_rx)).await
+    }
+
+    /// The Shutdown tail after runtime teardown: actor-owned background work,
+    /// the generated Shutdown admission, the report, and the reply.
+    async fn finish_shutdown(
+        &mut self,
+        mut result: Result<(), MobError>,
+        reply_tx: LifecycleReplyTx,
+        mut joined: Vec<LifecycleReplyTx>,
+        command_rx: &mut mpsc::Receiver<RoutedMobCommand>,
+    ) -> ActorLoopControl {
+        if result.is_ok() {
+            let mut retained = std::mem::take(&mut self.retained_actor_completions);
+            let tail = Box::pin(self.shutdown_actor_owned_background_work());
+            Self::serve_refusals_while(command_rx, &mut joined, &mut retained, tail).await;
+            self.retained_actor_completions = retained;
+            // The hold was realized before the member interrupts; the
+            // committed transition must still carry it.
+            let applied = self
+                .apply_dsl_input_collect_transition(
+                    mob_dsl::MobMachineInput::Shutdown,
+                    "shutdown_input",
+                )
+                .map_err(|error| {
+                    tracing::debug!(
+                        error = %error,
+                        "MobMachine command admission rejected input"
+                    );
+                    self.invalid_transition_to(MobState::Stopped)
+                })
+                .and_then(|transition| {
+                    Self::require_member_run_start_effect(
+                        &transition,
+                        Some(true),
+                        "finish_shutdown",
+                    )
+                });
+            if let Err(error) = applied {
                 tracing::warn!(error = %error, "shutdown admission apply failed");
                 result = Err(error);
             }
         }
 
         let succeeded = result.is_ok();
+        if succeeded {
+            self.finish_shutdown_report();
+        }
+        if succeeded
+            && !self.durable_uncertainty_fail_stop
+            && !self.retained_actor_completions.is_empty()
+        {
+            // Completions of work this actor owned arrived while it joined that
+            // work: the actor processes them before it replies and exits.
+            self.shutdown_exit = Some(PendingShutdownExit { reply_tx, joined });
+            return ActorLoopControl::SkipBoundary;
+        }
         if !self.respawn_topology_reply_withheld {
             send_lifecycle_result(reply_tx, joined, result, &self.current_stop_report());
         }
@@ -18022,7 +18275,10 @@ impl MobActor {
         // observed as its actor-owned task completing; each completion
         // re-drives the stop. The deadline is the hang guard.
         let targets = loop {
-            match self.prepare_all_autonomous_member_stops().await {
+            match self
+                .prepare_all_autonomous_member_stops(PendingAutonomousStopKind::Stop)
+                .await
+            {
                 Ok(targets) => break targets,
                 Err(error @ MobError::AutonomousStopInterruptsPending { .. }) => {
                     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -21553,11 +21809,76 @@ impl MobActor {
     /// Join barrier for every background task/listener owned directly by the
     /// actor (as opposed to keyed pending-spawn/flow/autonomous tables).
     /// Safe to call repeatedly; all task sets and optional handles are drained.
+    /// Run `work` (a Shutdown step that joins actor-owned tasks) while still
+    /// answering every command that reaches the actor: a Shutdown joins this
+    /// one, a caller request is refused typed as `ActorCommandChannelClosed`
+    /// (the answer it gets a moment later anyway), and an actor completion is
+    /// retained in `retained` for the actor to process after the step. A joined task may have sent this
+    /// actor a command and await its reply; served this way, it can never wait
+    /// on the actor that is joining it (OB3: the actor otherwise wedged in an
+    /// inline Shutdown join until SIGKILL).
+    async fn serve_refusals_while<F>(
+        command_rx: &mut mpsc::Receiver<RoutedMobCommand>,
+        joined: &mut Vec<LifecycleReplyTx>,
+        retained: &mut VecDeque<RoutedMobCommand>,
+        work: F,
+    ) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        let mut work = std::pin::pin!(work);
+        let mut channel_open = true;
+        loop {
+            tokio::select! {
+                biased;
+                output = &mut work => {
+                    // Answer what is already queued too, so a completion sent
+                    // before the step ended is retained, not left behind.
+                    while let Ok(routed) = command_rx.try_recv() {
+                        Self::answer_while_shutting_down(routed, joined, retained);
+                    }
+                    return output;
+                }
+                routed = command_rx.recv(), if channel_open => match routed {
+                    Some(routed) => Self::answer_while_shutting_down(routed, joined, retained),
+                    None => channel_open = false,
+                },
+            }
+        }
+    }
+
+    /// One command reaching the actor while a Shutdown step joins its work:
+    /// a Shutdown joins it, a caller request is refused typed, an actor
+    /// completion is retained for processing (never refused).
+    fn answer_while_shutting_down(
+        routed: RoutedMobCommand,
+        joined: &mut Vec<LifecycleReplyTx>,
+        retained: &mut VecDeque<RoutedMobCommand>,
+    ) {
+        match routed.cmd {
+            MobCommand::Shutdown { reply_tx, .. } => joined.push(LifecycleReplyTx::Unit(reply_tx)),
+            cmd => match cmd.shutdown_answer_class() {
+                super::state::ShutdownAnswerClass::CallerRequest => {
+                    cmd.reject_with_error(MobError::ActorCommandChannelClosed);
+                }
+                super::state::ShutdownAnswerClass::ActorCompletion => {
+                    retained.push_back(RoutedMobCommand {
+                        authority: routed.authority,
+                        cmd,
+                    });
+                }
+            },
+        }
+    }
+
     async fn shutdown_actor_owned_background_work(&mut self) {
         // #1105: settle owned wiring ledgers first. Aborting them before
         // reconciliation would strand real trust rows with no compensation
         // and no typed answer for the caller.
+        let step = Instant::now();
         self.abort_and_join_wiring_io_tasks().await;
+        self.log_shutdown_step("wiring_io_joined", step);
+        let step = Instant::now();
         if let Err(error) = self.abort_and_join_member_effect_tasks().await {
             tracing::error!(
                 mob_id = %self.definition.id,
@@ -21566,6 +21887,7 @@ impl MobActor {
             );
             self.durable_uncertainty_fail_stop = true;
         }
+        self.log_shutdown_step("member_effects_joined", step);
         self.member_live_mutation_tasks.abort_all();
         while let Some(result) = self.member_live_mutation_tasks.join_next().await {
             if let Err(error) = result
@@ -21602,7 +21924,9 @@ impl MobActor {
 
         self.abort_and_join_lifecycle_tasks().await;
 
+        let step = Instant::now();
         self.member_event_pumps.stop_all_and_join().await;
+        self.log_shutdown_step("member_event_pumps_joined", step);
 
         // These listener tasks retain live command/bridge ownership. Stop and
         // join them before the supervisor bridge and before command-channel
@@ -21616,7 +21940,9 @@ impl MobActor {
             acceptor.shutdown().await;
         }
 
+        let step = Instant::now();
         self.supervisor_bridge.shutdown().await;
+        self.log_shutdown_step("supervisor_bridge_shut_down", step);
     }
 
     /// Crash-semantics quiescence for an actor whose durable commit outcome is
@@ -23968,6 +24294,7 @@ impl MobActor {
                         self.start_retirement(
                             identity.clone(), Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT,
                             None, retirement_io::RetirementReply::IdentityReconcile(completion_authority.clone()),
+                            false,
                         ).await;
                     }
                     Ok(false)
@@ -24846,6 +25173,7 @@ impl MobActor {
                 MobCommand::Retire {
                     agent_identity,
                     expected_incarnation,
+                    redrive,
                     deadline,
                     admission_tx,
                     reply_tx,
@@ -24856,6 +25184,7 @@ impl MobActor {
                             Ok(()) => self.start_retirement(
                                 agent_identity, deadline, Some(admission_tx),
                                 retirement_io::RetirementReply::Retire(reply_tx),
+                                redrive,
                             ).await,
                             Err(error) => { let _ = reply_tx.send(Err(error)); }
                         }
@@ -26145,6 +26474,51 @@ impl MobActor {
                     let _ = reply_tx.send(burst_result);
                 }
                 #[cfg(test)]
+                MobCommand::HonourCompletionForTest { honoured } => {
+                    honoured.send_replace(true);
+                }
+                #[cfg(test)]
+                MobCommand::SpawnLiveMutationSendingCompletionForTest { honoured, reply_tx } => {
+                    let command_tx = self.command_tx.clone();
+                    let mut admitted = self.lifecycle_observations.shutdown_admitted.subscribe();
+                    self.member_live_mutation_tasks.spawn(async move {
+                        let _ = admitted.wait_for(|admitted| *admitted).await;
+                        let _ = command_tx
+                            .send(RoutedMobCommand::internal(
+                                MobCommand::HonourCompletionForTest { honoured },
+                            ))
+                            .await;
+                        MemberLiveMutationCompletion::AwaitedActorForTest
+                    });
+                    let _ = reply_tx.send(Ok(()));
+                }
+                #[cfg(test)]
+                MobCommand::SpawnLiveMutationAwaitingActorForTest {
+                    observed_tx,
+                    reply_tx,
+                } => {
+                    let command_tx = self.command_tx.clone();
+                    let mut admitted = self.lifecycle_observations.shutdown_admitted.subscribe();
+                    self.member_live_mutation_tasks.spawn(async move {
+                        let _ = admitted.wait_for(|admitted| *admitted).await;
+                        let (phase_tx, phase_rx) = oneshot::channel();
+                        let observed = match command_tx
+                            .send(RoutedMobCommand::internal(MobCommand::QueryPhase {
+                                reply_tx: phase_tx,
+                            }))
+                            .await
+                        {
+                            Ok(()) => phase_rx
+                                .await
+                                .unwrap_or(Err(MobError::ActorReplyChannelClosed)),
+                            Err(_) => Err(MobError::ActorCommandChannelClosed),
+                        };
+                        let _ = observed_tx.send(observed);
+                        MemberLiveMutationCompletion::AwaitedActorForTest
+                    });
+                    let _ = reply_tx.send(Ok(()));
+                }
+                #[cfg(test)]
                 MobCommand::ParkActorForObservationTest {
                     entered_tx,
                     release_rx,
@@ -26512,7 +26886,9 @@ impl MobActor {
                                     stop_result = Err(error);
                                 }
                                 if stop_result.is_ok() {
-                                    match Box::pin(self.prepare_all_autonomous_member_stops())
+                                    match Box::pin(self.prepare_all_autonomous_member_stops(
+                                        PendingAutonomousStopKind::Stop,
+                                    ))
                                         .await
                                     {
                                         // No interrupted member to wait for:
@@ -27015,29 +27391,73 @@ impl MobActor {
                 MobCommand::AutonomousStopInterruptSettled => {
                     self.inline_step_watchdog
                         .set_step("autonomous_stop_interrupt_settled");
-                    return Box::pin(self.redrive_after_autonomous_stop_interrupt()).await;
+                    return Box::pin(self.redrive_after_autonomous_stop_interrupt(command_rx)).await;
                 }
                 MobCommand::AutonomousMemberStopsResolved { ticket, outcomes } => {
                     self.inline_step_watchdog
                         .set_step("autonomous_member_stops_resolved");
-                    return Box::pin(self.resolve_autonomous_member_stops(ticket, outcomes)).await;
+                    return Box::pin(
+                        self.resolve_autonomous_member_stops(ticket, outcomes, command_rx),
+                    )
+                    .await;
                 }
-                MobCommand::Shutdown { reply_tx } => {
-                    if let Err(error) = self.probe_command_admission(
-                        mob_dsl::MobMachineInput::Shutdown,
-                        MobState::Stopped,
-                        "shutdown_command_admission",
-                    ) {
+                MobCommand::ShutdownTeardownResolved { ticket, outcomes } => {
+                    self.inline_step_watchdog.set_step("shutdown_teardown_resolved");
+                    return Box::pin(self.resolve_shutdown_teardown(ticket, outcomes, command_rx))
+                        .await;
+                }
+                MobCommand::Shutdown { deadline, reply_tx } => {
+                    // A Shutdown arriving while one is parked on its runtime
+                    // teardown receives that Shutdown's result.
+                    if let Some(pending) = self.pending_shutdown_teardown.as_mut() {
+                        pending.joined.push(LifecycleReplyTx::Unit(reply_tx));
+                        return ActorLoopControl::SkipBoundary;
+                    }
+                    self.shutdown_deadline = deadline;
+                    // Probe only: Shutdown commits at its end. The probed
+                    // transition owns the run-start hold obligation (OB3).
+                    let admission = self
+                        .prepare_dsl_input_transition(
+                            mob_dsl::MobMachineInput::Shutdown,
+                            "shutdown_command_admission",
+                        )
+                        .map_err(|_| self.invalid_transition_to(MobState::Stopped))
+                        .and_then(|prepared| {
+                            Self::require_member_run_start_effect(
+                                &prepared.transition,
+                                Some(true),
+                                "shutdown_command_admission",
+                            )
+                        });
+                    if let Err(error) = admission {
                         let _ = reply_tx.send(Err(error));
                         return ActorLoopControl::SkipBoundary;
                     }
-                    self.drain_wiring_io_for_lifecycle().await;
-                    if let Err(error) = self.drain_member_effects_for_lifecycle().await {
-                        let _ = reply_tx.send(Err(error));
-                        return ActorLoopControl::SkipBoundary;
-                    }
-                    if let Err(error) = self.drain_member_live_mutations_for_lifecycle().await {
-                        let _ = reply_tx.send(Err(error));
+                    self.log_shutdown_admitted();
+                    #[cfg(test)]
+                    self.lifecycle_observations
+                        .shutdown_admitted
+                        .send_replace(true);
+                    // The lifecycle drains join actor-owned tasks without
+                    // aborting them; one may await this actor's reply, so the
+                    // actor keeps answering while it drains (OB3).
+                    let mut joined = Vec::new();
+                    let mut retained = std::mem::take(&mut self.retained_actor_completions);
+                    let drained = Self::serve_refusals_while(
+                        command_rx,
+                        &mut joined,
+                        &mut retained,
+                        Box::pin(async {
+                            self.drain_wiring_io_for_lifecycle().await;
+                            self.drain_member_effects_for_lifecycle().await?;
+                            self.drain_member_live_mutations_for_lifecycle().await
+                        }),
+                    )
+                    .await;
+                    self.retained_actor_completions = retained;
+                    let reply_tx = LifecycleReplyTx::Unit(reply_tx);
+                    if let Err(error) = drained {
+                        send_lifecycle_result(reply_tx, joined, Err(error), &self.current_stop_report());
                         return ActorLoopControl::SkipBoundary;
                     }
                     if let Err(error) = self
@@ -27046,7 +27466,7 @@ impl MobActor {
                         )
                         .await
                     {
-                        let _ = reply_tx.send(Err(error));
+                        send_lifecycle_result(reply_tx, joined, Err(error), &self.current_stop_report());
                         return ActorLoopControl::SkipBoundary;
                     }
                     let mut result = self
@@ -27054,7 +27474,7 @@ impl MobActor {
                         .await;
                     if result.is_err() {
                         if !self.respawn_topology_reply_withheld {
-                            let _ = reply_tx.send(result);
+                            send_lifecycle_result(reply_tx, joined, result, &self.current_stop_report());
                         }
                         if !self.durable_uncertainty_fail_stop {
                             return ActorLoopControl::SkipBoundary;
@@ -27072,7 +27492,40 @@ impl MobActor {
                                 result = Err(error);
                             }
                         }
-                        match Box::pin(self.prepare_all_autonomous_member_stops()).await {
+                        // Hold run starts before any interrupt, as the Stop
+                        // does (#1500): an input admitted before the Shutdown,
+                        // such as an autonomous kickoff, can no longer start a
+                        // run after the interrupt that the unregister would
+                        // then cancel. MobMachine's HoldMemberRunStarts is
+                        // mob-wide; this shell realizes it for the members
+                        // this mob hosts only. Remote members keep the
+                        // pre-#1500 Shutdown behaviour (no bridge contact:
+                        // their host owns their run starts and teardown), are
+                        // held through their host only when the member stop
+                        // below reaches them, and are reported as
+                        // `DelegatedToHost` otherwise. A Stopped mob owes no
+                        // remote member a release.
+                        self.provisioner.clear_owed_run_start_releases();
+                        match self.hold_all_member_run_starts(true).await {
+                            Ok(outcomes) => {
+                                for (identity, outcome) in outcomes {
+                                    self.shutdown_report
+                                        .run_starts
+                                        .insert(identity, outcome.starts);
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(error = %error, "shutdown run-start hold encountered errors");
+                                if result.is_ok() {
+                                    result = Err(error);
+                                }
+                            }
+                        }
+                        match Box::pin(self.prepare_all_autonomous_member_stops(
+                            PendingAutonomousStopKind::Shutdown,
+                        ))
+                        .await
+                        {
                             // No interrupted member to wait for: the Shutdown
                             // tail runs inline.
                             Ok(targets) if targets.is_empty() => {}
@@ -27083,18 +27536,24 @@ impl MobActor {
                                 self.park_autonomous_stop(
                                     PendingAutonomousStopKind::Shutdown,
                                     result,
-                                    LifecycleReplyTx::Unit(reply_tx),
+                                    reply_tx,
                                     Some(targets),
                                 );
+                                if let Some(pending) = self.pending_autonomous_stop.as_mut() {
+                                    pending.joined.extend(joined);
+                                }
                                 return ActorLoopControl::SkipBoundary;
                             }
                             Err(MobError::AutonomousStopInterruptsPending { .. }) => {
                                 self.park_autonomous_stop(
                                     PendingAutonomousStopKind::Shutdown,
                                     result,
-                                    LifecycleReplyTx::Unit(reply_tx),
+                                    reply_tx,
                                     None,
                                 );
+                                if let Some(pending) = self.pending_autonomous_stop.as_mut() {
+                                    pending.joined.extend(joined);
+                                }
                                 return ActorLoopControl::SkipBoundary;
                             }
                             Err(error) => {
@@ -27105,9 +27564,7 @@ impl MobActor {
                             }
                         }
                         return Box::pin(self.complete_shutdown_after_member_stops(
-                            result,
-                            LifecycleReplyTx::Unit(reply_tx),
-                            Vec::new(),
+                            result, reply_tx, joined, command_rx,
                         ))
                         .await;
                     }
@@ -27133,6 +27590,9 @@ impl MobActor {
         host_status_poll: &mut tokio::time::Interval,
         identity_reconcile_safety_scan: &mut tokio::time::Interval,
     ) -> ActorLoopWakeSelection {
+        if let Some(command) = self.retained_actor_completions.pop_front() {
+            return ActorLoopWakeSelection::Routed(command);
+        }
         if let Some(command) = self.take_ready_submit_work_pump_command() {
             return ActorLoopWakeSelection::Routed(command);
         }
@@ -27149,6 +27609,9 @@ impl MobActor {
         self.drain_completed_actor_io_tasks();
         self.drain_completed_peer_delivery_tasks();
         if boxed_arm_future(|| self.continue_retirement_batch_after_settlement()).await {
+            return ActorLoopWakeSelection::Continue;
+        }
+        if boxed_arm_future(|| self.start_pending_stuck_retirement_redrive()).await {
             return ActorLoopWakeSelection::Continue;
         }
         boxed_arm_future(|| self.continue_resume_topology_after_prior_owners()).await;
@@ -27463,10 +27926,26 @@ impl MobActor {
             // make a member no longer need interrupting (release, removal).
             if self.autonomous_stop_awaits_interrupts()
                 && matches!(
-                    boxed_arm_future(|| self.redrive_after_autonomous_stop_interrupt()).await,
+                    boxed_arm_future(
+                        || self.redrive_after_autonomous_stop_interrupt(&mut command_rx)
+                    )
+                    .await,
                     ActorLoopControl::BreakActor
                 )
             {
+                break;
+            }
+            if self.retained_actor_completions.is_empty()
+                && let Some(exit) = self.shutdown_exit.take()
+            {
+                if !self.respawn_topology_reply_withheld {
+                    send_lifecycle_result(
+                        exit.reply_tx,
+                        exit.joined,
+                        Ok(()),
+                        &self.current_stop_report(),
+                    );
+                }
                 break;
             }
             let routed = match boxed_arm_future(|| {
@@ -27504,6 +27983,7 @@ impl MobActor {
                 control
             } else {
                 if self.resume_member_control_is_pending(&cmd) {
+                    self.interrupt_owned_retirements_for_deferred_shutdown(&cmd);
                     let identity = Self::resume_member_control_target(&cmd).cloned();
                     if let Some(identity) = identity {
                         let depth = deferred_commands
@@ -27536,6 +28016,13 @@ impl MobActor {
                 // this loop's frame carries no extra command copies).
                 if self.pending_autonomous_stop.is_some() && Self::is_lifecycle_control(&cmd) {
                     self.park_lifecycle_control_behind_pending_stop(authority, cmd);
+                    continue;
+                }
+                // A Shutdown in progress (parked on its members' stops or on
+                // its runtime teardown) admits no new member and no member
+                // work it would then neither stop nor report (OB3).
+                if self.shutdown_in_progress() && cmd.starts_member_work() {
+                    cmd.reject_with_error(MobError::ActorCommandChannelClosed);
                     continue;
                 }
                 if matches!(
@@ -36802,6 +37289,8 @@ impl MobActor {
         mode: MemberLiveReconcileMode,
     ) -> Result<(), MobError> {
         match completion {
+            #[cfg(test)]
+            MemberLiveMutationCompletion::AwaitedActorForTest => Ok(()),
             MemberLiveMutationCompletion::Open {
                 agent_identity,
                 target,

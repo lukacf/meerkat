@@ -1684,7 +1684,7 @@ async fn placed_retirement_unwire_failure_retains_non_routable_retry_anchor() {
 
     controlling
         .handle
-        .retire(identity("b2"))
+        .redrive_retirement(identity("b2"))
         .await
         .expect("one-shot unwire failure retries from the Retiring anchor");
     assert_eq!(

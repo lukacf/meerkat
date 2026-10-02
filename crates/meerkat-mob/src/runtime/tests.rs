@@ -141,11 +141,8 @@ async fn crash_stop_and_release_routes(handle: MobHandle) {
     await_supervisor_route_release(&mob_id).await;
 }
 
-fn retirement_error_cause(mut error: &MobError) -> &MobError {
-    while let MobError::SharedRetirementFailure(shared) = error {
-        error = shared.as_ref();
-    }
-    error
+fn retirement_error_cause(error: &MobError) -> &MobError {
+    error.retirement_root_cause()
 }
 
 fn is_retirement_in_progress(error: &MobError) -> bool {
@@ -1906,6 +1903,9 @@ struct MockSessionService {
     prepared_resume_sessions: RwLock<HashMap<SessionId, Session>>,
     resume_prepare_calls: AtomicU64,
     keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
+    /// Sessions whose keep-alive turn has entered its wait: the runtime has
+    /// the turn's run current (see [`Self::wait_keep_alive_turn_entered`]).
+    keep_alive_turns_entered: tokio::sync::watch::Sender<HashSet<SessionId>>,
     session_comms_names: RwLock<HashMap<SessionId, String>>,
     /// Optional test-only key seed for the next materialization of a durable
     /// session. The public comms name/address stay canonical; only the
@@ -2162,6 +2162,7 @@ impl MockSessionService {
             prepared_resume_sessions: RwLock::new(HashMap::new()),
             resume_prepare_calls: AtomicU64::new(0),
             keep_alive_notifiers: RwLock::new(HashMap::new()),
+            keep_alive_turns_entered: tokio::sync::watch::Sender::new(HashSet::new()),
             session_comms_names: RwLock::new(HashMap::new()),
             comms_identity_seeds: RwLock::new(HashMap::new()),
             runtime_adapter: Mutex::new(None),
@@ -2760,6 +2761,15 @@ impl MockSessionService {
             .await
             .iter()
             .any(|(id, _)| id == session_id)
+    }
+
+    /// Wait until `session_id`'s keep-alive turn has entered its wait, so its
+    /// run is current in the runtime.
+    async fn wait_keep_alive_turn_entered(&self, session_id: &SessionId) {
+        let mut entered = self.keep_alive_turns_entered.subscribe();
+        let _ = entered
+            .wait_for(|entered| entered.contains(session_id))
+            .await;
     }
 
     /// Let a keep-alive (autonomous host) turn on `session_id` return the
@@ -4010,6 +4020,9 @@ impl SessionService for MockSessionService {
                     .store(true, Ordering::Release);
                 self.keep_alive_before_wait_release.notified().await;
             }
+            self.keep_alive_turns_entered.send_modify(|entered| {
+                entered.insert(id.clone());
+            });
             match interrupt_rx.as_mut() {
                 Some(interrupt_rx) => {
                     tokio::select! {
@@ -17246,7 +17259,7 @@ async fn test_resume_retries_retirement_started_anchor_without_operator_command(
 }
 
 #[tokio::test]
-async fn test_shutdown_joins_recovered_retirement_retry_worker_before_reply() {
+async fn test_shutdown_joins_recovered_retirement_worker_before_reply() {
     let definition = with_unique_mob_id(sample_definition(), "retirement-retry-shutdown-join");
     let mob_id = definition.id.clone();
     let events = Arc::new(FaultInjectedMobEventStore::new());
@@ -17308,20 +17321,32 @@ async fn test_shutdown_joins_recovered_retirement_retry_worker_before_reply() {
     .expect("resume retirement-started anchor");
     let resumed_mob_id = resumed.mob_id().clone();
 
-    // Drive the recovered worker to its capped two-second retry delay. A
-    // detached worker would still retain its MobHandle well after Shutdown
-    // replied; actor-owned shutdown must abort and join it first.
-    tokio::time::timeout(Duration::from_secs(6), async {
-        while service.archive_call_count(&bridge_session_id).await < 8 {
-            tokio::task::yield_now().await;
+    // The recovered worker drives the durable retirement through one typed
+    // re-drive; the failing archive leaves it stuck (owned and reported)
+    // instead of retrying on a timer. Its settlement is the signal.
+    let mut changes = resumed.machine_state_changes();
+    let settled = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(mut watch) = resumed.retirement_settlement(&worker)
+                && matches!(watch.current(), RetirementSettlement::InProgress { .. })
+            {
+                break watch.settled().await;
+            }
+            if let Some(watch) = resumed.retirement_settlement(&worker)
+                && watch.current().is_settled()
+            {
+                break Some(watch.current());
+            }
+            changes.changed().await.expect("the actor is alive");
         }
     })
     .await
-    .expect("recovered retirement worker reaches capped retry delay");
+    .expect("the recovered retirement settles");
     assert!(
-        super::builder::latest_actor_owned_startup_worker_count_for_test(&resumed_mob_id) >= 2,
-        "retirement retry and remote-intent reconciler must both be live before shutdown"
+        matches!(settled, Some(RetirementSettlement::Stuck { .. })),
+        "a failing archive leaves the recovered retirement stuck: {settled:?}"
     );
+    assert!(service.archive_call_count(&bridge_session_id).await >= 1);
 
     resumed.shutdown().await.expect("shutdown resumed mob");
     let attempts_after_shutdown = service.archive_call_count(&bridge_session_id).await;
@@ -18846,7 +18871,7 @@ async fn test_detach_failure_defers_runtime_retire_until_correlated_retry() {
     );
 
     handle
-        .retire(identity)
+        .redrive_retirement(identity)
         .await
         .expect("retry must close detach, dispatch one correlated retire, and archive");
     assert!(matches!(
@@ -36408,7 +36433,7 @@ async fn test_peer_only_retire_unwire_failure_retains_retry_anchor() {
     );
 
     handle
-        .retire(identity_a.clone())
+        .redrive_retirement(identity_a.clone())
         .await
         .expect("same-handle retry must converge remote trust and retirement");
     assert!(
@@ -36670,7 +36695,7 @@ async fn test_peer_only_retire_revoke_failure_retains_overlay_and_retry_anchor()
     );
 
     handle
-        .retire(identity.clone())
+        .redrive_retirement(identity.clone())
         .await
         .expect("same-actor retry must finish revoke and terminal retirement");
     assert_eq!(external.authorized_supervisor_peer_id().await, None);
@@ -37337,7 +37362,7 @@ async fn test_retire_archive_failure_is_not_silent() {
 
     service.clear_archive_failure(&session_id).await;
     handle
-        .retire(AgentIdentity::from("w-1"))
+        .redrive_retirement(AgentIdentity::from("w-1"))
         .await
         .expect("same-process retry converges after transient archive failure");
     assert!(
@@ -37415,7 +37440,7 @@ async fn test_retire_terminal_publication_failure_retains_anchor_and_retry_conve
 
     events.allow_appends_for("MemberRetired").await;
     handle
-        .retire(AgentIdentity::from("w-1"))
+        .redrive_retirement(AgentIdentity::from("w-1"))
         .await
         .expect("retry terminal publication");
     assert!(
@@ -37517,7 +37542,7 @@ async fn test_retire_trust_removal_failure_is_not_silent() {
         )
         .await;
     handle
-        .retire(AgentIdentity::from("w-1"))
+        .redrive_retirement(AgentIdentity::from("w-1"))
         .await
         .expect("same-handle retry must finish trust cleanup and retirement");
     assert!(
@@ -39630,9 +39655,9 @@ async fn retire_to_terminal_joins_a_saga_that_outlives_the_retire_budget() {
         matches!(
             &error,
             MobError::MemberRetirementInProgress { member_id, stage }
-                if member_id == &retiring && stage == "actor_retirement_saga"
+                if member_id == &retiring && stage == "retire-local-trust-cleanup"
         ),
-        "the caller budget answers the running saga typed in progress: {error:?}"
+        "the caller budget answers the running saga typed in progress at its stage: {error:?}"
     );
 
     let joined = tokio::spawn({
@@ -45878,22 +45903,25 @@ async fn test_retire_publishes_retiring_before_wedged_control_and_retry_is_bound
     // miss the one-shot notification, and make this fixture manufacture a
     // permanently wedged successor callback.
     service.clear_runtime_control_barrier().await;
+    let mut settlement = handle
+        .retirement_settlement(&member_id)
+        .expect("the owned retirement publishes its settlement");
+    let released = Instant::now();
     control.release_all();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match handle.retire(AgentIdentity::from(member_id.as_str())).await {
-                Ok(()) => break,
-                Err(error) if is_retirement_in_progress(&error) => {
-                    tokio::task::yield_now().await;
-                }
-                Err(error) => {
-                    panic!("retry should converge retained Retiring authority: {error}")
-                }
-            }
-        }
-    })
-    .await
-    .expect("retry should not strand after exact callbacks release");
+    // The single owned retirement re-issues its exact-run cancel once the
+    // released control path is deliverable again and settles on that
+    // signal, well inside the lifecycle hang guard, with no second retire.
+    let settled = tokio::time::timeout(Duration::from_secs(5), settlement.settled())
+        .await
+        .expect("the owned retirement settles once exact callbacks release");
+    assert!(
+        matches!(settled, Some(crate::runtime::RetirementSettlement::Retired)),
+        "the owned retirement retires the member: {settled:?}"
+    );
+    assert!(
+        released.elapsed() < Duration::from_secs(5),
+        "settled on the released control path, not the hang guard"
+    );
     assert!(
         handle
             .get_member(&member_id)
@@ -58711,6 +58739,8 @@ struct RuntimeBackedRealCommsSessionService {
     append_system_context_delay_ms: AtomicU64,
     block_runtime_turns: AtomicBool,
     fail_runtime_turns: AtomicBool,
+    /// Make the turn-boundary session archive fail (retirement stage error).
+    fail_archive: AtomicBool,
     fail_runtime_boundary_acknowledgement: AtomicBool,
     return_extraction_failure: AtomicBool,
     return_exact_run_result: AtomicBool,
@@ -58739,6 +58769,10 @@ struct RuntimeBackedRealCommsSessionService {
     applied_runtime_contributing_input_ids:
         RwLock<HashMap<SessionId, Vec<Vec<meerkat_core::InputId>>>>,
     turn_finalization_gate: std::sync::RwLock<Option<Arc<tokio::sync::Mutex<()>>>>,
+    /// Per-session turn-finalization gates; a session's own gate takes
+    /// precedence over the service-wide one.
+    session_turn_finalization_gates:
+        std::sync::RwLock<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
     /// Calls to `acquire_runtime_turn_finalization_guard`, published before
     /// the call waits on the gate.
     turn_finalization_guard_requests: tokio::sync::watch::Sender<u64>,
@@ -58761,6 +58795,7 @@ impl RuntimeBackedRealCommsSessionService {
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             append_system_context_delay_ms: AtomicU64::new(0),
             block_runtime_turns: AtomicBool::new(false),
+            fail_archive: AtomicBool::new(false),
             fail_runtime_turns: AtomicBool::new(false),
             fail_runtime_boundary_acknowledgement: AtomicBool::new(false),
             return_extraction_failure: AtomicBool::new(false),
@@ -58781,6 +58816,7 @@ impl RuntimeBackedRealCommsSessionService {
             runtime_event_delta_count: AtomicU64::new(1),
             applied_runtime_contributing_input_ids: RwLock::new(HashMap::new()),
             turn_finalization_gate: std::sync::RwLock::new(None),
+            session_turn_finalization_gates: std::sync::RwLock::new(HashMap::new()),
             turn_finalization_guard_requests: tokio::sync::watch::channel(0).0,
             active_runtime_runs: RwLock::new(HashMap::new()),
         }
@@ -58930,6 +58966,10 @@ impl RuntimeBackedRealCommsSessionService {
             .store(delay_ms, Ordering::Relaxed);
     }
 
+    fn set_fail_archive(&self, enabled: bool) {
+        self.fail_archive.store(enabled, Ordering::Relaxed);
+    }
+
     fn set_block_runtime_turns(&self, enabled: bool) {
         self.block_runtime_turns.store(enabled, Ordering::Relaxed);
     }
@@ -59000,6 +59040,20 @@ impl RuntimeBackedRealCommsSessionService {
     fn set_runtime_event_delta_count(&self, count: u64) {
         self.runtime_event_delta_count
             .store(count, Ordering::Relaxed);
+    }
+
+    /// Install a turn-finalization gate for one session only, so holding it
+    /// does not block any other session's boundary.
+    fn install_session_turn_finalization_gate(
+        &self,
+        session_id: &SessionId,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        self.session_turn_finalization_gates
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), Arc::clone(&gate));
+        gate
     }
 
     fn install_non_reentrant_turn_finalization_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
@@ -59530,6 +59584,13 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<(), SessionError> {
+        if self.fail_archive.load(Ordering::Relaxed) {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(
+                    "injected session archive failure".to_string(),
+                ),
+            ));
+        }
         self.archive_with_mob_lifecycle_authority(session_id).await
     }
 
@@ -59559,16 +59620,23 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
 
     async fn acquire_runtime_turn_finalization_guard(
         &self,
-        _session_id: &SessionId,
+        session_id: &SessionId,
     ) -> Result<Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>, SessionError>
     {
         self.turn_finalization_guard_requests
             .send_modify(|requests| *requests += 1);
-        let gate = self
-            .turn_finalization_gate
+        let session_gate = self
+            .session_turn_finalization_gates
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+            .get(session_id)
+            .cloned();
+        let gate = session_gate.or_else(|| {
+            self.turn_finalization_gate
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        });
         match gate {
             Some(gate) => Ok(Box::new(gate.lock_owned().await)),
             None => Ok(Box::new(())),
@@ -62981,6 +63049,7 @@ async fn test_member_reads_bypass_saturated_actor_command_queue() {
         .try_send(super::scope_gate::RoutedMobCommand::internal(
             super::state::MobCommand::Retire {
                 agent_identity: queued_identity.clone(),
+                redrive: false,
                 expected_incarnation: super::state::RetireMemberIncarnation {
                     agent_identity: queued_identity.clone(),
                     agent_runtime_id: AgentRuntimeId::new(queued_identity, queued_generation),
@@ -63100,6 +63169,7 @@ async fn test_retire_saturated_actor_queue_reports_not_admitted_without_authorit
         .try_send(super::scope_gate::RoutedMobCommand::internal(
             super::state::MobCommand::Retire {
                 agent_identity: queued_identity.clone(),
+                redrive: false,
                 expected_incarnation: super::state::RetireMemberIncarnation {
                     agent_identity: queued_identity.clone(),
                     agent_runtime_id: AgentRuntimeId::new(queued_identity, queued_generation),
@@ -68582,7 +68652,7 @@ async fn test_shutdown_level_triggers_owned_runtime_unregister_pending() {
     let responder_attempts = Arc::clone(&attempts);
     let responder = tokio::spawn(async move {
         while let Some(routed) = command_rx.recv().await {
-            let super::state::MobCommand::Shutdown { reply_tx } = routed.cmd else {
+            let super::state::MobCommand::Shutdown { reply_tx, .. } = routed.cmd else {
                 panic!("shutdown retry fixture received a non-shutdown command");
             };
             let attempt = responder_attempts.fetch_add(1, Ordering::SeqCst) + 1;
@@ -68611,73 +68681,6 @@ async fn test_shutdown_level_triggers_owned_runtime_unregister_pending() {
     );
     responder.await.expect("shutdown retry responder joins");
     handle.shutdown().await.expect("clean up real mob actor");
-}
-
-#[tokio::test]
-async fn test_shutdown_retry_stops_member_spawned_after_unregister_admission() {
-    let (handle, service) = create_test_mob(sample_definition()).await;
-    let adapter = service.enable_runtime_adapter();
-    let first_identity = AgentIdentity::from("shutdown-stage-a");
-    let mut first_spec = SpawnMemberSpec::new("worker", first_identity.as_str());
-    first_spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
-    handle
-        .spawn_spec(first_spec)
-        .await
-        .expect("spawn first autonomous member");
-    let first_session = handle
-        .resolve_bridge_session_id(&first_identity)
-        .await
-        .expect("first member bridge session");
-
-    let admission_deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match handle.shutdown_once_for_test().await {
-            Err(MobError::LifecycleOperationPending { intent })
-                if intent == "shutdown_runtime_unregister" =>
-            {
-                break;
-            }
-            Err(
-                MobError::AutonomousStopInterruptsPending { .. }
-                | MobError::PlacedCompletionCleanupPending { .. }
-                | MobError::PlacedKickoffCleanupPending { .. },
-            ) => {
-                assert!(
-                    Instant::now() < admission_deadline,
-                    "first shutdown must reach exact unregister admission"
-                );
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            result => panic!(
-                "first shutdown must retain exact unregister authority before interleaving spawn, got {result:?}"
-            ),
-        }
-    }
-
-    let second_identity = AgentIdentity::from("shutdown-stage-b");
-    let mut second_spec = SpawnMemberSpec::new("worker", second_identity.as_str());
-    second_spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
-    handle
-        .spawn_spec(second_spec)
-        .await
-        .expect("spawn interleaved autonomous member");
-    let second_session = handle
-        .resolve_bridge_session_id(&second_identity)
-        .await
-        .expect("second member bridge session");
-
-    tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
-        .await
-        .expect("shutdown retry remains bounded")
-        .expect("shutdown retry stops the interleaved member and converges");
-    assert!(
-        !adapter.contains_session(&first_session).await,
-        "first exact registration must remain unregistered"
-    );
-    assert!(
-        !adapter.contains_session(&second_session).await,
-        "interleaved member must not escape the repeated stop scan"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -68927,7 +68930,7 @@ async fn test_retire_final_event_append_failure_retries_on_same_actor() {
 
     events.allow_appends_for("MemberRetired").await;
     handle
-        .retire(identity.clone())
+        .redrive_retirement(identity.clone())
         .await
         .expect("same-actor retry must accept existing archive authority");
     assert!(
@@ -69205,7 +69208,7 @@ async fn test_autonomous_retire_retry_after_archive_unregister_closes_kickoff_qu
 
     events.allow_appends_for("MemberRetired").await;
     handle
-        .retire(identity.clone())
+        .redrive_retirement(identity.clone())
         .await
         .expect("retry must tolerate the already-absent comms drain");
     assert!(
@@ -78606,6 +78609,12 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::ForkedParticipantAttachmentReleaseUnproven { .. } => {
             "forked_participant_attachment_release_unproven".to_string()
         }
+        MobError::MemberRetirementStuck { stage, .. } => {
+            format!("member_retirement_stuck:{stage}")
+        }
+        MobError::RetirementInterrupted { stage, .. } => {
+            format!("retirement_interrupted:{stage}")
+        }
     }
 }
 
@@ -85717,6 +85726,10 @@ mod host_outage_recovery;
 /// stores (restored member, keyed duplicate, mid-turn refusal).
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod member_instruction_gates;
+/// #1390: stop and shutdown await interrupted members' end of turn as typed
+/// signals, concurrently and off the actor loop.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod owned_retirement;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod resume_bind_custody;
 mod retirement_isolation;
@@ -85725,9 +85738,6 @@ mod retirement_isolation;
 /// declined instead of touching its successor.
 mod spawn_activation_isolation;
 mod spawn_rollback;
-/// #1390: stop and shutdown await interrupted members' end of turn as typed
-/// signals, concurrently and off the actor loop.
-#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod stop_member_idle;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod submit_work_pump;

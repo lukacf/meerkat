@@ -11856,7 +11856,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `explicit_resume_settled`
   - `adaptive_lifecycle_drained`
-- Emits: `EmitRunLifecycleNotice`
+- Emits: `EmitRunLifecycleNotice`, `HoldMemberRunStarts`
 - To: `Stopped`
 
 ### `ShutdownStopped`
@@ -11865,7 +11865,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `explicit_resume_settled`
   - `adaptive_lifecycle_drained`
-- Emits: `EmitRunLifecycleNotice`
+- Emits: `EmitRunLifecycleNotice`, `HoldMemberRunStarts`
 - To: `Stopped`
 
 ### `ShutdownCompleted`
@@ -11874,7 +11874,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `explicit_resume_settled`
   - `adaptive_lifecycle_drained`
-- Emits: `EmitRunLifecycleNotice`
+- Emits: `EmitRunLifecycleNotice`, `HoldMemberRunStarts`
 - To: `Completed`
 
 ### `CancelFlowRunning`

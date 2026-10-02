@@ -312,6 +312,7 @@ mod placed_kickoff_reconciler;
 pub mod recovery;
 mod remote_flow_ticket;
 mod remote_turn_reconciler;
+mod retirement_settlement;
 mod roster_authority;
 pub(crate) mod scope_gate;
 mod session_service;
@@ -471,6 +472,11 @@ pub use reconcile::{
     ReconcileStage,
 };
 pub use recovery::RestoreIncompatible;
+pub(crate) use retirement_settlement::MemberLifecycleObservations;
+pub use retirement_settlement::{
+    MemberShutdownOutcome, MobShutdownReport, RetirementSettlement, RetirementSettlementWatch,
+    RetirementStage, ShutdownOptions,
+};
 use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::LiveDurableSourceObservation;
 pub use session_service::{

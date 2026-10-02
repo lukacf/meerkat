@@ -170,7 +170,10 @@ pub(crate) enum MobMachineCommand {
     SetSpawnPolicy {
         policy: Option<Arc<dyn crate::runtime::SpawnPolicy>>,
     },
-    Shutdown,
+    Shutdown {
+        /// Caller-owned bound for the Shutdown's waits (`ShutdownOptions`).
+        deadline: Option<meerkat_core::time_compat::Instant>,
+    },
     ForceCancel {
         agent_identity: AgentIdentity,
     },

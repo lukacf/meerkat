@@ -767,6 +767,13 @@ them.
   - Delivering an off-RPC monitor notification itself still needs the library
     applier, which is held with the ingress work.
 
+- `rkat auth login`'s browser step for provider OAuth no longer writes the
+  authorize URL, with its one-time `state` and PKCE challenge, to debug
+  logs. It opened the URL through `webbrowser::open`, which logs the
+  spawned command (URL included) at debug level, and the CLI forwards
+  `log` records into its tracing output under `RUST_LOG=debug`. It now uses
+  the same non-logging `open_system_browser` as the MCP login.
+
 - A prompt admitted to a session while its executor attachment was still
   being prepared could stay queued forever. The attachment read its queue to
   decide whether to wake its runtime loop, then handed the session mutation

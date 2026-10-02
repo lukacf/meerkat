@@ -192,6 +192,32 @@ them.
   longer joins the finished execution and reports `replayed: false`. The
   owned task now releases its in-flight reservation before publishing the
   sealed outcome, so a late caller replays the durable record.
+- MeerkatMachine unregister no longer wedges after a normal live channel
+  close (follow-up to #1476). The unregister guard added in #1476 required
+  every field a close removes to be empty. But the production close order
+  (custody revoke, then the recorded close) deliberately keeps its tombstone
+  for closed replays, so a session whose staged live channel was closed
+  normally could never unregister (`GuardRejected` on `UnregisterSession`).
+  The tombstone is the pending and activation receipts, the execution
+  mode and profile, and the two capability sets.
+  - `UnregisterSession*` now requires the 32 binding and in-flight fields
+    to be empty.
+  - The six tombstone fields may remain only for channels whose close is
+    recorded. Every forward recovery a closed channel still owes must be
+    settled first (cancelled, or its replacement bound).
+  - Unregister clears the tombstone. `RevokeLiveChannelCloseCustodyClosedReplay`
+    now requires a registered session.
+  - `live_channel_state_requires_registered_session` also requires no
+    tombstone and no owed forward recovery once unregistered.
+  - A classification test fails if a field a close removes is not
+    classified as binding or tombstone.
+  - A regression test replays the production close-then-unregister sequence
+    against the generated authority.
+  - `live_unregister_cleanup_audit` gains close-first starts in every phase
+    (Idle, Attached, Running, Retired, Stopped, and Retired and Stopped with
+    a recovery owed) with abandoned admission banned. A state-graph check
+    proves every reachable state can still unregister.
+
 - A delivery whose caller left while it was parked behind a member's
   in-flight admission no longer runs as a ghost turn. The admission lane
   skips such a delivery by checking its reply channel, but `SubmitWork` ran

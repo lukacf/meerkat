@@ -48,7 +48,7 @@ replace_exact_line "SPECIFICATION Spec" "SPECIFICATION AuditSpec" "${audit_cfg}"
 replace_exact_line "  SessionIdValues = {}" '  SessionIdValues = {"sessionid_1"}' "${audit_cfg}"
 replace_exact_line "  AgentRuntimeIdValues = {}" '  AgentRuntimeIdValues = {"runtime_1"}' "${audit_cfg}"
 replace_exact_line "  SessionLlmIdentityValues = {}" '  SessionLlmIdentityValues = {"identity_1"}' "${audit_cfg}"
-replace_exact_line "  StringValues = {}" '  StringValues = {"", "channel_a", "profile_1", "pending_a", "owner_1", "ready_1", "activation_a", "lease_1", "run_1", "input_1"}' "${audit_cfg}"
+replace_exact_line "  StringValues = {}" '  StringValues = {"", "channel_a", "channel_b", "profile_1", "pending_a", "owner_1", "ready_1", "activation_a", "lease_1", "run_1", "input_1", "stopped", "append_1", "digest_1", "commit_1"}' "${audit_cfg}"
 replace_exact_line "CONSTANTS" "CONSTANTS
   AuditMaxSteps = ${max_steps}
   AuditStart = AUDIT_START" "${audit_cfg}"
@@ -84,9 +84,25 @@ run_tlc() {
     live_unregister_cleanup_audit.tla || tlc_status=$?
   grep -E 'states generated|distinct states|is violated|Error:' "${log}" | sed "s/^/[${name}] /" || true
 }
+# run_tlc_dump <name> <cfg> <dump-base> -> TLC also writes <dump-base>.dot
+run_tlc_dump() {
+  local name="$1" cfg="$2" dump="$3"
+  local log="${work_dir}/${name}.log"
+  tlc_status=0
+  tlc_run_capped live_unregister_cleanup_audit "${name}" "${log}" \
+    -workers 1 -metadir "${work_dir}/${name}-states" -noGenerateSpecTE -dump dot "${dump}" -config "${cfg}" "${extra_tlc_args[@]}" \
+    live_unregister_cleanup_audit.tla || tlc_status=$?
+  if [[ "${tlc_status}" != "0" ]] || [[ ! -s "${dump}.dot" ]]; then
+    cat "${log}" >&2
+    echo "error: TLC state-graph dump for ${name} failed (tlc exit ${tlc_status})" >&2
+    exit 1
+  fi
+}
 extra_tlc_args=("$@")
 
-for start in admitted staged bound running retired; do
+# AUDIT_STARTS narrows the run to some start states (debugging only; the lane
+# runs them all).
+for start in ${AUDIT_STARTS:-admitted staged bound running retired closing-idle closing-attached closing-running closing-retired closing-stopped closing-retired-recovery closing-stopped-recovery}; do
   start_cfg="${work_dir}/${start}.cfg"
   sed 's/AUDIT_START/"'"${start}"'"/' "${audit_cfg}" > "${start_cfg}"
   printf 'PROPERTY\n  AuditUnregisterNeverWhileBound\n' >> "${start_cfg}"
@@ -107,6 +123,71 @@ for start in admitted staged bound running retired; do
     echo "error: unregister is not reachable from ${start} within bound ${max_steps}" >&2
     exit 1
   fi
+  if [[ "${start}" == closing-*-recovery ]]; then
+    rec_cfg="${work_dir}/${start}-recovery.cfg"
+    cp "${start_cfg}" "${rec_cfg}"
+    printf 'INVARIANT\n  AuditNeverCancelsRecovery\n' >> "${rec_cfg}"
+    run_tlc "AuditNeverCancelsRecovery-${start}" "${rec_cfg}"
+    if ! grep -q "AuditNeverCancelsRecovery is violated" "${work_dir}/AuditNeverCancelsRecovery-${start}.log"; then
+      cat "${work_dir}/AuditNeverCancelsRecovery-${start}.log" >&2
+      echo "error: the closed channel's forward recovery is never settled from ${start} within bound ${max_steps}" >&2
+      exit 1
+    fi
+  fi
+  # Per-state no wedge (close-first starts): every reachable state must still
+  # reach a completed unregister. TLC dumps the explored state graph and the
+  # check walks it backwards from the unregistered states. States within the
+  # finishing margin of the step bound are excluded: their successors are cut
+  # off by the bound, not by the model.
+  if [[ "${start}" == closing-* ]]; then
+    dump="${work_dir}/${start}-graph"
+    run_tlc_dump "graph-${start}" "${start_cfg}" "${dump}"
+    python3 - "${dump}.dot" "${max_steps}" "${start}" <<'PY'
+import re, sys
+from collections import defaultdict
+path, bound, start = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+prefix = {"closing-idle": 4, "closing-attached": 8, "closing-running": 9, "closing-retired": 10,
+          "closing-stopped": 9, "closing-retired-recovery": 15, "closing-stopped-recovery": 14}[start]
+limit = prefix + bound - 2
+margin = 7
+node_re = re.compile(r'^(-?\d+) \[label="(.*)"')
+edge_re = re.compile(r'^(-?\d+) -> (-?\d+)')
+steps, done, succ = {}, set(), defaultdict(set)
+with open(path) as f:
+    for line in f:
+        m = edge_re.match(line)
+        if m:
+            succ[m.group(1)].add(m.group(2))
+            continue
+        m = node_re.match(line)
+        if m:
+            node, label = m.group(1), m.group(2)
+            sm = re.search(r'\\n/\\\\ model_step_count = (\d+)', label)
+            steps[node] = int(sm.group(1)) if sm else 0
+            if re.search(r'\\n/\\\\ session_id = \[tag \|-> \\"none\\"', label):
+                done.add(node)
+pred = defaultdict(set)
+for a, bs in succ.items():
+    for b in bs:
+        pred[b].add(a)
+reach, todo = set(done), list(done)
+while todo:
+    n = todo.pop()
+    for p in pred[n]:
+        if p not in reach:
+            reach.add(p); todo.append(p)
+checked = [n for n in steps if steps[n] >= prefix and steps[n] <= limit - margin]
+wedged = [n for n in checked if n not in reach]
+print("[per-state %s] %d states, %d checked (step %d..%d), %d unregistered, %d wedged"
+      % (start, len(steps), len(checked), prefix, limit - margin, len(done), len(wedged)))
+if not done or wedged:
+    sys.exit(1)
+PY
+    if [[ $? -ne 0 ]]; then
+      echo "error: per-state no-wedge failed from ${start}: a reachable state cannot reach unregister" >&2
+      exit 1
+    fi
+  fi
   if [[ "${start}" == "staged" ]]; then
     prep_cfg="${work_dir}/${start}-prep.cfg"
     cp "${start_cfg}" "${prep_cfg}"
@@ -119,4 +200,4 @@ for start in admitted staged bound running retired; do
     fi
   fi
 done
-echo "live unregister cleanup audit passed at model_step_count <= ${max_steps} (unregister reachable from admitted, staged, bound, running and retired)"
+echo "live unregister cleanup audit passed at model_step_count <= ${max_steps} (unregister reachable from every start; per-state no-wedge holds from every close-first start)"

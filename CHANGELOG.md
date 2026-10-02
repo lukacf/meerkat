@@ -393,6 +393,33 @@ them.
   parameter tuple of every transition in every state: work_graph_lifecycle's
   ci sweep drops from 276 s to 161 s and occurrence_lifecycle's from 143 s to
   90 s, with identical generated and distinct state counts on every machine.
+- The GitHub-hosted release builds each surface binary in its own job (16
+  jobs: 4 targets x rkat, rkat-rpc, rkat-rest, rkat-mcp) instead of four
+  sequential `cargo build -p` runs per target, so a target takes the slowest
+  single package instead of the sum (the v0.8.50 asset run spent 3+ hours per
+  Linux target). The binaries are unchanged: one `cargo build` for all four
+- The GitHub-hosted release builds each surface binary in its own job on the
+  free runners (12 jobs: both Linux targets and arm64 macOS x rkat,
+  rkat-rpc, rkat-rest, rkat-mcp) instead of four sequential `cargo build -p`
+  runs per target, so those targets take the slowest single package instead
+  of the sum (the v0.8.50 asset run spent 3+ hours per Linux target). x86_64
+  macOS runs on the billed macos-15-large runner and keeps the sequential
+  loop, which shares units between packages (257 billed min on v0.8.50,
+  against an estimated 320-330 split). The binaries are unchanged: one `cargo build` for all four
+  would unify features across them, and the unit graphs show every binary
+  would link different code (rkat-mcp would gain live/mcp, native keyring and
+  OAuth), so each package still builds alone.
+- The GitHub-hosted release builds each surface binary in its own job (16
+  jobs: 4 targets x rkat, rkat-rpc, rkat-rest, rkat-mcp) instead of four
+  sequential `cargo build -p` runs per target, so a target takes the slowest
+  single package instead of the sum (the v0.8.50 asset run spent 3-4+ hours
+  per target). x86_64 macOS now builds natively on the free `macos-15-intel`
+  label instead of the billed `macos-15-large` runner (257 billed minutes per
+  release on v0.8.50). The binaries are unchanged: one `cargo build` for all
+  four would unify features across them, and the unit graphs show every
+  binary would link different code (rkat-mcp would gain live/mcp, native
+  keyring and OAuth), so each package still builds alone.
+
 - Supervisor rotation no longer polls a member for convergence. A member
   advertising `rotation_observe_hold` answers a held
   `ObserveSupervisorRotation` when the operation is terminal, waking on a

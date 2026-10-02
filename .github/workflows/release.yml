@@ -688,7 +688,7 @@ jobs:
             --changelog .semver-recovery-policy/CHANGELOG.md
 
   build_binaries:
-    name: Build and package surface binaries with GitHub-hosted runners
+    name: Build and package surface binaries with GitHub-hosted runners (${{ matrix.surface.bin }}, ${{ matrix.platform.target }})
     needs: [require_ci_green, release_validate_gate]
     # Linux/macOS fallback lane only. Under the owner BuildBuddy split those
     # four targets come from build_binaries_buildbuddy, and Windows is always
@@ -704,17 +704,28 @@ jobs:
       (startsWith(github.ref, 'refs/tags/v') ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.publish_release_assets_only == 'true'))
-    runs-on: ${{ matrix.runs-on }}
+    runs-on: ${{ matrix.platform.runs-on }}
     # Linux GNU binaries must keep the same glibc floor as the BuildBuddy lane
     # (buildpack-deps:bullseye = glibc 2.31, see tools/bazel/platforms/BUILD.bazel);
     # building directly on the hosted runner (Ubuntu 24.04, glibc 2.39) would
     # silently reintroduce the v0.8.21 Bullseye loader failure whenever this
     # fallback lane is active. Non-Linux matrix entries get no container.
-    container: ${{ contains(matrix.target, 'unknown-linux-gnu') && 'docker.io/library/buildpack-deps:bullseye' || '' }}
+    container: ${{ contains(matrix.platform.target, 'unknown-linux-gnu') && 'docker.io/library/buildpack-deps:bullseye' || '' }}
+    # One job per (target, surface binary). Each job builds exactly one
+    # package, so every binary keeps the feature set its own package
+    # resolves: one `cargo build -p` for all four would unify features
+    # across them and change what each binary links (measured on 0.8.50:
+    # rkat-mcp would gain the facade's live/mcp features, native keyring and
+    # OAuth; rkat-rest live, axum ws and keyring; rkat and rkat-rpc the rmcp
+    # streamable-HTTP server). The four used to build in sequence in one job,
+    # each rebuilding the graph above meerkat-core (whose features differ per
+    # package), so a target took the sum of four builds (3+ h on Linux at two
+    # jobs); now it takes the slowest single package. The cache key is shared
+    # per target so the four jobs warm each other where features match.
     strategy:
       fail-fast: false
       matrix:
-        include:
+        platform:
           - runs-on: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive_ext: tar.gz
@@ -724,9 +735,21 @@ jobs:
           - runs-on: macos-15
             target: aarch64-apple-darwin
             archive_ext: tar.gz
-          - runs-on: macos-15-large
+          # x86_64 macOS builds natively on the free standard Intel label. It
+          # used to build on macos-15-large, a billed larger runner (257 min
+          # per release on v0.8.50, sequential).
+          - runs-on: macos-15-intel
             target: x86_64-apple-darwin
             archive_ext: tar.gz
+        surface:
+          - package: rkat
+            bin: rkat
+          - package: meerkat-rpc
+            bin: rkat-rpc
+          - package: meerkat-rest
+            bin: rkat-rest
+          - package: meerkat-mcp-server
+            bin: rkat-mcp
 
     steps:
       - name: Checkout
@@ -749,12 +772,12 @@ jobs:
       - uses: ./.github/actions/setup-rust-ci
 
       - name: Add release target
-        run: rustup target add ${{ matrix.target }}
+        run: rustup target add ${{ matrix.platform.target }}
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          key: release-${{ matrix.platform.target }}
 
       # The workspace is trusted for Git in the step after Checkout (see
       # there). audiopus-sys falls back to building bundled Opus and requires
@@ -836,30 +859,26 @@ jobs:
             cargo_cmd=(cargo --config 'profile.release.package.meerkat-machine-schema.opt-level=1')
           fi
 
-          # Package names (for cargo build -p) — binary names differ via [[bin]]
-          PACKAGES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
-          for pkg in "${PACKAGES[@]}"; do
-            "${cargo_cmd[@]}" build --locked -p "$pkg" --release --target "${{ matrix.target }}"
-          done
+          # This job's one package (binary names differ via [[bin]], see the
+          # matrix). Building it alone keeps its own feature resolution.
+          "${cargo_cmd[@]}" build --locked -p "${{ matrix.surface.package }}" --release --target "${{ matrix.platform.target }}"
 
       - name: Ad-hoc codesign macOS binaries
         if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
-          for bin in rkat rkat-rpc rkat-rest rkat-mcp; do
-            codesign --force --sign - "target/${{ matrix.target }}/release/${bin}"
-          done
+          codesign --force --sign - "target/${{ matrix.platform.target }}/release/${{ matrix.surface.bin }}"
 
       - name: Package artifacts
         shell: bash
         env:
-          TARGET: ${{ matrix.target }}
+          TARGET: ${{ matrix.platform.target }}
           VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
-          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+          ARCHIVE_EXT: ${{ matrix.platform.archive_ext }}
         run: |
           set -euo pipefail
-          BINARIES=("rkat" "rkat-rpc" "rkat-rest" "rkat-mcp")
+          BINARIES=("${{ matrix.surface.bin }}")
           mkdir -p dist
           VERSION="${VERSION#v}"
           VERSION="${VERSION//\//-}"
@@ -893,7 +912,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: meerkat-${{ matrix.target }}-${{ matrix.runs-on }}
+          name: meerkat-${{ matrix.platform.target }}-${{ matrix.platform.runs-on }}-${{ matrix.surface.bin }}
           path: dist/*
           if-no-files-found: error
 

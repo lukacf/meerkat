@@ -84,6 +84,10 @@ them.
   the lifecycle budget reports a typed `LifecycleOperationProgressStalled`.
   The placed-cleanup barriers (`PlacedKickoffCleanupPending`,
   `PlacedCompletionCleanupPending`) are unchanged (#1413).
+- `meerkat_mcp::McpRouter::set_inflight_calls_for_testing` (feature
+  `test-support`) now returns `Result<(), McpError>`. It fails when the
+  server is not installed or the surface owner rejects the call transition,
+  instead of silently leaving the shell's count and the owner's apart.
 - Behaviour-only (not measured by the gate): rkat-rpc callback routing is
   owned per connection (#1451). Over TCP, a session's callback tools route
   only to the connection that created it, and `tools/register` changes only
@@ -196,6 +200,13 @@ them.
   shared named type with different domain shapes, and a composition that does
   not validate against the catalog. The canonical entry points are unchanged
   and render byte-identically through the same implementation.
+- `McpRouterAdapter::spawn_removal_drain` drives draining (Removing) MCP
+  servers to finalization in one background task per adapter. It is woken by
+  typed progress (a finished tool call, or the earliest removal timeout),
+  never a timer poll. meerkat-rpc and meerkat-rest use it in place of their
+  copies of a 100 ms poll loop. With `test-support`,
+  `McpRouterAdapter::wait_connect_results_delivered` and
+  `McpRouterAdapter::wait_removals_finalized` are typed waits for tests.
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a
@@ -365,6 +376,24 @@ them.
     a recovery owed) with abandoned admission banned. A state-graph check
     proves every reachable state can still unregister.
 
+- MCP server removal and readiness waits are event-driven (#1461).
+  - The removal drain in meerkat-rpc and meerkat-rest slept 100 ms between
+    passes. `McpRouterAdapter::wait_until_ready` polled every 100 ms. Both now
+    wait on a router progress signal: a finished call, a delivered connect
+    result or a finalized removal. The drain also wakes at the earliest
+    removal timeout.
+  - The drain queues its lifecycle actions before releasing the router lock.
+    Whoever observes a removal finalized also finds its action queued for the
+    next boundary.
+  - A removal staged just as the drain exited saw the running flag still set,
+    and nothing drained it. The drain now reclaims the flag for it.
+  - Three meerkat-rpc MCP lifecycle tests are no longer ignored. They staged
+    a remove or set an in-flight call right after an asynchronous add turn,
+    before the server was installed. A remove staged during a pending add is
+    deferred to a later boundary, and the in-flight hook silently did nothing.
+    They now wait for the server with `wait_until_ready`, and wait for the
+    drain with typed waits instead of fixed sleeps. Each passes 30/30 at 10
+    copies on two pinned cores.
 - A delivery whose caller left while it was parked behind a member's
   in-flight admission no longer runs as a ghost turn. The admission lane
   skips such a delivery by checking its reply channel, but `SubmitWork` ran
@@ -444,7 +473,7 @@ them.
   - Bazel gives every test target of such a crate the fixture, keyed on the
     dev-dependency. Generation fails if one lacks it.
   - Three meerkat-rpc MCP lifecycle tests this exposed as failing under load
-    are ignored with that reason pending #1461.
+    are fixed and run again (#1461, above).
 - Explicit mob resume no longer waits forever on a member whose session
   claim settled as an actor without an executor. If another in-process owner
   materializes that actor after the resume's preparation step and never

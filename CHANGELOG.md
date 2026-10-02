@@ -230,9 +230,9 @@ them.
   `CloseInFlight(String)`, `SessionBusy(String)` and `Permanent(String)`
   (see Fixed). The default `retire_bound_channel_after_pump_exit` reports
   `Permanent`.
-- Security fix (behaviour, managed hosts): members of mobs that callers of the
-  mob tools create (agent `mob_create` and public `meerkat_mob_create`) no
-  longer run without the host's application tool policy. Previously a member
+- Security fix (behaviour, managed hosts): members of child mobs (mobs a
+  member creates with the agent `mob_create` tool) no longer run without the
+  host's application tool policy. Previously a member
   constrained by a host consequence policy could create a child mob whose
   members were unmanaged, because the child builder received neither the
   host's policy registry nor any binding. Now:
@@ -242,12 +242,19 @@ them.
     explicit choice for child members, applied to every spawn into a child
     mob and never settable by callers. An explicit
     `ApplicationToolPolicyBinding::Unmanaged` is a valid opt-out.
-  - A managed host (registry installed) with no child policy refuses child mob
-    creation, and spawns into existing child mobs, with the typed
-    `ChildToolPolicyRefused::PolicyRequired`, whose message names the fix.
-    A provider child policy without a registry refuses with `RegistryMissing`,
-    and `Inherit` with `InheritNotAllowed`. A host without a registry keeps
+  - A managed host (registry installed) with no child policy refuses the
+    agent's `mob_create`, and spawns into existing child mobs, with the typed
+    `ChildToolPolicyRefused::PolicyRequired`, whose message says why and names
+    the fix. The agent sees the refusal as a `policy_denied` tool error
+    (code `child_tool_policy_required`) and its turn continues. A provider
+    child policy without a registry refuses with `RegistryMissing`, and
+    `Inherit` with `InheritNotAllowed`. A host without a registry keeps
     today's behaviour (unmanaged children).
+  - Only child mobs are governed. Mobs the host creates (including public
+    `meerkat_mob_create`), same-mob `fork_off` and `mob_spawn_member`,
+    temporary councils and implicit delegation mobs keep their own member
+    bindings. The classification comes from the mob's persisted owner bridge
+    authority, so it survives restore.
 - `meerkat_contracts::wire::MobToolConfigInput` gains `rust_bundles:
   Vec<String>` (ids only, omitted when empty); struct literals must set it,
   usually through `..Default::default()`.

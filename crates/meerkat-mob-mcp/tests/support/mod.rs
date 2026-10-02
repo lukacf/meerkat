@@ -468,6 +468,14 @@ impl CouncilFixture {
         )
     }
 
+    /// [`Self::new_runtime_backed`] with [`Self::new_with`]'s customization.
+    pub fn new_runtime_backed_with(
+        script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
+        customize: impl FnOnce(MobMcpState, &std::path::Path) -> MobMcpState,
+    ) -> Self {
+        Self::build(script, customize, FixtureRuntime::RuntimeBacked, None)
+    }
+
     /// A fixture whose mob state has NO runtime adapter: the host shape that
     /// cannot admit a detached completion, whatever it declares.
     pub fn new_without_runtime_adapter(

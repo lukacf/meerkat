@@ -1314,9 +1314,9 @@ impl MobMcpState {
         self
     }
 
-    /// Refuse child mob creation up front when the host's child policy cannot
-    /// be applied (a managed host without a child policy, a provider policy
-    /// without a registry, or `Inherit`).
+    /// Refuse child mob creation (the agent `mob_create` tool) up front when
+    /// the host's child policy cannot be applied (a managed host without a
+    /// child policy, a provider policy without a registry, or `Inherit`).
     pub fn admit_child_tool_policy(&self) -> Result<(), ChildToolPolicyRefused> {
         self.child_tool_policy().map(|_| ())
     }
@@ -1444,7 +1444,11 @@ impl MobMcpState {
         })
     }
 
-    fn configure_builder(&self, mut builder: MobBuilder) -> MobBuilder {
+    fn configure_builder(
+        &self,
+        mut builder: MobBuilder,
+        scope: child_tool_policy::ChildMobScope,
+    ) -> MobBuilder {
         builder = builder
             .with_session_service(self.session_service.clone())
             .allow_ephemeral_sessions(!self.session_service.supports_persistent_sessions())
@@ -1455,7 +1459,10 @@ impl MobMcpState {
             builder = builder.with_tool_consequence_policy_registry(Arc::clone(registry));
         }
         builder = builder.with_spawn_member_customizer(Arc::new(
-            child_tool_policy::ChildPolicyCustomizer(self.child_tool_policy()),
+            child_tool_policy::ChildPolicyCustomizer {
+                policy: self.child_tool_policy(),
+                scope,
+            },
         ));
         if let Some(adapter) = &self.runtime_adapter {
             builder = builder.with_runtime_adapter(adapter.clone());
@@ -1639,10 +1646,22 @@ impl MobMcpState {
                     continue;
                 }
 
+                let scope = child_tool_policy::ChildMobScope::default();
                 let handle = self
-                    .configure_builder(MobBuilder::for_resume(storage))
+                    .configure_builder(MobBuilder::for_resume(storage), scope.clone())
                     .resume()
                     .await?;
+                if handle
+                    .owner_bridge_session_lifecycle_authority()
+                    .is_some_and(|authority| {
+                        child_tool_policy::is_child_mob(
+                            authority.destroy_on_owner_archive,
+                            authority.implicit_delegation_mob,
+                        )
+                    })
+                {
+                    scope.mark_child();
+                }
                 let mob_id = handle.definition().id.clone();
                 match self.mobs.write().await.entry(mob_id.clone()) {
                     Entry::Vacant(entry) => {
@@ -1774,7 +1793,10 @@ impl MobMcpState {
         }
         let (storage, storage_path) = self.storage_for_new_mob(&mob_id).await?;
         let handle = self
-            .configure_builder(MobBuilder::new(definition, storage))
+            .configure_builder(
+                MobBuilder::new(definition, storage),
+                child_tool_policy::ChildMobScope::default(),
+            )
             .create()
             .await?;
         match self.mobs.write().await.entry(mob_id.clone()) {
@@ -1839,7 +1861,18 @@ impl MobMcpState {
             return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
         }
         let (storage, storage_path) = self.storage_for_new_mob(&mob_id).await?;
-        let mut builder = self.configure_builder(MobBuilder::new(definition.clone(), storage));
+        let scope = child_tool_policy::ChildMobScope::new(
+            owner_bridge_session_authority.as_ref().is_some_and(
+                |(_, destroy_on_owner_archive, implicit_delegation_mob)| {
+                    child_tool_policy::is_child_mob(
+                        *destroy_on_owner_archive,
+                        *implicit_delegation_mob,
+                    )
+                },
+            ),
+        );
+        let mut builder =
+            self.configure_builder(MobBuilder::new(definition.clone(), storage), scope);
         if let Some((owner_bridge_session_id, destroy_on_owner_archive, implicit_delegation_mob)) =
             owner_bridge_session_authority
         {
@@ -6122,9 +6155,6 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 let definition = agent_input::decode_agent_mob_definition(args.definition)
                     .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
-                self.state
-                    .admit_child_tool_policy()
-                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 self.state
                     .admit_child_tool_bundles(&definition)
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;

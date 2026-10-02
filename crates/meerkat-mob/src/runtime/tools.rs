@@ -409,14 +409,20 @@ pub(crate) fn resolve_profile_bundle_tools(
         .iter()
         .filter_map(|name| {
             tool_bundles.get(name).map(|dispatcher| {
-                (
-                    name.clone(),
-                    dispatcher
-                        .tools()
-                        .iter()
-                        .map(|tool| tool.name.clone())
-                        .collect(),
-                )
+                // Deferred catalog tools are composed like visible ones, so
+                // they are deniable the same way.
+                let names = dispatcher
+                    .tools()
+                    .iter()
+                    .map(|tool| tool.name.clone())
+                    .chain(
+                        dispatcher
+                            .tool_catalog()
+                            .iter()
+                            .map(|entry| entry.tool.name.clone()),
+                    )
+                    .collect();
+                (name.clone(), names)
             })
         })
         .collect()

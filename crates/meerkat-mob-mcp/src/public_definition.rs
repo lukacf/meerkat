@@ -114,8 +114,9 @@ fn decode_resume_override_field(
 
 /// Decode the canonical public profile input into the internal profile.
 ///
-/// Host-only fields (`mcp_servers`, `rust_bundles`) have no public input and
-/// stay empty.
+/// Host-only `mcp_servers` have no public input and stay empty;
+/// `rust_bundles` carries bundle ids only, which each caller-facing path
+/// admits or refuses.
 pub fn decode_public_profile(input: MobProfileInput) -> Result<Profile, String> {
     decode_profile(input)
 }

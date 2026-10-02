@@ -1109,10 +1109,22 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         // The public contract owns what a caller may define: host-only
-        // fields (profile MCP server configs, Rust bundles) have no input,
-        // and a model may not name a host path as a skill source.
+        // fields (profile MCP server configs) have no input, and a model may
+        // not name a host path as a skill source.
         let definition = crate::agent_input::decode_agent_mob_definition(args.definition)
             .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
+        // A child mob's members run under the host's child policy and may name
+        // only child-available bundles. Both refusals return to the model as
+        // typed tool errors before anything is created.
+        self.state.admit_child_tool_policy().map_err(|refusal| {
+            ToolError::policy_denied(meerkat_core::ToolConsequenceDenial::new(
+                refusal.code(),
+                refusal.to_string(),
+            ))
+        })?;
+        self.state
+            .admit_child_tool_bundles(&definition)
+            .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
         // Compute the operator grant from the *intended* mob id (the definition
         // carries the id) BEFORE the durable create mutation lands, so the

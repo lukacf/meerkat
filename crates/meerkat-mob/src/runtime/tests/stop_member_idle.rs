@@ -288,6 +288,47 @@ async fn shutdown_waits_for_a_member_turn_and_a_second_shutdown_joins_it() {
 }
 
 #[tokio::test]
+async fn a_stop_command_parks_on_its_in_flight_interrupt_and_completes_when_it_settles() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_start_turn_delay_ms(600_000);
+    let identity = AgentIdentity::from("gated-interrupt");
+    let mut spec = SpawnMemberSpec::new("worker", identity.as_str());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn autonomous member");
+    let session = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("session-backed autonomous member");
+    wait_for_start_turn_call_count(
+        service.as_ref(),
+        1,
+        "the member's turn is in flight, so the stop must interrupt it",
+    )
+    .await;
+    let gate = service.install_interrupt_gate(&session).await;
+
+    // A Stop command with no handle retry around it: the exact interrupt is
+    // still in flight, and the stop parks on it instead of answering
+    // AutonomousStopInterruptsPending.
+    let mut stop = enqueue_stop(&handle).await;
+    tokio::time::timeout(STEP, service.interrupt_gate_entered.notified())
+        .await
+        .expect("the stop's interrupt reaches the member");
+    assert_eq!(actor_round_trip(&handle).await, MobState::Running);
+    assert!(
+        still_waiting(&mut stop),
+        "the stop waits on its in-flight interrupt"
+    );
+
+    gate.release_all();
+    expect_reply_ok(stop, "stop after its interrupt settles").await;
+    assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+}
+
+#[tokio::test]
 async fn the_hang_guard_reports_the_member_still_winding_down() {
     let identity = AgentIdentity::from("never-winds-down");
     let error = crate::runtime::actor::member_stop_within_hang_guard(

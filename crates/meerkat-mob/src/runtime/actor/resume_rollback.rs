@@ -46,6 +46,7 @@ impl MobActor {
             progress,
             deadline: Instant::now() + ROLLBACK_AUTONOMOUS_STOP_DEADLINE,
             in_flight: false,
+            awaiting_interrupts: false,
         });
         self.drive_explicit_resume_rollback(attempt).await;
     }
@@ -104,9 +105,17 @@ impl MobActor {
         }
         let targets = match self.prepare_all_autonomous_member_stops().await {
             Ok(targets) => targets,
+            // Exact interrupts still in flight: each one settling re-drives
+            // this rollback (`AutonomousStopInterruptSettled`).
+            Err(MobError::AutonomousStopInterruptsPending { .. }) => {
+                if let Some(pending) = self.pending_resume_rollback.as_mut() {
+                    pending.awaiting_interrupts = true;
+                }
+                return;
+            }
+            // The placed-cleanup lane is still level-triggered (#1413).
             Err(
-                MobError::AutonomousStopInterruptsPending { .. }
-                | MobError::PlacedKickoffCleanupPending { .. }
+                MobError::PlacedKickoffCleanupPending { .. }
                 | MobError::LifecycleOperationPending { .. },
             ) => {
                 self.schedule_explicit_resume_rollback(ROLLBACK_AUTONOMOUS_STOP_POLL_INTERVAL);

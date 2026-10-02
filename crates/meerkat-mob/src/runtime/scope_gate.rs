@@ -195,6 +195,7 @@ impl MobCommand {
             | Self::ResumeLifecycleReadinessResolved { .. }
             | Self::ResumeLifecyclePreparationResolved { .. }
             | Self::AutonomousMemberStopsResolved { .. }
+            | Self::AutonomousStopInterruptSettled
             | Self::ResumeLifecycleMemberObserved { .. }
             | Self::ResumeLifecycleMemberReady { .. }
             | Self::ResumeLifecycleMemberSettled { .. }
@@ -579,6 +580,7 @@ impl MobCommand {
             | Self::ResumeLifecycleReadinessResolved { .. }
             | Self::ResumeLifecyclePreparationResolved { .. }
             | Self::AutonomousMemberStopsResolved { .. }
+            | Self::AutonomousStopInterruptSettled
             | Self::ResumeLifecycleMemberObserved { .. }
             | Self::ResumeLifecycleMemberReady { .. }
             | Self::ResumeLifecycleMemberSettled { .. }

@@ -828,6 +828,10 @@ pub(super) enum MobCommand {
         ticket: super::actor::ResumeStepTicket,
         result: Result<Vec<super::actor::ExplicitResumeMemberRebuild>, MobError>,
     },
+    /// Internal re-entry sent by an exact autonomous stop interrupt task
+    /// after its result is available: re-drives a stop or resume rollback
+    /// parked on interrupts.
+    AutonomousStopInterruptSettled,
     /// Internal re-entry carrying the concurrent per-member end-of-turn
     /// outcomes of a parked Stop or Shutdown. `ticket` fences a stale
     /// resolution.
@@ -1689,6 +1693,7 @@ impl MobCommand {
             Self::ResumeLifecycleReadinessResolved { .. } => "ResumeLifecycleReadinessResolved",
             Self::ResumeLifecyclePreparationResolved { .. } => "ResumeLifecyclePreparationResolved",
             Self::AutonomousMemberStopsResolved { .. } => "AutonomousMemberStopsResolved",
+            Self::AutonomousStopInterruptSettled => "AutonomousStopInterruptSettled",
             Self::ResumeLifecycleMemberObserved { .. } => "ResumeLifecycleMemberObserved",
             Self::ResumeLifecycleMemberReady { .. } => "ResumeLifecycleMemberReady",
             Self::ResumeLifecycleMemberSettled { .. } => "ResumeLifecycleMemberSettled",

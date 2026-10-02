@@ -2139,6 +2139,10 @@ struct MockSessionService {
     /// Sessions whose turn keeps winding down after an interrupt: their
     /// active flag survives `interrupt` until the test clears it.
     wind_down_held_sessions: RwLock<HashSet<SessionId>>,
+    /// Holds a session's `interrupt` in flight until released.
+    interrupt_gates: RwLock<HashMap<SessionId, Arc<TestRuntimeControlBarrier>>>,
+    /// One permit per interrupt that entered its gate.
+    interrupt_gate_entered: tokio::sync::Notify,
     runtime_boundary_acknowledgements: RwLock<Vec<RuntimeBoundaryAcknowledgement>>,
 }
 
@@ -2282,6 +2286,8 @@ impl MockSessionService {
             active_sessions: RwLock::new(HashSet::new()),
             activity_flags: std::sync::Mutex::new(HashMap::new()),
             wind_down_held_sessions: RwLock::new(HashSet::new()),
+            interrupt_gates: RwLock::new(HashMap::new()),
+            interrupt_gate_entered: tokio::sync::Notify::new(),
             runtime_boundary_acknowledgements: RwLock::new(Vec::new()),
         }
     }
@@ -2715,6 +2721,20 @@ impl MockSessionService {
         {
             flag.send_replace(active);
         }
+    }
+
+    /// Hold the next `interrupt` of `session_id` in flight until the returned
+    /// barrier is released; `interrupt_gate_entered` signals its entry.
+    async fn install_interrupt_gate(
+        &self,
+        session_id: &SessionId,
+    ) -> Arc<TestRuntimeControlBarrier> {
+        let gate = Arc::new(TestRuntimeControlBarrier::new());
+        self.interrupt_gates
+            .write()
+            .await
+            .insert(session_id.clone(), Arc::clone(&gate));
+        gate
     }
 
     /// Keep `session_id`'s turn active through an interrupt, modelling a turn
@@ -4059,6 +4079,11 @@ impl SessionService for MockSessionService {
             return Err(SessionError::NotFound { id: id.clone() });
         }
         drop(sessions);
+        let gate = self.interrupt_gates.read().await.get(id).cloned();
+        if let Some(gate) = gate {
+            self.interrupt_gate_entered.notify_one();
+            gate.wait_for_release().await;
+        }
         if let Some(interrupt_tx) = self.start_turn_interrupts.read().await.get(id) {
             interrupt_tx.send_modify(|generation| *generation = generation.saturating_add(1));
         }
@@ -4086,6 +4111,11 @@ impl SessionService for MockSessionService {
             return Err(SessionError::NotFound { id: id.clone() });
         }
         drop(sessions);
+        let gate = self.interrupt_gates.read().await.get(id).cloned();
+        if let Some(gate) = gate {
+            self.interrupt_gate_entered.notify_one();
+            gate.wait_for_release().await;
+        }
         if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
             notifier.notify_waiters();
             return Ok(());

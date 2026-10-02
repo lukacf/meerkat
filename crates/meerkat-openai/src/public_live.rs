@@ -338,6 +338,11 @@ pub mod provider_recording {
         ServerFrame { raw: Value },
         /// The sideband receiver ended (`error` set when it failed).
         ReceiverEnd { error: Option<String> },
+        /// A test-driven step outside the adapter (a browser utterance
+        /// scheduled, a peer disconnect). Everything recorded after it may
+        /// depend on it, so a replay holds later server frames until the
+        /// replaying test reaches the same step.
+        Marker { step: String },
     }
 
     /// One JSONL line of a recording.
@@ -441,6 +446,11 @@ pub mod provider_recording {
             }
         }
 
+        /// Record a test-driven step (see [`Entry::Marker`]).
+        pub fn mark(&self, step: impl Into<String>) {
+            self.record(Entry::Marker { step: step.into() });
+        }
+
         pub(super) fn record_value<T: serde::Serialize>(
             &self,
             entry: impl FnOnce(Value) -> Entry,
@@ -498,10 +508,17 @@ pub mod provider_recording {
             scoped.record(Entry::ServerFrame {
                 raw: serde_json::json!({"type": "session.closed"}),
             });
+            recorder.mark("disconnect:graceful");
             let lines = read(&path).unwrap();
-            assert_eq!(lines.len(), 2);
+            assert_eq!(lines.len(), 3);
             assert_eq!(lines[0].seq, 0);
             assert_eq!(lines[1].seq, 1);
+            assert_eq!(
+                lines[2].entry,
+                Entry::Marker {
+                    step: "disconnect:graceful".into()
+                }
+            );
             assert!(lines.iter().all(|line| line.channel_ordinal == 3));
             assert!(recorder.failure().is_none());
             assert!(

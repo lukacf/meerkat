@@ -733,6 +733,7 @@ test_suite(
         "//crates/meerkat-mob:remote_spawn_materialization_test",
         "//crates/meerkat-mob:scope_matrix_test",
         "//crates/meerkat-mob:shadow_state_absent_test",
+        "//crates/meerkat-mob:spawn_while_member_turn_runs_test",
         "//crates/meerkat-mob:stop_run_model_selected_successor_test",
         "//crates/meerkat-mob:tool_process_custody_mob_restart_test",
         "//crates/meerkat-mob:turn_boundary_fork_forwarding_test",

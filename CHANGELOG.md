@@ -589,6 +589,24 @@ them.
     grows by about 640 KB per 1,000 compactions. Missing-receipt repair
     writes those commit values, so they stay; folding them below an
     audit-coverage watermark is tracked in #1534.
+- A member spawn no longer waits for another member's turn to end.
+  - Many `EphemeralSessionService` operations (also used inside
+    `PersistentSessionService`) held the service-wide session map while
+    waiting for a session task's reply. A session task serves no commands
+    while its turn runs. Examples: `update_session_mob_authority_context`,
+    `set_session_tool_visibility_state`, the session client and tool-filter
+    updates, the identity hot swap, and the live transcript commits.
+  - One such call aimed at a busy session therefore pinned the map for that
+    whole turn. Because the lock is fair, the next session create (a spawned
+    member's session) and every later session read of any session queued
+    behind it.
+  - Seen in a host whose coordinator spawned review workers from a tool call:
+    the spawns completed only after the coordinator's turn released.
+  - The session map is now a type whose only access is a synchronous
+    closure (or a cloned handle fact), so no guard can be held across an
+    `.await`. Every session-task round trip takes the task's command sender
+    and sends and waits with the map released.
+
 - The machine TLA generator parenthesizes a field's pending value when a
   later expression in the same update block reads it. A conditionally
   updated field was spliced bare as `IF c THEN a ELSE b`, so TLA+ precedence

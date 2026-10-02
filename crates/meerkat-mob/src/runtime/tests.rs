@@ -26981,6 +26981,105 @@ async fn caller_turn_fork_on_a_service_without_durable_fork_fails_fast_mid_turn(
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), turn).await;
 }
 
+/// Regression (OB3 spawn stall): while a member's turn runs (here, held open
+/// as a coordinator's spawn tool call would hold it), a command parked on that
+/// member's session task (it serves none until the turn ends) must not hold
+/// the session service's map. A new member's spawn creates its session through
+/// that map and must complete while the coordinator's turn is still running,
+/// not after it ends.
+///
+/// Before the fix the spawn never completes while the turn is held; the
+/// deadline only bounds that failure, it is not a latency budget.
+#[tokio::test]
+async fn spawn_completes_while_a_member_turn_runs_with_a_command_parked_on_it() {
+    let gate = Arc::new(TurnGate::default());
+    let service = Arc::new(meerkat_session::EphemeralSessionService::new(
+        GatedOverlayProbeSessionAgentBuilder {
+            inner: OverlayProbeSessionAgentBuilder {
+                provider_visible_tools: Arc::default(),
+                provider_turn_overlays: Arc::default(),
+                provider_call_sessions: Arc::default(),
+            },
+            gate: Arc::clone(&gate),
+        },
+        16,
+    ));
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("create an ephemeral-backed mob");
+    let coordinator = AgentIdentity::from("ob3-coordinator");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), coordinator.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn the coordinator");
+
+    gate.armed.store(true, Ordering::SeqCst);
+    let coordinator_session = handle
+        .member_status(&coordinator)
+        .await
+        .expect("coordinator status")
+        .current_session_id
+        .expect("coordinator session");
+    let member = handle
+        .member(&coordinator)
+        .await
+        .expect("coordinator handle");
+    let turn = tokio::spawn(async move {
+        member
+            .internal_turn(ContentInput::from("spawn the review workers".to_string()))
+            .await
+    });
+    gate.entered.notified().await;
+
+    // A host-side update parks on the coordinator's busy session task.
+    let parked = tokio::spawn({
+        let service = Arc::clone(&service);
+        let coordinator_session = coordinator_session.clone();
+        async move {
+            meerkat_core::service::SessionService::update_session_mob_authority_context(
+                service.as_ref(),
+                &coordinator_session,
+                None,
+            )
+            .await
+        }
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !parked.is_finished(),
+        "the coordinator's task is busy with its turn"
+    );
+
+    let worker = AgentIdentity::from("ob3-review-worker");
+    let mut worker_spec = SpawnMemberSpec::new(ProfileName::from("worker"), worker.clone());
+    worker_spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        handle.spawn_spec(worker_spec),
+    )
+    .await
+    .expect("the worker spawn must not wait for the coordinator's turn to end")
+    .expect("spawn the worker");
+    assert!(
+        handle.get_member(&worker).await.unwrap().is_some(),
+        "the worker is seated"
+    );
+    assert!(
+        !turn.is_finished(),
+        "the coordinator's turn is still running"
+    );
+
+    gate.armed.store(false, Ordering::SeqCst);
+    gate.release.notify_one();
+    let _ = turn.await;
+    let _ = parked.await;
+}
+
 /// Regression (inheritance lost on rebuild), process-restart restore: a
 /// running mob restored after a crash rebuilt a seated fork child the same
 /// generic way.

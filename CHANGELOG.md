@@ -121,9 +121,12 @@ them.
     `Created { admission_key, admission_request_digest }`; the
     `meerkat_machine_kernels` `Created` effect struct gains `admission_key` and
     `admission_request_digest`.
-  - `WorkGraphLifecycleEffect` gains the variant
-    `UnpairedAdmissionIdentityRejected` (with new transitions
-    `CreateOpenRejectedUnpairedAdmission` / `CreateBlockedRejectedUnpairedAdmission`).
+  - `WorkGraphLifecycleEffect` and `WorkGraphLifecycleEffectVariant` gain the
+    variant `UnpairedAdmissionIdentityRejected`; in `meerkat_machine_kernels`
+    the work-graph lifecycle `Effect` and `EffectKind` gain it too, and
+    `TransitionId` gains `CreateOpenRejectedUnpairedAdmission` and
+    `CreateBlockedRejectedUnpairedAdmission` (appended, so existing
+    discriminants are unchanged).
 - Typed tool choice (see Added). Struct literals and exhaustive matches must
   handle the new members:
   - `meerkat_llm_core::LlmRequest` gains `tool_choice: ToolChoice` (serde

@@ -113,14 +113,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `non_reviewer_quorum_policy_has_no_threshold`
 
 ## Transitions
-### `CreateOpenRejectedUnpairedAdmission`
-- From: `Absent`
-- On: `CreateOpen`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest)
-- Guards:
-  - `admission_identity_unpaired`
-- Emits: `UnpairedAdmissionIdentityRejected`
-- To: `Absent`
-
 ### `CreateOpen`
 - From: `Absent`
 - On: `CreateOpen`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest)
@@ -129,14 +121,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `admission_identity_paired`
 - Emits: `Created`
 - To: `Open`
-
-### `CreateBlockedRejectedUnpairedAdmission`
-- From: `Absent`
-- On: `CreateBlocked`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest)
-- Guards:
-  - `admission_identity_unpaired`
-- Emits: `UnpairedAdmissionIdentityRejected`
-- To: `Absent`
 
 ### `CreateBlocked`
 - From: `Absent`
@@ -2770,6 +2754,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `confirmation_admissible`
 - Emits: `ConfirmationAdmissionClassified`
 - To: `Failed`
+
+### `CreateOpenRejectedUnpairedAdmission`
+- From: `Absent`
+- On: `CreateOpen`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest)
+- Guards:
+  - `admission_identity_unpaired`
+- Emits: `UnpairedAdmissionIdentityRejected`
+- To: `Absent`
+
+### `CreateBlockedRejectedUnpairedAdmission`
+- From: `Absent`
+- On: `CreateBlocked`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest)
+- Guards:
+  - `admission_identity_unpaired`
+- Emits: `UnpairedAdmissionIdentityRejected`
+- To: `Absent`
 
 ## Coverage
 ### Code Anchors

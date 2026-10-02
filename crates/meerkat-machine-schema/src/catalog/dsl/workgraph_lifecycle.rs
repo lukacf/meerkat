@@ -1176,21 +1176,6 @@ machine! {
         disposition WorkItemReadinessClassified => local seam SurfaceResultAlignment,
         disposition ChildJoinClassified => local seam SurfaceResultAlignment,
 
-        // Typed refusal of a half-present admission identity: exactly one of
-        // the key and the digest is present. Absent stays Absent, nothing is
-        // created and no Created effect routes to WorkItemAdmissionMachine.
-        transition CreateOpenRejectedUnpairedAdmission {
-            on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest }
-            guard { self.lifecycle_phase == Phase::Absent }
-            guard "admission_identity_unpaired" {
-                (admission_key != None && admission_request_digest == None)
-                    || (admission_key == None && admission_request_digest != None)
-            }
-            update {}
-            to Absent
-            emit UnpairedAdmissionIdentityRejected
-        }
-
         transition CreateOpen {
             on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest }
             guard { self.lifecycle_phase == Phase::Absent }
@@ -1218,21 +1203,6 @@ machine! {
                 admission_key: admission_key,
                 admission_request_digest: admission_request_digest
             }
-        }
-
-        // Typed refusal of a half-present admission identity: exactly one of
-        // the key and the digest is present. Absent stays Absent, nothing is
-        // created and no Created effect routes to WorkItemAdmissionMachine.
-        transition CreateBlockedRejectedUnpairedAdmission {
-            on input CreateBlocked { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest }
-            guard { self.lifecycle_phase == Phase::Absent }
-            guard "admission_identity_unpaired" {
-                (admission_key != None && admission_request_digest == None)
-                    || (admission_key == None && admission_request_digest != None)
-            }
-            update {}
-            to Absent
-            emit UnpairedAdmissionIdentityRejected
         }
 
         transition CreateBlocked {
@@ -2594,6 +2564,38 @@ machine! {
             update {}
             to Absent
             emit ConfirmationAdmissionClassified { admission: WorkConfirmationAdmissionKind::Admitted }
+        }
+
+        // Declared last so the generated TransitionId ordinals of every
+        // released transition stay unchanged.
+        // Typed refusal of a half-present admission identity: exactly one of
+        // the key and the digest is present. Absent stays Absent, nothing is
+        // created and no Created effect routes to WorkItemAdmissionMachine.
+        transition CreateOpenRejectedUnpairedAdmission {
+            on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest }
+            guard { self.lifecycle_phase == Phase::Absent }
+            guard "admission_identity_unpaired" {
+                (admission_key != None && admission_request_digest == None)
+                    || (admission_key == None && admission_request_digest != None)
+            }
+            update {}
+            to Absent
+            emit UnpairedAdmissionIdentityRejected
+        }
+
+        // Typed refusal of a half-present admission identity: exactly one of
+        // the key and the digest is present. Absent stays Absent, nothing is
+        // created and no Created effect routes to WorkItemAdmissionMachine.
+        transition CreateBlockedRejectedUnpairedAdmission {
+            on input CreateBlocked { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest }
+            guard { self.lifecycle_phase == Phase::Absent }
+            guard "admission_identity_unpaired" {
+                (admission_key != None && admission_request_digest == None)
+                    || (admission_key == None && admission_request_digest != None)
+            }
+            update {}
+            to Absent
+            emit UnpairedAdmissionIdentityRejected
         }
     }
 }

@@ -17,13 +17,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `workgraph_topology_legality` — ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ClassifyTerminalityAbsent, ClassifyTerminalityOpen, ClassifyTerminalityInProgress, ClassifyTerminalityBlocked, ClassifyTerminalityCompleted, ClassifyTerminalityCancelled, ClassifyTerminalityFailed, BlockerSatisfied, BlockerUnsatisfied, LifecycleTerminal, LifecycleNonTerminal, ValidateLink, and LinkValidated reject missing endpoints, self edges, duplicate edges, dependency cycles, and unsatisfied blockers without adding a separate topology machine
 
 ### Transitions
-- `CreateOpenRejectedUnpairedAdmission`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
 - `CreateOpen`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_create_update_ready_claim`
-- `CreateBlockedRejectedUnpairedAdmission`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_create_update_ready_claim`
 - `CreateBlocked`
@@ -1019,6 +1013,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyConfirmationAdmissionAdmittedFailed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `CreateOpenRejectedUnpairedAdmission`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`
+- `CreateBlockedRejectedUnpairedAdmission`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`
 
 ### Effects
 - `Created`

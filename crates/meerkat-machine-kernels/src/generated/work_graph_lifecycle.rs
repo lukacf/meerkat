@@ -1653,9 +1653,7 @@ pub enum EffectKind {
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
-    CreateOpenRejectedUnpairedAdmission,
     CreateOpen,
-    CreateBlockedRejectedUnpairedAdmission,
     CreateBlocked,
     UpdateOpen,
     UpdateInProgress,
@@ -1987,6 +1985,8 @@ pub enum TransitionId {
     ClassifyConfirmationAdmissionAdmittedCompleted,
     ClassifyConfirmationAdmissionAdmittedCancelled,
     ClassifyConfirmationAdmissionAdmittedFailed,
+    CreateOpenRejectedUnpairedAdmission,
+    CreateBlockedRejectedUnpairedAdmission,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

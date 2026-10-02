@@ -71,6 +71,10 @@ impl MeerkatMachine {
                     }
                 }
 
+                // Staging statements and preview proofs below run in their own
+                // boxed frames: each returns ~9 KiB authority snapshots by
+                // value, and inline they all share this arm's frame (#1466).
+                crate::stack_relief::box_in_own_frame(|| async {
                 if let Err(reason) = self
                     .stage_session_dsl_input(
                         &session_id,
@@ -85,6 +89,9 @@ impl MeerkatMachine {
                         .classify_session_dsl_rejection(&session_id, reason)
                         .await);
                 }
+                Ok(())
+                })
+                .await?;
 
                 // W2-G (issue #264): peer-ingress ownership is tracked by
                 // the DSL via `peer_ingress_owner_kind` +
@@ -162,6 +169,7 @@ impl MeerkatMachine {
                         // quiesce the old runtime's drain + rotation carrier.
                         // Only an otherwise-identical owner replacing its
                         // runtime needs the explicit Detach -> Attach fallback.
+                        let detach_before_attach = crate::stack_relief::box_in_own_frame(|| async {
                         let mut direct_preview =
                             crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(
                                 authority_snapshot.clone(),
@@ -210,6 +218,9 @@ impl MeerkatMachine {
                                 });
                             }
                         };
+                        Ok::<_, RuntimeDriverError>(detach_before_attach)
+                        })
+                        .await?;
 
                         // The caller holds the session mutation gate. Abort and
                         // JOIN both old-runtime producers before publishing any
@@ -217,6 +228,7 @@ impl MeerkatMachine {
                         self.abort_and_join_session_comms_producers(&session_id, false)
                             .await;
                         if detach_before_attach {
+                            crate::stack_relief::box_in_own_frame(|| async {
                             self.stage_session_dsl_input(
                                 &session_id,
                                 crate::meerkat_machine::dsl::MeerkatMachineInput::DetachIngress,
@@ -224,11 +236,18 @@ impl MeerkatMachine {
                             )
                             .await
                             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                            Ok::<_, RuntimeDriverError>(())
+                            })
+                            .await?;
                         }
                     }
+                    crate::stack_relief::box_in_own_frame(|| async {
                     self.stage_session_dsl_input(&session_id, attach_input, "AttachPeerIngress")
                         .await
                         .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                    Ok::<_, RuntimeDriverError>(())
+                    })
+                    .await?;
                 } else if !keep_alive {
                     // Prove DetachIngress before touching mechanics. Then stop
                     // and join BOTH the drain and rotation carrier while the
@@ -238,7 +257,7 @@ impl MeerkatMachine {
                         .session_dsl_authority(&session_id)
                         .await
                         .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-                    {
+                    crate::stack_relief::box_in_own_frame(|| async {
                         let authority = authority
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -258,13 +277,16 @@ impl MeerkatMachine {
                                 reason: error.to_string(),
                             }
                         })?;
-                    }
+                    Ok::<_, RuntimeDriverError>(())
+                    })
+                    .await?;
                     if !self
                         .stop_and_abort_session_comms_producers(&session_id, false)
                         .await
                     {
                         return Ok(MeerkatMachineCommandResult::Spawned(false));
                     }
+                    crate::stack_relief::box_in_own_frame(|| async {
                     self.stage_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::DetachIngress,
@@ -272,6 +294,9 @@ impl MeerkatMachine {
                     )
                     .await
                     .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                    Ok::<_, RuntimeDriverError>(())
+                    })
+                    .await?;
                     return Ok(MeerkatMachineCommandResult::Spawned(false));
                 }
 

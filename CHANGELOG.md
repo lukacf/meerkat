@@ -89,6 +89,13 @@ them.
 
 ### Added
 
+- `meerkat::session_runtime::live_orchestration::LIVE_PLAYBACK_TERMINAL_SETTLEMENT_BOUND`
+  names the 30 s an accepted playback terminal may wait for its provider
+  acknowledgement before it is treated as ambiguous (previously an unnamed
+  literal). It is a failure bound on the provider: every other settlement
+  path (channel close, failed playback waiters, pump terminal) resolves it
+  through a typed signal.
+
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a

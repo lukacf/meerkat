@@ -5040,10 +5040,25 @@ impl ExperimentalLiveDelegationCoordinator {
         let (start_tx, start_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             let _ = start_rx.await;
-            let mut retry_delay = LIVE_DELEGATION_CLEANUP_RETRY_DELAY;
+            let session_id = task_retained.runtime_binding.session_id().clone();
+            // A refused release waits for the session machine to commit a
+            // transition, never on a timer: the release guards (the channel's
+            // result slot, transcript confirmation, worker eligibility, the
+            // channel binding) only change through committed transitions, and
+            // the previous result's provider acknowledgement frees the slot
+            // through one.
+            let mut commits = coordinator
+                .runtime
+                .subscribe_session_machine_commits(&session_id)
+                .await;
             loop {
                 if task_retained.result.lock().await.terminal_ineligible {
                     break;
+                }
+                // Mark the current generation seen before the attempt, so a
+                // commit that lands during it wakes the wait below at once.
+                if let Some(commits) = commits.as_mut() {
+                    commits.borrow_and_update();
                 }
                 match coordinator
                     .try_release_retained_result(&task_retained)
@@ -5063,7 +5078,7 @@ impl ExperimentalLiveDelegationCoordinator {
                         if coordinator
                             .runtime
                             .live_channel_activity_for_session(
-                                task_retained.runtime_binding.session_id(),
+                                &session_id,
                                 task_retained.runtime_binding.channel_id(),
                             )
                             .await
@@ -5074,11 +5089,29 @@ impl ExperimentalLiveDelegationCoordinator {
                                 .await;
                             break;
                         }
-                        tracing::warn!(%error, %task_operation_id, "owned live result delivery retry remains pending");
-                        tokio::time::sleep(retry_delay).await;
-                        retry_delay = retry_delay
-                            .saturating_mul(2)
-                            .min(LIVE_DELEGATION_CLEANUP_RETRY_MAX_DELAY);
+                        tracing::debug!(%error, %task_operation_id, "owned live result release refused; waiting for the session machine to commit");
+                        let advanced = match commits.as_mut() {
+                            Some(receiver) => receiver.changed().await.is_ok(),
+                            None => false,
+                        };
+                        if !advanced {
+                            // The runtime entry observed is gone (removed or
+                            // replaced). Follow its successor, if any. With no
+                            // entry the session holds no live channel, and no
+                            // commit will ever come, so the result takes the
+                            // post-close path.
+                            commits = coordinator
+                                .runtime
+                                .subscribe_session_machine_commits(&session_id)
+                                .await;
+                            if commits.is_none() {
+                                tracing::info!(%error, %task_operation_id, %session_id, "owned live result merges after close: the session has no runtime entry");
+                                coordinator
+                                    .merge_result_after_channel_close(&task_retained)
+                                    .await;
+                                break;
+                            }
+                        }
                     }
                 }
             }

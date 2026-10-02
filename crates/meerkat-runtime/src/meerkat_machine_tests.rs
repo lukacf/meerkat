@@ -441,6 +441,11 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
             .result_delivery()
     };
     assert_eq!(result_delivery().await, None, "delivery is in flight");
+    let mut commits = machine
+        .subscribe_session_machine_commits(&session_id)
+        .await
+        .expect("registered session exposes its machine commit signal");
+    commits.borrow_and_update();
     machine
         .resolve_live_delegation_result_delivery(
             &delivery,
@@ -448,6 +453,13 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
         )
         .await
         .expect("resolve result delivery");
+    assert!(
+        commits
+            .has_changed()
+            .expect("the session entry is still registered"),
+        "the provider acknowledgement that frees the channel's result slot \
+         advances the commit signal a refused release waits on"
+    );
     assert_eq!(
         result_delivery().await,
         Some(crate::live_execution::LiveDelegationResultDeliveryObservation::Delivered),

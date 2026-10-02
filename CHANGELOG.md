@@ -358,6 +358,13 @@ them.
   every live delegation's result is acknowledged `Delivered` and its
   commentary reached the peer, both before the typed correction and again
   before the recall (covering the correction's own result).
+- A live delegation result that has to wait for the channel's result slot
+  (the previous result's provider acknowledgement) is released as soon as
+  that acknowledgement commits. Previously it retried on a doubling timer of
+  up to 1 s per queued result. The release waits on the session machine's
+  commit signal and re-checks after each committed transition. The release
+  guards change only through committed transitions, so no timer is needed.
+  New: `meerkat_runtime::MeerkatMachine::subscribe_session_machine_commits`.
 
 - Three meerkat-mob-mcp tests no longer fail on a loaded host (#1509). They
   now assert ordering with events instead of wall-clock margins.

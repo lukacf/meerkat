@@ -592,3 +592,87 @@ async fn the_refusal_reaches_the_model_as_a_tool_error_and_the_turn_continues() 
     );
     fixture.teardown().await;
 }
+
+/// `delegate` from a member of a host-created mob, with an explicit helper
+/// profile.
+async fn delegate(fixture: &CouncilFixture) -> (Result<ToolDispatchOutcome, ToolError>, SessionId) {
+    fixture.seed_source_mob(&["creator"]).await;
+    let session = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .expect("source mob handle")
+        .resolve_bridge_session_id(&AgentIdentity::from("creator"))
+        .await
+        .expect("creator has a bridge session");
+    let surface = agent_surface(&fixture.state, session.clone(), creator_authority());
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(60),
+        dispatch(
+            &surface,
+            "delegate",
+            json!({
+                "task": "go",
+                "member_id": "helper",
+                "result_label": "helper_result",
+                "max_text_bytes": 4096,
+                "tooling": {
+                    "mode": "profile",
+                    "source": {
+                        "type": "inline",
+                        "model": "claude-sonnet-4-6",
+                        "tools": { "comms": true }
+                    }
+                }
+            }),
+        ),
+    )
+    .await
+    .expect("delegate returns within the failure bound");
+    (outcome, session)
+}
+
+/// Delegate helpers are child members: a helper runs under the host's child
+/// policy, not unmanaged.
+#[tokio::test(flavor = "multi_thread")]
+async fn delegate_helpers_run_under_the_host_child_policy() {
+    let (fixture, dispatched) = fixture(|state| {
+        state
+            .with_tool_consequence_policy_registry(registry())
+            .with_child_application_tool_policy(host_policy())
+    });
+    let (outcome, _session) = delegate(&fixture).await;
+    outcome.expect("delegate succeeds");
+    assert_eq!(*dispatched.lock().unwrap(), [ALLOWED]);
+    fixture.teardown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_managed_host_without_a_child_policy_refuses_delegate() {
+    let (fixture, dispatched) =
+        fixture(|state| state.with_tool_consequence_policy_registry(registry()));
+    let (outcome, session) = delegate(&fixture).await;
+    let error = outcome.expect_err("delegate is refused");
+    let ToolError::PolicyDenied { denial } = &error else {
+        panic!("a typed policy denial, got {error:?}");
+    };
+    assert_eq!(denial.code, "child_tool_policy_required", "{error:?}");
+    assert!(
+        denial.message.starts_with(
+            "this host runs a tool-policy registry and no child application tool policy is \
+             configured"
+        ),
+        "{}",
+        denial.message
+    );
+    assert!(
+        fixture
+            .state
+            .find_implicit_mob_for_bridge_session(&session.to_string())
+            .await
+            .is_none(),
+        "no implicit mob is created"
+    );
+    assert!(dispatched.lock().unwrap().is_empty());
+    fixture.teardown().await;
+}

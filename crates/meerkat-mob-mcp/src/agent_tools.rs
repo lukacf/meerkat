@@ -954,6 +954,11 @@ impl AgentMobToolSurface {
                 allow_overlay: None,
                 deny_overlay: None,
             });
+        // A delegate helper runs in a child mob under the host's child policy;
+        // refuse before the implicit mob is created, as mob_create does.
+        self.state
+            .admit_child_tool_policy()
+            .map_err(Self::child_policy_denial)?;
 
         let (mob_id, first_delegate) = self
             .ensure_implicit_mob()
@@ -1100,6 +1105,15 @@ impl AgentMobToolSurface {
         Self::encode_result_with_effects(call, result, session_effects)
     }
 
+    /// The model-facing form of a child-policy refusal: a typed policy denial
+    /// the turn continues past.
+    fn child_policy_denial(refusal: crate::ChildToolPolicyRefused) -> ToolError {
+        ToolError::policy_denied(meerkat_core::ToolConsequenceDenial::new(
+            refusal.code(),
+            refusal.to_string(),
+        ))
+    }
+
     async fn dispatch_mob_create(
         &self,
         call: ToolCallView<'_>,
@@ -1116,12 +1130,9 @@ impl AgentMobToolSurface {
         // A child mob's members run under the host's child policy and may name
         // only child-available bundles. Both refusals return to the model as
         // typed tool errors before anything is created.
-        self.state.admit_child_tool_policy().map_err(|refusal| {
-            ToolError::policy_denied(meerkat_core::ToolConsequenceDenial::new(
-                refusal.code(),
-                refusal.to_string(),
-            ))
-        })?;
+        self.state
+            .admit_child_tool_policy()
+            .map_err(Self::child_policy_denial)?;
         self.state
             .admit_child_tool_bundles(&definition)
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;

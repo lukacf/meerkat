@@ -1314,9 +1314,10 @@ impl MobMcpState {
         self
     }
 
-    /// Refuse child mob creation (the agent `mob_create` tool) up front when
-    /// the host's child policy cannot be applied (a managed host without a
-    /// child policy, a provider policy without a registry, or `Inherit`).
+    /// Refuse child mob creation (the agent `mob_create` tool, and the
+    /// implicit mob `delegate` helpers run in) up front when the host's child
+    /// policy cannot be applied (a managed host without a child policy, a
+    /// provider policy without a registry, or `Inherit`).
     pub fn admit_child_tool_policy(&self) -> Result<(), ChildToolPolicyRefused> {
         self.child_tool_policy().map(|_| ())
     }
@@ -1654,10 +1655,7 @@ impl MobMcpState {
                 if handle
                     .owner_bridge_session_lifecycle_authority()
                     .is_some_and(|authority| {
-                        child_tool_policy::is_child_mob(
-                            authority.destroy_on_owner_archive,
-                            authority.implicit_delegation_mob,
-                        )
+                        child_tool_policy::is_child_mob(authority.destroy_on_owner_archive)
                     })
                 {
                     scope.mark_child();
@@ -1863,11 +1861,8 @@ impl MobMcpState {
         let (storage, storage_path) = self.storage_for_new_mob(&mob_id).await?;
         let scope = child_tool_policy::ChildMobScope::new(
             owner_bridge_session_authority.as_ref().is_some_and(
-                |(_, destroy_on_owner_archive, implicit_delegation_mob)| {
-                    child_tool_policy::is_child_mob(
-                        *destroy_on_owner_archive,
-                        *implicit_delegation_mob,
-                    )
+                |(_, destroy_on_owner_archive, _)| {
+                    child_tool_policy::is_child_mob(*destroy_on_owner_archive)
                 },
             ),
         );

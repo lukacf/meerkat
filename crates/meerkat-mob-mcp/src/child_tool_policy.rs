@@ -1,5 +1,6 @@
 //! The application tool policy for members of child mobs: mobs a member
-//! created with the agent `mob_create` tool.
+//! creates with the agent `mob_create` tool, and the implicit mob its
+//! `delegate` helpers run in.
 //!
 //! The binding is the host's explicit choice and is never caller-settable. A
 //! host that runs managed (a consequence-policy registry is installed) must
@@ -8,8 +9,8 @@
 //! that choice, creating a child mob and spawning into one are refused.
 //!
 //! Only child mobs are governed. Mobs the host creates, same-mob `fork_off`
-//! and `mob_spawn_member`, temporary councils and implicit delegation mobs
-//! keep their own member bindings.
+//! and `mob_spawn_member`, and temporary councils keep their own member
+//! bindings.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,8 +25,8 @@ pub enum ChildToolPolicyRefused {
     /// The host runs managed but chose no child policy.
     #[error(
         "this host runs a tool-policy registry and no child application tool policy is \
-         configured, so members of a mob created with mob_create would run outside the host's \
-         tool policy. Configure one with \
+         configured, so members of a mob created with mob_create, and delegate helpers, would \
+         run outside the host's tool policy. Configure one with \
          MobMcpState::with_child_application_tool_policy(binding) (MobKit hosts: the \
          `child_application_tool_policy` init parameter, proposed for MobKit 0.8.46), or \
          explicitly choose ApplicationToolPolicyBinding::Unmanaged ({{\"kind\":\"unmanaged\"}}) \
@@ -58,11 +59,11 @@ impl ChildToolPolicyRefused {
 }
 
 /// Whether a mob is a child mob, from its owner bridge authority: the agent
-/// `mob_create` tool creates it destroy-on-archive and not as an implicit
-/// delegation mob. Councils are not destroy-on-archive. The authority is
-/// persisted, so the classification survives restore.
-pub(crate) fn is_child_mob(destroy_on_owner_archive: bool, implicit_delegation_mob: bool) -> bool {
-    destroy_on_owner_archive && !implicit_delegation_mob
+/// `mob_create` tool and `delegate`'s implicit mob are destroyed with their
+/// owner's archive; councils are not. The authority is persisted, so the
+/// classification survives restore.
+pub(crate) fn is_child_mob(destroy_on_owner_archive: bool) -> bool {
+    destroy_on_owner_archive
 }
 
 /// Shared with a mob's [`ChildPolicyCustomizer`]. A restored mob is marked

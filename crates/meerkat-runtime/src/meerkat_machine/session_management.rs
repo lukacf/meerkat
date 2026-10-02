@@ -10371,7 +10371,18 @@ Ok::<(), RuntimeDriverError>(())
         #[cfg(feature = "live")]
         drop(live_lifecycle_lease);
         drop(registration_transaction_guard);
+        #[cfg(feature = "live")]
+        let entry_removed = removed_entry.is_some();
         drop(removed_entry);
+        // The entry carried the session's machine state, including every
+        // channel's Closed record: the host's close tombstones go with it.
+        // After the locks above, so the publisher cannot contend with them.
+        #[cfg(feature = "live")]
+        if entry_removed && let Some(publisher) = self.live_channel_close_publisher() {
+            publisher
+                .retire_live_session_close_tombstones(session_id)
+                .await;
+        }
         Ok(())
     }
 

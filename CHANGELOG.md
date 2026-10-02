@@ -139,6 +139,12 @@ them.
 - `ExperimentalLiveBoundChannelActivator::await_pump_retirement_retry`, a
   provided method (default: never retry) that waits for the typed signal a
   retryable pump-exit retirement refusal names.
+- `meerkat_live::LiveAdapterHost::retire_session_close_tombstones` and the
+  provided `LiveChannelCloseEventPublisher::retire_live_session_close_tombstones`
+  (default no-op). The runtime calls the hook exactly once per committed
+  unregister, after its durability transaction, and never on a resume or a
+  rolled-back unregister. The surface's publisher releases the session's
+  host tombstones there.
 
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
@@ -482,6 +488,13 @@ them.
   in another connection's id space. On connection close the server now fails
   pending callbacks before its graceful request shutdown, so a session waiting
   on a gone client gets the typed failure immediately.
+- `live/status` for a closed channel keeps answering `Closed { reason }`
+  (including `media_fault`) for as long as the machine keeps the channel's
+  Closed record, that is until finalized unregister removes the session's
+  runtime entry. It used to switch to `ChannelNotFound` 60 s after the
+  close, when `LiveAdapterHost` reaped its closed-channel state on a timer.
+  The host now keeps a typed closed tombstone with no TTL, and the runtime
+  releases a session's tombstones from the point the entry is removed.
 
 - Debug worker-stack headroom (#1446): the unregister teardown saga and the
   session registration chain no longer reserve every section's temporaries

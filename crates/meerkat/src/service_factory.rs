@@ -102,10 +102,12 @@ fn build_agent_error_to_session_error(
             declared_by,
             tool,
             enabled_families,
+            vocabulary,
         } => SessionError::Agent(meerkat_core::error::AgentError::DeclaredToolUnknown {
             declared_by,
             tool,
             enabled_families,
+            vocabulary,
         }),
         other => SessionError::Agent(meerkat_core::error::AgentError::BuildError(
             other.to_string(),

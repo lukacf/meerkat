@@ -1185,6 +1185,42 @@ fn metadata_memory_override_for_realm(
 }
 
 /// Errors that can occur when building an agent via [`AgentFactory::build_agent()`].
+/// The built-in tool families' vocabularies: every tool name a family can
+/// provide, whether or not a given build enables the family. Each list is
+/// owned by its family and pinned to the family's tool definitions there.
+fn builtin_tool_vocabulary() -> Vec<(meerkat_core::ToolVocabularySource, Vec<&'static str>)> {
+    let family = |name: &str| meerkat_core::ToolVocabularySource::Family(name.to_string());
+    #[allow(unused_mut)]
+    let mut vocabulary = vec![
+        (
+            family("shell"),
+            meerkat_tools::builtin::SHELL_TOOL_NAMES.to_vec(),
+        ),
+        (
+            family("tasks"),
+            meerkat_tools::builtin::tasks::tool_names().to_vec(),
+        ),
+        (
+            family("image_generation"),
+            meerkat_tools::builtin::image_generation::tool_names().to_vec(),
+        ),
+        (
+            family("workgraph"),
+            meerkat_workgraph::workgraph_tool_names(),
+        ),
+        (
+            family("schedule"),
+            meerkat_schedule::schedule_tool_names().to_vec(),
+        ),
+    ];
+    #[cfg(feature = "memory-store-session")]
+    vocabulary.push((
+        family("memory"),
+        meerkat_memory::MemorySearchDispatcher::tool_names().to_vec(),
+    ));
+    vocabulary
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BuildAgentError {
     /// The selected runtime composition excludes an explicitly requested capability.
@@ -1227,17 +1263,20 @@ pub enum BuildAgentError {
     #[error("Config error: {0}")]
     Config(String),
 
-    /// The build's declared tool restriction denies a tool none of the
-    /// agent's statically composed families provides.
+    /// The build's declared tool restriction denies a tool the build neither
+    /// composed nor finds in any tool vocabulary.
     #[error(
-        "{declared_by} denies tool '{tool}', which none of its enabled tool families provides \
-         (enabled: {}); MCP and host-bundle tools cannot be denied by name",
+        "{declared_by} denies tool '{tool}', which is in none of its tool vocabularies \
+         ({}; enabled families: {})",
+        vocabulary.join(", "),
         enabled_families.join(", ")
     )]
     DeclaredToolUnknown {
         declared_by: String,
         tool: String,
         enabled_families: Vec<String>,
+        /// The vocabulary sources checked, by display name.
+        vocabulary: Vec<String>,
     },
 
     /// An explicit tool-category `Enable` could not be satisfied.
@@ -6592,9 +6631,10 @@ impl AgentFactory {
                 })?;
         }
         // External tools (MCP servers, host bundles) are not part of the
-        // statically composed surface a declared deny list may name.
-        // Deferred catalog entries count too: a deferred external tool (an MCP
-        // tool not yet loaded) is still external, never a composed family tool.
+        // composed surface a declared deny list may name; only the names a
+        // tool vocabulary declares for them are. Deferred catalog entries
+        // count too: a deferred external tool (an MCP tool not yet loaded) is
+        // still external, never a composed family tool.
         let external_tool_names: std::collections::HashSet<String> =
             match (&declared_tool_restriction, &build_config.external_tools) {
                 (Some(_), Some(external)) => external
@@ -7753,43 +7793,55 @@ impl AgentFactory {
             hoisted_control_visibility_provider = Some(visibility_provider);
         }
 
-        // 12i-pre. A declared deny list names tools of the statically composed
-        // families, or the declaring mob profile's operator tools that this
-        // build actually mounted as external tools. Any other name (stale,
-        // mistyped, MCP, or an operator tool not mounted here) is a typed
-        // configuration error, never a silently inert entry.
+        // 12i-pre. A declared deny list names tools this build composed or
+        // names in a tool vocabulary: the built-in families' (every tool a
+        // family can provide, enabled here or not) and the declaring
+        // configuration's own (mob operator and agent mob tools, declared MCP
+        // server tools, tool bundles). A known name this build did not mount
+        // is inert; any other name (stale or mistyped) is a typed
+        // configuration error, never a silently inert entry. External tools
+        // outside every vocabulary (a host's undeclared MCP or provider
+        // tools) stay unknown.
         if let Some(restriction) = &declared_tool_restriction {
-            let composed: std::collections::HashSet<String> = tools
-                .tools()
+            let builtin_vocabulary = builtin_tool_vocabulary();
+            let tool_defs = tools.tools();
+            let catalog = tools.tool_catalog();
+            let composed = tool_defs
                 .iter()
-                .map(|tool| tool.name.to_string())
+                .map(|tool| tool.name.as_str())
+                .chain(catalog.iter().map(|entry| entry.tool.name.as_str()))
+                .filter(|name| !external_tool_names.contains(*name));
+            let known: std::collections::HashSet<&str> = composed
                 .chain(
-                    tools
-                        .tool_catalog()
+                    builtin_vocabulary
                         .iter()
-                        .map(|entry| entry.tool.name.to_string()),
+                        .flat_map(|(_, names)| names.iter().copied()),
                 )
-                .filter(|name| !external_tool_names.contains(name))
                 .chain(
                     restriction
-                        .mob_operator_tools
-                        .iter()
-                        .map(|name| name.as_str().to_string())
-                        .filter(|name| external_tool_names.contains(name)),
+                        .vocabulary
+                        .values()
+                        .flat_map(|names| names.iter().map(|name| name.as_str())),
                 )
                 .collect();
             let mut unknown = restriction
                 .deny
                 .iter()
-                .map(|name| name.as_str().to_string())
-                .filter(|name| !composed.contains(name))
+                .map(|name| name.as_str())
+                .filter(|name| !known.contains(name))
                 .collect::<Vec<_>>();
-            unknown.sort();
-            if let Some(tool) = unknown.into_iter().next() {
+            unknown.sort_unstable();
+            if let Some(tool) = unknown.first() {
                 return Err(BuildAgentError::DeclaredToolUnknown {
                     declared_by: restriction.declared_by.clone(),
-                    tool,
+                    tool: (*tool).to_string(),
                     enabled_families: restriction.enabled_families.clone(),
+                    vocabulary: builtin_vocabulary
+                        .iter()
+                        .map(|(source, _)| source)
+                        .chain(restriction.vocabulary.keys())
+                        .map(ToString::to_string)
+                        .collect(),
                 });
             }
         }

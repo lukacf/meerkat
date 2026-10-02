@@ -850,8 +850,40 @@ impl MobOperatorToolDispatcher {
 pub(crate) fn mob_operator_tool_names() -> meerkat_core::ToolNameSet {
     local_operator_tool_defs()
         .iter()
+        .chain(super::member_upcall::remote_operator_tool_defs().iter())
         .map(|tool| meerkat_core::ToolName::new(tool.name.to_string()))
         .collect()
+}
+
+/// The agent-facing mob tool names (`delegate`, `mob_create`, `fork_off`,
+/// ...). Owned here so a profile's deny list can name them even on a build
+/// that does not mount them; meerkat-mob-mcp pins its agent tool surface to
+/// this set.
+pub const AGENT_MOB_TOOL_NAMES: &[&str] = &[
+    "delegate",
+    "conclude_objective",
+    "fork_off",
+    "council",
+    "mob_create",
+    "mob_destroy",
+    "mob_spawn_member",
+    "mob_retire_member",
+    "mob_check_member",
+    "mob_list_members",
+    "mob_list",
+    "mob_wire",
+    "mob_unwire",
+    "mob_profile_create",
+    "mob_profile_get",
+    "mob_profile_list",
+    "mob_profile_update",
+    "mob_profile_delete",
+    "mob_profile_list_sources",
+];
+
+/// [`AGENT_MOB_TOOL_NAMES`] as a name set.
+pub fn agent_mob_tool_names() -> meerkat_core::ToolNameSet {
+    AGENT_MOB_TOOL_NAMES.iter().copied().collect()
 }
 
 /// The member-session operator tool definitions, local flavor: exactly what

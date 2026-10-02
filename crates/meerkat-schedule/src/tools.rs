@@ -59,6 +59,20 @@ struct UpdateScheduleArgs {
     update: UpdateScheduleRequest,
 }
 
+/// The names of the schedule tools [`schedule_tools_list`] defines.
+pub fn schedule_tool_names() -> &'static [&'static str] {
+    &[
+        "meerkat_schedule_create",
+        "meerkat_schedule_get",
+        "meerkat_schedule_list",
+        "meerkat_schedule_update",
+        "meerkat_schedule_pause",
+        "meerkat_schedule_resume",
+        "meerkat_schedule_delete",
+        "meerkat_schedule_occurrences",
+    ]
+}
+
 pub fn schedule_tools_list() -> Vec<Value> {
     vec![
         tool_descriptor(
@@ -1342,6 +1356,15 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn tool_names_match_the_tool_definitions() {
+        let defined: Vec<String> = schedule_tools_list()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(defined, schedule_tool_names());
+    }
 
     struct IdentityCurrentSessionResolver;
 

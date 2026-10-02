@@ -4173,7 +4173,7 @@ fn declared_restriction(
         enabled_families: vec!["builtins".to_string(), "comms".to_string()],
         read_only,
         deny: deny.iter().copied().collect(),
-        mob_operator_tools: meerkat_core::ToolNameSet::new(),
+        vocabulary: std::collections::BTreeMap::new(),
     }
 }
 
@@ -4574,7 +4574,12 @@ async fn declared_deny_validates_against_the_composed_tool_surface() {
             declared_by,
             tool,
             enabled_families,
+            vocabulary,
         } => {
+            assert!(
+                vocabulary.iter().any(|source| source == "shell tools"),
+                "the built-in family vocabularies are named: {vocabulary:?}"
+            );
             assert_eq!(declared_by, "profile 'worker'");
             assert_eq!(tool, "gamma");
             assert_eq!(enabled_families, &declared.enabled_families);
@@ -4633,8 +4638,88 @@ async fn declared_deny_resolves_real_builtin_family_tools() {
     );
 }
 
-/// External tools (MCP servers, host bundles) are not part of the statically
-/// composed surface: denying one by name is a typed error.
+fn vocabulary_restriction(
+    deny: &[&str],
+    vocabulary: &[(meerkat_core::ToolVocabularySource, &[&str])],
+) -> meerkat_core::ops::DeclaredToolRestriction {
+    let mut restriction = declared_restriction(deny, false);
+    restriction.vocabulary = vocabulary
+        .iter()
+        .map(|(source, names)| (source.clone(), names.iter().copied().collect()))
+        .collect();
+    restriction
+}
+
+/// A known tool the build does not mount is an inert deny entry: a built-in
+/// family that is off and an agent mob tool no factory mounted both build.
+#[tokio::test]
+async fn declared_deny_of_a_known_unmounted_tool_is_inert() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(
+                &["alpha"],
+                &dispatched,
+                None,
+                Some(vocabulary_restriction(
+                    &["shell", "mob_create"],
+                    &[(
+                        meerkat_core::ToolVocabularySource::AgentMob,
+                        &["mob_create"],
+                    )],
+                )),
+                None,
+            ),
+            &Config::default(),
+        )
+        .await
+        .expect("known but unmounted deny entries build");
+    assert!(gate_admits(&mut agent, "alpha").await);
+}
+
+/// A declared MCP server's exposed tool is deniable: the build accepts the
+/// name, the tool stays listed, and calling it is an `access_denied` result
+/// that never reaches the server.
+#[tokio::test]
+async fn declared_deny_refuses_a_mounted_declared_mcp_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                external_tools: Some(Arc::new(PolicyProbeDispatcher::new(
+                    &["lookup", "echo"],
+                    Arc::clone(&dispatched),
+                ))),
+                declared_tool_restriction: Some(vocabulary_restriction(
+                    &["lookup"],
+                    &[(
+                        meerkat_core::ToolVocabularySource::McpServer("lookup-server".into()),
+                        &["lookup"],
+                    )],
+                )),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .expect("a declared MCP tool name is deniable");
+    let visible: Vec<String> = agent
+        .tool_scope()
+        .visible_tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    assert!(visible.iter().any(|name| name == "lookup"), "{visible:?}");
+    assert!(!gate_admits(&mut agent, "lookup").await);
+    assert!(gate_admits(&mut agent, "echo").await);
+    assert_eq!(*dispatched.lock().unwrap(), ["echo"]);
+}
+
+/// External tools outside every vocabulary (a host's undeclared MCP or
+/// provider tools) stay unknown: denying one by name is a typed error.
 #[tokio::test]
 async fn declared_deny_rejects_external_tool_names() {
     let temp = tempfile::tempdir().unwrap();

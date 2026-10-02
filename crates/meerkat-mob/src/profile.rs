@@ -68,12 +68,14 @@ pub struct ToolConfig {
     /// An enforcement declaration like [`Self::read_only`]: it conjoins with
     /// the per-spawn tool access policy (a spawn cannot widen it) and is
     /// recomputed from the current definition on every build, including a
-    /// resume. Each name must belong to one of the profile's statically
-    /// composed tool families, or be a mob operator tool (`spawn_member`,
-    /// `spawn_many_members`, `wire_members`, `unwire_members`, ...) that a
-    /// `mob` profile's members mount; a stale or mistyped name fails the
-    /// member's build with a typed error. MCP and host-bundle tools cannot be
-    /// named here; leave their server out of [`Self::mcp`] instead.
+    /// resume. Each name must be a tool the member's build composed or a name
+    /// in a tool vocabulary: the built-in families' tools (enabled or not),
+    /// the mob operator tools (`spawn_member`, `wire_members`, ...), the agent
+    /// mob tools (`mob_spawn_member`, `mob_wire`, `mob_create`, ...), and the
+    /// exposed names this profile's [`Self::mcp_servers`] map. A known name the
+    /// member does not mount is inert; any other name fails the member's build
+    /// with a typed error naming the vocabularies. Denied tools stay listed and
+    /// the execution gate refuses every call by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
     /// MCP server names this profile connects to.

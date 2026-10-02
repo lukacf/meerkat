@@ -340,7 +340,8 @@ pub use ops::{
     ForkBudgetPolicy, OpEvent, OperationId, OperationPolicy, OperationResult, OperationSpec,
     ResultShape, SessionEffect, SpawnSpec, SpawnToolAccessPolicy, ToolAccessConstraint,
     ToolAccessPolicy, ToolDispatchOutcome, ToolDispatchTerminalCause,
-    ToolDispatchTerminalErrorKind, ToolDispatchTimeoutPolicy, WaitPolicy, WorkKind,
+    ToolDispatchTerminalErrorKind, ToolDispatchTimeoutPolicy, ToolVocabularySource, WaitPolicy,
+    WorkKind,
 };
 pub use ops_lifecycle::{
     OperationCompletionWatch, OperationCompletionWatchError, OperationKind,

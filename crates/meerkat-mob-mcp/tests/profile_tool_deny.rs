@@ -17,13 +17,16 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use meerkat_client::LlmRequest;
 use meerkat_core::{ContentInput, HandlingMode, Message};
 use meerkat_mob::{
     AgentIdentity, MobBackendKind, MobControlPrincipal, MobDefinition, MobId, ProfileBinding,
     ProfileName,
 };
 use meerkat_mob_mcp::MobMcpState;
-use support::{ScriptedCouncilClient, ScriptedTurn, last_user_text, participant_profile};
+use support::{
+    CouncilFixture, ScriptedCouncilClient, ScriptedTurn, last_user_text, participant_profile,
+};
 
 const PROBE: &str = "HOMECORE-DENY-PROBE";
 
@@ -113,42 +116,51 @@ fn tool_results(messages: &[Message]) -> BTreeMap<String, String> {
         .collect()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn homecore_deny_set_gates_denied_mob_tools_and_keeps_the_rest() {
-    let probes: Vec<&'static str> = DENIED.iter().chain(KEPT).copied().collect();
-    let final_results: Arc<Mutex<Option<BTreeMap<String, String>>>> = Arc::default();
-    let script_probes = probes.clone();
-    let script_results = Arc::clone(&final_results);
-    let temp = tempfile::tempdir().expect("temp dir");
-    let state = wired_state(
-        temp.path(),
-        ScriptedCouncilClient::new(move |request| {
-            if !last_user_text(request).contains(PROBE) {
-                return ScriptedTurn::Text("ok".to_string());
+type ProbeResults = Arc<Mutex<Option<BTreeMap<String, String>>>>;
+
+/// The member's model: on the probe turn, call every probe tool once, in
+/// order, then record the results it saw.
+fn probe_script(
+    final_results: ProbeResults,
+    probes: Vec<&'static str>,
+) -> impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static {
+    move |request| {
+        if !last_user_text(request).contains(PROBE) {
+            return ScriptedTurn::Text("ok".to_string());
+        }
+        // One call per probe, in order; each later request carries the
+        // results so far.
+        let results = tool_results(&request.messages);
+        match probes.get(results.len()) {
+            Some(tool) => ScriptedTurn::ToolCall {
+                id: format!("call-{tool}"),
+                name: (*tool).to_string(),
+                args: serde_json::json!({}),
+            },
+            None => {
+                *final_results.lock().unwrap() = Some(results);
+                ScriptedTurn::Text("probed".to_string())
             }
-            // One call per probe, in order; each later request carries the
-            // results so far.
-            let results = tool_results(&request.messages);
-            match script_probes.get(results.len()) {
-                Some(tool) => ScriptedTurn::ToolCall {
-                    id: format!("call-{tool}"),
-                    name: (*tool).to_string(),
-                    args: serde_json::json!({}),
-                },
-                None => {
-                    *script_results.lock().unwrap() = Some(results);
-                    ScriptedTurn::Text("probed".to_string())
-                }
-            }
-        }),
-    );
+        }
+    }
+}
+
+/// Create the mob, spawn the member (its build must accept every deny name),
+/// drive the probe turn, and check every `denied` call is refused by the
+/// gate while the `kept` ones pass it.
+async fn probe_homecore_member(
+    state: &Arc<MobMcpState>,
+    final_results: &ProbeResults,
+    denied: &[&str],
+    kept: &[&str],
+) {
     let mob_id = MobId::from(format!("homecore-{}", uuid::Uuid::new_v4().simple()));
     state
         .mob_create_definition(homecore_definition(&mob_id))
         .await
         .expect("create the mob");
-    // The member build must accept every name: a name the member does not
-    // compose would fail the spawn as `DeclaredToolUnknown`.
+    // A name in no tool vocabulary would fail the spawn as
+    // `DeclaredToolUnknown`.
     state
         .mob_spawn(
             &mob_id,
@@ -183,7 +195,7 @@ async fn homecore_deny_set_gates_denied_mob_tools_and_keeps_the_rest() {
         .unwrap()
         .clone()
         .expect("the probe turn reached its final request");
-    for tool in DENIED {
+    for tool in denied {
         let text = results
             .get(&format!("call-{tool}"))
             .unwrap_or_else(|| panic!("{tool} was called"));
@@ -192,7 +204,7 @@ async fn homecore_deny_set_gates_denied_mob_tools_and_keeps_the_rest() {
             "{tool} is denied by the profile: {text}"
         );
     }
-    for tool in KEPT {
+    for tool in kept {
         let text = results
             .get(&format!("call-{tool}"))
             .unwrap_or_else(|| panic!("{tool} was called"));
@@ -204,4 +216,37 @@ async fn homecore_deny_set_gates_denied_mob_tools_and_keeps_the_rest() {
         );
     }
     let _ = state.mob_destroy(&mob_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn homecore_deny_set_gates_denied_mob_tools_and_keeps_the_rest() {
+    let final_results = ProbeResults::default();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let probes = DENIED.iter().chain(KEPT).copied().collect();
+    let state = wired_state(
+        temp.path(),
+        ScriptedCouncilClient::new(probe_script(Arc::clone(&final_results), probes)),
+    );
+    probe_homecore_member(&state, &final_results, DENIED, KEPT).await;
+}
+
+/// The same deny set on a composition without the agent mob tool factory
+/// (no `wire_mob_tools`): the agent mob tools are not mounted, yet every name
+/// is in a tool vocabulary, so the member builds; its denied names are inert
+/// where unmounted. The mob operator tools it does mount are still gated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn homecore_deny_set_builds_without_the_agent_mob_tool_factory() {
+    const MOUNTED_DENIED: &[&str] = &[
+        "spawn_member",
+        "spawn_many_members",
+        "wire_members",
+        "unwire_members",
+    ];
+    const MOUNTED_KEPT: &[&str] = &["retire_member", "member_status"];
+    let final_results = ProbeResults::default();
+    let probes = MOUNTED_DENIED.iter().chain(MOUNTED_KEPT).copied().collect();
+    let fixture =
+        CouncilFixture::new_runtime_backed(probe_script(Arc::clone(&final_results), probes));
+    probe_homecore_member(&fixture.state, &final_results, MOUNTED_DENIED, MOUNTED_KEPT).await;
+    fixture.teardown().await;
 }

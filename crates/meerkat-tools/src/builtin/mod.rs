@@ -15,6 +15,18 @@
 //! The [`memory_store`] module provides [`MemoryTaskStore`] for testing.
 //! The [`file_store`] module provides [`FileTaskStore`] for persistent storage.
 
+/// Tool names of the shell family. Available on every target (the family
+/// itself is native-only) so a tool name a deny list declares means the same
+/// thing everywhere; [`shell::ShellToolSet::tool_names`] returns it and its
+/// drift test pins it to the tool definitions.
+pub const SHELL_TOOL_NAMES: &[&str] = &[
+    "shell",
+    "shell_job_status",
+    "shell_jobs",
+    "shell_job_cancel",
+    "monitor_start",
+];
+
 #[cfg(feature = "comms")]
 pub mod comms;
 // Staging-only, so it is wasm-safe by construction; the surfaces that cannot

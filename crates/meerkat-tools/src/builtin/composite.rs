@@ -88,7 +88,7 @@ struct BlobToolBinding {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-const IMAGE_GENERATION_TOOL_NAMES: &[&str] = &["generate_image"];
+const IMAGE_GENERATION_TOOL_NAMES: &[&str] = crate::builtin::image_generation::TOOL_NAMES;
 #[cfg(not(target_arch = "wasm32"))]
 const BRAIN_SWAP_TOOL_NAMES: &[&str] = &[crate::builtin::brain_swap::BRAIN_SWAP_TOOL_NAME];
 #[cfg(not(target_arch = "wasm32"))]

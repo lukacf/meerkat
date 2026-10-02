@@ -234,16 +234,16 @@ async fn a_denied_tool_of_an_enabled_family_is_gated_for_the_member() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_deny_entry_no_enabled_family_provides_fails_the_spawn_typed() {
+async fn a_deny_entry_in_no_tool_vocabulary_fails_the_spawn_typed() {
     let temp = tempfile::tempdir().expect("temp dir");
     let client = Arc::new(ShellThenDoneClient {
         marker: temp.path().join(MARKER),
     });
     let (service, adapter) = build_service(temp.path(), Arc::clone(&client)).await;
     let storage = MobStorage::persistent(temp.path().join("mob.db")).expect("mob storage");
-    // `mob = false`: the topology tools are not composed, so naming one is
-    // stale configuration, not a silently inert entry.
-    let handle = MobBuilder::new(mob_definition(&["mob_wire"]), storage)
+    // `mob_wier` is in no tool vocabulary: stale configuration, never a
+    // silently inert entry.
+    let handle = MobBuilder::new(mob_definition(&["mob_wier"]), storage)
         .with_session_service(service.clone())
         .with_runtime_adapter(adapter.clone())
         .with_default_llm_client(client.clone())
@@ -255,10 +255,39 @@ async fn a_deny_entry_no_enabled_family_provides_fails_the_spawn_typed() {
         .await
         .expect_err("an unknown deny entry must fail the spawn");
     let message = err.to_string();
-    for needle in ["profile 'peer'", "'mob_wire'", "shell, comms"] {
+    for needle in [
+        "profile 'peer'",
+        "'mob_wier'",
+        "shell, comms",
+        "agent mob tools",
+    ] {
         assert!(
             message.contains(needle),
             "{needle} missing from the spawn error: {message}"
         );
     }
+}
+
+/// A known tool the member does not mount is an inert deny entry: with
+/// `mob = false` the agent mob tools are not composed, yet `mob_wire` is in
+/// the agent mob tool vocabulary, so the member builds.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_known_but_unmounted_deny_entry_is_inert() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let client = Arc::new(ShellThenDoneClient {
+        marker: temp.path().join(MARKER),
+    });
+    let (service, adapter) = build_service(temp.path(), Arc::clone(&client)).await;
+    let storage = MobStorage::persistent(temp.path().join("mob.db")).expect("mob storage");
+    let handle = MobBuilder::new(mob_definition(&["mob_wire"]), storage)
+        .with_session_service(service.clone())
+        .with_runtime_adapter(adapter.clone())
+        .with_default_llm_client(client.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn_spec(SpawnMemberSpec::new("peer", AgentIdentity::from("kitchen")))
+        .await
+        .expect("a known but unmounted deny entry builds");
 }

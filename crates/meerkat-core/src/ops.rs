@@ -448,14 +448,45 @@ pub struct DeclaredToolRestriction {
     pub enabled_families: Vec<String>,
     /// Only tools their owning dispatcher declares read-only may execute.
     pub read_only: bool,
-    /// Tool names that may not execute. Each must name a tool of the agent's
-    /// statically composed families, or one of [`Self::mob_operator_tools`]
-    /// the build actually mounted; the build rejects any other name.
+    /// Tool names that may not execute. Each must be a tool the build
+    /// composed or a name in a tool vocabulary: the factory's built-in family
+    /// vocabularies and [`Self::vocabulary`]. A known name the build did not
+    /// mount is inert; any other name fails the build as `DeclaredToolUnknown`.
+    /// The execution gate matches by name, so a denied name refuses whichever
+    /// mounted tool carries it while the tool stays listed.
     pub deny: ToolNameSet,
-    /// Mob operator tools (`spawn_member`, `wire_members`, ...) the declaring
-    /// mob profile mounts as external tools. A deny entry may name one only
-    /// when the build actually composed it.
-    pub mob_operator_tools: ToolNameSet,
+    /// The tool names the declaring configuration owns, by source: the mob
+    /// operator and agent mob tools, the exposed names of the MCP servers it
+    /// declares, and its tool bundles.
+    pub vocabulary: std::collections::BTreeMap<ToolVocabularySource, ToolNameSet>,
+}
+
+/// Where a tool name a deny list may declare comes from.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum ToolVocabularySource {
+    /// A built-in tool family (`shell`, `memory`, ...), named by the factory.
+    Family(String),
+    /// The mob operator tools a mob member mounts.
+    MobOperator,
+    /// The agent-facing mob tools.
+    AgentMob,
+    /// The exposed tool names a declared MCP server config maps.
+    McpServer(String),
+    /// A host tool bundle.
+    Bundle(String),
+}
+
+impl std::fmt::Display for ToolVocabularySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Family(family) => write!(f, "{family} tools"),
+            Self::MobOperator => f.write_str("mob operator tools"),
+            Self::AgentMob => f.write_str("agent mob tools"),
+            Self::McpServer(server) => write!(f, "MCP server '{server}'"),
+            Self::Bundle(bundle) => write!(f, "tool bundle '{bundle}'"),
+        }
+    }
 }
 
 impl DeclaredToolRestriction {
@@ -711,7 +742,7 @@ mod tests {
             enabled_families: vec!["mob".to_string()],
             read_only: false,
             deny: ["mob_wire"].into_iter().collect(),
-            mob_operator_tools: ToolNameSet::new(),
+            vocabulary: std::collections::BTreeMap::new(),
         };
         assert!(!restriction.is_unrestricted());
         assert_eq!(

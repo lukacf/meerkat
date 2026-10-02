@@ -62,7 +62,7 @@ pub use tool_surface::{
 pub use tools::{
     WorkGraphToolCapability, WorkGraphToolContract, WorkGraphToolError, WorkGraphToolErrorCode,
     WorkGraphToolSource, handle_unscoped_workgraph_tools_call, unscoped_workgraph_tools_list,
-    workgraph_platform_capability_manifest, workgraph_tools_list,
+    workgraph_platform_capability_manifest, workgraph_tool_names, workgraph_tools_list,
 };
 pub use types::{
     AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,

@@ -373,18 +373,26 @@ them.
   handle the new variants.
 - Per-profile tool deny list (see Added). Struct literals and exhaustive
   matches must handle the new members:
+  - `meerkat_tools::builtin::SHELL_TOOL_NAMES`, `ShellToolSet::tool_names`,
+    `builtin::tasks::tool_names`, `builtin::image_generation::{TOOL_NAMES,
+    tool_names}`, `meerkat_memory::MemorySearchDispatcher::tool_names`,
+    `meerkat_workgraph::workgraph_tool_names`,
+    `meerkat_schedule::schedule_tool_names` and
+    `meerkat_mob::{AGENT_MOB_TOOL_NAMES, agent_mob_tool_names}` are new
+    (additive): each family owns its tool names, pinned by a test to its
+    tool definitions.
   - `meerkat_mob::ToolConfig` gains `deny: Vec<String>` (omitted when empty).
   - `meerkat_contracts::PortableToolConfig`, `WireMobToolConfig` and
     `MobToolConfigInput` gain `deny: Vec<String>` (omitted when empty).
   - `meerkat_mob::DiagnosticCode` gains `MalformedToolDeny`.
   - `meerkat::BuildAgentError` gains `DeclaredToolUnknown { declared_by,
-    tool, enabled_families }`. (`meerkat_core::error::AgentError` gains the
+    tool, enabled_families, vocabulary }`. (`meerkat_core::error::AgentError` gains the
     matching variant too; it is `#[non_exhaustive]`, so that is additive.)
   - `meerkat::AgentBuildConfig` and `meerkat_core::service::SessionBuildOptions`
     gain `declared_tool_restriction: Option<DeclaredToolRestriction>`; the new
-    `meerkat_core::ops::DeclaredToolRestriction` carries it, including the
-    `mob_operator_tools` a `mob` profile mounts as external tools. Both new types
-    are re-exported at the `meerkat_core` root.
+    `meerkat_core::ops::DeclaredToolRestriction` carries it, including its
+    `vocabulary` keyed by the new `meerkat_core::ToolVocabularySource`. The new
+    types are re-exported at the `meerkat_core` root.
   - `meerkat_core::SessionTooling` gains `spawn_tool_access_policy:
     Option<SpawnToolAccessPolicy>` (omitted when absent); the new
     `meerkat_core::ops::SpawnToolAccessPolicy` (`Unrestricted` or
@@ -837,15 +845,17 @@ them.
   cannot widen it, and children inherit it through the persisted effective
   policy. It is carried by portable specs, RPC/MCP mob definitions and
   `mob.toml`.
-  - Each name must be a tool of the member's statically composed families. A
-    stale or mistyped name fails the member's build with the typed
-    `DeclaredToolUnknown` error naming the profile, the tool and the enabled
-    families. A `mob` profile may also deny the mob operator tools its members
-    mount (`spawn_member`, `spawn_many_members`, `wire_members`,
-    `unwire_members`, ...) next to the agent mob tools (`mob_spawn_member`,
-    `mob_wire`, `mob_create`, ...); MCP and host-bundle tools cannot be denied
-    by name. Empty or whitespace entries are a `malformed_tool_deny`
-    definition diagnostic.
+  - Each name must be a tool the member's build composed or a name in a tool
+    vocabulary: the built-in families' tools (shell, tasks, memory, workgraph,
+    schedule, image generation; enabled or not), the mob operator tools
+    (`spawn_member`, `spawn_many_members`, `wire_members`, ...), the agent mob
+    tools (`mob_spawn_member`, `mob_wire`, `mob_create`, ...) and the exposed
+    tool names the profile's declared MCP servers map. A known name the member
+    does not mount is inert, so one deny set works on every composition. Any
+    other name (stale or mistyped, or an undeclared external tool) fails the
+    member's build with the typed `DeclaredToolUnknown` error naming the
+    profile, the tool, the vocabularies and the enabled families. Empty or
+    whitespace entries are a `malformed_tool_deny` definition diagnostic.
   - The declaration is recomputed from the current definition on every build,
     including a resume, so adding or removing a deny entry or toggling
     `read_only` takes effect when the member resumes. Sessions now persist the

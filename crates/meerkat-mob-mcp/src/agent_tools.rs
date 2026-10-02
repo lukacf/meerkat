@@ -7258,6 +7258,40 @@ mod tests {
         )
     }
 
+    /// Profile deny lists name agent mob tools through meerkat-mob's canonical
+    /// set; the surface never advertises a name outside it, and the set names
+    /// nothing the fullest surface does not.
+    #[test]
+    fn agent_tool_surface_stays_within_the_canonical_name_set() {
+        let canonical: std::collections::BTreeSet<&str> =
+            meerkat_mob::AGENT_MOB_TOOL_NAMES.iter().copied().collect();
+        let names = |defs: Arc<[Arc<ToolDef>]>| -> std::collections::BTreeSet<String> {
+            defs.iter().map(|def| def.name.to_string()).collect()
+        };
+        for (store, snapshots, packs) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, true),
+        ] {
+            for name in names(build_tool_defs_with_profile_support(
+                store, snapshots, packs,
+            )) {
+                assert!(
+                    canonical.contains(name.as_str()),
+                    "agent tool '{name}' is missing from meerkat_mob::AGENT_MOB_TOOL_NAMES"
+                );
+            }
+        }
+        let fullest = names(build_tool_defs_with_profile_support(true, true, true));
+        for name in &canonical {
+            assert!(
+                fullest.contains(*name),
+                "meerkat_mob::AGENT_MOB_TOOL_NAMES names '{name}', which no agent surface provides"
+            );
+        }
+    }
+
     #[test]
     fn test_profile_tools_present_when_store_available() {
         let defs = build_tool_defs_with_profile_support(true, false, false);

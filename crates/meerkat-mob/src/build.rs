@@ -419,18 +419,38 @@ pub async fn build_agent_config(
             }
             deny
         },
-        // A `mob` profile's members mount the mob operator tools as external
-        // tools; the factory lets the deny list name them only when this
-        // build actually mounted them.
-        mob_operator_tools: if profile.tools.mob {
-            crate::runtime::mob_operator_tool_names()
-        } else {
-            meerkat_core::ToolNameSet::new()
-        },
+        vocabulary: profile_tool_vocabulary(&profile.tools),
     };
     config.declared_tool_restriction = (!restriction.is_unrestricted()).then_some(restriction);
 
     Ok(config)
+}
+
+/// The tool names a profile's deny list may name beyond the factory's
+/// built-in families: the mob operator and agent mob tools (known whether or
+/// not this build mounts them) and the exposed names its declared MCP servers
+/// map. A name in no vocabulary fails the build.
+fn profile_tool_vocabulary(
+    tools: &crate::profile::ToolConfig,
+) -> std::collections::BTreeMap<meerkat_core::ToolVocabularySource, meerkat_core::ToolNameSet> {
+    let mut vocabulary = std::collections::BTreeMap::new();
+    vocabulary.insert(
+        meerkat_core::ToolVocabularySource::MobOperator,
+        crate::runtime::mob_operator_tool_names(),
+    );
+    vocabulary.insert(
+        meerkat_core::ToolVocabularySource::AgentMob,
+        crate::runtime::agent_mob_tool_names(),
+    );
+    for server in &tools.mcp_servers {
+        if !server.tool_names.is_empty() {
+            vocabulary.insert(
+                meerkat_core::ToolVocabularySource::McpServer(server.name.clone()),
+                server.tool_names.values().map(String::as_str).collect(),
+            );
+        }
+    }
+    vocabulary
 }
 
 /// The tool families a profile enables, in declaration order, for errors that
@@ -1781,6 +1801,46 @@ mod tests {
             enabled_tool_families(&profile.tools)
         );
         assert!(!restriction.enabled_families.is_empty());
+    }
+
+    #[test]
+    fn profile_vocabulary_names_mob_tools_and_declared_mcp_tool_names() {
+        let mut tools = crate::profile::ToolConfig::default();
+        let mut server = meerkat_core::mcp_config::McpServerConfig::stdio(
+            "lookup-server",
+            "lookup".to_string(),
+            Vec::new(),
+            std::collections::HashMap::new(),
+        );
+        server
+            .tool_names
+            .insert("raw_lookup".to_string(), "lookup".to_string());
+        tools.mcp_servers = vec![
+            server,
+            meerkat_core::mcp_config::McpServerConfig::stdio(
+                "unmapped",
+                "unmapped".to_string(),
+                Vec::new(),
+                std::collections::HashMap::new(),
+            ),
+        ];
+        let vocabulary = profile_tool_vocabulary(&tools);
+        // Known whether or not this profile mounts them.
+        assert!(vocabulary[&meerkat_core::ToolVocabularySource::AgentMob].contains("mob_create"));
+        assert!(
+            vocabulary[&meerkat_core::ToolVocabularySource::MobOperator].contains("spawn_member")
+        );
+        // A declared server's exposed names, never its raw operation names.
+        let declared =
+            &vocabulary[&meerkat_core::ToolVocabularySource::McpServer("lookup-server".into())];
+        assert!(declared.contains("lookup"));
+        assert!(!declared.contains("raw_lookup"));
+        // A server that maps no names declares none.
+        assert!(
+            !vocabulary.contains_key(&meerkat_core::ToolVocabularySource::McpServer(
+                "unmapped".into()
+            ))
+        );
     }
 
     #[tokio::test]

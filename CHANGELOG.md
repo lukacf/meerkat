@@ -152,6 +152,10 @@ them.
   cover the retained occurrences only, and `materialize_revision` of a retired
   revision returns `TranscriptRevisionRetired`. `commits()`, `commit_count()`,
   `commit(i)`, `rewrite_prefix()` and `graph_prefix()` are unchanged.
+- The SQLite session store's schema domain moves to v5 (table
+  `session_transcript_retirements`). Opening a store migrates it forward.
+  Binaries from before this release refuse a v5 file, as they refuse any
+  newer schema.
 
 ### Added
 
@@ -276,6 +280,16 @@ them.
     oldest_retained_revision, is_retired_revision, retired_revision_refusal}`;
   - the defaulted `Compactor::transcript_history_retention`, which
     `DefaultCompactor` reads from its config.
+- Head-canonical stores can bound their rows to the same retention cut:
+  - `PreparedHeadCanonicalRewriteMutation::transcript_retired_count`;
+  - `RetiredTranscriptGraphBase`;
+  - `ValidatedTranscriptHistory::{retired_through,
+    from_store_replayed_retired_graph}`;
+  - `VerifiedHeadCanonicalTranscriptHistory::history`;
+  - the defaulted `IncrementalSessionStore::transcript_row_retention`
+    (`TranscriptRowRetention::{RetiresToCut, KeepsAll}`). A `KeepsAll` store
+    stays correct but unbounded, and `PersistentSessionService` warns about
+    it once at construction.
 
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
@@ -436,10 +450,23 @@ them.
     projections, and suffix proofs that would start before the cut) fail with
     the typed `TranscriptRevisionRetired` naming the oldest retained revision.
     They never return a wrong anchor.
-  - Head-canonical stores still keep the full history out of line. Their
-    revision reads can serve retired revisions, and cold loads replay the
-    whole graph. A re-anchored graph cannot be laid out as head-canonical
-    strands (blob-to-SQLite conversion), which is refused typed.
+  - A head-canonical store that keeps all rows (`TranscriptRowRetention::
+    KeepsAll`) can still serve retired revisions from its rewrite records.
+    A re-anchored graph cannot be laid out as head-canonical strands
+    (blob-to-SQLite conversion), which is refused typed.
+  - The SQLite store bounds its rows to the same cut. In a rewrite
+    mutation's transaction it:
+    - replays its stored graph and re-anchors it through the graph owner;
+    - persists the retired base;
+    - deletes the `session_rewrites` rows below the cut;
+    - collects strands that only retired history could reach.
+  - Cold loads replay the retained rows from that base, with the same rolling
+    identity. A head's row-lineage anchor rotates once the retention cut
+    passes it, so cold row replay never needs a retired row. Proofs that
+    would need rows below the cut refuse typed.
+  - Measured over 40 compaction cycles, keeping 3: 3 rewrite rows and 17
+    strand rows from cycle 20 on, with stored bytes growing only by the
+    retained commit list.
   - Residual: each retained commit is about 640 B, so the document still
     grows by about 640 KB per 1,000 compactions. Missing-receipt repair
     writes those commit values, so they stay; folding them below an

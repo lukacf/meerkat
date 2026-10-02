@@ -30,12 +30,11 @@ impl AuthorizationAuditSink for FailingEntrySink {
         &self,
         event: AuthorizationAuditObservation,
     ) -> Result<(), OperationObservationError> {
-        if let AuditObservation::Prepared { target, .. } = &event.observation {
-            if matches!(target.as_ref(), AuditTarget::Tool { tool_name, .. } if tool_name == BLOCKED)
-            {
-                *self.blocked_operation.lock().expect("injected target") =
-                    Some(event.operation_id.clone());
-            }
+        if let AuditObservation::Prepared { target, .. } = &event.observation
+            && matches!(target.as_ref(), AuditTarget::Tool { tool_name, .. } if tool_name == BLOCKED)
+        {
+            *self.blocked_operation.lock().expect("injected target") =
+                Some(event.operation_id.clone());
         }
         if matches!(event.observation, AuditObservation::Entry)
             && self

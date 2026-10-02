@@ -450,13 +450,12 @@ impl EphemeralRuntimeDriver {
             }) {
                 return Err(crate::input_authority::unavailable());
             }
-            if let (Some(binding), Some(batch_key)) = expected {
-                if selected_input_bindings
+            if let (Some(binding), Some(batch_key)) = expected
+                && selected_input_bindings
                     .insert(key, (binding, batch_key))
                     .is_some()
-                {
-                    return Err(crate::input_authority::unavailable());
-                }
+            {
+                return Err(crate::input_authority::unavailable());
             }
             originals.extend(row.authority_contributors.iter().cloned());
         }
@@ -4377,7 +4376,7 @@ impl EphemeralRuntimeDriver {
             active_turn_boundary_available,
             without_wake,
         )
-        .with_authority_binding(crate::input_authority::generated_binding(&input)?);
+        .with_authority_binding(crate::input_authority::generated_binding(input)?);
         let effects = self.dsl_preview(
             Self::resolve_admission_plan_input(&authority),
             "ResolveAdmissionPlan",
@@ -4732,7 +4731,7 @@ impl EphemeralRuntimeDriver {
         input: &Input,
         resolved: &crate::accept::ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
-        self.authenticate_work(&input)?;
+        self.authenticate_work(input)?;
         let runtime_phase = self.runtime_phase_snapshot();
         let lifecycle_facts = crate::meerkat_machine::classify_runtime_lifecycle_state(
             runtime_phase,
@@ -4797,7 +4796,7 @@ impl EphemeralRuntimeDriver {
 
         if let Some(existing_id) = self.preview_idempotency(
             &input_id,
-            crate::input_authority::qualified_idempotency_key(&input)?
+            crate::input_authority::qualified_idempotency_key(input)?
                 .as_ref()
                 .map(std::string::ToString::to_string),
         )? {
@@ -4806,7 +4805,7 @@ impl EphemeralRuntimeDriver {
                     "generated idempotency authority references missing input {existing_id}"
                 ))
             })?;
-            crate::input_authority::verify_retained_replay(&existing.state, &input)?;
+            crate::input_authority::verify_retained_replay(&existing.state, input)?;
             crate::input_state::PromptReplayIdentity::verify_replay(
                 &existing.state,
                 input,
@@ -4832,7 +4831,7 @@ impl EphemeralRuntimeDriver {
             resolved.authority().active_turn_boundary_available(),
             resolved.authority().without_wake(),
         )
-        .with_authority_binding(crate::input_authority::generated_binding(&input)?);
+        .with_authority_binding(crate::input_authority::generated_binding(input)?);
         let effects = self.dsl_preview(
             Self::resolve_admission_plan_input(&authority),
             "ResolveAdmissionPlan(accept preview)",
@@ -4847,9 +4846,9 @@ impl EphemeralRuntimeDriver {
 
         let mut state = InputState::new_accepted(input_id.clone());
         state.durability = Some(input.header().durability);
-        state.idempotency_key = crate::input_authority::qualified_idempotency_key(&input)?;
+        state.idempotency_key = crate::input_authority::qualified_idempotency_key(input)?;
         state.authority_contributors =
-            crate::input_authority::RetainedInputAuthority::from_input(&input)?
+            crate::input_authority::RetainedInputAuthority::from_input(input)?
                 .into_iter()
                 .collect();
         state.controller_client = input

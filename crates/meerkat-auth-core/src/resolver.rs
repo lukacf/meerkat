@@ -1797,14 +1797,12 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
             // closure performed inside the publication helper.
             if &auth_lease.snapshot(&lease_key) == previous_snapshot
                 && previous_snapshot.phase == Some(AuthLeasePhase::Refreshing)
-            {
-                if let Err(closure) =
+                && let Err(closure) =
                     auth_lease.refresh_failed(&lease_key, RefreshFailureObservation::transient())
-                {
-                    return Err(ProviderAuthError::SourceResolutionFailed(format!(
-                        "{error}; refresh closure failed: {closure}"
-                    )));
-                }
+            {
+                return Err(ProviderAuthError::SourceResolutionFailed(format!(
+                    "{error}; refresh closure failed: {closure}"
+                )));
             }
             return Err(error);
         }

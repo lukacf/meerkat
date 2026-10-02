@@ -69,10 +69,13 @@ impl Server {
 }
 
 fn sse(events: Vec<Value>) -> String {
-    events
-        .into_iter()
-        .map(|event| format!("data: {event}\n\n"))
-        .collect()
+    use std::fmt::Write as _;
+
+    let mut encoded = String::new();
+    for event in events {
+        write!(encoded, "data: {event}\n\n").expect("write SSE event to String");
+    }
+    encoded
 }
 fn start_message() -> Value {
     json!({"type":"message_start","message":{"id":"e1-response","type":"message","role":"assistant","model":E1_MODEL,"content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}})
@@ -163,7 +166,7 @@ impl HttpAuthorizer for FixtureAuthorizer {
         ));
         Ok(())
     }
-    fn label(&self) -> &str {
+    fn label(&self) -> &'static str {
         "e1-private-loopback"
     }
 }

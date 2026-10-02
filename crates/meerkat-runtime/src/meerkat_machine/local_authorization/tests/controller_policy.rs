@@ -243,7 +243,7 @@ pub(super) async fn assert_controller_veto_preserves_policy_and_publication() {
             .expect("positive controller");
     check.current().expect("current controller before proposal");
     let before = *fixture.account.state.lock().expect("owner");
-    let (_, stamp) = fixture
+    let ((), stamp) = fixture
         .publication
         .observe(|| ())
         .expect("coherent publication");
@@ -290,7 +290,7 @@ async fn unrelated_policy_change_can_commit_without_removing_the_controller() {
     let fixture = fixture().await;
     let (_, run, context) =
         stage_controller_input(&fixture.machine, &fixture.session, fixture.prompt.clone()).await;
-    let (_, before) = fixture.publication.observe(|| ()).expect("old publication");
+    let ((), before) = fixture.publication.observe(|| ()).expect("old publication");
     let next = PolicyState {
         controller: true,
         ordinary_tool: false,
@@ -395,7 +395,7 @@ async fn terminal_input_keeps_controller_until_the_actual_run_is_terminal() {
 #[tokio::test]
 async fn busy_native_custody_refuses_only_the_administrative_proposal() {
     let fixture = fixture().await;
-    let (_, stamp) = fixture.publication.observe(|| ()).expect("publication");
+    let ((), stamp) = fixture.publication.observe(|| ()).expect("publication");
     let driver = Arc::clone(
         &fixture
             .machine
@@ -592,7 +592,7 @@ async fn unavailable_proposed_policy_preserves_actual_state_publication_and_cont
             .expect("live control");
     check.current().expect("current control");
     let before = *fixture.account.state.lock().unwrap();
-    let (_, stamp) = fixture.publication.observe(|| ()).unwrap();
+    let ((), stamp) = fixture.publication.observe(|| ()).unwrap();
     let calls = AtomicUsize::new(0);
     {
         let mut custody = fixture.machine.try_controller_grant_mutation().unwrap();

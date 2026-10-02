@@ -641,7 +641,7 @@ impl AgentLlmClient for SiblingClient {
     fn provider(&self) -> Provider {
         Provider::Anthropic
     }
-    fn model(&self) -> &str {
+    fn model(&self) -> &'static str {
         "claude-sonnet-4-5"
     }
 }

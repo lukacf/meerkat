@@ -159,7 +159,7 @@ impl OperationPolicyOwner for ApplicationOwner {
         };
         let actual_resource = ResourceRef {
             domain: domain(),
-            resource_id: arguments.record.into(),
+            resource_id: arguments.record,
         };
         let candidate = association.candidate();
         // Evaluate the correlated exact tuple directly. Grant restrictions stay
@@ -651,12 +651,20 @@ async fn exercise_a8(server: &Server, barrier: &Arc<EntryBarrier>) {
                 && decision.executor_permitted)
     );
     let operation_before = grants
-        .resolve_lineage(&[operation.clone()], &principal("executor"), None)
+        .resolve_lineage(
+            std::slice::from_ref(&operation),
+            &principal("executor"),
+            None,
+        )
         .unwrap()
         .restrictions()
         .clone();
     let controller_before = grants
-        .resolve_controller_lineage(&[controller.clone()], &principal("executor"), None)
+        .resolve_controller_lineage(
+            std::slice::from_ref(&controller),
+            &principal("executor"),
+            None,
+        )
         .unwrap()
         .restrictions()
         .clone();
@@ -740,7 +748,11 @@ async fn exercise_a8(server: &Server, barrier: &Arc<EntryBarrier>) {
     );
     assert_eq!(
         *grants
-            .resolve_lineage(&[operation.clone()], &principal("executor"), None)
+            .resolve_lineage(
+                std::slice::from_ref(&operation),
+                &principal("executor"),
+                None
+            )
             .unwrap()
             .restrictions(),
         operation_before
@@ -748,7 +760,11 @@ async fn exercise_a8(server: &Server, barrier: &Arc<EntryBarrier>) {
     assert_eq!(operation_before, operation_bounds);
     assert_eq!(
         *grants
-            .resolve_controller_lineage(&[controller.clone()], &principal("executor"), None)
+            .resolve_controller_lineage(
+                std::slice::from_ref(&controller),
+                &principal("executor"),
+                None
+            )
             .unwrap()
             .restrictions(),
         controller_before
@@ -946,13 +962,13 @@ async fn exercise_a8(server: &Server, barrier: &Arc<EntryBarrier>) {
             "one canonical saved result for exact call {call_id}"
         );
         assert_eq!(retained[0].is_error, is_error);
-        if !is_error {
-            assert_eq!(retained[0].text_content(), text);
-        } else {
+        if is_error {
             assert_eq!(
                 serde_json::from_str::<Value>(&retained[0].text_content()).unwrap(),
                 refused_payload
             );
+        } else {
+            assert_eq!(retained[0].text_content(), text);
         }
     }
     let final_pin = service

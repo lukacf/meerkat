@@ -226,7 +226,7 @@ fn admission_requires_actual_lineage_exact_controller_ceiling_and_work_lifetime(
             0 => owner.restrictions.lifetime = LifetimeRestriction::window(0, 1_000),
             1 => {
                 owner.restrictions.actions =
-                    ExactRestriction::unresolved(UnresolvedConstraint::Unavailable)
+                    ExactRestriction::unresolved(UnresolvedConstraint::Unavailable);
             }
             _ => owner.empty = true,
         }

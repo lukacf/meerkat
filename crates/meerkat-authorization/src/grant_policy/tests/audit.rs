@@ -36,8 +36,8 @@ fn real_compiler_records_grant_observation_refusal_entry_and_deferred_return_wit
         .audited_work_context(vec![association].into(), scope(), sink.clone())
         .expect("audited context");
     let binding = source(SourceAuthorizationUse::Read, "public");
-    let check = PreparedOperationCheck::prepare(context.clone(), binding.clone())
-        .expect("real grant checks");
+    let check =
+        PreparedOperationCheck::prepare(context.clone(), binding).expect("real grant checks");
     check.observe_entry().expect("entry staged");
     let native = meerkat_core::ops::AsyncOpRef::detached(meerkat_core::OperationId::new());
     let returned = Ok(meerkat_core::ops::ToolDispatchOutcome::new(
@@ -105,12 +105,9 @@ fn warm_checks_do_not_append_and_known_entry_failure_keeps_physical_result_separ
         check.observe_outcome(OperationObservedOutcome::from_tool_dispatch(&physical)),
         Err(OperationObservationError)
     );
-    assert_eq!(
-        physical
-            .expect("original physical result retained")
-            .result
-            .text_content(),
-        "actual result"
+    assert!(
+        matches!(physical, Ok(outcome) if outcome.result.text_content() == "actual result"),
+        "original physical result retained"
     );
     assert_eq!(sink.events.lock().expect("events").len(), 1);
 }

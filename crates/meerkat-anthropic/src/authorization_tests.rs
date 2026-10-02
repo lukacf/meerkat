@@ -852,7 +852,7 @@ fn forced_request(client: &dyn LlmClient, policy: Arc<Policy>) -> PreparedLlmReq
             .request()
             .clone()
             .with_tools(vec![Arc::new(ToolDef {
-                name: "lookup".to_owned(),
+                name: "lookup".into(),
                 description: "Synthetic lookup tool".to_owned(),
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
                 provenance: None,

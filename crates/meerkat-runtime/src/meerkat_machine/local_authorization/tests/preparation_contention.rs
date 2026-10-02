@@ -145,7 +145,7 @@ async fn assert_coordination_is_not_permission(which: HeldCoordination) {
             .await
             .expect("unrelated registered session");
     }
-    let (_, stamp) = publication
+    let ((), stamp) = publication
         .observe(|| ())
         .expect("stable publication before coordination");
     let attempt = plain_controller_binding(&context, &run);

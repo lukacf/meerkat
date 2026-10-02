@@ -559,7 +559,7 @@ async fn exercise_expiry(case: CredentialCase) {
             cleanup.caller = Some(task.abort_handle());
             let arrived = tokio::time::timeout(BOUND, async {
                 tokio::select! {
-                    _ = server.endpoint.refresh_arrived.notified() => Ok(()),
+                    () = server.endpoint.refresh_arrived.notified() => Ok(()),
                     completed = &mut task => Err(match completed {
                         Ok(Err(error)) => format!("admission refused before refresh: {error}"),
                         Ok(Ok(_)) => "input accepted before required refresh HTTP".into(),

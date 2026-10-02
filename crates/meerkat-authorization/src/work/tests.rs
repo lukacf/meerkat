@@ -521,27 +521,27 @@ fn unresolved_restrictions_cannot_be_dropped_during_compilation() {
         fixture.change(|state| match dimension {
             0 => {
                 state.restrictions.actions =
-                    ExactRestriction::unresolved(UnresolvedConstraint::Absent)
+                    ExactRestriction::unresolved(UnresolvedConstraint::Absent);
             }
             1 => {
                 state.restrictions.resource_domains =
-                    ExactRestriction::unresolved(UnresolvedConstraint::Unknown)
+                    ExactRestriction::unresolved(UnresolvedConstraint::Unknown);
             }
             2 => {
                 state.restrictions.processors =
-                    ExactRestriction::unresolved(UnresolvedConstraint::Unavailable)
+                    ExactRestriction::unresolved(UnresolvedConstraint::Unavailable);
             }
             3 => {
                 state.restrictions.audiences =
-                    ExactRestriction::unresolved(UnresolvedConstraint::Unknown)
+                    ExactRestriction::unresolved(UnresolvedConstraint::Unknown);
             }
             4 => {
                 state.restrictions.lifetime =
-                    LifetimeRestriction::unresolved(UnresolvedConstraint::Absent)
+                    LifetimeRestriction::unresolved(UnresolvedConstraint::Absent);
             }
             _ => {
                 state.restrictions.delegation_depth =
-                    DelegationDepth::unresolved(UnresolvedConstraint::Unavailable)
+                    DelegationDepth::unresolved(UnresolvedConstraint::Unavailable);
             }
         });
         assert_refused(
@@ -609,9 +609,7 @@ fn wall_rollback_does_not_extend_monotonic_deadline_or_cross_not_before() {
     fixture.clock.unavailable.store(true, Ordering::Relaxed);
     let error: meerkat_core::OperationAuthorizationError = prepared
         .check_current(&binding)
-        .err()
-        .expect("unavailable clock cannot validate entry")
-        .into();
+        .expect_err("unavailable clock cannot validate entry");
     assert_eq!(
         meerkat_core::ToolError::from(error).error_code(),
         "operation_authorization_unavailable"
@@ -774,7 +772,7 @@ fn batch_checks_every_original_once_then_one_stamp_and_earliest_deadline() {
     let compiler = LocalWorkAuthorization::new_batch(
         originals.into(),
         policy.clone(),
-        publication.clone(),
+        publication,
         clock.clone(),
     )
     .expect("homogeneous originals");
@@ -990,7 +988,7 @@ fn controller_label_cannot_substitute_model_account_profile_or_backend() {
             3 => model.backend_kind = Arc::from("other-backend"),
             _ => {
                 Arc::make_mut(&mut model.identity).self_hosted_server_id =
-                    Some("other-server".into())
+                    Some("other-server".into());
             }
         }
         assert!(check(&PreparedAuthorizationBinding::new(facts)).is_err());
@@ -1116,9 +1114,7 @@ fn unavailable_clock_at_current_check_is_not_a_policy_denial() {
     fixture.clock.unavailable.store(true, Ordering::Relaxed);
     let error: meerkat_core::OperationAuthorizationError = prepared
         .check_current(&binding)
-        .err()
-        .expect("unavailable clock cannot validate entry")
-        .into();
+        .expect_err("unavailable clock cannot validate entry");
     fixture.clock.unavailable.store(false, Ordering::Relaxed);
     prepared
         .check_current(&binding)
@@ -1130,6 +1126,7 @@ fn unavailable_clock_at_current_check_is_not_a_policy_denial() {
 }
 
 #[test]
+#[allow(clippy::panic)] // The spawned thread deliberately poisons the actual owner lock.
 fn poisoned_publication_is_unavailable_at_prepare_and_current_check() {
     let fixture = Fixture::new(ExecutionRestrictions::unrestricted());
     let binding = read_binding();
@@ -1153,15 +1150,12 @@ fn poisoned_publication_is_unavailable_at_prepare_and_current_check() {
     );
     let current_error: meerkat_core::OperationAuthorizationError = prepared
         .check_current(&binding)
-        .err()
-        .expect("poisoned publication cannot validate old entry")
-        .into();
+        .expect_err("poisoned publication cannot validate old entry");
     let prepare_error: meerkat_core::OperationAuthorizationError = fixture
         .authorization
         .prepare(&binding)
         .err()
-        .expect("poisoned publication cannot issue replacement authority")
-        .into();
+        .expect("poisoned publication cannot issue replacement authority");
     assert_eq!(
         meerkat_core::ToolError::from(current_error).error_code(),
         "operation_authorization_unavailable"

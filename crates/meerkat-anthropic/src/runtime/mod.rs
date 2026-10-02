@@ -344,7 +344,7 @@ impl meerkat_core::HttpAuthorizer for ClaudeAiOAuthAuthorizer {
         Ok(())
     }
 
-    fn label(&self) -> &str {
+    fn label(&self) -> &'static str {
         "claude-ai-oauth"
     }
 

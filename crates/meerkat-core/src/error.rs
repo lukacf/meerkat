@@ -1338,7 +1338,7 @@ mod tests {
         };
         let second = crate::ToolDispatchSettlementFailure {
             admission_source: crate::ToolDispatchAdmissionSource::ContextGate,
-            ..first.clone()
+            ..first
         };
         let primary =
             ToolError::policy_indeterminate(crate::ToolConsequenceFailure::InvalidProvenance {

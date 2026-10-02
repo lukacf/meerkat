@@ -870,10 +870,10 @@ mod tests {
         // The old implementation materializes successfully. Retire any actual
         // actor/registration before the intended negative assertion fails.
         let mut cleanup_ids = builds.clone();
-        if let Ok(Ok(created)) = &outcome {
-            if !cleanup_ids.contains(&created.session_id) {
-                cleanup_ids.push(created.session_id.clone());
-            }
+        if let Ok(Ok(created)) = &outcome
+            && !cleanup_ids.contains(&created.session_id)
+        {
+            cleanup_ids.push(created.session_id.clone());
         }
         if let Ok(summaries) = &live {
             for summary in summaries {

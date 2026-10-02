@@ -261,7 +261,7 @@ impl HttpAuthorizer for Authorizer {
         }
         Ok(meerkat_core::HttpAuthorizationResponseAction::Propagate)
     }
-    fn label(&self) -> &str {
+    fn label(&self) -> &'static str {
         "openai-authorization-boundary-test"
     }
 }

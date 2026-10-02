@@ -51,6 +51,7 @@ fn unavailable_clock_never_records_a_false_policy_refusal() {
     }
     struct UnenteredPolicy;
     impl WorkAuthorization for UnenteredPolicy {
+        #[allow(clippy::panic)] // Entering this policy is the failing test sentinel.
         fn prepare(
             &self,
             _: &PreparedAuthorizationBinding,
@@ -186,7 +187,7 @@ fn observation_infrastructure_inner_failure_survives_concurrent_publication_chan
     }
     for change_during_prepare in [false, true] {
         let publication = LocalAuthorizationPublication::new();
-        let (_, before) = publication.observe(|| ()).expect("initial stamp");
+        let ((), before) = publication.observe(|| ()).expect("initial stamp");
         let inner = Arc::new(FailingInner {
             publication: publication.clone(),
             change_during_prepare,
@@ -296,7 +297,7 @@ fn authorization_unavailable_survives_publication_change_and_is_observed() {
     }
     for change_during_prepare in [false, true] {
         let publication = LocalAuthorizationPublication::new();
-        let (_, before) = publication.observe(|| ()).expect("initial stamp");
+        let ((), before) = publication.observe(|| ()).expect("initial stamp");
         let inner = Arc::new(FailingInner {
             publication: publication.clone(),
             change_during_prepare,

@@ -26697,7 +26697,7 @@ mod tests {
             fn provider(&self) -> crate::Provider {
                 crate::Provider::OpenAI
             }
-            fn model(&self) -> &str {
+            fn model(&self) -> &'static str {
                 "fixture-model"
             }
         }
@@ -26838,7 +26838,7 @@ mod tests {
             fn provider(&self) -> crate::Provider {
                 crate::Provider::OpenAI
             }
-            fn model(&self) -> &str {
+            fn model(&self) -> &'static str {
                 "alternate-model"
             }
         }
@@ -27032,11 +27032,7 @@ mod tests {
                         );
                         assert_eq!(
                             alternate.attempts.load(Ordering::Relaxed),
-                            if matches!(boundary, RefusalBoundary::Prepare) {
-                                0
-                            } else {
-                                1
-                            },
+                            usize::from(!matches!(boundary, RefusalBoundary::Prepare)),
                             "no second attempt of the unavailable alternate"
                         );
                         let mut failed = 0;
@@ -27617,7 +27613,7 @@ mod tests {
                 fn provider(&self) -> crate::Provider {
                     crate::Provider::OpenAI
                 }
-                fn model(&self) -> &str {
+                fn model(&self) -> &'static str {
                     "fixture-model"
                 }
             }

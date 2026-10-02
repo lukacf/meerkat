@@ -392,7 +392,7 @@ impl HttpAuthorizer for ModelAuthorizer {
         ));
         Ok(())
     }
-    fn label(&self) -> &str {
+    fn label(&self) -> &'static str {
         "ce-native-model-fixture"
     }
 }
@@ -515,6 +515,8 @@ struct ObservedRun {
     input: meerkat_core::InputId,
     run: meerkat_core::RunId,
 }
+// Keep the test's actual owners and retained grant lineages explicit at each call.
+#[allow(clippy::too_many_arguments)]
 async fn run_native(
     machine: Arc<MeerkatMachine>,
     endpoint: Arc<Endpoint>,

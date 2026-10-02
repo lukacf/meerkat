@@ -1415,7 +1415,7 @@ impl MethodRouter {
         route
             .registry()
             .replace_or_add(tools)
-            .map_err(|_| crate::governed_jsonl::unsupported())?;
+            .map_err(|()| crate::governed_jsonl::unsupported())?;
         self.governed_connection = Some(connection);
         Ok(self)
     }

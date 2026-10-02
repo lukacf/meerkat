@@ -227,9 +227,13 @@ pub struct NativeWorkBatch {
     // driver custody. It grants nothing until the generated owner has staged
     // this complete set for the exact run. Coalesced originals remain in
     // contributors; they are not independently staged rows.
+    // The local authorization owner reads this state; every build retains it.
+    #[cfg_attr(not(feature = "local-authorization"), allow(dead_code))]
     pub(crate) selected_input_bindings: std::collections::BTreeMap<String, (String, String)>,
     pub(crate) controller_client: Option<meerkat_core::ControllerModelClient>,
+    #[cfg_attr(not(feature = "local-authorization"), allow(dead_code))]
     pub(crate) authority: crate::driver::ephemeral::SharedIngressDslAuthority,
+    #[cfg_attr(not(feature = "local-authorization"), allow(dead_code))]
     pub(crate) durability_health: Option<crate::meerkat_machine::DurabilityHealthHandle>,
     pub(crate) audit_sink: Arc<dyn meerkat_authorization_contracts::audit::AuthorizationAuditSink>,
 }
@@ -903,7 +907,7 @@ pub(crate) mod tests {
                 0 => claim.represented_subject = Some(principal("represented")),
                 1 => {
                     claim.admitted_ceiling.actions =
-                        meerkat_authorization_contracts::constraints::ExactRestriction::exact([])
+                        meerkat_authorization_contracts::constraints::ExactRestriction::exact([]);
                 }
                 2 => claim.controller_grant_lineage[0].issued_revision += 1,
                 3 => claim.target.context_generation += 1,

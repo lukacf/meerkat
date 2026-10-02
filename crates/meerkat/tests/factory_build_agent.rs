@@ -857,8 +857,11 @@ mod controller_pair {
         ));
         assert_eq!(controller.selection().model(), "gpt-5.4");
         assert_eq!(controller.selection().provider(), Provider::OpenAI);
-        let built_identity = SessionMetadata::try_from_session(agent.session())
-            .unwrap()
+        let built_identity = agent
+            .session()
+            .try_session_metadata()
+            .expect("factory session metadata decodes")
+            .expect("factory session metadata is present")
             .llm_identity();
         assert_eq!(controller.selection().model(), built_identity.model);
         assert_eq!(controller.selection().provider(), built_identity.provider);

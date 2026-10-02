@@ -382,7 +382,7 @@ impl meerkat_core::HttpAuthorizer for ManagedChatGptAuthorizer {
         Ok(())
     }
 
-    fn label(&self) -> &str {
+    fn label(&self) -> &'static str {
         "managed-chatgpt-oauth"
     }
 

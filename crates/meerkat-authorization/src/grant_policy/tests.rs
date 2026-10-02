@@ -703,9 +703,7 @@ fn unavailable_grant_clock_is_not_an_authoritative_policy_denial() {
             LocalPolicyPurpose::Operation,
             100,
         )
-        .err()
-        .expect("real child grant excludes write")
-        .into();
+        .expect_err("real child grant excludes write");
     assert!(
         matches!(denial, meerkat_core::OperationAuthorizationError::Refused(refusal)
         if refusal.kind() == OperationRefusalKind::Denied)
@@ -725,9 +723,7 @@ fn unavailable_grant_clock_is_not_an_authoritative_policy_denial() {
     );
     let error: meerkat_core::OperationAuthorizationError = policy
         .evaluate_for(&association, &allowed, LocalPolicyPurpose::Operation, 100)
-        .err()
-        .expect("unavailable clock cannot issue allowance")
-        .into();
+        .expect_err("unavailable clock cannot issue allowance");
     fixture.clock.1.store(false, Ordering::SeqCst);
     policy
         .evaluate_for(&association, &allowed, LocalPolicyPurpose::Operation, 100)

@@ -14828,7 +14828,10 @@ mod tests {
             failure_kind:
                 meerkat_core::ToolDispatchTerminalErrorKind::OperationObservationUnavailable,
         }];
-        session.submit_tool_result(result).await.unwrap();
+        session
+            .submit_tool_result(result)
+            .await
+            .expect("completed result with settlement diagnostics must be submitted");
         assert_eq!(
             session.response_state,
             RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 }
@@ -14840,7 +14843,7 @@ mod tests {
                 false,
             ))
             .await
-            .unwrap();
+            .expect("healthy result after settlement diagnostics must be submitted");
         assert_eq!(
             session.response_state,
             RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 }
@@ -14865,7 +14868,8 @@ mod tests {
             assert_eq!(call_id, expected_call);
             if index == 0 {
                 assert_eq!(
-                    serde_json::from_str::<serde_json::Value>(output).unwrap(),
+                    serde_json::from_str::<serde_json::Value>(output)
+                        .expect("semantic provider output must be valid JSON"),
                     semantic
                 );
             } else {
@@ -14995,12 +14999,13 @@ mod tests {
             }))
             .expect("canonical typed-error command with secondary diagnostics");
             assert_eq!(
-                serde_json::to_value(&command).unwrap()["result"]["settlement_failures"],
+                serde_json::to_value(&command).expect("typed live command must serialize")["result"]
+                    ["settlement_failures"],
                 companions
             );
             execute_openai_live_command(&mut session, command)
                 .await
-                .unwrap();
+                .expect("typed tool feedback must be submitted successfully");
         }
         let healthy: LiveAdapterCommand = serde_json::from_value(serde_json::json!({
             "command": "submit_tool_result",
@@ -15013,7 +15018,7 @@ mod tests {
         .expect("legacy result without settlement field stays valid");
         execute_openai_live_command(&mut session, healthy)
             .await
-            .unwrap();
+            .expect("healthy result after typed feedback must be submitted");
         let seen = seen.lock().await;
         assert_eq!(
             seen.len(),
@@ -15035,7 +15040,8 @@ mod tests {
             };
             assert_eq!(call_id, expected_call);
             assert_eq!(
-                serde_json::from_str::<serde_json::Value>(output).unwrap(),
+                serde_json::from_str::<serde_json::Value>(output)
+                    .expect("typed provider feedback must be valid JSON"),
                 serde_json::json!({"error": code, "message": message})
             );
             assert!(!output.contains("settlement_failures"));
@@ -15127,7 +15133,8 @@ mod tests {
                 };
                 assert_eq!(call_id, "call-refused");
                 assert_eq!(
-                    serde_json::from_str::<serde_json::Value>(output).unwrap(),
+                    serde_json::from_str::<serde_json::Value>(output)
+                        .expect("refused provider function output must be valid JSON"),
                     serde_json::json!({
                         "error": "operation_refused",
                         "message": "operation unavailable under current authorization"
@@ -15152,17 +15159,37 @@ mod tests {
                 response: fake_response("response-new", ResponseStatus::InProgress),
             };
             if old_terminal_first {
-                assert!(session.map_server_event(old_done).unwrap().is_none());
+                assert!(
+                    session
+                        .map_server_event(old_done)
+                        .expect("retired response terminal must map successfully")
+                        .is_none()
+                );
                 assert_eq!(session.active_response_id, None);
                 assert_eq!(
                     session.response_state,
                     RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 }
                 );
-                assert!(session.map_server_event(new_created).unwrap().is_none());
+                assert!(
+                    session
+                        .map_server_event(new_created)
+                        .expect("new response creation must map successfully")
+                        .is_none()
+                );
             } else {
-                assert!(session.map_server_event(new_created).unwrap().is_none());
+                assert!(
+                    session
+                        .map_server_event(new_created)
+                        .expect("new response creation must map successfully")
+                        .is_none()
+                );
                 assert_eq!(session.active_response_id.as_deref(), Some("response-new"));
-                assert!(session.map_server_event(old_done).unwrap().is_none());
+                assert!(
+                    session
+                        .map_server_event(old_done)
+                        .expect("retired response terminal must map successfully")
+                        .is_none()
+                );
             }
             assert_eq!(session.active_response_id.as_deref(), Some("response-new"));
             assert_eq!(
@@ -15209,7 +15236,13 @@ mod tests {
             ));
             assert_eq!(session.active_response_id, None);
             assert_eq!(session.response_state, RealtimeResponseState::Idle);
-            assert_eq!(session.next_event().await.unwrap(), None);
+            assert_eq!(
+                session
+                    .next_event()
+                    .await
+                    .expect("completed continuation stream must close successfully"),
+                None
+            );
             assert_eq!(
                 seen.lock().await.len(),
                 2,

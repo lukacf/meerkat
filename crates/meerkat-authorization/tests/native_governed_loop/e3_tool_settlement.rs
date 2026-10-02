@@ -69,10 +69,13 @@ impl Server {
 }
 
 fn sse(events: Vec<Value>) -> String {
-    events
-        .into_iter()
-        .map(|event| format!("data: {event}\n\n"))
-        .collect()
+    use std::fmt::Write as _;
+
+    let mut encoded = String::new();
+    for event in events {
+        write!(encoded, "data: {event}\n\n").expect("write SSE event to String");
+    }
+    encoded
 }
 fn start_message() -> Value {
     json!({"type":"message_start","message":{"id":"e3-response","type":"message","role":"assistant","model":E3_MODEL,"content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}})
@@ -163,7 +166,7 @@ impl HttpAuthorizer for FixtureAuthorizer {
         ));
         Ok(())
     }
-    fn label(&self) -> &str {
+    fn label(&self) -> &'static str {
         "e3-private-loopback"
     }
 }
@@ -793,13 +796,12 @@ async fn exercise(server: &Server) {
     let result_with_companion = saved
         .messages()
         .iter()
-        .filter_map(|message| match message {
+        .find_map(|message| match message {
             Message::ToolResults { results, .. } => results
                 .iter()
                 .find(|result| result.tool_use_id == PERMITTED_CALL),
             _ => None,
         })
-        .next()
         .expect("actual canonical tool result");
     assert_eq!(result_with_companion.settlement_failures.len(), 1);
     let failure = &result_with_companion.settlement_failures[0];
@@ -823,13 +825,12 @@ async fn exercise(server: &Server) {
     let restored_result = restored
         .messages()
         .iter()
-        .filter_map(|message| match message {
+        .find_map(|message| match message {
             Message::ToolResults { results, .. } => results
                 .iter()
                 .find(|result| result.tool_use_id == PERMITTED_CALL),
             _ => None,
         })
-        .next()
         .unwrap();
     assert_eq!(
         restored_result.settlement_failures,

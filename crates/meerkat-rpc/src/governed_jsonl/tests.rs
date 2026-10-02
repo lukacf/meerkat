@@ -2,6 +2,7 @@
 //! The private HTTP provider is the accepted E1 receiver, not a live model.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -268,10 +269,10 @@ impl Server {
 }
 
 fn sse(events: Vec<Value>) -> String {
-    events
-        .into_iter()
-        .map(|event| format!("data: {event}\n\n"))
-        .collect()
+    events.into_iter().fold(String::new(), |mut stream, event| {
+        write!(stream, "data: {event}\n\n").expect("write event to string");
+        stream
+    })
 }
 fn start_message() -> Value {
     json!({"type":"message_start","message":{"id":"e1-response","type":"message","role":"assistant","model":E1_MODEL,"content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}})
@@ -362,7 +363,7 @@ impl HttpAuthorizer for FixtureAuthorizer {
         ));
         Ok(())
     }
-    fn label(&self) -> &str {
+    fn label(&self) -> &'static str {
         "e1-private-loopback"
     }
 }

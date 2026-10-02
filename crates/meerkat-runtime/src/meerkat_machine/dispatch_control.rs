@@ -499,7 +499,7 @@ impl MeerkatMachine {
                             let drv = driver.lock().await;
                             drv.preview_accept_resolved_input(input.clone(), &resolved)
                                 .await
-                                .map_err(|err| Self::control_plane_error_from_driver_error(err))?
+                                .map_err(Self::control_plane_error_from_driver_error)?
                         };
 
                         let (signal, cancel_plan, accepted_effects, fallback_wake) =

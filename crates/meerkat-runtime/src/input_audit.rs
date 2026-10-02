@@ -90,10 +90,10 @@ impl InputAuthorizationAudit {
         let AuditPayload::Pending(live) = &self.0 else {
             return Err(OperationObservationError);
         };
-        if let AuditPayload::Pending(other) = &committed.0 {
-            if Arc::ptr_eq(live, other) {
-                return Ok(self.clone());
-            }
+        if let AuditPayload::Pending(other) = &committed.0
+            && Arc::ptr_eq(live, other)
+        {
+            return Ok(self.clone());
         }
         let frozen = committed.freeze_for_persistence()?;
         let AuditPayload::Frozen(committed) = &frozen.0 else {

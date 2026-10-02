@@ -62835,10 +62835,19 @@ async fn test_shutdown_releases_the_supervisor_name_for_a_same_id_successor() {
     drop(first);
 }
 
+/// Failure-only bound for the busy-turn actor tests. Their busy turn is held
+/// by the mock executor's typed hold (`hold_start_turns`), not a delay, so
+/// the operations under test succeed whatever the host load. This bound only
+/// turns a parked actor (an operation waiting behind the held turn) into a
+/// failure instead of a hang.
+const ACTOR_DEADLOCK_BOUND: Duration = Duration::from_secs(60);
+
+/// The lead's turn is held by the mock executor's typed hold. An unrelated
+/// spawn must complete while that turn is still held, with a queued steer
+/// in flight: the steer must not park the mob actor.
 #[tokio::test]
 async fn test_queued_steer_during_running_turn_does_not_block_actor_commands() {
     let (handle, service) = create_test_mob(sample_definition()).await;
-    service.set_start_turn_delay_ms(600_000);
 
     handle
         .spawn_with_options(
@@ -62851,6 +62860,8 @@ async fn test_queued_steer_during_running_turn_does_not_block_actor_commands() {
         .await
         .expect("spawn turn-driven lead");
 
+    service.hold_start_turns();
+    let mut held = service.held_start_turn_entries();
     handle
         .member(&AgentIdentity::from("lead-busy"))
         .await
@@ -62862,14 +62873,10 @@ async fn test_queued_steer_during_running_turn_does_not_block_actor_commands() {
         )
         .await
         .expect("first turn should be admitted");
-
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while service.start_turn_call_count() == 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("runtime should start the long-running turn");
+    tokio::time::timeout(ACTOR_DEADLOCK_BOUND, held.wait_for(|entries| *entries >= 1))
+        .await
+        .expect("runtime should start the held turn")
+        .expect("held-turn signal stays open");
 
     let steer_member = handle
         .member(&AgentIdentity::from("lead-busy"))
@@ -62884,11 +62891,12 @@ async fn test_queued_steer_during_running_turn_does_not_block_actor_commands() {
             )
             .await
     });
-
+    // Ordering aid only: give the steer a chance to reach the actor first.
+    // A steer that arrives later makes the check weaker, never a failure.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     tokio::time::timeout(
-        Duration::from_millis(250),
+        ACTOR_DEADLOCK_BOUND,
         handle.spawn_with_options(
             ProfileName::from("worker"),
             AgentIdentity::from("worker-after-steer"),
@@ -62900,8 +62908,14 @@ async fn test_queued_steer_during_running_turn_does_not_block_actor_commands() {
     .await
     .expect("queued steer admission must not park the mob actor")
     .expect("unrelated actor command should still be processed");
+    assert_eq!(
+        *held.borrow(),
+        1,
+        "the spawn completed while the lead's turn was still held"
+    );
 
     steer_task.abort();
+    service.release_held_start_turns();
 }
 
 #[tokio::test]
@@ -74843,6 +74857,9 @@ async fn test_wire_external_peer_not_blocked_by_delayed_turn_driven_submit_work(
         .expect("submit_work should be accepted");
 }
 
+/// The internal turn is held by the mock executor's typed hold. Listing and
+/// spawning must complete while it is still held: neither may wait behind
+/// the turn's TurnCompleted reply.
 #[tokio::test]
 async fn test_internal_turn_completed_reply_does_not_block_actor_operations() {
     let (handle, service) = create_test_mob(sample_definition()).await;
@@ -74858,9 +74875,8 @@ async fn test_internal_turn_completed_reply_does_not_block_actor_operations() {
         .await
         .expect("spawn turn-driven lead");
 
-    let baseline_start_turn_calls = service.start_turn_call_count();
-    service.set_start_turn_delay_ms(250);
-
+    service.hold_start_turns();
+    let mut held = service.held_start_turn_entries();
     let turn_handle = handle.clone();
     let turn_identity = AgentIdentity::from(member_id.as_str());
     let internal_turn = tokio::spawn(async move {
@@ -74870,25 +74886,20 @@ async fn test_internal_turn_completed_reply_does_not_block_actor_operations() {
             .internal_turn("long internal turn")
             .await
     });
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while service.start_turn_call_count() < baseline_start_turn_calls + 1 {
-        assert!(
-            Instant::now() < deadline,
-            "delayed internal turn should reach the runtime executor"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    tokio::time::timeout(ACTOR_DEADLOCK_BOUND, held.wait_for(|entries| *entries >= 1))
+        .await
+        .expect("held internal turn should reach the runtime executor")
+        .expect("held-turn signal stays open");
 
     tokio::time::timeout(
-        Duration::from_millis(100),
+        ACTOR_DEADLOCK_BOUND,
         handle.list_members_including_retiring(),
     )
     .await
     .expect("member listing must not wait behind TurnCompleted runtime completion");
 
     tokio::time::timeout(
-        Duration::from_millis(100),
+        ACTOR_DEADLOCK_BOUND,
         handle.spawn(
             ProfileName::from("worker"),
             AgentIdentity::from("worker-after-internal-turn"),
@@ -74898,10 +74909,15 @@ async fn test_internal_turn_completed_reply_does_not_block_actor_operations() {
     .await
     .expect("spawn must not wait behind TurnCompleted runtime completion")
     .expect("spawn worker while internal turn is still running");
+    assert!(
+        !internal_turn.is_finished(),
+        "listing and spawning completed while the internal turn was still held"
+    );
 
-    tokio::time::timeout(Duration::from_secs(2), internal_turn)
+    service.release_held_start_turns();
+    tokio::time::timeout(ACTOR_DEADLOCK_BOUND, internal_turn)
         .await
-        .expect("internal_turn should complete once the runtime turn completes")
+        .expect("internal_turn should complete once the held turn is released")
         .expect("internal_turn task should not panic")
         .expect("internal_turn result should succeed");
 }
@@ -81083,10 +81099,15 @@ async fn test_late_kickoff_outcome_after_retire_is_benign() {
     assert_eq!(handle.status().await.expect("status"), MobState::Destroyed);
 }
 
+/// The kickoff turn is held by the mock executor's typed hold, so it is
+/// still in flight when the member retires, however slowly the host runs.
+/// Before, a 10 s delay could elapse on a loaded host, letting the kickoff
+/// complete before the retire.
 #[tokio::test]
 async fn test_late_kickoff_failure_outcome_after_retire_is_benign() {
     let (handle, service) = create_test_mob(sample_definition()).await;
-    service.set_start_turn_delay_ms(10_000);
+    service.hold_start_turns();
+    let mut held = service.held_start_turn_entries();
 
     let member = AgentIdentity::from("lead-late-failure");
     handle
@@ -81095,23 +81116,23 @@ async fn test_late_kickoff_failure_outcome_after_retire_is_benign() {
         .expect("spawn autonomous lead");
 
     let dsl_member = crate::machines::mob_machine::AgentIdentity::from_domain(&member);
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let state = handle
-                .query_machine_state()
-                .await
-                .expect("query machine state");
-            if state.member_kickoff_starting.contains(&dsl_member) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("autonomous kickoff must reach the machine-owned Starting state");
+    tokio::time::timeout(ACTOR_DEADLOCK_BOUND, held.wait_for(|entries| *entries >= 1))
+        .await
+        .expect("autonomous kickoff turn should reach the runtime executor")
+        .expect("held-turn signal stays open");
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("query machine state");
+    assert!(
+        state.member_kickoff_starting.contains(&dsl_member),
+        "a held kickoff turn is in the machine-owned Starting state"
+    );
 
-    handle
-        .retire(member.clone())
+    // Join the retirement saga to its terminal reply. A plain `retire`
+    // answers a typed in-progress error once its wait budget elapses on a
+    // loaded host while the saga keeps running.
+    retire_to_terminal(&handle, &member)
         .await
         .expect("retire of a kickoff-in-flight autonomous member must succeed");
 
@@ -81146,6 +81167,7 @@ async fn test_late_kickoff_failure_outcome_after_retire_is_benign() {
         !state.member_kickoff_error.contains_key(&dsl_member),
         "a late failure outcome must not record an error for a quiesced kickoff",
     );
+    service.release_held_start_turns();
 }
 
 #[tokio::test]

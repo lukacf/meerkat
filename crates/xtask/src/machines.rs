@@ -580,6 +580,7 @@ fn run_tlc_lane(
         let skip_full_sweep = skip_tlc_compositions.contains(&composition.slug);
         let mut aggregated_coverage = TlcCoverageSummary::default();
         let mut main_ok = true;
+        let mut main_distinct_states = None;
         if skip_full_sweep {
             println!(
                 "skipping full TLC for broad composition {} after drift and ci.cfg structural-invariant validation; its witnesses still run",
@@ -593,6 +594,7 @@ fn run_tlc_lane(
                 );
             };
             print!("{}", result.output);
+            main_distinct_states = parse_tlc_distinct_states(&result.output);
             match result.coverage {
                 Ok(coverage) => aggregated_coverage = coverage.unwrap_or_default(),
                 Err(err) => {
@@ -606,6 +608,7 @@ fn run_tlc_lane(
         let mut witness_covered_routes = BTreeSet::new();
         let mut witness_covered_scheduler_rules = BTreeSet::new();
         let mut witness_failures = Vec::new();
+        let mut completed_witnesses = 0;
         for witness in &composition.schema.witnesses {
             let Some((_, result)) = results.next() else {
                 bail!(
@@ -617,6 +620,7 @@ fn run_tlc_lane(
             print!("{}", result.output);
             match result.coverage {
                 Ok(coverage) => {
+                    completed_witnesses += 1;
                     merge_tlc_coverage(&mut aggregated_coverage, coverage.as_ref());
                     witness_covered_routes.extend(
                         witness
@@ -645,6 +649,30 @@ fn run_tlc_lane(
                     .collect::<Vec<_>>()
                     .join("\n")
             ));
+        }
+        if main_ok
+            && witness_failures.is_empty()
+            && let Err(err) = ensure_composition_positive_coverage(
+                composition.schema.name.as_str(),
+                main_distinct_states,
+                completed_witnesses,
+            )
+        {
+            failures.push(format!("{err:#}"));
+        }
+        // Every declared route must fire in every profile. The Deep zero-hit
+        // audit below covers routes for a full main sweep, so this check runs
+        // wherever that audit does not: the Ci profile, or a skipped sweep.
+        if main_ok
+            && witness_failures.is_empty()
+            && (matches!(profile, VerifyProfile::Ci) || skip_full_sweep)
+            && let Err(err) = ensure_composition_routes_fired(
+                &composition.schema,
+                &aggregated_coverage,
+                &witness_covered_routes,
+            )
+        {
+            failures.push(format!("{err:#}"));
         }
         // The zero-hit audit needs the main sweep's coverage and every witness.
         if matches!(profile, VerifyProfile::Deep)
@@ -5060,13 +5088,14 @@ pub fn ensure_machine_transition_coverage(
     );
 }
 
-pub fn ensure_composition_coverage(
+/// Declared composition routes that never fired: no TLC coverage hit in
+/// `coverage` and not declared by a witness whose completion TLC proved.
+pub fn zero_hit_composition_routes(
     schema: &CompositionSchema,
     coverage: &TlcCoverageSummary,
     witness_covered_routes: &BTreeSet<String>,
-    witness_covered_scheduler_rules: &BTreeSet<String>,
-) -> Result<()> {
-    let zero_hit_routes = schema
+) -> Vec<String> {
+    schema
         .routes
         .iter()
         .filter_map(|route| {
@@ -5079,7 +5108,81 @@ pub fn ensure_composition_coverage(
             (evaluations == 0 && !witness_covered_routes.contains(route.name.as_str()))
                 .then(|| route.name.as_str().to_owned())
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+/// Every declared composition route must fire: a TLC coverage hit, or a
+/// witness whose completion TLC proved declares it. Fails closed, naming every
+/// route that never fired.
+pub fn ensure_composition_routes_fired(
+    schema: &CompositionSchema,
+    coverage: &TlcCoverageSummary,
+    witness_covered_routes: &BTreeSet<String>,
+) -> Result<()> {
+    let never_fired = zero_hit_composition_routes(schema, coverage, witness_covered_routes);
+    if never_fired.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "composition {} has {} of {} declared route(s) that no TLC coverage hit or \
+         completed witness exercised:\n{}",
+        schema.name,
+        never_fired.len(),
+        schema.routes.len(),
+        never_fired
+            .iter()
+            .map(|route| format!("- {route}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+/// A composition must have positive TLC coverage from some source: a
+/// scripted witness whose completion TLC proved, or a main sweep that explores
+/// past its initial state. Compositions move only on queued inputs, so a main
+/// sweep that stays at its initial state and no completing witness means TLC
+/// checked nothing in the composition. `main_distinct_states` is `None` when
+/// the main sweep was skipped or reported no state count.
+pub fn ensure_composition_positive_coverage(
+    composition: &str,
+    main_distinct_states: Option<u64>,
+    completed_witnesses: usize,
+) -> Result<()> {
+    if completed_witnesses > 0 || main_distinct_states.is_some_and(|states| states > 1) {
+        return Ok(());
+    }
+    let main = match main_distinct_states {
+        Some(states) => format!("its main sweep reaches only {states} distinct state(s)"),
+        None => "its main sweep is skipped".to_owned(),
+    };
+    bail!(
+        "composition {composition} has no positive TLC coverage: {main} and it has no \
+         completing witness, so TLC checks nothing in it; add a scripted witness that \
+         drives its machines"
+    )
+}
+
+/// The final `N distinct states found` count of a TLC run, if it reported one.
+pub fn parse_tlc_distinct_states(output: &str) -> Option<u64> {
+    output.lines().rev().find_map(|line| {
+        let (count, _) = line.split_once(" distinct states found")?;
+        count
+            .rsplit(", ")
+            .next()?
+            .trim()
+            .replace(',', "")
+            .parse()
+            .ok()
+    })
+}
+
+pub fn ensure_composition_coverage(
+    schema: &CompositionSchema,
+    coverage: &TlcCoverageSummary,
+    witness_covered_routes: &BTreeSet<String>,
+    witness_covered_scheduler_rules: &BTreeSet<String>,
+) -> Result<()> {
+    let zero_hit_routes = zero_hit_composition_routes(schema, coverage, witness_covered_routes);
 
     if !zero_hit_routes.is_empty() {
         bail!(

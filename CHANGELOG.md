@@ -279,6 +279,17 @@ them.
   `opt-level = 1` in release (6.3 GB; it is not on a hot path) and the
   Linux build runs two jobs.
 
+- The canonical TLC lane no longer lets a composition pass with zero TLC
+  coverage. `auth_lease_bundle` had no witness and its main sweep reaches only
+  its initial state (compositions move only on queued inputs), so TLC checked
+  nothing in it. It gains two scripted witnesses that drive the embedded
+  AuthMachine through Acquire, the freshness classifications
+  (`ObserveCredentialFreshnessValid`, `ExpiredFromValid`, `ExpiringFromValid`)
+  and a refresh round trip (6 and 8 distinct states). `xtask machine-verify`
+  now fails closed, naming the composition, when a composition has neither a
+  witness whose completion TLC proved nor a main sweep that explores past its
+  initial state, and fails closed, naming each one, on any declared route that
+  no completed witness or coverage hit exercised.
 - Tests that need the `mcp-test-server` fixture binary no longer pass
   without running when it is missing. Each test hand-rolled a
   `target/debug/mcp-test-server` lookup and returned early when nothing was

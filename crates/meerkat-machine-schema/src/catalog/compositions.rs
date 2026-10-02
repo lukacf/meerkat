@@ -2497,6 +2497,141 @@ fn occurrence_supersede_ack_route_witness() -> CompositionWitness {
     }
 }
 
+fn some_u64(value: u64) -> Expr {
+    Expr::Some(Box::new(Expr::U64(value)))
+}
+
+fn auth_witness_limits(step_limit: u32, pending_input_limit: u32) -> CompositionStateLimits {
+    CompositionStateLimits {
+        step_limit,
+        pending_input_limit,
+        pending_route_limit: 0,
+        delivered_route_limit: 0,
+        emitted_effect_limit: step_limit,
+        seq_limit: 0,
+        set_limit: 0,
+        map_limit: 0,
+    }
+}
+
+/// A credential acquired with expiry 1 is observed fresh at time 0 (window 0)
+/// and expired at time 1 (window 0): the zero-window boundary, where the
+/// credential's expiry equals the observation time, classifies as Expired.
+fn auth_freshness_expiry_witness() -> CompositionWitness {
+    let observe = |now: u64| {
+        witness_input(
+            "auth_machine",
+            "ObserveCredentialFreshness",
+            vec![
+                witness_field("now_ts", Expr::U64(now)),
+                witness_field("refresh_window_secs", Expr::U64(0)),
+            ],
+        )
+    };
+    CompositionWitness {
+        name: witness_id("freshness_expiry"),
+        preload_inputs: vec![
+            witness_input(
+                "auth_machine",
+                "Acquire",
+                vec![
+                    witness_field("expires_at_ts", some_u64(1)),
+                    witness_field("credential_published_at_millis", Expr::U64(1)),
+                ],
+            ),
+            observe(0),
+            observe(2),
+        ],
+        expected_routes: vec![],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![CompositionWitnessState {
+            machine: mi_id("auth_machine"),
+            phase: Some(phase_id("Expired")),
+            fields: vec![],
+        }],
+        expected_transitions: vec![
+            witness_transition("auth_machine", "Acquire"),
+            witness_transition("auth_machine", "ObserveCredentialFreshnessValid"),
+            witness_transition("auth_machine", "ObserveCredentialFreshnessExpiredFromValid"),
+        ],
+        expected_transition_order: vec![witness_transition_order(
+            "auth_machine",
+            "ObserveCredentialFreshnessValid",
+            "auth_machine",
+            "ObserveCredentialFreshnessExpiredFromValid",
+        )],
+        state_limits: auth_witness_limits(4, 3),
+    }
+}
+
+/// A credential inside its refresh window (expiry 2, now 1, window 2) becomes
+/// Expiring, refresh begins and completes with a later expiry, returning the
+/// lifecycle to Valid.
+fn auth_expiring_refresh_witness() -> CompositionWitness {
+    CompositionWitness {
+        name: witness_id("expiring_refresh"),
+        preload_inputs: vec![
+            witness_input(
+                "auth_machine",
+                "Acquire",
+                vec![
+                    witness_field("expires_at_ts", some_u64(2)),
+                    witness_field("credential_published_at_millis", Expr::U64(1)),
+                ],
+            ),
+            witness_input(
+                "auth_machine",
+                "ObserveCredentialFreshness",
+                vec![
+                    witness_field("now_ts", Expr::U64(1)),
+                    witness_field("refresh_window_secs", Expr::U64(2)),
+                ],
+            ),
+            witness_input("auth_machine", "BeginRefresh", vec![]),
+            witness_input(
+                "auth_machine",
+                "CompleteRefresh",
+                vec![
+                    witness_field("new_expires_at", some_u64(2)),
+                    witness_field("now_ts", Expr::U64(1)),
+                    witness_field("credential_published_at_millis", Expr::U64(2)),
+                ],
+            ),
+        ],
+        expected_routes: vec![],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![CompositionWitnessState {
+            machine: mi_id("auth_machine"),
+            phase: Some(phase_id("Valid")),
+            fields: vec![],
+        }],
+        expected_transitions: vec![
+            witness_transition("auth_machine", "Acquire"),
+            witness_transition(
+                "auth_machine",
+                "ObserveCredentialFreshnessExpiringFromValid",
+            ),
+            witness_transition("auth_machine", "BeginRefreshFromExpiring"),
+            witness_transition("auth_machine", "CompleteRefresh"),
+        ],
+        expected_transition_order: vec![
+            witness_transition_order(
+                "auth_machine",
+                "ObserveCredentialFreshnessExpiringFromValid",
+                "auth_machine",
+                "BeginRefreshFromExpiring",
+            ),
+            witness_transition_order(
+                "auth_machine",
+                "BeginRefreshFromExpiring",
+                "auth_machine",
+                "CompleteRefresh",
+            ),
+        ],
+        state_limits: auth_witness_limits(5, 4),
+    }
+}
+
 fn default_ci_limits() -> CompositionStateLimits {
     CompositionStateLimits {
         step_limit: 8,
@@ -3966,6 +4101,8 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
             references_actors: vec![act_id("auth_machine_authority"), act_id("auth_lease_owner")],
         }],
         witnesses: vec![
+            auth_freshness_expiry_witness(),
+            auth_expiring_refresh_witness(),
         ],
         deep_domain_cardinality: 2,
         deep_domain_overrides: std::collections::BTreeMap::new(),

@@ -1357,6 +1357,18 @@ async fn publish_authorized_runtime_terminal_batch(
                 error,
             )
         })?;
+    // The receipt is final and readable from here, but completion waiters are
+    // resolved only after the interaction terminals publish below, which a
+    // transient failure can delay. Wake every receipt waiter now, so a
+    // receipt wait resolves at finalization instead of parking until
+    // publication. A waiter that read the input pending registered its
+    // observer under the driver lock before this persist, so it is woken.
+    if let Some(completions) = completions {
+        completions
+            .lock()
+            .await
+            .wake_receipt_less_terminal_observers(input_ids.iter().cloned());
+    }
     let events = bundle.interaction_events();
     let observations = events
         .iter()

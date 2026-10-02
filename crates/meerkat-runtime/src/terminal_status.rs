@@ -266,6 +266,8 @@ impl InputTerminalReceiptRead {
 #[non_exhaustive]
 pub enum InputTerminalReceiptWait {
     /// The input's receipt resolved (`Finalized` or `TerminalWithoutReceipt`).
+    /// For a directed input this is the receipt's finalization, independent
+    /// of its interaction terminals' publication.
     Resolved(Sourced<InputTerminalReceiptRead>),
     /// The input is still `Pending` in the durable store and its session has
     /// no live registration to wait on (never registered, or unregistered

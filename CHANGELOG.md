@@ -199,6 +199,15 @@ them.
 
 ### Fixed
 
+- `MeerkatMachine::wait_input_terminal_receipt` resolves a directed
+  (peer-request) batch's input when its receipt is finalized, not only once
+  its interaction terminals publish. The runtime finalizes a directed
+  receipt, then publishes, then resolves completion waiters, so while a
+  transient publication failure was retried the receipt was already readable
+  but the wait stayed parked. Finalization now wakes the per-input receipt
+  observers. The Mob delivery-identity wait therefore drops its 1 s
+  defensive re-read (`REREAD_INTERVAL`) and awaits the typed wait for its
+  whole budget.
 - The Mob delivery-identity terminal wait no longer re-reads on a sleep
   backoff while a delivery is not yet admitted on a live session. It awaits
   the runtime's admission signal; only a session without a live registration

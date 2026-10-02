@@ -285,7 +285,10 @@ is local to that RPC host; a controlling host cannot use `session/*` or
 `live/*` to proxy a placed member's remote session.
 
 All console surfaces consume the same four classified failures:
-`scope_denied`, `host_unavailable`, `stale_cursor`, and `stale_fence`.
+`scope_denied`, `host_unavailable`, `stale_cursor`, and `stale_fence`, plus
+`stale_delivery_scope` for a scope-bound submit whose member session moved
+under a current fence (re-capture the scope; `stale_fence` means re-resolve
+the member).
 Unclassified failures keep each route or protocol's legacy rendering.
 
 Runtime-mode behavior is shared across these surfaces because dispatch comes from the same mob runtime:

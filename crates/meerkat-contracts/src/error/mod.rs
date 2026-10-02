@@ -60,6 +60,12 @@ pub enum ErrorCode {
     /// clears on its own, so ordinary busy/backoff retry is never correct —
     /// only the named `reload_member_registration` repair resolves it.
     MemberReloadRequired,
+    /// A scope-bound mob submit named a member session that is no longer the
+    /// member's current session binding: the session rotated under a still
+    /// current runtime incarnation and fence. Distinct from
+    /// [`Self::StaleFence`] (a superseded incarnation): the recovery is to
+    /// re-capture the delivery scope, not to re-resolve the member.
+    StaleDeliveryScope,
 }
 
 impl ErrorCode {
@@ -87,6 +93,7 @@ impl ErrorCode {
             Self::StaleCursor => -32027,
             Self::StaleFence => -32028,
             Self::MemberReloadRequired => -32029,
+            Self::StaleDeliveryScope => -32030,
         }
     }
 
@@ -114,6 +121,7 @@ impl ErrorCode {
             -32027 => Some(Self::StaleCursor),
             -32028 => Some(Self::StaleFence),
             -32029 => Some(Self::MemberReloadRequired),
+            -32030 => Some(Self::StaleDeliveryScope),
             _ => None,
         }
     }
@@ -127,7 +135,8 @@ impl ErrorCode {
             | Self::DuplicateInput
             | Self::SupervisorRotationIncomplete
             | Self::StaleFence
-            | Self::MemberReloadRequired => 409,
+            | Self::MemberReloadRequired
+            | Self::StaleDeliveryScope => 409,
             Self::RequestCancelled => 499,
             Self::ProviderError => 502,
             Self::BudgetExhausted => 429,
@@ -165,6 +174,7 @@ impl ErrorCode {
             Self::StaleCursor => 47,
             Self::StaleFence => 48,
             Self::MemberReloadRequired => 49,
+            Self::StaleDeliveryScope => 50,
         }
     }
 }
@@ -215,7 +225,8 @@ impl ErrorCode {
             | Self::SupervisorRotationIncomplete
             | Self::StaleCursor
             | Self::StaleFence
-            | Self::MemberReloadRequired => ErrorCategory::Session,
+            | Self::MemberReloadRequired
+            | Self::StaleDeliveryScope => ErrorCategory::Session,
             Self::RequestCancelled => ErrorCategory::Request,
             // Provider is the transient-upstream-failure class (502-family);
             // an unreachable member host is the same retryable class and
@@ -467,6 +478,13 @@ mod tests {
                 -32028,
                 409,
                 48,
+                ErrorCategory::Session,
+            ),
+            (
+                ErrorCode::StaleDeliveryScope,
+                -32030,
+                409,
+                50,
                 ErrorCategory::Session,
             ),
         ];

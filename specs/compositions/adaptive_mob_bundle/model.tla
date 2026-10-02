@@ -17972,13 +17972,14 @@ control_mob_ClassifyTurnTimeoutDispositionCanceledDestroyed(arg_timed_out_run_id
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
+control_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "SubmitWork"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
        /\ packet.payload.content_attribution = arg_content_attribution
@@ -17991,6 +17992,7 @@ control_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, 
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))
        /\ ((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)
        /\ ((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)
+       /\ (IF (packet.payload.expected_session_id = None) THEN TRUE ELSE ((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.expected_session_id))
        /\ (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE) THEN TRUE ELSE control_mob__mob_machine_placed_carrier_binding_active(control_mob_member_placement, control_mob_current_placed_spawn_host_binding_generations, control_mob_host_bind_phase, control_mob_host_binding_generations, packet.payload.agent_identity))
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))
        /\ (packet.payload.origin = "External")
@@ -18007,13 +18009,14 @@ control_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, 
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
+control_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "SubmitWork"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
        /\ packet.payload.content_attribution = arg_content_attribution
@@ -18026,6 +18029,7 @@ control_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runt
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))
        /\ ((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)
        /\ ((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = None)
+       /\ (packet.payload.expected_session_id = None)
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))
        /\ (packet.payload.origin = "External")
        /\ (packet.payload.agent_runtime_id \in control_mob_externally_addressable_runtime_ids)
@@ -18042,13 +18046,14 @@ control_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runt
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
+control_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "SubmitWork"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
        /\ packet.payload.content_attribution = arg_content_attribution
@@ -18061,6 +18066,7 @@ control_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, 
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))
        /\ ((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)
        /\ ((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)
+       /\ (IF (packet.payload.expected_session_id = None) THEN TRUE ELSE ((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.expected_session_id))
        /\ (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE) THEN TRUE ELSE control_mob__mob_machine_placed_carrier_binding_active(control_mob_member_placement, control_mob_current_placed_spawn_host_binding_generations, control_mob_host_bind_phase, control_mob_host_binding_generations, packet.payload.agent_identity))
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))
        /\ (packet.payload.origin = "Internal")
@@ -18076,13 +18082,14 @@ control_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, 
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
+control_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "SubmitWork"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
        /\ packet.payload.content_attribution = arg_content_attribution
@@ -18095,6 +18102,7 @@ control_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runt
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))
        /\ ((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)
        /\ ((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = None)
+       /\ (packet.payload.expected_session_id = None)
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))
        /\ (packet.payload.origin = "Internal")
        /\ (packet.payload.agent_identity \in DOMAIN control_mob_member_peer_ids)
@@ -18110,13 +18118,14 @@ control_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runt
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_ResolveSubmitWorkRejectionStopped(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+control_mob_ResolveSubmitWorkRejectionStopped(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Stopped"
@@ -18132,13 +18141,14 @@ control_mob_ResolveSubmitWorkRejectionStopped(arg_agent_identity, arg_agent_runt
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_ResolveSubmitWorkRejectionCompleted(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+control_mob_ResolveSubmitWorkRejectionCompleted(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Completed"
@@ -18154,13 +18164,14 @@ control_mob_ResolveSubmitWorkRejectionCompleted(arg_agent_identity, arg_agent_ru
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_ResolveSubmitWorkRejectionDestroyed(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+control_mob_ResolveSubmitWorkRejectionDestroyed(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Destroyed"
@@ -18176,13 +18187,14 @@ control_mob_ResolveSubmitWorkRejectionDestroyed(arg_agent_identity, arg_agent_ru
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_ResolveSubmitWorkRejectionMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+control_mob_ResolveSubmitWorkRejectionMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
@@ -18199,13 +18211,14 @@ control_mob_ResolveSubmitWorkRejectionMemberNotFound(arg_agent_identity, arg_age
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_ResolveSubmitWorkRejectionCurrentRuntimeNotLive(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+control_mob_ResolveSubmitWorkRejectionCurrentRuntimeNotLive(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
@@ -18223,13 +18236,14 @@ control_mob_ResolveSubmitWorkRejectionCurrentRuntimeNotLive(arg_agent_identity, 
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_ResolveSubmitWorkRejectionStaleFenceToken(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+control_mob_ResolveSubmitWorkRejectionStaleFenceToken(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
@@ -18248,13 +18262,14 @@ control_mob_ResolveSubmitWorkRejectionStaleFenceToken(arg_agent_identity, arg_ag
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_ResolveSubmitWorkRejectionRetiringAsMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+control_mob_ResolveSubmitWorkRejectionRetiringAsMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
@@ -18274,13 +18289,14 @@ control_mob_ResolveSubmitWorkRejectionRetiringAsMemberNotFound(arg_agent_identit
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_ResolveSubmitWorkRejectionNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+control_mob_ResolveSubmitWorkRejectionNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
@@ -18302,13 +18318,14 @@ control_mob_ResolveSubmitWorkRejectionNotExternallyAddressable(arg_agent_identit
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+control_mob_ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
@@ -18327,6 +18344,34 @@ control_mob_ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(arg_agent
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "SubmitWorkRejected", payload |-> [actual_fence_token |-> None, agent_runtime_id |-> packet.payload.agent_runtime_id, expected_fence_token |-> None, origin |-> packet.payload.origin, reason |-> "NotExternallyAddressable"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveSubmitWorkRejectionStaleSessionBinding(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveSubmitWorkRejection"
+       /\ packet.payload.agent_identity = arg_agent_identity
+       /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
+       /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
+       /\ packet.payload.origin = arg_origin
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Running"
+       /\ ((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))
+       /\ (packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)
+       /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))
+       /\ (packet.payload.expected_session_id # None)
+       /\ ((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # packet.payload.expected_session_id)
+       /\ control_mob_phase' = "Running"
+       /\ UnchangedFrame_2208318e4df12434
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "SubmitWorkRejected", payload |-> [actual_fence_token |-> None, agent_runtime_id |-> packet.payload.agent_runtime_id, expected_fence_token |-> None, origin |-> packet.payload.origin, reason |-> "StaleSessionBinding"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSubmitWorkRejectionStaleSessionBinding"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveSubmitWorkRejectionStaleSessionBinding", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
 
@@ -53643,13 +53688,14 @@ layer_mob_ClassifyTurnTimeoutDispositionCanceledDestroyed(arg_timed_out_run_id, 
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
+layer_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "SubmitWork"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
        /\ packet.payload.content_attribution = arg_content_attribution
@@ -53662,6 +53708,7 @@ layer_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, ar
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))
        /\ ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)
        /\ ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)
+       /\ (IF (packet.payload.expected_session_id = None) THEN TRUE ELSE ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.expected_session_id))
        /\ (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE) THEN TRUE ELSE layer_mob__mob_machine_placed_carrier_binding_active(layer_mob_member_placement, layer_mob_current_placed_spawn_host_binding_generations, layer_mob_host_bind_phase, layer_mob_host_binding_generations, packet.payload.agent_identity))
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))
        /\ (packet.payload.origin = "External")
@@ -53678,13 +53725,14 @@ layer_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, ar
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
+layer_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "SubmitWork"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
        /\ packet.payload.content_attribution = arg_content_attribution
@@ -53697,6 +53745,7 @@ layer_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtim
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))
        /\ ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)
        /\ ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = None)
+       /\ (packet.payload.expected_session_id = None)
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))
        /\ (packet.payload.origin = "External")
        /\ (packet.payload.agent_runtime_id \in layer_mob_externally_addressable_runtime_ids)
@@ -53713,13 +53762,14 @@ layer_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtim
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
+layer_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "SubmitWork"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
        /\ packet.payload.content_attribution = arg_content_attribution
@@ -53732,6 +53782,7 @@ layer_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, ar
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))
        /\ ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)
        /\ ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)
+       /\ (IF (packet.payload.expected_session_id = None) THEN TRUE ELSE ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.expected_session_id))
        /\ (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE) THEN TRUE ELSE layer_mob__mob_machine_placed_carrier_binding_active(layer_mob_member_placement, layer_mob_current_placed_spawn_host_binding_generations, layer_mob_host_bind_phase, layer_mob_host_binding_generations, packet.payload.agent_identity))
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))
        /\ (packet.payload.origin = "Internal")
@@ -53747,13 +53798,14 @@ layer_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, ar
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
+layer_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "SubmitWork"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
        /\ packet.payload.content_attribution = arg_content_attribution
@@ -53766,6 +53818,7 @@ layer_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtim
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))
        /\ ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)
        /\ ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = None)
+       /\ (packet.payload.expected_session_id = None)
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))
        /\ (packet.payload.origin = "Internal")
        /\ (packet.payload.agent_identity \in DOMAIN layer_mob_member_peer_ids)
@@ -53781,13 +53834,14 @@ layer_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtim
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_ResolveSubmitWorkRejectionStopped(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+layer_mob_ResolveSubmitWorkRejectionStopped(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Stopped"
@@ -53803,13 +53857,14 @@ layer_mob_ResolveSubmitWorkRejectionStopped(arg_agent_identity, arg_agent_runtim
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_ResolveSubmitWorkRejectionCompleted(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+layer_mob_ResolveSubmitWorkRejectionCompleted(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Completed"
@@ -53825,13 +53880,14 @@ layer_mob_ResolveSubmitWorkRejectionCompleted(arg_agent_identity, arg_agent_runt
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_ResolveSubmitWorkRejectionDestroyed(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+layer_mob_ResolveSubmitWorkRejectionDestroyed(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Destroyed"
@@ -53847,13 +53903,14 @@ layer_mob_ResolveSubmitWorkRejectionDestroyed(arg_agent_identity, arg_agent_runt
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_ResolveSubmitWorkRejectionMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+layer_mob_ResolveSubmitWorkRejectionMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
@@ -53870,13 +53927,14 @@ layer_mob_ResolveSubmitWorkRejectionMemberNotFound(arg_agent_identity, arg_agent
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_ResolveSubmitWorkRejectionCurrentRuntimeNotLive(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+layer_mob_ResolveSubmitWorkRejectionCurrentRuntimeNotLive(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
@@ -53894,13 +53952,14 @@ layer_mob_ResolveSubmitWorkRejectionCurrentRuntimeNotLive(arg_agent_identity, ar
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_ResolveSubmitWorkRejectionStaleFenceToken(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+layer_mob_ResolveSubmitWorkRejectionStaleFenceToken(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
@@ -53919,13 +53978,14 @@ layer_mob_ResolveSubmitWorkRejectionStaleFenceToken(arg_agent_identity, arg_agen
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_ResolveSubmitWorkRejectionRetiringAsMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+layer_mob_ResolveSubmitWorkRejectionRetiringAsMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
@@ -53945,13 +54005,14 @@ layer_mob_ResolveSubmitWorkRejectionRetiringAsMemberNotFound(arg_agent_identity,
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_ResolveSubmitWorkRejectionNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+layer_mob_ResolveSubmitWorkRejectionNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
@@ -53973,13 +54034,14 @@ layer_mob_ResolveSubmitWorkRejectionNotExternallyAddressable(arg_agent_identity,
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin) ==
+layer_mob_ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "ResolveSubmitWorkRejection"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
@@ -53998,6 +54060,34 @@ layer_mob_ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(arg_agent_i
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "SubmitWorkRejected", payload |-> [actual_fence_token |-> None, agent_runtime_id |-> packet.payload.agent_runtime_id, expected_fence_token |-> None, origin |-> packet.payload.origin, reason |-> "NotExternallyAddressable"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveSubmitWorkRejectionStaleSessionBinding(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveSubmitWorkRejection"
+       /\ packet.payload.agent_identity = arg_agent_identity
+       /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
+       /\ packet.payload.fence_token = arg_fence_token
+       /\ packet.payload.expected_session_id = arg_expected_session_id
+       /\ packet.payload.origin = arg_origin
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Running"
+       /\ ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))
+       /\ (packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)
+       /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))
+       /\ (packet.payload.expected_session_id # None)
+       /\ ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # packet.payload.expected_session_id)
+       /\ layer_mob_phase' = "Running"
+       /\ UnchangedFrame_de87a44994f9bfa2
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "SubmitWorkRejected", payload |-> [actual_fence_token |-> None, agent_runtime_id |-> packet.payload.agent_runtime_id, expected_fence_token |-> None, origin |-> packet.payload.origin, reason |-> "StaleSessionBinding"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSubmitWorkRejectionStaleSessionBinding"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveSubmitWorkRejectionStaleSessionBinding", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
 
@@ -73581,10 +73671,10 @@ EntryPacketAdmissible_control_mob(packet) ==
     \/ /\ (packet.variant = "ClassifyTurnTimeoutDisposition") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.retryable = FALSE) /\ (control_mob_orphan_budget = 0)))
     \/ /\ (packet.variant = "ClassifyTurnTimeoutDisposition") /\ (control_mob_phase = "Completed") /\ (((packet.payload.retryable = FALSE) /\ (control_mob_orphan_budget = 0)))
     \/ /\ (packet.variant = "ClassifyTurnTimeoutDisposition") /\ (control_mob_phase = "Destroyed") /\ (((packet.payload.retryable = FALSE) /\ (control_mob_orphan_budget = 0)))
-    \/ /\ (packet.variant = "SubmitWork") /\ (control_mob_phase = "Running") /\ ((control_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((control_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ ((IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE) THEN TRUE ELSE control_mob__entry_packet__mob_machine_placed_carrier_binding_active(control_mob_member_placement, control_mob_current_placed_spawn_host_binding_generations, control_mob_host_bind_phase, control_mob_host_binding_generations, packet.payload.agent_identity))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "External")) /\ ((packet.payload.agent_runtime_id \in control_mob_externally_addressable_runtime_ids))
-    \/ /\ (packet.variant = "SubmitWork") /\ (control_mob_phase = "Running") /\ ((control_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((control_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = None)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "External")) /\ ((packet.payload.agent_runtime_id \in control_mob_externally_addressable_runtime_ids)) /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_peer_ids))
-    \/ /\ (packet.variant = "SubmitWork") /\ (control_mob_phase = "Running") /\ ((control_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((control_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ ((IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE) THEN TRUE ELSE control_mob__entry_packet__mob_machine_placed_carrier_binding_active(control_mob_member_placement, control_mob_current_placed_spawn_host_binding_generations, control_mob_host_bind_phase, control_mob_host_binding_generations, packet.payload.agent_identity))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "Internal"))
-    \/ /\ (packet.variant = "SubmitWork") /\ (control_mob_phase = "Running") /\ ((control_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((control_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = None)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "Internal")) /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_peer_ids))
+    \/ /\ (packet.variant = "SubmitWork") /\ (control_mob_phase = "Running") /\ ((control_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((control_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ ((IF (packet.payload.expected_session_id = None) THEN TRUE ELSE ((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.expected_session_id))) /\ ((IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE) THEN TRUE ELSE control_mob__entry_packet__mob_machine_placed_carrier_binding_active(control_mob_member_placement, control_mob_current_placed_spawn_host_binding_generations, control_mob_host_bind_phase, control_mob_host_binding_generations, packet.payload.agent_identity))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "External")) /\ ((packet.payload.agent_runtime_id \in control_mob_externally_addressable_runtime_ids))
+    \/ /\ (packet.variant = "SubmitWork") /\ (control_mob_phase = "Running") /\ ((control_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((control_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = None)) /\ ((packet.payload.expected_session_id = None)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "External")) /\ ((packet.payload.agent_runtime_id \in control_mob_externally_addressable_runtime_ids)) /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_peer_ids))
+    \/ /\ (packet.variant = "SubmitWork") /\ (control_mob_phase = "Running") /\ ((control_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((control_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ ((IF (packet.payload.expected_session_id = None) THEN TRUE ELSE ((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.expected_session_id))) /\ ((IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE) THEN TRUE ELSE control_mob__entry_packet__mob_machine_placed_carrier_binding_active(control_mob_member_placement, control_mob_current_placed_spawn_host_binding_generations, control_mob_host_bind_phase, control_mob_host_binding_generations, packet.payload.agent_identity))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "Internal"))
+    \/ /\ (packet.variant = "SubmitWork") /\ (control_mob_phase = "Running") /\ ((control_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((control_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = None)) /\ ((packet.payload.expected_session_id = None)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "Internal")) /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_peer_ids))
     \/ /\ (packet.variant = "ResolveSubmitWorkRejection") /\ (control_mob_phase = "Stopped")
     \/ /\ (packet.variant = "ResolveSubmitWorkRejection") /\ (control_mob_phase = "Completed")
     \/ /\ (packet.variant = "ResolveSubmitWorkRejection") /\ (control_mob_phase = "Destroyed")
@@ -73594,6 +73684,7 @@ EntryPacketAdmissible_control_mob(packet) ==
     \/ /\ (packet.variant = "ResolveSubmitWorkRejection") /\ (control_mob_phase = "Running") /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some("Retiring")))
     \/ /\ (packet.variant = "ResolveSubmitWorkRejection") /\ (control_mob_phase = "Running") /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "External")) /\ (~((packet.payload.agent_runtime_id \in control_mob_externally_addressable_runtime_ids)))
     \/ /\ (packet.variant = "ResolveSubmitWorkRejection") /\ (control_mob_phase = "Running") /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "Internal")) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = None)) /\ (~((packet.payload.agent_identity \in DOMAIN control_mob_member_peer_ids)))
+    \/ /\ (packet.variant = "ResolveSubmitWorkRejection") /\ (control_mob_phase = "Running") /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ ((packet.payload.expected_session_id # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # packet.payload.expected_session_id))
     \/ /\ (packet.variant = "RetireMember") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ (((packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_retire_pending_sessions) = FALSE)) /\ ((((packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_retire_refusal_codes) = FALSE) /\ ((packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_retire_refusal_reasons) = FALSE))) /\ ((packet.payload.session_id # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.session_id))
     \/ /\ (packet.variant = "RetireMember") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE)) /\ (control_mob__entry_packet__mob_machine_placed_carrier_binding_active(control_mob_member_placement, control_mob_current_placed_spawn_host_binding_generations, control_mob_host_bind_phase, control_mob_host_binding_generations, packet.payload.agent_identity)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.session_id # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.session_id))
     \/ /\ (packet.variant = "RetireMember") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE)) /\ (control_mob__entry_packet__mob_machine_placed_carrier_binding_confirmed_revoked(control_mob_member_placement, control_mob_current_placed_spawn_host_binding_generations, control_mob_host_bind_phase, control_mob_confirmed_host_binding_revocations, packet.payload.agent_identity)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.session_id # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.session_id))
@@ -75191,10 +75282,10 @@ EntryPacketAdmissible_layer_mob(packet) ==
     \/ /\ (packet.variant = "ClassifyTurnTimeoutDisposition") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.retryable = FALSE) /\ (layer_mob_orphan_budget = 0)))
     \/ /\ (packet.variant = "ClassifyTurnTimeoutDisposition") /\ (layer_mob_phase = "Completed") /\ (((packet.payload.retryable = FALSE) /\ (layer_mob_orphan_budget = 0)))
     \/ /\ (packet.variant = "ClassifyTurnTimeoutDisposition") /\ (layer_mob_phase = "Destroyed") /\ (((packet.payload.retryable = FALSE) /\ (layer_mob_orphan_budget = 0)))
-    \/ /\ (packet.variant = "SubmitWork") /\ (layer_mob_phase = "Running") /\ ((layer_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((layer_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ ((IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE) THEN TRUE ELSE layer_mob__entry_packet__mob_machine_placed_carrier_binding_active(layer_mob_member_placement, layer_mob_current_placed_spawn_host_binding_generations, layer_mob_host_bind_phase, layer_mob_host_binding_generations, packet.payload.agent_identity))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "External")) /\ ((packet.payload.agent_runtime_id \in layer_mob_externally_addressable_runtime_ids))
-    \/ /\ (packet.variant = "SubmitWork") /\ (layer_mob_phase = "Running") /\ ((layer_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((layer_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = None)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "External")) /\ ((packet.payload.agent_runtime_id \in layer_mob_externally_addressable_runtime_ids)) /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_peer_ids))
-    \/ /\ (packet.variant = "SubmitWork") /\ (layer_mob_phase = "Running") /\ ((layer_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((layer_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ ((IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE) THEN TRUE ELSE layer_mob__entry_packet__mob_machine_placed_carrier_binding_active(layer_mob_member_placement, layer_mob_current_placed_spawn_host_binding_generations, layer_mob_host_bind_phase, layer_mob_host_binding_generations, packet.payload.agent_identity))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "Internal"))
-    \/ /\ (packet.variant = "SubmitWork") /\ (layer_mob_phase = "Running") /\ ((layer_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((layer_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = None)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "Internal")) /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_peer_ids))
+    \/ /\ (packet.variant = "SubmitWork") /\ (layer_mob_phase = "Running") /\ ((layer_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((layer_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ ((IF (packet.payload.expected_session_id = None) THEN TRUE ELSE ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.expected_session_id))) /\ ((IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE) THEN TRUE ELSE layer_mob__entry_packet__mob_machine_placed_carrier_binding_active(layer_mob_member_placement, layer_mob_current_placed_spawn_host_binding_generations, layer_mob_host_bind_phase, layer_mob_host_binding_generations, packet.payload.agent_identity))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "External")) /\ ((packet.payload.agent_runtime_id \in layer_mob_externally_addressable_runtime_ids))
+    \/ /\ (packet.variant = "SubmitWork") /\ (layer_mob_phase = "Running") /\ ((layer_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((layer_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = None)) /\ ((packet.payload.expected_session_id = None)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "External")) /\ ((packet.payload.agent_runtime_id \in layer_mob_externally_addressable_runtime_ids)) /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_peer_ids))
+    \/ /\ (packet.variant = "SubmitWork") /\ (layer_mob_phase = "Running") /\ ((layer_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((layer_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ ((IF (packet.payload.expected_session_id = None) THEN TRUE ELSE ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.expected_session_id))) /\ ((IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE) THEN TRUE ELSE layer_mob__entry_packet__mob_machine_placed_carrier_binding_active(layer_mob_member_placement, layer_mob_current_placed_spawn_host_binding_generations, layer_mob_host_bind_phase, layer_mob_host_binding_generations, packet.payload.agent_identity))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "Internal"))
+    \/ /\ (packet.variant = "SubmitWork") /\ (layer_mob_phase = "Running") /\ ((layer_mob_placed_completion_lifecycle_quiescing = FALSE)) /\ ((layer_mob_live_runtime_ids # {})) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = None)) /\ ((packet.payload.expected_session_id = None)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "Internal")) /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_peer_ids))
     \/ /\ (packet.variant = "ResolveSubmitWorkRejection") /\ (layer_mob_phase = "Stopped")
     \/ /\ (packet.variant = "ResolveSubmitWorkRejection") /\ (layer_mob_phase = "Completed")
     \/ /\ (packet.variant = "ResolveSubmitWorkRejection") /\ (layer_mob_phase = "Destroyed")
@@ -75204,6 +75295,7 @@ EntryPacketAdmissible_layer_mob(packet) ==
     \/ /\ (packet.variant = "ResolveSubmitWorkRejection") /\ (layer_mob_phase = "Running") /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some("Retiring")))
     \/ /\ (packet.variant = "ResolveSubmitWorkRejection") /\ (layer_mob_phase = "Running") /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "External")) /\ (~((packet.payload.agent_runtime_id \in layer_mob_externally_addressable_runtime_ids)))
     \/ /\ (packet.variant = "ResolveSubmitWorkRejection") /\ (layer_mob_phase = "Running") /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.origin = "Internal")) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = None)) /\ (~((packet.payload.agent_identity \in DOMAIN layer_mob_member_peer_ids)))
+    \/ /\ (packet.variant = "ResolveSubmitWorkRejection") /\ (layer_mob_phase = "Running") /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ ((packet.payload.expected_session_id # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) # packet.payload.expected_session_id))
     \/ /\ (packet.variant = "RetireMember") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ (((packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_retire_pending_sessions) = FALSE)) /\ ((((packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_retire_refusal_codes) = FALSE) /\ ((packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_retire_refusal_reasons) = FALSE))) /\ ((packet.payload.session_id # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.session_id))
     \/ /\ (packet.variant = "RetireMember") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE)) /\ (layer_mob__entry_packet__mob_machine_placed_carrier_binding_active(layer_mob_member_placement, layer_mob_current_placed_spawn_host_binding_generations, layer_mob_host_bind_phase, layer_mob_host_binding_generations, packet.payload.agent_identity)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.session_id # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.session_id))
     \/ /\ (packet.variant = "RetireMember") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE)) /\ (layer_mob__entry_packet__mob_machine_placed_carrier_binding_confirmed_revoked(layer_mob_member_placement, layer_mob_current_placed_spawn_host_binding_generations, layer_mob_host_bind_phase, layer_mob_confirmed_host_binding_revocations, packet.payload.agent_identity)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ ((packet.payload.session_id # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.session_id))
@@ -76579,19 +76671,20 @@ CoreNext ==
     \/ \E arg_timed_out_run_id \in RunIdValues : control_mob_ClassifyTurnTimeoutDispositionCanceledStopped(arg_timed_out_run_id, FALSE)
     \/ \E arg_timed_out_run_id \in RunIdValues : control_mob_ClassifyTurnTimeoutDispositionCanceledCompleted(arg_timed_out_run_id, FALSE)
     \/ \E arg_timed_out_run_id \in RunIdValues : control_mob_ClassifyTurnTimeoutDispositionCanceledDestroyed(arg_timed_out_run_id, FALSE)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : control_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : control_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : control_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : control_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionStopped(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionCompleted(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionDestroyed(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionCurrentRuntimeNotLive(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionStaleFenceToken(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionRetiringAsMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : control_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : control_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : control_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : control_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionStopped(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionCompleted(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionDestroyed(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionCurrentRuntimeNotLive(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionStaleFenceToken(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionRetiringAsMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionStaleSessionBinding(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_session_id \in OptionSessionIdValues : control_mob_RetireMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_session_id)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_session_id \in OptionSessionIdValues : control_mob_RetireMemberRemote(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_session_id)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_session_id \in OptionSessionIdValues : control_mob_RetireMemberRemoteConfirmedRevoked(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_session_id)
@@ -77897,19 +77990,20 @@ CoreNext ==
     \/ \E arg_timed_out_run_id \in RunIdValues : layer_mob_ClassifyTurnTimeoutDispositionCanceledStopped(arg_timed_out_run_id, FALSE)
     \/ \E arg_timed_out_run_id \in RunIdValues : layer_mob_ClassifyTurnTimeoutDispositionCanceledCompleted(arg_timed_out_run_id, FALSE)
     \/ \E arg_timed_out_run_id \in RunIdValues : layer_mob_ClassifyTurnTimeoutDispositionCanceledDestroyed(arg_timed_out_run_id, FALSE)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : layer_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : layer_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : layer_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : layer_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionStopped(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionCompleted(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionDestroyed(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionCurrentRuntimeNotLive(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionStaleFenceToken(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionRetiringAsMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : layer_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : layer_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : layer_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : layer_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_work_id, arg_origin, arg_content_attribution)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionStopped(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionCompleted(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionDestroyed(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionCurrentRuntimeNotLive(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionStaleFenceToken(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionRetiringAsMemberNotFound(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_expected_session_id \in OptionSessionIdValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionStaleSessionBinding(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_expected_session_id, arg_origin)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_session_id \in OptionSessionIdValues : layer_mob_RetireMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_session_id)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_session_id \in OptionSessionIdValues : layer_mob_RetireMemberRemote(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_session_id)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_session_id \in OptionSessionIdValues : layer_mob_RetireMemberRemoteConfirmedRevoked(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_session_id)

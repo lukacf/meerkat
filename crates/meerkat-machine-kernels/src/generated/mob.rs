@@ -6124,6 +6124,8 @@ pub enum SubmitWorkRejectReasonKind {
     StaleFenceToken,
     #[serde(rename = "NotExternallyAddressable")]
     NotExternallyAddressable,
+    #[serde(rename = "StaleSessionBinding")]
+    StaleSessionBinding,
 }
 impl SubmitWorkRejectReasonKind {
     pub fn as_str(&self) -> &'static str {
@@ -6132,6 +6134,7 @@ impl SubmitWorkRejectReasonKind {
             Self::MemberNotFound => "MemberNotFound",
             Self::StaleFenceToken => "StaleFenceToken",
             Self::NotExternallyAddressable => "NotExternallyAddressable",
+            Self::StaleSessionBinding => "StaleSessionBinding",
         }
     }
 }
@@ -6143,6 +6146,7 @@ impl std::convert::TryFrom<&str> for SubmitWorkRejectReasonKind {
             "MemberNotFound" => Ok(Self::MemberNotFound),
             "StaleFenceToken" => Ok(Self::StaleFenceToken),
             "NotExternallyAddressable" => Ok(Self::NotExternallyAddressable),
+            "StaleSessionBinding" => Ok(Self::StaleSessionBinding),
             other => Err(format!(
                 "invalid SubmitWorkRejectReasonKind value `{other}`"
             )),
@@ -7693,6 +7697,7 @@ pub mod inputs {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
+        pub expected_session_id: Option<SessionId>,
         pub work_id: WorkId,
         pub origin: WorkOrigin,
         pub content_attribution: WorkContentAttribution,
@@ -7702,6 +7707,7 @@ pub mod inputs {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
+        pub expected_session_id: Option<SessionId>,
         pub origin: WorkOrigin,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11623,6 +11629,7 @@ pub enum TransitionId {
     ResolveSubmitWorkRejectionRetiringAsMemberNotFound,
     ResolveSubmitWorkRejectionNotExternallyAddressable,
     ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable,
+    ResolveSubmitWorkRejectionStaleSessionBinding,
     RetireMember,
     RetireMemberRemote,
     RetireMemberRemoteConfirmedRevoked,

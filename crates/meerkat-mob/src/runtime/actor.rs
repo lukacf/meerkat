@@ -12564,6 +12564,33 @@ impl MobActor {
             .map(|_| ())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    fn rebind_member_session_for_test(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        session_id: &SessionId,
+    ) -> Result<(), MobError> {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let state = self.dsl_authority.state();
+        let agent_runtime_id = state
+            .identity_to_runtime
+            .get(&dsl_identity)
+            .cloned()
+            .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
+        let replacing = state.member_session_bindings.get(&dsl_identity).cloned();
+        self.apply_dsl_signal_collect_transition(
+            mob_dsl::MobMachineSignal::RecoverMemberSessionBinding {
+                agent_identity: dsl_identity,
+                agent_runtime_id,
+                bridge_session_id: mob_dsl::SessionId::from_domain(session_id),
+                replacing,
+            },
+            "rebind_member_session_for_test",
+        )?;
+        self.publish_machine_state_projection();
+        Ok(())
+    }
+
     fn apply_dsl_signal_collect_transition(
         &mut self,
         signal: mob_dsl::MobMachineSignal,
@@ -15890,6 +15917,7 @@ impl MobActor {
         dsl_identity: &mob_dsl::AgentIdentity,
         dsl_runtime_id: &mob_dsl::AgentRuntimeId,
         dsl_fence_token: mob_dsl::FenceToken,
+        dsl_expected_session_id: Option<mob_dsl::SessionId>,
         runtime_id: &AgentRuntimeId,
         origin: WorkOrigin,
         agent_identity: &AgentIdentity,
@@ -15902,6 +15930,7 @@ impl MobActor {
                 agent_identity: dsl_identity.clone(),
                 agent_runtime_id: dsl_runtime_id.clone(),
                 fence_token: dsl_fence_token,
+                expected_session_id: dsl_expected_session_id.clone(),
                 origin: dsl_origin,
             },
         ) {
@@ -15954,6 +15983,25 @@ impl MobActor {
             Some((mob_dsl::SubmitWorkRejectReasonKind::NotExternallyAddressable, _, _)) => {
                 MobError::NotExternallyAddressable(agent_identity.clone())
             }
+            Some((mob_dsl::SubmitWorkRejectReasonKind::StaleSessionBinding, _, _)) => {
+                let parse = |session: &mob_dsl::SessionId| SessionId::parse(&session.0).ok();
+                let actual_session = authority
+                    .state()
+                    .member_session_bindings
+                    .get(dsl_identity)
+                    .and_then(parse);
+                match dsl_expected_session_id.as_ref().and_then(parse) {
+                    Some(expected_session) => MobError::StaleDeliveryScope {
+                        agent_identity: agent_identity.clone(),
+                        expected_session,
+                        actual_session,
+                    },
+                    None => MobError::Internal(
+                        "MobMachine rejected SubmitWork as a stale session binding without a valid expected session"
+                            .into(),
+                    ),
+                }
+            }
             None => MobError::Internal(
                 "MobMachine rejected SubmitWork without typed rejection feedback".into(),
             ),
@@ -15967,6 +16015,7 @@ impl MobActor {
         dsl_identity: &mob_dsl::AgentIdentity,
         dsl_runtime_id: &mob_dsl::AgentRuntimeId,
         dsl_fence_token: mob_dsl::FenceToken,
+        dsl_expected_session_id: Option<mob_dsl::SessionId>,
         runtime_id: &AgentRuntimeId,
         origin: WorkOrigin,
         agent_identity: &AgentIdentity,
@@ -15982,6 +16031,7 @@ impl MobActor {
             dsl_identity,
             dsl_runtime_id,
             dsl_fence_token,
+            dsl_expected_session_id,
             runtime_id,
             origin,
             agent_identity,
@@ -16210,6 +16260,7 @@ impl MobActor {
                 agent_identity: dsl_identity.clone(),
                 agent_runtime_id: dsl_runtime_id.clone(),
                 fence_token: dsl_fence_token,
+                expected_session_id: None,
                 work_id: mob_dsl::WorkId::from_work_ref(work_ref),
                 origin: mob_dsl::WorkOrigin::from(origin),
                 content_attribution: mob_dsl::WorkContentAttribution::Conversational,
@@ -16222,6 +16273,7 @@ impl MobActor {
                 &dsl_identity,
                 &dsl_runtime_id,
                 dsl_fence_token,
+                None,
                 &domain_runtime_id,
                 origin,
                 agent_identity,
@@ -16739,11 +16791,16 @@ impl MobActor {
             let identity = mob_dsl::AgentIdentity::from_domain(&payload.runtime_id.identity);
             let runtime = mob_dsl::AgentRuntimeId::from_domain(&payload.runtime_id);
             let fence = mob_dsl::FenceToken::from_domain(payload.fence_token);
+            let expected_session = payload
+                .expected_session_id
+                .as_ref()
+                .map(mob_dsl::SessionId::from_domain);
             if let Err(error) = self.probe_command_admission(
                 mob_dsl::MobMachineInput::SubmitWork {
                     agent_identity: identity.clone(),
                     agent_runtime_id: runtime.clone(),
                     fence_token: fence,
+                    expected_session_id: expected_session.clone(),
                     work_id: mob_dsl::WorkId::from_work_ref(&payload.work_ref),
                     origin: mob_dsl::WorkOrigin::from(payload.origin),
                     content_attribution: payload.content_attribution,
@@ -16760,6 +16817,7 @@ impl MobActor {
                     &identity,
                     &runtime,
                     fence,
+                    expected_session.clone(),
                     &payload.runtime_id,
                     payload.origin,
                     &payload.runtime_id.identity,
@@ -17280,6 +17338,12 @@ impl MobActor {
                 return;
             }
         }
+        #[cfg(any(test, feature = "test-support"))]
+        super::handle::run_member_turn_admission_test_gate(
+            &agent_identity,
+            super::handle::MemberTurnAdmissionTestStage::BeforeRuntimeAdmission,
+        )
+        .await;
         match dispatch {
             PendingTurnDispatch::Admission {
                 member_ref,
@@ -17299,6 +17363,12 @@ impl MobActor {
                     placed_identity.map(|identity| (command_tx.clone(), identity)),
                     placed_incarnation,
                     placed_input_id,
+                )
+                .await;
+                #[cfg(any(test, feature = "test-support"))]
+                super::handle::run_member_turn_admission_test_gate(
+                    &agent_identity,
+                    super::handle::MemberTurnAdmissionTestStage::AfterRuntimeAdmission,
                 )
                 .await;
                 let _ = reply_tx.send(result);
@@ -27494,6 +27564,16 @@ impl MobActor {
                     self.inline_step_watchdog
                         .set_step("autonomous_member_stops_resolved");
                     return Box::pin(self.resolve_autonomous_member_stops(ticket, outcomes)).await;
+                }
+                #[cfg(any(test, feature = "test-support"))]
+                MobCommand::RebindMemberSessionForTest {
+                    agent_identity,
+                    session_id,
+                    reply_tx,
+                } => {
+                    let result = self.rebind_member_session_for_test(&agent_identity, &session_id);
+                    let _ = reply_tx.send(result);
+                    ActorLoopControl::ProceedBoundary
                 }
                 MobCommand::Shutdown { reply_tx } => {
                     if let Err(error) = self.probe_command_admission(
@@ -51712,6 +51792,7 @@ impl MobActor {
         let super::state::SubmitWorkPayload {
             runtime_id,
             fence_token,
+            expected_session_id,
             work_ref,
             content,
             origin,
@@ -51729,6 +51810,9 @@ impl MobActor {
             mut ack_mode,
             content_attribution,
         } = *payload;
+        let dsl_expected_session_id = expected_session_id
+            .as_ref()
+            .map(mob_dsl::SessionId::from_domain);
         if content_attribution
             == crate::mob_machine::WorkContentAttribution::InjectedExecutionContext
             && (origin != WorkOrigin::Internal
@@ -51765,6 +51849,7 @@ impl MobActor {
                 agent_identity: dsl_identity.clone(),
                 agent_runtime_id: declared_dsl_runtime_id.clone(),
                 fence_token: declared_dsl_fence_token,
+                expected_session_id: dsl_expected_session_id.clone(),
                 work_id: mob_dsl::WorkId::from_work_ref(&work_ref),
                 origin: mob_dsl::WorkOrigin::from(origin),
                 content_attribution,
@@ -51812,8 +51897,12 @@ impl MobActor {
                 e
             }
             None => {
+                // A scope-bound submit never materializes a member: it was
+                // captured against an existing session, so an absent target
+                // is a typed refusal, never a policy spawn.
                 if matches!(origin, WorkOrigin::Internal)
                     || content_attribution == crate::mob_machine::WorkContentAttribution::HostHuman
+                    || expected_session_id.is_some()
                 {
                     let current_state = self.state();
                     return Err(Self::resolve_submit_work_projection_missing_or_rejection(
@@ -51822,6 +51911,7 @@ impl MobActor {
                         &dsl_identity,
                         &declared_dsl_runtime_id,
                         declared_dsl_fence_token,
+                        dsl_expected_session_id.clone(),
                         &runtime_id,
                         origin,
                         &agent_identity,
@@ -51842,6 +51932,7 @@ impl MobActor {
                         payload: Box::new(super::state::SubmitWorkPayload {
                             runtime_id,
                             fence_token,
+                            expected_session_id,
                             work_ref,
                             content,
                             origin,
@@ -51868,6 +51959,7 @@ impl MobActor {
                     &dsl_identity,
                     &declared_dsl_runtime_id,
                     declared_dsl_fence_token,
+                    dsl_expected_session_id.clone(),
                     &runtime_id,
                     origin,
                     &agent_identity,
@@ -52101,6 +52193,7 @@ impl MobActor {
             agent_identity: dsl_identity.clone(),
             agent_runtime_id: dsl_runtime_id.clone(),
             fence_token: dsl_fence_token,
+            expected_session_id: dsl_expected_session_id.clone(),
             work_id: dsl_work_id.clone(),
             origin: dsl_origin,
             content_attribution,
@@ -52126,6 +52219,7 @@ impl MobActor {
                 &dsl_identity,
                 &dsl_runtime_id,
                 dsl_fence_token,
+                dsl_expected_session_id.clone(),
                 &admission_runtime_id,
                 origin,
                 &agent_identity,
@@ -52213,6 +52307,7 @@ impl MobActor {
                     &dsl_identity,
                     &dsl_runtime_id,
                     dsl_fence_token,
+                    dsl_expected_session_id.clone(),
                     &admission_runtime_id,
                     origin,
                     &agent_identity,
@@ -58425,6 +58520,7 @@ mod routed_effect_containment_tests {
                 llm_identity_applied_tx: None,
                 ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
                 content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+                expected_session_id: None,
             })
         };
         let (reply_tx, reply_rx) = oneshot::channel();

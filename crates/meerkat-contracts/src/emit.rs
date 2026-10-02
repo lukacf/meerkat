@@ -498,6 +498,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireHostUnavailableDetail": schema_for!(crate::wire::WireHostUnavailableDetail),
         "WireStaleCursorDetail": schema_for!(crate::wire::WireStaleCursorDetail),
         "WireStaleFenceDetail": schema_for!(crate::wire::WireStaleFenceDetail),
+        "WireStaleDeliveryScopeDetail": schema_for!(crate::wire::WireStaleDeliveryScopeDetail),
         "MobBindHostResult": schema_for!(crate::wire::MobBindHostResult),
         "MobGrantScopesResult": schema_for!(crate::wire::MobGrantScopesResult),
         "MobGrantsResult": schema_for!(crate::wire::MobGrantsResult),
@@ -711,6 +712,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         crate::error::ErrorCode::HostUnavailable,
         crate::error::ErrorCode::StaleCursor,
         crate::error::ErrorCode::StaleFence,
+        crate::error::ErrorCode::StaleDeliveryScope,
     ]
     .into_iter()
     .map(|code| (code.to_string(), Value::from(code.jsonrpc_code())))

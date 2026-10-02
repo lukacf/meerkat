@@ -2088,6 +2088,7 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         | MobError::MobDefinitionProjectionMismatch { .. }
         | MobError::MobDefinitionAuthorityChanged { .. }
         | MobError::MemberSessionNotLive { .. }
+        | MobError::DeliveryScopeUnavailable { .. }
         | MobError::AgentEventCursorRejected { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
@@ -2256,7 +2257,9 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::CallbackPending { .. } | MobError::CallbackBatchPending { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::CallbackPending
         }
-        MobError::StaleFenceToken { .. } | MobError::StaleMemberOperatorAuthority { .. } => {
+        MobError::StaleFenceToken { .. }
+        | MobError::StaleDeliveryScope { .. }
+        | MobError::StaleMemberOperatorAuthority { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::StaleFenceToken
         }
         MobError::StaleEventCursor { .. } => {
@@ -2888,6 +2891,7 @@ fn submit_work_payload(
     let crate::mob_machine::SubmitWorkCommand {
         runtime_id,
         fence_token,
+        expected_session_id,
         work_ref,
         spec,
         handling_mode,
@@ -2920,6 +2924,7 @@ fn submit_work_payload(
     Ok(Box::new(super::state::SubmitWorkPayload {
         runtime_id,
         fence_token,
+        expected_session_id,
         work_ref,
         content: spec.content,
         origin: spec.origin,
@@ -3105,6 +3110,34 @@ impl MemberAdmissionBacklogGauge {
     }
 }
 
+/// The acknowledgement stage a [`WorkDeliveryReceipt`] proves, and nothing
+/// more. No stage claims durable runtime-input acceptance: that needs a
+/// committed store witness (see
+/// [`crate::ScopedWorkState::InFlight::durable_witness`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WorkAdmissionStage {
+    /// The member's work lane accepted the delivery at ingress. For an
+    /// autonomous member this can precede the runtime input itself.
+    IngressAccepted,
+    /// The member runtime admitted the exact input.
+    RuntimeInputAccepted,
+    /// The member's turn for this work completed before the receipt was
+    /// returned.
+    TurnCompleted,
+}
+
+impl WorkAdmissionStage {
+    fn from_ack(ack_mode: crate::mob_machine::SubmitWorkAckMode) -> Self {
+        match ack_mode {
+            crate::mob_machine::SubmitWorkAckMode::IngressAccepted => Self::IngressAccepted,
+            crate::mob_machine::SubmitWorkAckMode::ExactInputAccepted => Self::RuntimeInputAccepted,
+            crate::mob_machine::SubmitWorkAckMode::TurnCompleted => Self::TurnCompleted,
+        }
+    }
+}
+
 /// Receipt confirming that a unit of work was accepted by the work lane.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
@@ -3114,6 +3147,12 @@ pub struct WorkDeliveryReceipt {
     /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
     #[serde(skip)]
     pub(crate) runtime_id: AgentRuntimeId,
+    /// The acknowledgement stage this receipt proves.
+    pub stage: WorkAdmissionStage,
+    /// The member session the delivery was admitted to, when the submit was
+    /// scope-bound (generated authority validated it at admission); `None`
+    /// for an unscoped submit, whose session is not part of the receipt.
+    pub session_id: Option<SessionId>,
 }
 
 /// Completion-bearing handle for one admitted unit of internal work.
@@ -11654,6 +11693,7 @@ impl MobHandle {
             llm_identity_applied_tx: observers.llm_identity_applied_tx,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
             content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+            expected_session_id: None,
         });
         self.execute_machine_command(MobMachineCommand::SubmitWork(cmd))
             .await?;
@@ -11686,6 +11726,7 @@ impl MobHandle {
             llm_identity_applied_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::TurnCompleted,
             content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+            expected_session_id: None,
         });
         self.execute_machine_command(MobMachineCommand::SubmitWork(cmd))
             .await?;
@@ -11721,6 +11762,7 @@ impl MobHandle {
                 agent_identity: mob_dsl::AgentIdentity::from_domain(&domain_identity),
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&declared_runtime_id),
                 fence_token: mob_dsl::FenceToken::from_domain(declared_fence_token),
+                expected_session_id: None,
                 origin: mob_dsl::WorkOrigin::from(origin),
             })
             .await
@@ -11758,6 +11800,13 @@ impl MobHandle {
                 expected: declared_fence_token,
                 actual: declared_fence_token,
             },
+            // No expected session was named on this resolution, so the
+            // generated authority cannot classify it as a stale session.
+            mob_dsl::SubmitWorkRejectReasonKind::StaleSessionBinding => {
+                MobError::Internal(format!(
+                    "{context} resolved a stale session binding for '{agent_identity}' without an expected session"
+                ))
+            }
             mob_dsl::SubmitWorkRejectReasonKind::MobNotRunning => MobError::InvalidTransition {
                 // Error rendering only: the machine already rejected; the
                 // watch observation avoids a principal-gated QueryPhase
@@ -12280,6 +12329,7 @@ impl MobHandle {
             llm_identity_applied_tx: None,
             ack_mode,
             content_attribution,
+            expected_session_id: None,
         });
         match self
             .execute_machine_command(MobMachineCommand::SubmitWork(cmd))
@@ -12291,6 +12341,8 @@ impl MobHandle {
                 receipt: WorkDeliveryReceipt {
                     work_ref: admitted_ref,
                     runtime_id,
+                    stage: WorkAdmissionStage::from_ack(ack_mode),
+                    session_id: None,
                 },
                 session_id: admitted_session_id,
                 completion_rx,
@@ -12329,6 +12381,7 @@ impl MobHandle {
             llm_identity_applied_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
             content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+            expected_session_id: None,
         });
         match self
             .execute_machine_command(MobMachineCommand::SubmitWork(cmd))
@@ -12337,6 +12390,8 @@ impl MobHandle {
             MobMachineCommandResult::WorkReceipt { work_ref: ref_out } => Ok(WorkDeliveryReceipt {
                 work_ref: ref_out,
                 runtime_id,
+                stage: WorkAdmissionStage::IngressAccepted,
+                session_id: None,
             }),
             _ => Err(MobError::Internal(
                 "unexpected command result variant".into(),
@@ -12377,6 +12432,7 @@ impl MobHandle {
             llm_identity_applied_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
             content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+            expected_session_id: None,
         });
         match self
             .execute_machine_command(MobMachineCommand::SubmitWork(cmd))
@@ -12385,6 +12441,8 @@ impl MobHandle {
             MobMachineCommandResult::WorkReceipt { work_ref: ref_out } => Ok(WorkDeliveryReceipt {
                 work_ref: ref_out,
                 runtime_id,
+                stage: WorkAdmissionStage::IngressAccepted,
+                session_id: None,
             }),
             _ => Err(MobError::Internal(
                 "unexpected command result variant".into(),
@@ -12429,31 +12487,47 @@ impl MobHandle {
             llm_identity_applied_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
             content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+            expected_session_id: None,
         });
         self.submit_work_command_bounded(cmd, deadline).await
     }
 
-    /// [`Self::submit_work_with_mode_and_delivery_identity`] with a caller
-    /// deadline; see [`Self::submit_work_with_mode_bounded`].
+    /// Submit one delivery to the exact member session a host captured with
+    /// [`Self::capture_member_delivery_scope`] and persisted beforehand, with
+    /// a caller deadline (see [`Self::submit_work_with_mode_bounded`] for the
+    /// deadline contract).
+    ///
+    /// The scope's runtime id, fence and session are validated by generated
+    /// SubmitWork authority inside the actor's admission, atomically with the
+    /// admission itself. A moved session binding is refused as
+    /// [`MobError::StaleDeliveryScope`], a stale incarnation as
+    /// [`MobError::StaleFenceToken`]; the delivery is never repaired,
+    /// retargeted to today's session, or resubmitted. The work reference is
+    /// derived from the delivery's stable idempotency key.
+    ///
+    /// The receipt proves [`WorkAdmissionStage::IngressAccepted`] and names
+    /// the admitted session; it is not a durable runtime-input claim. Recover
+    /// a lost reply with [`Self::recover_bounded_work_at_scope`] and the same
+    /// scope.
     pub async fn submit_work_with_mode_and_delivery_identity_bounded(
         &self,
-        runtime_id: AgentRuntimeId,
-        fence_token: FenceToken,
+        scope: &super::MemberDeliveryScope,
         spec: WorkSpec,
         handling_mode: HandlingMode,
         delivery_identity: crate::store::MobDeliveryIdentity,
         deadline: Instant,
     ) -> Result<WorkDeliveryReceipt, MobError> {
         delivery_identity.validate()?;
+        let runtime_id = scope.runtime_id().clone();
         let work_ref = WorkRef::for_delivery(
             &self.definition.id,
             &runtime_id.identity,
             &delivery_identity.idempotency_key,
         );
         let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
-            runtime_id: runtime_id.clone(),
-            fence_token,
-            work_ref: work_ref.clone(),
+            runtime_id,
+            fence_token: scope.fence_token(),
+            work_ref,
             spec,
             handling_mode,
             external_delivery_identity: Some(delivery_identity),
@@ -12464,6 +12538,7 @@ impl MobHandle {
             llm_identity_applied_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
             content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+            expected_session_id: Some(scope.session_id().clone()),
         });
         self.submit_work_command_bounded(cmd, deadline).await
     }
@@ -12697,6 +12772,7 @@ impl MobHandle {
             llm_identity_applied_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
             content_attribution: crate::mob_machine::WorkContentAttribution::HostHuman,
+            expected_session_id: None,
         }))
     }
 
@@ -12707,6 +12783,10 @@ impl MobHandle {
     ) -> Result<WorkDeliveryReceipt, MobError> {
         let runtime_id = cmd.runtime_id.clone();
         let work_ref = cmd.work_ref.clone();
+        let stage = WorkAdmissionStage::from_ack(cmd.ack_mode);
+        // Generated SubmitWork authority admitted this exact session when one
+        // was named (it refuses a moved binding as StaleSessionBinding).
+        let session_id = cmd.expected_session_id.clone();
         let payload = submit_work_payload(cmd)?;
         self.send_actor_command_until(deadline, |reply_tx| MobCommand::SubmitWork {
             payload,
@@ -12716,6 +12796,8 @@ impl MobHandle {
         Ok(WorkDeliveryReceipt {
             work_ref,
             runtime_id,
+            stage,
+            session_id,
         })
     }
 
@@ -13148,6 +13230,49 @@ impl MobHandle {
             "member status read test gate already armed for this identity"
         );
         (entered_rx, release_tx)
+    }
+
+    /// Hold the next member turn admission of `identity` at `stage`. The
+    /// first receiver resolves when an admission reaches the gate; sending on
+    /// (or dropping) the returned sender lets it go on. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_member_turn_admission_test_gate(
+        identity: AgentIdentity,
+        stage: MemberTurnAdmissionTestStage,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let replaced = MEMBER_TURN_ADMISSION_TEST_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert((identity, stage), (entered_tx, release_rx));
+        assert!(
+            replaced.is_none(),
+            "member turn admission test gate already armed for this identity and stage"
+        );
+        (entered_rx, release_tx)
+    }
+
+    /// Move `identity`'s session binding to `session_id` under its current
+    /// runtime id, through the generated `RecoverMemberSessionBinding`
+    /// signal. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn rebind_member_session_for_test(
+        &self,
+        identity: &AgentIdentity,
+        session_id: SessionId,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::RebindMemberSessionForTest {
+            agent_identity: identity.clone(),
+            session_id,
+            reply_tx,
+        })
+        .await?
     }
 
     /// Test witness that crash-stop acknowledgement followed actor teardown.
@@ -18147,6 +18272,8 @@ mod tests {
         let receipt = WorkDeliveryReceipt {
             work_ref: WorkRef::new(),
             runtime_id: AgentRuntimeId::new(identity, Generation::new(8)),
+            stage: WorkAdmissionStage::TurnCompleted,
+            session_id: None,
         };
         let expected_work_ref = receipt.work_ref.clone();
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
@@ -18456,6 +18583,42 @@ type MemberStatusReadTestGate = (
 static MEMBER_STATUS_READ_TEST_GATE: std::sync::Mutex<
     std::collections::BTreeMap<AgentIdentity, MemberStatusReadTestGate>,
 > = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Where a test holds one member turn admission (see
+/// [`MobHandle::arm_member_turn_admission_test_gate`]).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MemberTurnAdmissionTestStage {
+    /// After MobMachine admitted the SubmitWork and the member lane finished
+    /// readiness, before the runtime input is admitted.
+    BeforeRuntimeAdmission,
+    /// After the runtime admitted the input, before the admission reply.
+    AfterRuntimeAdmission,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static MEMBER_TURN_ADMISSION_TEST_GATE: std::sync::Mutex<
+    std::collections::BTreeMap<
+        (AgentIdentity, MemberTurnAdmissionTestStage),
+        MemberStatusReadTestGate,
+    >,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) async fn run_member_turn_admission_test_gate(
+    identity: &AgentIdentity,
+    stage: MemberTurnAdmissionTestStage,
+) {
+    let armed = MEMBER_TURN_ADMISSION_TEST_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&(identity.clone(), stage));
+    if let Some((entered_tx, release_rx)) = armed {
+        let _ = entered_tx.send(());
+        let _ = release_rx.await;
+    }
+}
 
 #[cfg(any(test, feature = "test-support"))]
 async fn run_member_status_read_test_gate(identity: &AgentIdentity) {

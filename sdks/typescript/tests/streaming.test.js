@@ -7,6 +7,7 @@ import {
   ScopeDeniedError,
   StaleCursorError,
   StaleFenceError,
+  StaleDeliveryScopeError,
   meerkatErrorFromJsonRpcCode,
   meerkatErrorFromSemanticCode,
 } from "../dist/index.js";
@@ -49,6 +50,13 @@ const MULTI_HOST_ERROR_CASES = [
     ErrorClass: StaleFenceError,
     details: { runtime_id: "runtime-1", expected: 9, actual: 8 },
     malformed: { runtime_id: 7 },
+  },
+  {
+    rpcCode: -32030,
+    semanticCode: "STALE_DELIVERY_SCOPE",
+    ErrorClass: StaleDeliveryScopeError,
+    details: { agent_identity: "worker", expected_session_id: "s-a", actual_session_id: "s-b" },
+    malformed: { agent_identity: "worker" },
   },
 ];
 

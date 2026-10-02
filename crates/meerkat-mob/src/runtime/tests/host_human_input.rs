@@ -487,10 +487,14 @@ impl Fixture {
         spec: WorkSpec,
         delivery: MobDeliveryIdentity,
     ) -> WorkDeliveryReceipt {
+        let scope = self
+            .handle
+            .capture_member_delivery_scope(&self.entry.agent_identity)
+            .await
+            .expect("capture the member's delivery scope");
         self.handle
             .submit_work_with_mode_and_delivery_identity_bounded(
-                self.entry.agent_runtime_id.clone(),
-                self.entry.fence_token,
+                &scope,
                 spec,
                 HandlingMode::Queue,
                 delivery,
@@ -742,11 +746,15 @@ async fn generic_autonomous_work_remains_external_event_not_mirrored_human() {
     let generic_delivery = delivery("generic-work");
     let id = interaction(&generic_delivery);
     let requests_before = fixture.client.requests().len();
+    let scope = fixture
+        .handle
+        .capture_member_delivery_scope(&fixture.entry.agent_identity)
+        .await
+        .expect("capture the member's delivery scope");
     fixture
         .handle
         .submit_work_with_mode_and_delivery_identity_bounded(
-            fixture.entry.agent_runtime_id.clone(),
-            fixture.entry.fence_token,
+            &scope,
             WorkSpec::new(HUMAN, WorkOrigin::External).with_interaction_id(id),
             HandlingMode::Queue,
             generic_delivery,

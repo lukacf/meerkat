@@ -23,13 +23,19 @@ class WireStaleFenceDetail(TypedDict, total=False):
     expected: NotRequired[Optional[int]]
     runtime_id: NotRequired[Optional[str]]
 
-MultiHostErrorCode = Literal['SCOPE_DENIED', 'HOST_UNAVAILABLE', 'STALE_CURSOR', 'STALE_FENCE']
+class WireStaleDeliveryScopeDetail(TypedDict, total=False):
+    actual_session_id: NotRequired[Optional[str]]
+    agent_identity: Required[str]
+    expected_session_id: Required[str]
+
+MultiHostErrorCode = Literal['SCOPE_DENIED', 'HOST_UNAVAILABLE', 'STALE_CURSOR', 'STALE_FENCE', 'STALE_DELIVERY_SCOPE']
 
 MULTI_HOST_JSON_RPC_ERROR_CODES: dict[int, MultiHostErrorCode] = {
     -32025: 'SCOPE_DENIED',
     -32026: 'HOST_UNAVAILABLE',
     -32027: 'STALE_CURSOR',
     -32028: 'STALE_FENCE',
+    -32030: 'STALE_DELIVERY_SCOPE',
 }
 
 def _is_scope_denied_detail(value: Any) -> TypeGuard[WireScopeDeniedDetail]:
@@ -72,6 +78,17 @@ def _is_stale_fence_detail(value: Any) -> TypeGuard[WireStaleFenceDetail]:
         ('actual' not in value or ((isinstance(value.get('actual'), int) and not isinstance(value.get('actual'), bool) and value.get('actual') >= 0) or value.get('actual') is None)) and
         ('expected' not in value or ((isinstance(value.get('expected'), int) and not isinstance(value.get('expected'), bool) and value.get('expected') >= 0) or value.get('expected') is None)) and
         ('runtime_id' not in value or (isinstance(value.get('runtime_id'), str) or value.get('runtime_id') is None))
+    )
+
+def _is_stale_delivery_scope_detail(value: Any) -> TypeGuard[WireStaleDeliveryScopeDetail]:
+    if not isinstance(value, dict):
+        return False
+    if not set(value).issubset(('actual_session_id', 'agent_identity', 'expected_session_id')):
+        return False
+    return (
+        ('actual_session_id' not in value or (isinstance(value.get('actual_session_id'), str) or value.get('actual_session_id') is None)) and
+        ('agent_identity' in value and isinstance(value.get('agent_identity'), str)) and
+        ('expected_session_id' in value and isinstance(value.get('expected_session_id'), str))
     )
 
 
@@ -149,6 +166,18 @@ class StaleFenceError(MeerkatError):
         super().__init__('STALE_FENCE', message, details, capability_hint)
 
 
+class StaleDeliveryScopeError(MeerkatError):
+    """Raised for STALE_DELIVERY_SCOPE with validated typed details."""
+
+    def __init__(
+        self,
+        message: str,
+        details: WireStaleDeliveryScopeDetail,
+        capability_hint: Any = None,
+    ) -> None:
+        super().__init__('STALE_DELIVERY_SCOPE', message, details, capability_hint)
+
+
 def meerkat_error_from_semantic_code(
     code: str,
     message: str,
@@ -163,6 +192,8 @@ def meerkat_error_from_semantic_code(
         return StaleCursorError(message, details, capability_hint)
     if code == 'STALE_FENCE' and _is_stale_fence_detail(details):
         return StaleFenceError(message, details, capability_hint)
+    if code == 'STALE_DELIVERY_SCOPE' and _is_stale_delivery_scope_detail(details):
+        return StaleDeliveryScopeError(message, details, capability_hint)
     return MeerkatError(code, message, details, capability_hint)
 
 

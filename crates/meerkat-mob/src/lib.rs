@@ -310,6 +310,10 @@ pub use runtime::{
     DeliveryTerminalWait, DeliveryTerminalWaitError, DeliveryTerminalWaitReport,
     DeliveryUnknownCause,
 };
+pub use runtime::{
+    DeliveryScopeDecodeError, MEMBER_DELIVERY_SCOPE_VERSION, MemberDeliveryScope,
+    ScopedRecoveryUnresolved, ScopedWorkRecovery, ScopedWorkState, WorkAdmissionStage,
+};
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{
     FlowTurnExecutor, FlowTurnFailureDisposition, FlowTurnOutcome, FlowTurnTicket,
@@ -319,8 +323,8 @@ pub use runtime::{
 #[doc(hidden)]
 pub use runtime::{
     ForkSupervisorExitForTest, IdentityRecoveryFailStopPoint, MemberStatusDeadlineTestObservation,
-    arm_identity_recovery_fail_stop_for_test, member_operator_tool_defs_for_test,
-    member_status_deadline_after_snapshot_wait_for_test,
+    MemberTurnAdmissionTestStage, arm_identity_recovery_fail_stop_for_test,
+    member_operator_tool_defs_for_test, member_status_deadline_after_snapshot_wait_for_test,
 };
 pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime::{SpawnBasePromptSource, StaticSpawnBasePromptSource};

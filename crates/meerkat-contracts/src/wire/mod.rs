@@ -90,7 +90,7 @@ pub use auth::{
 };
 pub use error::{
     WireConversionError, WireHostUnavailableDetail, WireMobErrorDetail, WireStaleCursorDetail,
-    WireStaleFenceDetail,
+    WireStaleDeliveryScopeDetail, WireStaleFenceDetail,
 };
 pub use event::{
     EventReplayCursor, EventReplayCursorError, EventReplayEnvelope, EventReplayEventId,

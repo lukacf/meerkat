@@ -31,9 +31,12 @@ use crate::runtime::state::MobCommand;
 #[path = "reload_lane.rs"]
 mod reload_lane;
 
-/// `InMemoryRuntimeStore` decorator with per-session fault switches.
-struct FaultInjectingRuntimeStore {
-    inner: Arc<InMemoryRuntimeStore>,
+/// `RuntimeStore` decorator (an `InMemoryRuntimeStore` by default) with
+/// per-session fault switches.
+pub(super) struct FaultInjectingRuntimeStore {
+    inner: Arc<dyn RuntimeStore>,
+    /// Sessions whose exact input-state reads fail (store unavailable).
+    fail_input_reads: std::sync::Mutex<HashSet<LogicalRuntimeId>>,
     fail_commit: std::sync::Mutex<HashSet<LogicalRuntimeId>>,
     parked_admissions: std::sync::Mutex<HashSet<LogicalRuntimeId>>,
     release_admissions: Notify,
@@ -49,8 +52,14 @@ struct FaultInjectingRuntimeStore {
 
 impl FaultInjectingRuntimeStore {
     fn new() -> Arc<Self> {
+        Self::wrapping(Arc::new(InMemoryRuntimeStore::new()))
+    }
+
+    /// Wrap an existing store (for example a real SQLite runtime store).
+    pub(super) fn wrapping(inner: Arc<dyn RuntimeStore>) -> Arc<Self> {
         Arc::new(Self {
-            inner: Arc::new(InMemoryRuntimeStore::new()),
+            inner,
+            fail_input_reads: std::sync::Mutex::new(HashSet::new()),
             fail_commit: std::sync::Mutex::new(HashSet::new()),
             parked_admissions: std::sync::Mutex::new(HashSet::new()),
             release_admissions: Notify::new(),
@@ -160,6 +169,14 @@ impl FaultInjectingRuntimeStore {
             .get(&LogicalRuntimeId::for_session(session_id))
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Fail every exact input-state read for `session_id` as a store outage.
+    pub(super) fn fail_input_reads(&self, session_id: &SessionId) {
+        self.fail_input_reads
+            .lock()
+            .expect("fail_input_reads mutex")
+            .insert(LogicalRuntimeId::for_session(session_id));
     }
 
     fn fail_commit_if_flagged(
@@ -507,6 +524,16 @@ impl RuntimeStore for FaultInjectingRuntimeStore {
         Option<meerkat_runtime::store::ExactInputStateObservation>,
         meerkat_runtime::store::RuntimeStoreError,
     > {
+        if self
+            .fail_input_reads
+            .lock()
+            .expect("fail_input_reads mutex")
+            .contains(runtime_id)
+        {
+            return Err(meerkat_runtime::store::RuntimeStoreError::ReadFailed(
+                format!("injected input-state read failure for {runtime_id}"),
+            ));
+        }
         self.inner
             .load_input_state_by_idempotency_key(runtime_id, key)
             .await

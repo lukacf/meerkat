@@ -66,8 +66,25 @@ pub struct WireStaleFenceDetail {
     pub actual: Option<u64>,
 }
 
-/// Closed pairing of the four multi-host console [`ErrorCode`]s with their
-/// typed detail payloads (§17.4, ADJ-P7-4).
+/// Typed `details` payload for [`ErrorCode::StaleDeliveryScope`]: a
+/// scope-bound submit named a member session that is no longer the member's
+/// current session binding. The runtime incarnation and fence were current;
+/// only the session moved. Nothing was admitted and nothing was retargeted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireStaleDeliveryScopeDetail {
+    /// The member the scope named.
+    pub agent_identity: String,
+    /// The session the caller's scope pinned.
+    pub expected_session_id: String,
+    /// The member's current session binding, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_session_id: Option<String>,
+}
+
+/// Closed pairing of the four multi-host console [`ErrorCode`]s (§17.4,
+/// ADJ-P7-4) and the delivery-scope code with their typed detail payloads.
 ///
 /// Deliberately NOT serde-derived: the enum itself is never serialized. It
 /// exists so the code↔detail pairing has exactly one compile-forced owner —
@@ -80,6 +97,7 @@ pub enum WireMobErrorDetail {
     HostUnavailable(WireHostUnavailableDetail),
     StaleCursor(WireStaleCursorDetail),
     StaleFence(WireStaleFenceDetail),
+    StaleDeliveryScope(WireStaleDeliveryScopeDetail),
 }
 
 impl WireMobErrorDetail {
@@ -91,6 +109,7 @@ impl WireMobErrorDetail {
             Self::HostUnavailable(_) => ErrorCode::HostUnavailable,
             Self::StaleCursor(_) => ErrorCode::StaleCursor,
             Self::StaleFence(_) => ErrorCode::StaleFence,
+            Self::StaleDeliveryScope(_) => ErrorCode::StaleDeliveryScope,
         }
     }
 
@@ -102,6 +121,7 @@ impl WireMobErrorDetail {
             Self::HostUnavailable(detail) => serde_json::to_value(detail),
             Self::StaleCursor(detail) => serde_json::to_value(detail),
             Self::StaleFence(detail) => serde_json::to_value(detail),
+            Self::StaleDeliveryScope(detail) => serde_json::to_value(detail),
         }
     }
 }
@@ -233,6 +253,26 @@ mod tests {
         assert_eq!(host.code(), ErrorCode::HostUnavailable);
         assert_eq!(cursor.code(), ErrorCode::StaleCursor);
         assert_eq!(fence.code(), ErrorCode::StaleFence);
+        let scope_moved = WireMobErrorDetail::StaleDeliveryScope(WireStaleDeliveryScopeDetail {
+            agent_identity: "worker".to_string(),
+            expected_session_id: "s-a".to_string(),
+            actual_session_id: None,
+        });
+        assert_eq!(scope_moved.code(), ErrorCode::StaleDeliveryScope);
+        assert_ne!(scope_moved.code(), ErrorCode::StaleFence);
+        assert_eq!(
+            scope_moved.detail_value().expect("scope detail serializes"),
+            serde_json::json!({"agent_identity": "worker", "expected_session_id": "s-a"})
+        );
+        assert!(
+            serde_json::from_value::<WireStaleDeliveryScopeDetail>(serde_json::json!({
+                "agent_identity": "worker",
+                "expected_session_id": "s-a",
+                "runtime_id": "worker#2",
+            }))
+            .is_err(),
+            "deny_unknown_fields: a stale-fence field is not a stale-scope detail"
+        );
 
         // The ScopeDenied detail_value is the BARE phase-5 shape —
         // byte-identical `{required, presented}`, no enum envelope.
@@ -357,6 +397,16 @@ mod tests {
                 -32028,
                 409,
                 48,
+            ),
+            (
+                WireMobErrorDetail::StaleDeliveryScope(WireStaleDeliveryScopeDetail {
+                    agent_identity: "worker".to_string(),
+                    expected_session_id: "s-a".to_string(),
+                    actual_session_id: Some("s-b".to_string()),
+                }),
+                -32030,
+                409,
+                50,
             ),
         ];
         for (detail, jsonrpc, http, cli) in details {

@@ -371,6 +371,9 @@ pub(crate) struct MobMemberMachineProjection {
 pub(super) struct SubmitWorkPayload {
     pub runtime_id: AgentRuntimeId,
     pub fence_token: FenceToken,
+    /// Member session a scope-bound submit was captured against; validated
+    /// by generated SubmitWork authority (`StaleSessionBinding`).
+    pub expected_session_id: Option<SessionId>,
     pub work_ref: WorkRef,
     pub content: ContentInput,
     pub origin: WorkOrigin,
@@ -1604,6 +1607,15 @@ pub(super) enum MobCommand {
     CrashStopPreservingDurableWorkForTest {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Test-support-only: move a member's session binding under its current
+    /// runtime id through the generated `RecoverMemberSessionBinding` signal,
+    /// the same authority path a snapshotless session-head repair takes.
+    #[cfg(any(test, feature = "test-support"))]
+    RebindMemberSessionForTest {
+        agent_identity: AgentIdentity,
+        session_id: SessionId,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     /// Read the current lifecycle phase directly from the DSL authority.
     /// Routes through the command channel so the actor returns the single
     /// canonical DSL-authority value; there is no atomic shadow (dogma #1,
@@ -1827,6 +1839,8 @@ impl MobCommand {
             Self::CrashStopPreservingDurableWorkForTest { .. } => {
                 "CrashStopPreservingDurableWorkForTest"
             }
+            #[cfg(any(test, feature = "test-support"))]
+            Self::RebindMemberSessionForTest { .. } => "RebindMemberSessionForTest",
             Self::QueryPhase { .. } => "QueryPhase",
         }
     }

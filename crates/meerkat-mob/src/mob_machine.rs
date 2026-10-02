@@ -220,6 +220,11 @@ pub(crate) use crate::machines::mob_machine::WorkContentAttribution;
 pub(crate) struct SubmitWorkCommand {
     pub runtime_id: AgentRuntimeId,
     pub fence_token: FenceToken,
+    /// The member session this submit was scoped to, when the caller bound
+    /// one (see [`crate::runtime::MemberDeliveryScope`]). Generated SubmitWork
+    /// authority refuses the admission as `StaleSessionBinding` when the
+    /// member's current session binding differs; it never retargets.
+    pub expected_session_id: Option<meerkat_core::types::SessionId>,
     pub work_ref: WorkRef,
     pub spec: WorkSpec,
     pub handling_mode: meerkat_core::types::HandlingMode,

@@ -117276,6 +117276,11 @@
             "const": "MEMBER_RELOAD_REQUIRED",
             "description": "A mob member's runtime registration is durability-degraded and\nrefuses ordinary work until an explicit registration-authorized cold\nreload replaces it (`MobError::MemberReloadRequired`). Deliberately\nits own code rather than [`Self::SessionBusy`]: the condition never\nclears on its own, so ordinary busy/backoff retry is never correct —\nonly the named `reload_member_registration` repair resolves it.",
             "type": "string"
+          },
+          {
+            "const": "STALE_DELIVERY_SCOPE",
+            "description": "A scope-bound mob submit named a member session that is no longer the\nmember's current session binding: the session rotated under a still\ncurrent runtime incarnation and fence. Distinct from\n[`Self::StaleFence`] (a superseded incarnation): the recovery is to\nre-capture the delivery scope, not to re-resolve the member.",
+            "type": "string"
           }
         ]
       },
@@ -172180,6 +172185,34 @@
       "watermark"
     ],
     "title": "WireStaleCursorDetail",
+    "type": "object"
+  },
+  "WireStaleDeliveryScopeDetail": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Typed `details` payload for [`ErrorCode::StaleDeliveryScope`]: a\nscope-bound submit named a member session that is no longer the member's\ncurrent session binding. The runtime incarnation and fence were current;\nonly the session moved. Nothing was admitted and nothing was retargeted.",
+    "properties": {
+      "actual_session_id": {
+        "description": "The member's current session binding, when it has one.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "agent_identity": {
+        "description": "The member the scope named.",
+        "type": "string"
+      },
+      "expected_session_id": {
+        "description": "The session the caller's scope pinned.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_identity",
+      "expected_session_id"
+    ],
+    "title": "WireStaleDeliveryScopeDetail",
     "type": "object"
   },
   "WireStaleFenceDetail": {

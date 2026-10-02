@@ -77726,6 +77726,8 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             "callback_pending".to_string()
         }
         MobError::StaleFenceToken { .. } => "stale_fence_token".to_string(),
+        MobError::StaleDeliveryScope { .. } => "stale_delivery_scope".to_string(),
+        MobError::DeliveryScopeUnavailable { .. } => "delivery_scope_unavailable".to_string(),
         MobError::StaleMemberOperatorAuthority { .. } => {
             "stale_member_operator_authority".to_string()
         }
@@ -84624,6 +84626,10 @@ fn placement_fixture_uses_local_mob_authority_types() {
         "shared unit fixtures must not import the separately compiled self-dev-dependency",
     );
 }
+/// Delivery scope correctness: scope-bound submit and original-session
+/// recovery over real persistent stores.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod delivery_scope_gates;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod host_outage_recovery;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]

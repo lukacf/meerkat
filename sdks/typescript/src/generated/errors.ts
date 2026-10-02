@@ -22,7 +22,13 @@ export interface WireStaleFenceDetail {
   runtime_id?: string | null;
 }
 
-export type MultiHostErrorCode = "SCOPE_DENIED" | "HOST_UNAVAILABLE" | "STALE_CURSOR" | "STALE_FENCE";
+export interface WireStaleDeliveryScopeDetail {
+  actual_session_id?: string | null;
+  agent_identity: string;
+  expected_session_id: string;
+}
+
+export type MultiHostErrorCode = "SCOPE_DENIED" | "HOST_UNAVAILABLE" | "STALE_CURSOR" | "STALE_FENCE" | "STALE_DELIVERY_SCOPE";
 
 export const MULTI_HOST_JSON_RPC_ERROR_CODES: Readonly<
   Partial<Record<number, MultiHostErrorCode>>
@@ -31,6 +37,7 @@ export const MULTI_HOST_JSON_RPC_ERROR_CODES: Readonly<
   [-32026]: "HOST_UNAVAILABLE",
   [-32027]: "STALE_CURSOR",
   [-32028]: "STALE_FENCE",
+  [-32030]: "STALE_DELIVERY_SCOPE",
 };
 
 function isErrorDetailRecord(value: unknown): value is Record<string, unknown> {
@@ -76,6 +83,17 @@ function isStaleFenceDetail(value: unknown): value is WireStaleFenceDetail {
     (!Object.prototype.hasOwnProperty.call(value, "actual") || ((typeof value.actual === "number" && Number.isFinite(value.actual) && Number.isSafeInteger(value.actual) && value.actual >= 0) || value.actual === null)) &&
     (!Object.prototype.hasOwnProperty.call(value, "expected") || ((typeof value.expected === "number" && Number.isFinite(value.expected) && Number.isSafeInteger(value.expected) && value.expected >= 0) || value.expected === null)) &&
     (!Object.prototype.hasOwnProperty.call(value, "runtime_id") || (typeof value.runtime_id === "string" || value.runtime_id === null))
+  );
+}
+
+function isStaleDeliveryScopeDetail(value: unknown): value is WireStaleDeliveryScopeDetail {
+  if (!isErrorDetailRecord(value)) return false;
+  const allowed = ["actual_session_id", "agent_identity", "expected_session_id"] as readonly string[];
+  if (!Object.keys(value).every((key) => allowed.includes(key))) return false;
+  return (
+    (!Object.prototype.hasOwnProperty.call(value, "actual_session_id") || (typeof value.actual_session_id === "string" || value.actual_session_id === null)) &&
+    Object.prototype.hasOwnProperty.call(value, "agent_identity") && typeof value.agent_identity === "string" &&
+    Object.prototype.hasOwnProperty.call(value, "expected_session_id") && typeof value.expected_session_id === "string"
   );
 }
 
@@ -160,6 +178,18 @@ export class StaleFenceError extends MeerkatError {
   }
 }
 
+export class StaleDeliveryScopeError extends MeerkatError {
+  declare public readonly details: WireStaleDeliveryScopeDetail;
+  constructor(
+    message: string,
+    details: WireStaleDeliveryScopeDetail,
+    capabilityHint?: { capability_id: string; message: string },
+  ) {
+    super("STALE_DELIVERY_SCOPE", message, details, capabilityHint);
+    this.name = "StaleDeliveryScopeError";
+  }
+}
+
 export function meerkatErrorFromSemanticCode(
   code: string,
   message: string,
@@ -177,6 +207,9 @@ export function meerkatErrorFromSemanticCode(
   }
   if (code === "STALE_FENCE" && isStaleFenceDetail(details)) {
     return new StaleFenceError(message, details, capabilityHint);
+  }
+  if (code === "STALE_DELIVERY_SCOPE" && isStaleDeliveryScopeDetail(details)) {
+    return new StaleDeliveryScopeError(message, details, capabilityHint);
   }
   return new MeerkatError(code, message, details, capabilityHint);
 }

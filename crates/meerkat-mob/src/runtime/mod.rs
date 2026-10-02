@@ -211,6 +211,7 @@ mod builder;
 pub mod composition;
 pub mod conditions;
 mod delegation;
+mod delivery_scope;
 mod delivery_wait;
 mod disposal;
 mod edge_locks;
@@ -229,10 +230,10 @@ mod identity_recovery_test_support;
 mod live_bridge_operation;
 #[cfg(any(test, feature = "test-support"))]
 mod member_status_test_support;
+pub(crate) use handle::MemberTurnLlmIdentityAppliedSender;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
-pub use handle::ForkSupervisorExitForTest;
-pub(crate) use handle::MemberTurnLlmIdentityAppliedSender;
+pub use handle::{ForkSupervisorExitForTest, MemberTurnAdmissionTestStage};
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use identity_recovery_test_support::trigger_identity_recovery_fail_stop;
 #[cfg(any(test, feature = "test-support"))]
@@ -390,6 +391,10 @@ pub use delegation::{
     DelegationMemberOptions, DelegationParentContext, DelegationTerminalizedExecution,
     DelegationTurnTerminal, LiveDelegationTerminalEvidence, render_bounded_delegation_task,
 };
+pub use delivery_scope::{
+    DeliveryScopeDecodeError, MEMBER_DELIVERY_SCOPE_VERSION, MemberDeliveryScope,
+    ScopedRecoveryUnresolved, ScopedWorkRecovery, ScopedWorkState,
+};
 #[cfg(all(feature = "runtime-adapter", any(test, feature = "test-support")))]
 #[doc(hidden)]
 pub use delivery_wait::DeliveryInputSettleTestRelease;
@@ -434,8 +439,9 @@ pub use handle::{
     PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport, SpawnContinuityIntent,
     SpawnCustomizationContext, SpawnMemberAdmission, SpawnMemberAdmissionObservations,
     SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult, SpawnSource, SpawnSystemPromptOverride,
-    SpawnToolAdmission, SupervisorRotationReport, WorkBoundedTurnResult, WorkDeliveryReceipt,
-    WorkTurnHandle, mob_error_wire_code, profile_to_wire, stored_realm_profile_to_wire,
+    SpawnToolAdmission, SupervisorRotationReport, WorkAdmissionStage, WorkBoundedTurnResult,
+    WorkDeliveryReceipt, WorkTurnHandle, mob_error_wire_code, profile_to_wire,
+    stored_realm_profile_to_wire,
 };
 pub(crate) use handle::{
     CanonicalOpsOwnerContext, ExactTurnCompletionSender, FlowOperationCustody, MemberSpawnReceipt,

@@ -42,6 +42,13 @@ them.
   explicit-resume work defers the revival, so the wait can observe that
   operation's own completion.
 
+- `meerkat_machine_codegen::CompositionTlaError` gains the variants
+  `InvalidSuppliedMachine`, `DuplicateSuppliedMachine`,
+  `ShadowsCanonicalMachine`, `CanonicalNamedTypeMismatch`,
+  `DivergentNamedTypeBinding` and `InvalidCompositionForCatalog`, so
+  exhaustive matches need arms. `render_machine_semantic_model` now returns
+  `CanonicalNamedTypeMismatch` for a machine that keeps a canonical id but
+  drops or rebinds a canonical named type, where it used to panic.
 - `meerkat_runtime::EphemeralRuntimeDriver` is no longer `UnwindSafe` or
   `RefUnwindSafe`: it now holds the runtime admission signal added with the
   typed admission wait (#1431). Callers that relied on these auto traits (for
@@ -176,6 +183,19 @@ them.
     classes. The facade session runtime's `activate_instruction` now calls
     them too, with unchanged behaviour.
 
+- `meerkat_machine_codegen` renders a composition against a caller-supplied
+  machine catalog: `render_composition_semantic_model_with_catalog`,
+  `render_composition_ci_cfg_with_catalog`,
+  `render_composition_witness_cfg_with_catalog` and
+  `render_composition_driver_with_catalog`, for compositions whose machines
+  live outside Meerkat's catalog. The supplied catalog is validated first and
+  every problem is a typed `CompositionTlaError`: a machine that fails its own
+  validation, a duplicate machine id, a machine that reuses a canonical
+  Meerkat machine id with a different schema (a canonical machine may be
+  included unchanged, never shadowed), machines of one composition binding a
+  shared named type with different domain shapes, and a composition that does
+  not validate against the catalog. The canonical entry points are unchanged
+  and render byte-identically through the same implementation.
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a

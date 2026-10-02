@@ -390,6 +390,12 @@ them.
 
 ### Fixed
 
+- The runtime store test `contended_unregister_finalization_does_not_starve_runtime_worker`
+  no longer fails on a loaded host. Its two 1 s wall-clock waits are replaced
+  by typed handoffs. The heartbeat now fires on a test-only signal sent when
+  finalization starts waiting for the write lock, so the test still catches a
+  finalization that blocks the Tokio worker.
+
 - Three meerkat-mob-mcp tests no longer fail on a loaded host (#1509). They
   now assert ordering with events instead of wall-clock margins.
   `relink_past_max_run_retires_a_child_still_running` relies on the child's

@@ -322,6 +322,8 @@ printf '%s\n' \
   'echo "Error: Invariant NotGoalNotDelivered is violated."' \
   'echo "Error: Invariant NotGoalMaterialConflict is violated."' \
   'echo "Error: Invariant NotGoalMissing is violated."' \
+  'echo "Error: Action property AuditNeverUnregisters is violated."' \
+  'echo "Error: Action property AuditNeverUnregistersWithPreparation is violated."' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
 

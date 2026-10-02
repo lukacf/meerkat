@@ -9123,6 +9123,72 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || !self.live_delegation_worker_identity_by_operation.contains_key(operation_id))
         }
 
+        // #1476: live channel state belongs to the registered session. A
+        // channel binding names the current session, and once the session is
+        // unregistered neither binding state (the fields a close removes) nor
+        // terminal context-preparation records remain. Public request results,
+        // revocation tombstones and durable bridge/delegation custody are
+        // outside this invariant.
+        invariant live_channel_state_requires_registered_session {
+            for_all(channel_id in self.live_channel_session_by_channel.keys(),
+                meerkat_machine_session_id_matches_string(
+                    self.session_id,
+                    self.live_channel_session_by_channel.get_cloned(channel_id).get("value")
+                ) == true)
+            && for_all(bound_session in self.live_active_channel_by_session.keys(),
+                meerkat_machine_session_id_matches_string(self.session_id, bound_session) == true)
+            && (self.session_id != None
+                || (self.live_activation_receipt_by_channel == EmptyMap
+                    && self.live_active_channel_by_session == EmptyMap
+                    && self.live_active_interaction_by_channel == EmptyMap
+                    && self.live_awaiting_assistant_interaction_by_channel == EmptyMap
+                    && self.live_bridge_operation_by_channel == EmptyMap
+                    && self.live_channel_identity_by_channel == EmptyMap
+                    && self.live_channel_session_by_channel == EmptyMap
+                    && self.live_client_context_capable_channels == EmptySet
+                    && self.live_context_cursor_by_channel == EmptyMap
+                    && self.live_context_pending_append_by_channel == EmptyMap
+                    && self.live_context_pending_channel_by_append == EmptyMap
+                    && self.live_context_pending_next_cursor_by_append == EmptyMap
+                    && self.live_context_pending_previous_cursor_by_append == EmptyMap
+                    && self.live_context_queued_append_by_cursor == EmptyMap
+                    && self.live_context_queued_commit_token_by_append == EmptyMap
+                    && self.live_context_queued_cursor_by_append == EmptyMap
+                    && self.live_context_queued_digest_by_append == EmptyMap
+                    && self.live_context_queued_disposition_by_append == EmptyMap
+                    && self.live_context_queued_session_by_append == EmptyMap
+                    && self.live_delegation_active_worker_count_by_channel == EmptyMap
+                    && self.live_execution_fence_by_channel == EmptyMap
+                    && self.live_execution_generation_by_channel == EmptyMap
+                    && self.live_execution_mode_by_channel == EmptyMap
+                    && self.live_execution_profile_by_channel == EmptyMap
+                    && self.live_execution_runtime_id_by_channel == EmptyMap
+                    && self.live_experimental_execution_channels == EmptySet
+                    && self.live_experimental_pending_receipt_by_channel == EmptyMap
+                    && self.live_experimental_staged_fence_by_channel == EmptyMap
+                    && self.live_experimental_staged_generation_by_channel == EmptyMap
+                    && self.live_experimental_staged_runtime_by_channel == EmptyMap
+                    && self.live_experimental_staged_seed_cursor_by_channel == EmptyMap
+                    && self.live_function_bridge_capable_channels == EmptySet
+                    && self.live_playback_owner_by_channel == EmptyMap
+                    && self.live_playback_readiness_by_channel == EmptyMap
+                    && self.live_provider_turn_by_channel == EmptyMap
+                    && self.live_result_delivery_channel_by_operation == EmptyMap
+                    && self.live_result_delivery_digest_by_operation == EmptyMap
+                    && self.live_result_delivery_operation_by_channel == EmptyMap
+                    && self.live_context_preparation_phase_by_channel == EmptyMap
+                    && self.live_context_preparation_failure_by_channel == EmptyMap
+                    && self.live_context_preparation_lease_by_channel == EmptyMap
+                    && self.live_context_preparation_runtime_by_channel == EmptyMap
+                    && self.live_context_preparation_fence_by_channel == EmptyMap
+                    && self.live_context_preparation_generation_by_channel == EmptyMap
+                    && self.live_context_observation_counter_by_channel == EmptyMap
+                    && self.live_context_reserved_cursor_by_channel == EmptyMap
+                    && self.live_context_bootstrap_append_by_channel == EmptyMap
+                    && self.live_context_bootstrap_digest_by_channel == EmptyMap
+                    && self.live_context_ack_cut_by_channel == EmptyMap))
+        }
+
         invariant live_close_settlement_deferral_is_for_closed_channels {
             for_all(channel_id in self.live_close_settlement_deferred_channels,
                 !self.live_execution_runtime_id_by_channel.contains_key(channel_id)
@@ -10916,6 +10982,52 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "runtime_loop_drained" { self.unregister_runtime_loop_drain_pending == false }
             guard "comms_drain_exited" { self.unregister_comms_drain_exit_pending == false }
             guard "completion_waiters_drained" { self.unregister_completion_waiter_drain_pending == false }
+            // #1476: unregister follows the close of every live channel and the
+            // settlement of its close custody, so the close transitions remain
+            // the single authority that settles live obligations (deliveries,
+            // bridge operations, staged/bound execution custody). The guard is
+            // exactly "no channel binding state left": every field a close
+            // removes is empty.
+            guard "live_channels_closed" {
+                self.live_activation_receipt_by_channel == EmptyMap
+                && self.live_active_channel_by_session == EmptyMap
+                && self.live_active_interaction_by_channel == EmptyMap
+                && self.live_awaiting_assistant_interaction_by_channel == EmptyMap
+                && self.live_bridge_operation_by_channel == EmptyMap
+                && self.live_channel_identity_by_channel == EmptyMap
+                && self.live_channel_session_by_channel == EmptyMap
+                && self.live_client_context_capable_channels == EmptySet
+                && self.live_context_cursor_by_channel == EmptyMap
+                && self.live_context_pending_append_by_channel == EmptyMap
+                && self.live_context_pending_channel_by_append == EmptyMap
+                && self.live_context_pending_next_cursor_by_append == EmptyMap
+                && self.live_context_pending_previous_cursor_by_append == EmptyMap
+                && self.live_context_queued_append_by_cursor == EmptyMap
+                && self.live_context_queued_commit_token_by_append == EmptyMap
+                && self.live_context_queued_cursor_by_append == EmptyMap
+                && self.live_context_queued_digest_by_append == EmptyMap
+                && self.live_context_queued_disposition_by_append == EmptyMap
+                && self.live_context_queued_session_by_append == EmptyMap
+                && self.live_delegation_active_worker_count_by_channel == EmptyMap
+                && self.live_execution_fence_by_channel == EmptyMap
+                && self.live_execution_generation_by_channel == EmptyMap
+                && self.live_execution_mode_by_channel == EmptyMap
+                && self.live_execution_profile_by_channel == EmptyMap
+                && self.live_execution_runtime_id_by_channel == EmptyMap
+                && self.live_experimental_execution_channels == EmptySet
+                && self.live_experimental_pending_receipt_by_channel == EmptyMap
+                && self.live_experimental_staged_fence_by_channel == EmptyMap
+                && self.live_experimental_staged_generation_by_channel == EmptyMap
+                && self.live_experimental_staged_runtime_by_channel == EmptyMap
+                && self.live_experimental_staged_seed_cursor_by_channel == EmptyMap
+                && self.live_function_bridge_capable_channels == EmptySet
+                && self.live_playback_owner_by_channel == EmptyMap
+                && self.live_playback_readiness_by_channel == EmptyMap
+                && self.live_provider_turn_by_channel == EmptyMap
+                && self.live_result_delivery_channel_by_operation == EmptyMap
+                && self.live_result_delivery_digest_by_operation == EmptyMap
+                && self.live_result_delivery_operation_by_channel == EmptyMap
+            }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
@@ -10937,6 +11049,27 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_committed_visible_set_changed = false;
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
+                // #1476: every channel was closed first (guard), so its
+                // obligations were settled by the close transitions. The
+                // session's terminal context-preparation records (the whole
+                // preparation/bootstrap family, which its invariants keep
+                // together) go with it.
+                // Revocation tombstones (execution phase Revoked, the revoked
+                // set) are durable executor evidence captured into the live
+                // bridge recovery image, so they are kept.
+                self.live_context_preparation_phase_by_channel = EmptyMap;
+                self.live_context_preparation_failure_by_channel = EmptyMap;
+                self.live_context_preparation_lease_by_channel = EmptyMap;
+                self.live_context_preparation_runtime_by_channel = EmptyMap;
+                self.live_context_preparation_fence_by_channel = EmptyMap;
+                self.live_context_preparation_generation_by_channel = EmptyMap;
+                self.live_context_observation_counter_by_channel = EmptyMap;
+                self.live_context_reserved_cursor_by_channel = EmptyMap;
+                self.live_context_bootstrap_append_by_channel = EmptyMap;
+                self.live_context_bootstrap_digest_by_channel = EmptyMap;
+                self.live_context_ack_cut_by_channel = EmptyMap;
+                // A stop deferred for this runtime lifetime ends with it.
+                self.runtime_stop_deferred = false;
                 // Keep the terminal cleanup tombstone until the shell removes
                 // the exact runtime entry. A cancelled post-commit finalizer
                 // can then resume without reopening registration or losing
@@ -10956,6 +11089,52 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "runtime_loop_drained" { self.unregister_runtime_loop_drain_pending == false }
             guard "comms_drain_exited" { self.unregister_comms_drain_exit_pending == false }
             guard "completion_waiters_drained" { self.unregister_completion_waiter_drain_pending == false }
+            // #1476: unregister follows the close of every live channel and the
+            // settlement of its close custody, so the close transitions remain
+            // the single authority that settles live obligations (deliveries,
+            // bridge operations, staged/bound execution custody). The guard is
+            // exactly "no channel binding state left": every field a close
+            // removes is empty.
+            guard "live_channels_closed" {
+                self.live_activation_receipt_by_channel == EmptyMap
+                && self.live_active_channel_by_session == EmptyMap
+                && self.live_active_interaction_by_channel == EmptyMap
+                && self.live_awaiting_assistant_interaction_by_channel == EmptyMap
+                && self.live_bridge_operation_by_channel == EmptyMap
+                && self.live_channel_identity_by_channel == EmptyMap
+                && self.live_channel_session_by_channel == EmptyMap
+                && self.live_client_context_capable_channels == EmptySet
+                && self.live_context_cursor_by_channel == EmptyMap
+                && self.live_context_pending_append_by_channel == EmptyMap
+                && self.live_context_pending_channel_by_append == EmptyMap
+                && self.live_context_pending_next_cursor_by_append == EmptyMap
+                && self.live_context_pending_previous_cursor_by_append == EmptyMap
+                && self.live_context_queued_append_by_cursor == EmptyMap
+                && self.live_context_queued_commit_token_by_append == EmptyMap
+                && self.live_context_queued_cursor_by_append == EmptyMap
+                && self.live_context_queued_digest_by_append == EmptyMap
+                && self.live_context_queued_disposition_by_append == EmptyMap
+                && self.live_context_queued_session_by_append == EmptyMap
+                && self.live_delegation_active_worker_count_by_channel == EmptyMap
+                && self.live_execution_fence_by_channel == EmptyMap
+                && self.live_execution_generation_by_channel == EmptyMap
+                && self.live_execution_mode_by_channel == EmptyMap
+                && self.live_execution_profile_by_channel == EmptyMap
+                && self.live_execution_runtime_id_by_channel == EmptyMap
+                && self.live_experimental_execution_channels == EmptySet
+                && self.live_experimental_pending_receipt_by_channel == EmptyMap
+                && self.live_experimental_staged_fence_by_channel == EmptyMap
+                && self.live_experimental_staged_generation_by_channel == EmptyMap
+                && self.live_experimental_staged_runtime_by_channel == EmptyMap
+                && self.live_experimental_staged_seed_cursor_by_channel == EmptyMap
+                && self.live_function_bridge_capable_channels == EmptySet
+                && self.live_playback_owner_by_channel == EmptyMap
+                && self.live_playback_readiness_by_channel == EmptyMap
+                && self.live_provider_turn_by_channel == EmptyMap
+                && self.live_result_delivery_channel_by_operation == EmptyMap
+                && self.live_result_delivery_digest_by_operation == EmptyMap
+                && self.live_result_delivery_operation_by_channel == EmptyMap
+            }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
@@ -10977,6 +11156,27 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_committed_visible_set_changed = false;
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
+                // #1476: every channel was closed first (guard), so its
+                // obligations were settled by the close transitions. The
+                // session's terminal context-preparation records (the whole
+                // preparation/bootstrap family, which its invariants keep
+                // together) go with it.
+                // Revocation tombstones (execution phase Revoked, the revoked
+                // set) are durable executor evidence captured into the live
+                // bridge recovery image, so they are kept.
+                self.live_context_preparation_phase_by_channel = EmptyMap;
+                self.live_context_preparation_failure_by_channel = EmptyMap;
+                self.live_context_preparation_lease_by_channel = EmptyMap;
+                self.live_context_preparation_runtime_by_channel = EmptyMap;
+                self.live_context_preparation_fence_by_channel = EmptyMap;
+                self.live_context_preparation_generation_by_channel = EmptyMap;
+                self.live_context_observation_counter_by_channel = EmptyMap;
+                self.live_context_reserved_cursor_by_channel = EmptyMap;
+                self.live_context_bootstrap_append_by_channel = EmptyMap;
+                self.live_context_bootstrap_digest_by_channel = EmptyMap;
+                self.live_context_ack_cut_by_channel = EmptyMap;
+                // A stop deferred for this runtime lifetime ends with it.
+                self.runtime_stop_deferred = false;
                 // Keep Draining + the durability verdict through exact entry
                 // removal; the next registration starts on a fresh authority.
             }
@@ -10994,6 +11194,52 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "runtime_loop_drained" { self.unregister_runtime_loop_drain_pending == false }
             guard "comms_drain_exited" { self.unregister_comms_drain_exit_pending == false }
             guard "completion_waiters_drained" { self.unregister_completion_waiter_drain_pending == false }
+            // #1476: unregister follows the close of every live channel and the
+            // settlement of its close custody, so the close transitions remain
+            // the single authority that settles live obligations (deliveries,
+            // bridge operations, staged/bound execution custody). The guard is
+            // exactly "no channel binding state left": every field a close
+            // removes is empty.
+            guard "live_channels_closed" {
+                self.live_activation_receipt_by_channel == EmptyMap
+                && self.live_active_channel_by_session == EmptyMap
+                && self.live_active_interaction_by_channel == EmptyMap
+                && self.live_awaiting_assistant_interaction_by_channel == EmptyMap
+                && self.live_bridge_operation_by_channel == EmptyMap
+                && self.live_channel_identity_by_channel == EmptyMap
+                && self.live_channel_session_by_channel == EmptyMap
+                && self.live_client_context_capable_channels == EmptySet
+                && self.live_context_cursor_by_channel == EmptyMap
+                && self.live_context_pending_append_by_channel == EmptyMap
+                && self.live_context_pending_channel_by_append == EmptyMap
+                && self.live_context_pending_next_cursor_by_append == EmptyMap
+                && self.live_context_pending_previous_cursor_by_append == EmptyMap
+                && self.live_context_queued_append_by_cursor == EmptyMap
+                && self.live_context_queued_commit_token_by_append == EmptyMap
+                && self.live_context_queued_cursor_by_append == EmptyMap
+                && self.live_context_queued_digest_by_append == EmptyMap
+                && self.live_context_queued_disposition_by_append == EmptyMap
+                && self.live_context_queued_session_by_append == EmptyMap
+                && self.live_delegation_active_worker_count_by_channel == EmptyMap
+                && self.live_execution_fence_by_channel == EmptyMap
+                && self.live_execution_generation_by_channel == EmptyMap
+                && self.live_execution_mode_by_channel == EmptyMap
+                && self.live_execution_profile_by_channel == EmptyMap
+                && self.live_execution_runtime_id_by_channel == EmptyMap
+                && self.live_experimental_execution_channels == EmptySet
+                && self.live_experimental_pending_receipt_by_channel == EmptyMap
+                && self.live_experimental_staged_fence_by_channel == EmptyMap
+                && self.live_experimental_staged_generation_by_channel == EmptyMap
+                && self.live_experimental_staged_runtime_by_channel == EmptyMap
+                && self.live_experimental_staged_seed_cursor_by_channel == EmptyMap
+                && self.live_function_bridge_capable_channels == EmptySet
+                && self.live_playback_owner_by_channel == EmptyMap
+                && self.live_playback_readiness_by_channel == EmptyMap
+                && self.live_provider_turn_by_channel == EmptyMap
+                && self.live_result_delivery_channel_by_operation == EmptyMap
+                && self.live_result_delivery_digest_by_operation == EmptyMap
+                && self.live_result_delivery_operation_by_channel == EmptyMap
+            }
             update {
                 self.input_live_boundary_join_run = EmptyMap;
                 self.input_live_boundary_join_phase = EmptyMap;
@@ -11017,6 +11263,27 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_committed_visible_set_changed = false;
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
+                // #1476: every channel was closed first (guard), so its
+                // obligations were settled by the close transitions. The
+                // session's terminal context-preparation records (the whole
+                // preparation/bootstrap family, which its invariants keep
+                // together) go with it.
+                // Revocation tombstones (execution phase Revoked, the revoked
+                // set) are durable executor evidence captured into the live
+                // bridge recovery image, so they are kept.
+                self.live_context_preparation_phase_by_channel = EmptyMap;
+                self.live_context_preparation_failure_by_channel = EmptyMap;
+                self.live_context_preparation_lease_by_channel = EmptyMap;
+                self.live_context_preparation_runtime_by_channel = EmptyMap;
+                self.live_context_preparation_fence_by_channel = EmptyMap;
+                self.live_context_preparation_generation_by_channel = EmptyMap;
+                self.live_context_observation_counter_by_channel = EmptyMap;
+                self.live_context_reserved_cursor_by_channel = EmptyMap;
+                self.live_context_bootstrap_append_by_channel = EmptyMap;
+                self.live_context_bootstrap_digest_by_channel = EmptyMap;
+                self.live_context_ack_cut_by_channel = EmptyMap;
+                // A stop deferred for this runtime lifetime ends with it.
+                self.runtime_stop_deferred = false;
                 // Keep Draining + the durability verdict through exact entry
                 // removal; the next registration starts on a fresh authority.
             }
@@ -11034,6 +11301,52 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "runtime_loop_drained" { self.unregister_runtime_loop_drain_pending == false }
             guard "comms_drain_exited" { self.unregister_comms_drain_exit_pending == false }
             guard "completion_waiters_drained" { self.unregister_completion_waiter_drain_pending == false }
+            // #1476: unregister follows the close of every live channel and the
+            // settlement of its close custody, so the close transitions remain
+            // the single authority that settles live obligations (deliveries,
+            // bridge operations, staged/bound execution custody). The guard is
+            // exactly "no channel binding state left": every field a close
+            // removes is empty.
+            guard "live_channels_closed" {
+                self.live_activation_receipt_by_channel == EmptyMap
+                && self.live_active_channel_by_session == EmptyMap
+                && self.live_active_interaction_by_channel == EmptyMap
+                && self.live_awaiting_assistant_interaction_by_channel == EmptyMap
+                && self.live_bridge_operation_by_channel == EmptyMap
+                && self.live_channel_identity_by_channel == EmptyMap
+                && self.live_channel_session_by_channel == EmptyMap
+                && self.live_client_context_capable_channels == EmptySet
+                && self.live_context_cursor_by_channel == EmptyMap
+                && self.live_context_pending_append_by_channel == EmptyMap
+                && self.live_context_pending_channel_by_append == EmptyMap
+                && self.live_context_pending_next_cursor_by_append == EmptyMap
+                && self.live_context_pending_previous_cursor_by_append == EmptyMap
+                && self.live_context_queued_append_by_cursor == EmptyMap
+                && self.live_context_queued_commit_token_by_append == EmptyMap
+                && self.live_context_queued_cursor_by_append == EmptyMap
+                && self.live_context_queued_digest_by_append == EmptyMap
+                && self.live_context_queued_disposition_by_append == EmptyMap
+                && self.live_context_queued_session_by_append == EmptyMap
+                && self.live_delegation_active_worker_count_by_channel == EmptyMap
+                && self.live_execution_fence_by_channel == EmptyMap
+                && self.live_execution_generation_by_channel == EmptyMap
+                && self.live_execution_mode_by_channel == EmptyMap
+                && self.live_execution_profile_by_channel == EmptyMap
+                && self.live_execution_runtime_id_by_channel == EmptyMap
+                && self.live_experimental_execution_channels == EmptySet
+                && self.live_experimental_pending_receipt_by_channel == EmptyMap
+                && self.live_experimental_staged_fence_by_channel == EmptyMap
+                && self.live_experimental_staged_generation_by_channel == EmptyMap
+                && self.live_experimental_staged_runtime_by_channel == EmptyMap
+                && self.live_experimental_staged_seed_cursor_by_channel == EmptyMap
+                && self.live_function_bridge_capable_channels == EmptySet
+                && self.live_playback_owner_by_channel == EmptyMap
+                && self.live_playback_readiness_by_channel == EmptyMap
+                && self.live_provider_turn_by_channel == EmptyMap
+                && self.live_result_delivery_channel_by_operation == EmptyMap
+                && self.live_result_delivery_digest_by_operation == EmptyMap
+                && self.live_result_delivery_operation_by_channel == EmptyMap
+            }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
@@ -11055,6 +11368,27 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_committed_visible_set_changed = false;
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
+                // #1476: every channel was closed first (guard), so its
+                // obligations were settled by the close transitions. The
+                // session's terminal context-preparation records (the whole
+                // preparation/bootstrap family, which its invariants keep
+                // together) go with it.
+                // Revocation tombstones (execution phase Revoked, the revoked
+                // set) are durable executor evidence captured into the live
+                // bridge recovery image, so they are kept.
+                self.live_context_preparation_phase_by_channel = EmptyMap;
+                self.live_context_preparation_failure_by_channel = EmptyMap;
+                self.live_context_preparation_lease_by_channel = EmptyMap;
+                self.live_context_preparation_runtime_by_channel = EmptyMap;
+                self.live_context_preparation_fence_by_channel = EmptyMap;
+                self.live_context_preparation_generation_by_channel = EmptyMap;
+                self.live_context_observation_counter_by_channel = EmptyMap;
+                self.live_context_reserved_cursor_by_channel = EmptyMap;
+                self.live_context_bootstrap_append_by_channel = EmptyMap;
+                self.live_context_bootstrap_digest_by_channel = EmptyMap;
+                self.live_context_ack_cut_by_channel = EmptyMap;
+                // A stop deferred for this runtime lifetime ends with it.
+                self.runtime_stop_deferred = false;
                 // Keep Draining + the durability verdict through exact entry
                 // removal; the next registration starts on a fresh authority.
             }
@@ -11072,6 +11406,52 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "runtime_loop_drained" { self.unregister_runtime_loop_drain_pending == false }
             guard "comms_drain_exited" { self.unregister_comms_drain_exit_pending == false }
             guard "completion_waiters_drained" { self.unregister_completion_waiter_drain_pending == false }
+            // #1476: unregister follows the close of every live channel and the
+            // settlement of its close custody, so the close transitions remain
+            // the single authority that settles live obligations (deliveries,
+            // bridge operations, staged/bound execution custody). The guard is
+            // exactly "no channel binding state left": every field a close
+            // removes is empty.
+            guard "live_channels_closed" {
+                self.live_activation_receipt_by_channel == EmptyMap
+                && self.live_active_channel_by_session == EmptyMap
+                && self.live_active_interaction_by_channel == EmptyMap
+                && self.live_awaiting_assistant_interaction_by_channel == EmptyMap
+                && self.live_bridge_operation_by_channel == EmptyMap
+                && self.live_channel_identity_by_channel == EmptyMap
+                && self.live_channel_session_by_channel == EmptyMap
+                && self.live_client_context_capable_channels == EmptySet
+                && self.live_context_cursor_by_channel == EmptyMap
+                && self.live_context_pending_append_by_channel == EmptyMap
+                && self.live_context_pending_channel_by_append == EmptyMap
+                && self.live_context_pending_next_cursor_by_append == EmptyMap
+                && self.live_context_pending_previous_cursor_by_append == EmptyMap
+                && self.live_context_queued_append_by_cursor == EmptyMap
+                && self.live_context_queued_commit_token_by_append == EmptyMap
+                && self.live_context_queued_cursor_by_append == EmptyMap
+                && self.live_context_queued_digest_by_append == EmptyMap
+                && self.live_context_queued_disposition_by_append == EmptyMap
+                && self.live_context_queued_session_by_append == EmptyMap
+                && self.live_delegation_active_worker_count_by_channel == EmptyMap
+                && self.live_execution_fence_by_channel == EmptyMap
+                && self.live_execution_generation_by_channel == EmptyMap
+                && self.live_execution_mode_by_channel == EmptyMap
+                && self.live_execution_profile_by_channel == EmptyMap
+                && self.live_execution_runtime_id_by_channel == EmptyMap
+                && self.live_experimental_execution_channels == EmptySet
+                && self.live_experimental_pending_receipt_by_channel == EmptyMap
+                && self.live_experimental_staged_fence_by_channel == EmptyMap
+                && self.live_experimental_staged_generation_by_channel == EmptyMap
+                && self.live_experimental_staged_runtime_by_channel == EmptyMap
+                && self.live_experimental_staged_seed_cursor_by_channel == EmptyMap
+                && self.live_function_bridge_capable_channels == EmptySet
+                && self.live_playback_owner_by_channel == EmptyMap
+                && self.live_playback_readiness_by_channel == EmptyMap
+                && self.live_provider_turn_by_channel == EmptyMap
+                && self.live_result_delivery_channel_by_operation == EmptyMap
+                && self.live_result_delivery_digest_by_operation == EmptyMap
+                && self.live_result_delivery_operation_by_channel == EmptyMap
+            }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
@@ -11093,6 +11473,27 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_committed_visible_set_changed = false;
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
+                // #1476: every channel was closed first (guard), so its
+                // obligations were settled by the close transitions. The
+                // session's terminal context-preparation records (the whole
+                // preparation/bootstrap family, which its invariants keep
+                // together) go with it.
+                // Revocation tombstones (execution phase Revoked, the revoked
+                // set) are durable executor evidence captured into the live
+                // bridge recovery image, so they are kept.
+                self.live_context_preparation_phase_by_channel = EmptyMap;
+                self.live_context_preparation_failure_by_channel = EmptyMap;
+                self.live_context_preparation_lease_by_channel = EmptyMap;
+                self.live_context_preparation_runtime_by_channel = EmptyMap;
+                self.live_context_preparation_fence_by_channel = EmptyMap;
+                self.live_context_preparation_generation_by_channel = EmptyMap;
+                self.live_context_observation_counter_by_channel = EmptyMap;
+                self.live_context_reserved_cursor_by_channel = EmptyMap;
+                self.live_context_bootstrap_append_by_channel = EmptyMap;
+                self.live_context_bootstrap_digest_by_channel = EmptyMap;
+                self.live_context_ack_cut_by_channel = EmptyMap;
+                // A stop deferred for this runtime lifetime ends with it.
+                self.runtime_stop_deferred = false;
                 // Keep Draining + the durability verdict through exact entry
                 // removal; the next registration starts on a fresh authority.
             }

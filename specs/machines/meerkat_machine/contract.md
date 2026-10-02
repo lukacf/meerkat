@@ -2243,6 +2243,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `comms_drain_exited`
   - `completion_waiters_drained`
   - `live_channels_closed`
+  - `live_recovery_obligations_settled`
 - To: `Idle`
 
 ### `UnregisterSessionAttached`
@@ -2259,6 +2260,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `comms_drain_exited`
   - `completion_waiters_drained`
   - `live_channels_closed`
+  - `live_recovery_obligations_settled`
 - To: `Idle`
 
 ### `UnregisterSessionRunning`
@@ -2275,6 +2277,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `comms_drain_exited`
   - `completion_waiters_drained`
   - `live_channels_closed`
+  - `live_recovery_obligations_settled`
 - To: `Idle`
 
 ### `UnregisterSessionRetired`
@@ -2291,6 +2294,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `comms_drain_exited`
   - `completion_waiters_drained`
   - `live_channels_closed`
+  - `live_recovery_obligations_settled`
 - To: `Retired`
 
 ### `UnregisterSessionStopped`
@@ -2307,6 +2311,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `comms_drain_exited`
   - `completion_waiters_drained`
   - `live_channels_closed`
+  - `live_recovery_obligations_settled`
 - To: `Idle`
 
 ### `ResolveRuntimeOpsLifecycleDurabilityIdle`
@@ -14665,6 +14670,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
 - Guards:
+  - `session_registered`
   - `exactly_one_close_receipt_is_present`
   - `closed_tombstone_matches`
 - Emits: `LiveChannelCloseCustodyRevoked`
@@ -14674,6 +14680,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
 - Guards:
+  - `session_registered`
   - `exactly_one_close_receipt_is_present`
   - `closed_tombstone_matches`
 - Emits: `LiveChannelCloseCustodyRevoked`
@@ -14683,6 +14690,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
 - Guards:
+  - `session_registered`
   - `exactly_one_close_receipt_is_present`
   - `closed_tombstone_matches`
 - Emits: `LiveChannelCloseCustodyRevoked`
@@ -14692,6 +14700,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
 - Guards:
+  - `session_registered`
   - `exactly_one_close_receipt_is_present`
   - `closed_tombstone_matches`
 - Emits: `LiveChannelCloseCustodyRevoked`
@@ -14701,6 +14710,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
 - Guards:
+  - `session_registered`
   - `exactly_one_close_receipt_is_present`
   - `closed_tombstone_matches`
 - Emits: `LiveChannelCloseCustodyRevoked`

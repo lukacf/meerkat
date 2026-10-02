@@ -49391,3 +49391,137 @@ async fn run_input_read_refuses_a_driver_replaced_or_removed_while_it_waited() {
         "a removed session is not held: {removed:?}"
     );
 }
+
+/// #1476: the production close of a staged live channel (custody revoke,
+/// then the recorded close) must leave the session unregisterable. The close
+/// keeps the receipts, execution mode/profile and capability sets as its
+/// tombstone (closed replays match against it), so unregister must not
+/// require them to be empty.
+#[test]
+fn unregister_completes_after_normal_close_of_a_staged_live_channel() {
+    let session = mm_dsl::SessionId("staged-close-session".to_string());
+    let runtime = mm_dsl::AgentRuntimeId("staged-close-runtime".to_string());
+    let s = "staged-close-session".to_string();
+    let c = "staged-close-channel".to_string();
+    let mut authority = registered_dsl_authority_for_session("staged-close-session");
+    let mut apply = |input: mm_dsl::MeerkatMachineInput, step: &str| {
+        mm_dsl::MeerkatMachineMutator::apply(&mut authority, input)
+            .unwrap_or_else(|error| panic!("{step}: {error:?}"));
+    };
+    apply(
+        mm_dsl::MeerkatMachineInput::PrepareBindings {
+            agent_runtime_id: runtime.clone(),
+            fence_token: mm_dsl::FenceToken(1),
+            generation: Some(mm_dsl::Generation(1)),
+            runtime_epoch_id: None,
+            session_id: session.clone(),
+        },
+        "prepare bindings",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::ResolveLiveOpenAdmission {
+            session_id: s.clone(),
+            channel_id: c.clone(),
+            llm_identity: dsl_live_identity("gpt-realtime-2"),
+        },
+        "live open",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::ResolveLiveExecutionModeAdmission {
+            session_id: s.clone(),
+            channel_id: c.clone(),
+            profile_id: "profile".to_string(),
+            requested_mode: mm_dsl::LiveExecutionMode::FunctionBridge,
+            function_bridge_available: true,
+            client_context_available: false,
+        },
+        "execution mode",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::StageExperimentalLiveExecution {
+            session_id: s.clone(),
+            channel_id: c.clone(),
+            runtime_id: runtime.clone(),
+            fence_token: mm_dsl::FenceToken(1),
+            generation: mm_dsl::Generation(1),
+            canonical_seed_cursor: 0,
+            pending_receipt: "pending".to_string(),
+        },
+        "stage",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::RevokeLiveChannelCloseCustody {
+            session_id: s.clone(),
+            channel_id: c.clone(),
+            pending_receipt: Some("pending".to_string()),
+            activation_receipt: None,
+        },
+        "revoke close custody",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::RecordLiveCloseClosed {
+            session_id: s.clone(),
+            channel_id: c.clone(),
+            close_observation_sequence: 1,
+        },
+        "record closed",
+    );
+    let binding = |input: fn(
+        mm_dsl::SessionId,
+        Option<mm_dsl::AgentRuntimeId>,
+        Option<mm_dsl::FenceToken>,
+        Option<mm_dsl::Generation>,
+    ) -> mm_dsl::MeerkatMachineInput| {
+        input(
+            session.clone(),
+            Some(runtime.clone()),
+            Some(mm_dsl::FenceToken(1)),
+            Some(mm_dsl::Generation(1)),
+        )
+    };
+    apply(
+        binding(|session_id, agent_runtime_id, fence_token, generation| {
+            mm_dsl::MeerkatMachineInput::BeginUnregisterSession {
+                session_id,
+                agent_runtime_id,
+                fence_token,
+                generation,
+                runtime_epoch_id: None,
+            }
+        }),
+        "begin unregister",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
+            session_id: session.clone(),
+            forced_abort: false,
+        },
+        "runtime loop stopped",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::CommsDrainExitedForUnregister {
+            session_id: session.clone(),
+            forced_abort: false,
+        },
+        "comms drain exited",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::CompletionWaitersResolvedForUnregister {
+            session_id: session.clone(),
+        },
+        "completion waiters resolved",
+    );
+    apply(
+        binding(|session_id, agent_runtime_id, fence_token, generation| {
+            mm_dsl::MeerkatMachineInput::UnregisterSession {
+                session_id,
+                agent_runtime_id,
+                fence_token,
+                generation,
+                runtime_epoch_id: None,
+            }
+        }),
+        "unregister after a normal live close",
+    );
+    assert_eq!(authority.state().session_id, None);
+}

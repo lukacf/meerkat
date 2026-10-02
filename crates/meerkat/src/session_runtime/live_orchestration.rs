@@ -55,6 +55,19 @@ use crate::session_runtime::errors::LiveOpenPrecheckError;
 /// close verb applies it on every feature set.
 pub const LIVE_CLOSE_CONFIRMATION_BOUND: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// How long an accepted playback terminal (a truncation or completion the
+/// adapter queued for the provider) may wait for its settlement. The
+/// settlement resolves when the provider's acknowledging observation crosses
+/// the projection sink and SessionDocument terminal authority, when the
+/// channel closes, when its playback waiters are failed, or when the pump
+/// terminates. It can wait forever only if a connected provider never sends
+/// that observation, so this is a failure bound on the provider, not a pacing
+/// timer. Past it the terminal is treated as ambiguous: the exact target is
+/// retained for projection-owner retry and the channel closes with
+/// `LiveChannelCloseReason::Error`.
+pub const LIVE_PLAYBACK_TERMINAL_SETTLEMENT_BOUND: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
 /// How long one deferred close-time playback settlement waits for the
 /// member's turn-finalization boundary before trying again. A member turn is
 /// bounded by its own tool round; ten minutes covers the longest ordinary
@@ -4588,7 +4601,7 @@ mod orchestrator {
                 });
             let settlement_result = match acceptance_result {
                 Ok(()) => match tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
+                    super::LIVE_PLAYBACK_TERMINAL_SETTLEMENT_BOUND,
                     settlement.settle(),
                 )
                 .await

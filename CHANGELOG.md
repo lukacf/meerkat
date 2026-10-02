@@ -35,6 +35,18 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- The GitHub-hosted Linux release binary jobs work again. The release
+  container marked the workspace safe for Git only after setup-rust-ci had
+  already asked Git for the repository root ("detected dubious ownership",
+  every run since 2026-08-28), and on the 16 GB runners the release build of
+  `meerkat-machine-schema` (8.7 GB peak) overlapping `meerkat-mob` (9.0 GB)
+  was OOM-killed on aarch64. The workspace is now trusted right after
+  Checkout, and the Linux build runs two jobs with the schema crate at
+  `opt-level = 1` (6.3 GB) through `--config`, so asset recovery dispatches
+  can build older tags too.
+
 ## [0.8.50] - 2026-10-01
 
 ### Breaking

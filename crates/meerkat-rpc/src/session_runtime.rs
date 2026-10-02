@@ -1885,13 +1885,10 @@ fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
 
 fn combine_rpc_cleanup_error(
     mut primary_error: RpcError,
-    cleanup_error: impl std::fmt::Display,
-    context: &str,
+    _cleanup_error: impl std::fmt::Display,
+    _context: &str,
 ) -> RpcError {
-    primary_error.message = format!(
-        "{}; additionally failed to {context}: {cleanup_error}",
-        primary_error.message
-    );
+    primary_error.message.push_str("; required cleanup failed");
     primary_error
 }
 
@@ -4394,7 +4391,15 @@ impl SessionRuntime {
             .await
         {
             Ok(()) => primary_error,
-            Err(cleanup_error) => combine_rpc_cleanup_error(primary_error, cleanup_error, context),
+            Err(cleanup_error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %cleanup_error,
+                    context,
+                    "recovered runtime cleanup failed"
+                );
+                combine_rpc_cleanup_error(primary_error, cleanup_error, context)
+            }
         }
     }
 
@@ -13135,6 +13140,7 @@ mod tests {
         fail_lifecycle_after_successes: AtomicUsize,
         fail_delete_ops_once: AtomicBool,
         fail_catalog_read_once: AtomicBool,
+        cleanup_wire_store_calls: StdMutex<Vec<(&'static str, meerkat_runtime::LogicalRuntimeId)>>,
     }
 
     impl FailingLifecycleRuntimeStore {
@@ -13147,7 +13153,19 @@ mod tests {
                 fail_lifecycle_after_successes: AtomicUsize::new(usize::MAX),
                 fail_delete_ops_once: AtomicBool::new(false),
                 fail_catalog_read_once: AtomicBool::new(false),
+                cleanup_wire_store_calls: StdMutex::new(Vec::new()),
             }
+        }
+
+        fn record_cleanup_wire_store_call(
+            &self,
+            method: &'static str,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) {
+            self.cleanup_wire_store_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((method, runtime_id.clone()));
         }
 
         fn set_fail_snapshot(&self, fail: bool) {
@@ -13511,9 +13529,20 @@ mod tests {
                     "synthetic service-turn lifecycle commit failure".to_string(),
                 ));
             }
-            self.inner
+            let result = self
+                .inner
                 .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
-                .await
+                .await;
+            if matches!(
+                &result,
+                Ok(meerkat_runtime::store::MachineLifecycleCasOutcome::Applied { .. })
+            ) {
+                self.record_cleanup_wire_store_call(
+                    "compare_and_swap_machine_lifecycle_applied",
+                    runtime_id,
+                );
+            }
+            result
         }
 
         async fn compare_and_swap_machine_lifecycle_with_fence(
@@ -13895,7 +13924,9 @@ mod tests {
             commit: meerkat_runtime::store::MachineLifecycleCommit,
             input_states: &[InputStatePersistenceRecord],
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.record_cleanup_wire_store_call("commit_machine_lifecycle", runtime_id);
             if self.take_lifecycle_failure() {
+                self.record_cleanup_wire_store_call("commit_machine_lifecycle_failed", runtime_id);
                 return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
                     "synthetic service-turn lifecycle commit failure".to_string(),
                 ));
@@ -13910,7 +13941,12 @@ mod tests {
             runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
             finalization: meerkat_runtime::store::UnregisterFinalizationCommit,
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.record_cleanup_wire_store_call("commit_unregister_finalization", runtime_id);
             if self.take_lifecycle_failure() {
+                self.record_cleanup_wire_store_call(
+                    "commit_unregister_finalization_failed",
+                    runtime_id,
+                );
                 return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
                     "synthetic service-turn lifecycle commit failure".to_string(),
                 ));
@@ -13963,6 +13999,7 @@ mod tests {
             &self,
             runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.record_cleanup_wire_store_call("delete_ops_lifecycle", runtime_id);
             if self
                 .fail_delete_ops_once
                 .swap(false, AtomicOrdering::AcqRel)
@@ -15850,10 +15887,14 @@ mod tests {
             "combined error must retain the create failure: {failed:?}"
         );
         assert!(
-            failed
+            failed.message.ends_with("; required cleanup failed"),
+            "combined error must retain the finite cleanup indication: {failed:?}"
+        );
+        assert!(
+            !failed
                 .message
                 .contains("synthetic service-turn lifecycle commit failure"),
-            "combined error must retain the unregister failure: {failed:?}"
+            "private unregister diagnostic must stay off the wire: {failed:?}"
         );
         let retry_session_id = runtime
             .create_session_after_prepare_bindings_session_id
@@ -29477,5 +29518,290 @@ mod tests {
             !matches!(parked, Err(SessionError::Busy { .. })),
             "the parked projection was never refused as released: {parked:?}"
         );
+    }
+
+    // Current-API generic setup failure only, not governed native refusal.
+    mod setup_cleanup_wire_privacy {
+        use super::*;
+        use futures::FutureExt;
+        use meerkat_runtime::RuntimeStore;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        const PRIMARY_SETUP_MESSAGE: &str = "synthetic public post-prepare setup failure";
+        const PRIVATE_CLEANUP_CANARY: &str = "synthetic service-turn lifecycle commit failure";
+        const PROMPT: &str = "ordinary setup-cleanup JSONL control";
+
+        async fn send_jsonl(writer: &mut tokio::io::DuplexStream, request: serde_json::Value) {
+            writer
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .expect("write JSONL request");
+            writer.flush().await.expect("flush JSONL request");
+        }
+
+        async fn response_for(
+            frames: &mut tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+            id: u64,
+        ) -> serde_json::Value {
+            while let Some(frame) = frames.recv().await {
+                if frame.get("method").is_none() && frame["id"] == id {
+                    return frame;
+                }
+            }
+            panic!("JSONL stream ended before response {id}");
+        }
+
+        async fn run_wire_case(fail_cleanup: bool) {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let store = Arc::new(FailingLifecycleRuntimeStore::new());
+            let client = Arc::new(RecordingMessagesLlmClient::default());
+            let config = Config::default();
+            let runtime = Arc::new(SessionRuntime::new(
+                temp_factory(&temp),
+                config.clone(),
+                1,
+                meerkat::PersistenceBundle::new(
+                    Arc::new(meerkat::MemoryStore::new()),
+                    store.clone(),
+                    Arc::new(meerkat_store::MemoryBlobStore::new()),
+                ),
+                crate::router::NotificationSink::noop(),
+            ));
+            runtime.set_default_llm_client(Some(client.clone()));
+            let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+                meerkat_core::MemoryConfigStore::new(config, meerkat_models::canonical()),
+            );
+            runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
+                config_store.clone(),
+                temp.path().join("config_state.json"),
+            )));
+            if fail_cleanup {
+                *runtime
+                    .create_session_after_prepare_bindings_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(PRIMARY_SETUP_MESSAGE.to_string());
+                // Preserve the existing real preparation commit, then fault the
+                // following cleanup lifecycle commit at its actual store method.
+                store.fail_lifecycle_commit_after(1);
+            }
+            assert!(
+                store
+                    .cleanup_wire_store_calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty()
+            );
+
+            let (server_reader, mut writer) = tokio::io::duplex(65_536);
+            let (client_reader, server_writer) = tokio::io::duplex(65_536);
+            let wire = Arc::new(StdMutex::new(Vec::<String>::new()));
+            let capture = wire.clone();
+            let (frames_tx, mut frames_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut reader_task = tokio::spawn(async move {
+                let mut lines = BufReader::new(client_reader).lines();
+                while let Some(line) = lines.next_line().await.map_err(|error| error.to_string())? {
+                    capture
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(line.clone());
+                    let frame = serde_json::from_str(&line).map_err(|error| error.to_string())?;
+                    frames_tx.send(frame).map_err(|error| error.to_string())?;
+                }
+                Ok::<(), String>(())
+            });
+            let server_runtime = runtime.clone();
+            let mut server_task = tokio::spawn(async move {
+                let mut server = crate::server::RpcServer::new(
+                    BufReader::new(server_reader),
+                    server_writer,
+                    server_runtime,
+                    config_store,
+                );
+                // The failure case must retain its actual repair-blocked owner.
+                // Use the existing shared-connection EOF behavior, not a test
+                // erasure or a forced successful cleanup of that owner.
+                server.skip_shutdown_on_eof = fail_cleanup;
+                server.run().await
+            });
+
+            let scenario = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                std::panic::AssertUnwindSafe(async {
+                    send_jsonl(&mut writer, serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1, "method": "session/create",
+                        "params": {
+                            "prompt": [], "initial_turn": "deferred",
+                            "model": "claude-sonnet-4-5", "provider": "anthropic",
+                            "enable_builtins": false, "enable_shell": false,
+                            "enable_web_search": false,
+                        }
+                    })).await;
+                    let created = response_for(&mut frames_rx, 1).await;
+                    if fail_cleanup {
+                        assert_eq!(created["error"]["code"], error::INTERNAL_ERROR,
+                            "preserve the real generic setup class: {created}");
+                        assert!(created.get("result").is_none());
+                        assert!(created["error"]["message"].as_str().unwrap()
+                            .contains(PRIMARY_SETUP_MESSAGE), "primary setup failure: {created}");
+                        assert!(created["error"].get("data").is_none(),
+                            "this current setup hook has no native refusal detail: {created}");
+                        let session_id = runtime.create_session_after_prepare_bindings_session_id
+                            .lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+                            .expect("real post-prepare hook reached after registration");
+                        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+                        let observed = store.cleanup_wire_store_calls.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                        assert_eq!(observed.iter().filter(|(method, id)|
+                            *method == "commit_machine_lifecycle_failed" && id == &runtime_id)
+                            .count(), 1, "actual cleanup commit must fail before privacy is checked: {observed:?}");
+                        assert_eq!(observed, vec![
+                            ("compare_and_swap_machine_lifecycle_applied", runtime_id.clone()),
+                            ("commit_machine_lifecycle", runtime_id.clone()),
+                            ("commit_machine_lifecycle_failed", runtime_id.clone()),
+                        ], "real preparation CAS succeeds before the cleanup commit fails");
+                        assert!(runtime.runtime_adapter.contains_session(&session_id).await,
+                            "failed cleanup retains its real registration");
+                        assert!(client.requests().is_empty(), "setup failure cannot execute a model request");
+                        assert!(store.load_input_states_strict(&runtime_id).await.unwrap().is_empty(),
+                            "no input was admitted before the setup hook");
+                        assert!(store.load_committed_whole_blob_snapshot(&runtime_id).await.unwrap().is_none(),
+                            "failed pre-actor setup did not publish a session document");
+                        assert!(!runtime.service.live_session_actor_registered(&session_id).await,
+                            "do not manufacture cleanup eligibility by removing an actor");
+                        let retry = runtime.archive_runtime_cleanup().run(&session_id).await
+                            .expect_err("genuine lifecycle failure remains repair-blocked");
+                        assert!(retry.to_string().contains("Runtime recovery is repair-blocked"));
+                        assert!(retry.to_string().contains("ordinary_lifecycle_commit"));
+                        assert!(runtime.runtime_adapter.contains_session(&session_id).await);
+                        assert_eq!(store.cleanup_wire_store_calls.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner).len(), observed.len(),
+                            "repair-blocked retry must not reach another store mutation");
+                    } else {
+                        assert!(created.get("error").is_none(), "real healthy creation: {created}");
+                        let session_id: SessionId = serde_json::from_value(
+                            created["result"]["session_id"].clone()).expect("actual session id");
+                        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+                        assert!(client.requests().is_empty(), "deferred create is not a model turn");
+                        assert!(store.load_input_states_strict(&runtime_id).await.unwrap().is_empty());
+                        send_jsonl(&mut writer, serde_json::json!({
+                            "jsonrpc": "2.0", "id": 2, "method": "turn/start",
+                            "params": {"session_id": session_id, "prompt": PROMPT}
+                        })).await;
+                        let completed = response_for(&mut frames_rx, 2).await;
+                        assert!(completed.get("error").is_none(), "healthy wire turn: {completed}");
+                        assert_eq!(completed["result"]["text"], "recorded");
+                        assert_eq!(completed["result"]["tool_calls"], 0);
+                        assert_eq!(client.requests().len(), 1, "actual configured model invocation");
+                        let rows = store.load_input_states_strict(&runtime_id).await.unwrap();
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0].seed.phase,
+                            meerkat_runtime::input_state::InputLifecycleState::Consumed);
+                        assert_eq!(rows[0].seed.terminal_outcome,
+                            Some(meerkat_runtime::input_state::InputTerminalOutcome::Consumed));
+                        let document = store.load_committed_whole_blob_snapshot(&runtime_id).await.unwrap()
+                            .expect("actual stock session document");
+                        assert!(document.session().messages().iter().any(|message|
+                            matches!(message, Message::User(user) if user.text_content() == PROMPT)));
+                        assert!(serde_json::to_string(document.session().messages()).unwrap().contains("recorded"));
+                    }
+                }).catch_unwind(),
+            ).await;
+
+            // Both tasks are joined or aborted and joined on every assertion,
+            // transport error and scenario timeout path. Keep all output lines.
+            drop(writer);
+            let server_cleanup =
+                match tokio::time::timeout(std::time::Duration::from_secs(5), &mut server_task)
+                    .await
+                {
+                    Ok(joined) => Some(joined),
+                    Err(_) => {
+                        server_task.abort();
+                        let _ = server_task.await;
+                        None
+                    }
+                };
+            let reader_cleanup =
+                match tokio::time::timeout(std::time::Duration::from_secs(5), &mut reader_task)
+                    .await
+                {
+                    Ok(joined) => Some(joined),
+                    Err(_) => {
+                        reader_task.abort();
+                        let _ = reader_task.await;
+                        None
+                    }
+                };
+            match scenario {
+                Ok(Ok(())) => {}
+                Ok(Err(payload)) => std::panic::resume_unwind(payload),
+                Err(error) => panic!("bounded setup/cleanup JSONL scenario: {error}"),
+            }
+            server_cleanup
+                .expect("bounded server shutdown")
+                .expect("server joined")
+                .expect("server result");
+            reader_cleanup
+                .expect("bounded output EOF")
+                .expect("reader joined")
+                .expect("all JSONL output parsed");
+            let lines = wire
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let frames: Vec<serde_json::Value> = lines
+                .iter()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert!(!frames.is_empty(), "actual wire output is required");
+            assert!(
+                !frames.iter().any(|frame| frame["method"] == "tool/execute"),
+                "no callback receiver effect in either fixture"
+            );
+            assert!(
+                !lines.join("\n").contains(PRIVATE_CLEANUP_CANARY),
+                "private cleanup diagnostic must never enter any response or notification"
+            );
+        }
+
+        #[tokio::test]
+        async fn setup_cleanup_failure_keeps_primary_code_and_private_detail_off_jsonl() {
+            run_wire_case(true).await;
+        }
+
+        #[tokio::test]
+        async fn healthy_setup_and_turn_use_real_jsonl_and_persist_the_result() {
+            run_wire_case(false).await;
+        }
+    }
+
+    #[test]
+    fn cleanup_error_projection_preserves_primary_fields_and_redacts_private_detail() {
+        const PRIMARY_MESSAGE: &str = "synthetic primary setup failure";
+        const PRIVATE_DETAIL: &str = "PRIVATE_CLEANUP_DISPLAY_CANARY";
+        const PRIVATE_CONTEXT: &str = "PRIVATE_CLEANUP_CONTEXT_CANARY";
+        let primary_data = serde_json::json!({
+            "kind": "synthetic_primary_data",
+            "nested": { "items": [2, 1, 2], "present": true }
+        });
+        let combined = combine_rpc_cleanup_error(
+            RpcError {
+                code: error::INVALID_PARAMS,
+                message: PRIMARY_MESSAGE.to_string(),
+                data: Some(primary_data.clone()),
+            },
+            PRIVATE_DETAIL,
+            PRIVATE_CONTEXT,
+        );
+
+        assert_eq!(combined.code, error::INVALID_PARAMS);
+        assert_eq!(combined.data, Some(primary_data));
+        assert_eq!(
+            combined.message,
+            "synthetic primary setup failure; required cleanup failed"
+        );
+        let public_error = serde_json::to_string(&combined).expect("serialize public RPC error");
+        assert!(!public_error.contains(PRIVATE_DETAIL));
+        assert!(!public_error.contains(PRIVATE_CONTEXT));
     }
 }

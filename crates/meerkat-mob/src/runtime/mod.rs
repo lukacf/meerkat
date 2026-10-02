@@ -284,7 +284,11 @@ mod member_history_proxy;
 // Controlling-side live-channel bridge proxy (phase 6b, DEC-P6B-C6). NOTE
 // for the lead's consolidated gate edit (ADJ-P6B-17): this module is a
 // `BridgeReply` consumer by construction and joins BRIDGE_CLASSIFIER_FILES.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod member_instruction;
 mod member_live_proxy;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub use member_instruction::MemberInstructionActivationError;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub(crate) mod member_operator_forwarder;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]

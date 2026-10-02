@@ -230,6 +230,8 @@ pub use run::{
 pub use runtime::DeliveryInputSettleTestRelease;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::FactoryChainSpawnBasePromptSource;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub use runtime::MemberInstructionActivationError;
 pub use runtime::RestoreIncompatible;
 pub use runtime::bridge::{MobBoundMemberRuntimeBridge, MobMemberRuntimeBridge};
 pub use runtime::bridge_protocol::{

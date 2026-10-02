@@ -1165,6 +1165,27 @@ pub trait MobSessionService:
         ))
     }
 
+    /// Append one typed instruction activation to the live session's durable
+    /// transcript while the caller holds the runtime turn-finalization
+    /// boundary (see [`crate::MobHandle::activate_member_instruction`]).
+    /// Keyed by the request's activation identity: re-applying the effective
+    /// activation is `InstructionActivationMutation::Duplicate`, never a
+    /// second System row.
+    ///
+    /// The default is a typed refusal, never a silent success: a decorator
+    /// that does not forward this method must not drop activations quietly.
+    /// Every production wrapper over a durable owner forwards it explicitly.
+    async fn activate_instruction_under_runtime_turn_boundary(
+        &self,
+        _session_id: &SessionId,
+        _request: meerkat_core::InstructionActivationRequest,
+        _write_fence: Option<Arc<dyn meerkat_runtime::RuntimeStoreWriteFence>>,
+    ) -> Result<meerkat_core::InstructionActivationMutation, SessionError> {
+        Err(SessionError::Unsupported(
+            "instruction activation is not supported by this session service".to_string(),
+        ))
+    }
+
     /// Commit one provider-final client-delegation transcript through the
     /// canonical session actor, SessionDocument authority, and runtime-backed
     /// persistent projection.
@@ -2740,6 +2761,18 @@ where
         )
         .await
         .map(|_| ())
+    }
+
+    async fn activate_instruction_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        request: meerkat_core::InstructionActivationRequest,
+        write_fence: Option<Arc<dyn meerkat_runtime::RuntimeStoreWriteFence>>,
+    ) -> Result<meerkat_core::InstructionActivationMutation, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::activate_instruction_under_runtime_turn_boundary(
+            self, session_id, request, write_fence,
+        )
+        .await
     }
 
     async fn publish_boundary_appends_discarded_for_actor(

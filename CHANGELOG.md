@@ -148,6 +148,34 @@ them.
   that the file exists or realizes the anchored semantics; the owning
   coverage validator checks that. The built-in catalogs now construct their
   anchors through the same parser.
+- Member-level safe-boundary instruction activation, so a host can change a
+  restored member's standing instructions (resume inherits persisted prompt
+  state, so build-time instructions cannot reach it):
+  - `MobHandle::activate_member_instruction(identity, request)` holds the
+    member session's runtime turn-finalization boundary (and, with
+    `openai-live`, the live-open lifecycle lease), applies the shared runtime
+    admission, and appends one keyed `InstructionActivationRequest` through
+    the session owner. It returns the native `InstructionActivationReceipt`:
+    `Applied`, or `Duplicate` for a re-apply of the effective activation (no
+    second record, no accreting System row). Refusals are the typed
+    `MemberInstructionActivationError::Admission { code, .. }`
+    (`TargetNotMaterialized`, `SessionBusy`, `LiveChannelOpen`,
+    `UnsupportedCurrentLowering`, `DurabilityUnavailable`, fence conflict or
+    backoff); nothing is appended. No new journal.
+  - `MobHandle::read_member_instruction_activations(identity, query)` reads
+    the member session's durable activation records.
+  - `MobSessionService::activate_instruction_under_runtime_turn_boundary`,
+    with a default that returns the typed `SessionError::Unsupported`
+    (classified `DurabilityUnavailable`), never a silent success. The
+    `PersistentSessionService` implementation forwards it; every production
+    decorator over a durable owner must forward it explicitly.
+  - `meerkat_runtime::instruction_activation_runtime_admission` and
+    `instruction_activation_admission_for_session_error` are the one owner of
+    the runtime-side admission policy (live channel, transcript-edit
+    admission, mid-conversation System lowering) and of the session-error
+    classes. The facade session runtime's `activate_instruction` now calls
+    them too, with unchanged behaviour.
+
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a

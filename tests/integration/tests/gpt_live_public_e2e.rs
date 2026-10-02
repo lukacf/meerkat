@@ -4062,6 +4062,10 @@ struct S100UserRows {
 
 fn s100_user_rows(history: &Value) -> S100UserRows {
     let prefix = normalize_words(S100_DELEGATION_CONTEXT_PREFIX);
+    // The delegation seam prefaces every voice request with the speech
+    // transcript note; the request part of the executor task follows it.
+    let speech_note =
+        normalize_words(meerkat_mob_mcp::live_delegation::LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE);
     let mut rows = S100UserRows::default();
     for message in history["messages"].as_array().into_iter().flatten() {
         if message["role"].as_str() != Some("user") {
@@ -4069,7 +4073,18 @@ fn s100_user_rows(history: &Value) -> S100UserRows {
         }
         let text = normalize_words(&history_text(&json!({"messages":[message]})));
         match text.strip_prefix(prefix.as_str()) {
-            Some(rest) => rows.executor_inputs.push(rest.trim().to_owned()),
+            Some(rest) => {
+                // Contract: the request is prefaced by the speech transcript
+                // note. A task without it keeps the note's absence visible
+                // as a mismatch against the user window.
+                let rest = rest.trim();
+                match rest.strip_prefix(speech_note.as_str()) {
+                    Some(request) => rows.executor_inputs.push(request.trim().to_owned()),
+                    None => rows
+                        .executor_inputs
+                        .push(format!("<missing speech transcript note> {rest}")),
+                }
+            }
             None => rows.spoken.push(text),
         }
     }

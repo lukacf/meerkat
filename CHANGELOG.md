@@ -169,6 +169,70 @@ them.
   (the operation a `LifecycleOperationPending { "explicit_resume member ..." }`
   names) to end.
 
+- `meerkat_machine_schema::SymbolRef::parse` is a public constructor for a
+  coverage anchor path, so a crate outside Meerkat can build a coverage
+  manifest for its own machines. The check is lexical and never touches the
+  filesystem: the path must be non-empty, repository-relative and
+  `/`-separated, with no control characters, no drive or stream `:`, no
+  empty/`.`/`..` component, and no component that Windows cannot hold
+  (trailing dot or space, `< > " | ? *`, or a device name such as `CON` or
+  `LPT1`). Each refusal is a typed `SymbolRefError` (with
+  `NonPortableComponentKind` for the portability rules). It does not prove
+  that the file exists or realizes the anchored semantics; the owning
+  coverage validator checks that. The built-in catalogs now construct their
+  anchors through the same parser.
+- Member-level safe-boundary instruction activation, so a host can change a
+  restored member's standing instructions (resume inherits persisted prompt
+  state, so build-time instructions cannot reach it):
+  - `MobHandle::activate_member_instruction(identity, request)` holds the
+    member session's runtime turn-finalization boundary (and, with
+    `openai-live`, the live-open lifecycle lease), applies the shared runtime
+    admission, and appends one keyed `InstructionActivationRequest` through
+    the session owner. It returns the native `InstructionActivationReceipt`:
+    `Applied`, or `Duplicate` for a re-apply of the effective activation (no
+    second record, no accreting System row). Refusals are the typed
+    `MemberInstructionActivationError::Admission { code, .. }`
+    (`TargetNotMaterialized`, `SessionBusy`, `LiveChannelOpen`,
+    `UnsupportedCurrentLowering`, `DurabilityUnavailable`, fence conflict or
+    backoff); nothing is appended. No new journal.
+  - `MobHandle::read_member_instruction_activations(identity, query)` reads
+    the member session's durable activation records.
+  - `MobSessionService::activate_instruction_under_runtime_turn_boundary`,
+    with a default that returns the typed `SessionError::Unsupported`
+    (classified `DurabilityUnavailable`), never a silent success. The
+    `PersistentSessionService` implementation forwards it; every production
+    decorator over a durable owner must forward it explicitly.
+  - `meerkat_runtime::instruction_activation_runtime_admission` and
+    `instruction_activation_admission_for_session_error` are the one owner of
+    the runtime-side admission policy (live channel, transcript-edit
+    admission, mid-conversation System lowering) and of the session-error
+    classes. The facade session runtime's `activate_instruction` now calls
+    them too, with unchanged behaviour.
+
+- `meerkat_machine_codegen` renders a composition against a caller-supplied
+  machine catalog: `render_composition_semantic_model_with_catalog`,
+  `render_composition_ci_cfg_with_catalog`,
+  `render_composition_witness_cfg_with_catalog` and
+  `render_composition_driver_with_catalog`, for compositions whose machines
+  live outside Meerkat's catalog. The supplied catalog is validated first and
+  every problem is a typed `CompositionTlaError`: a machine that fails its own
+  validation, a duplicate machine id, a machine that reuses a canonical
+  Meerkat machine id with a different schema (a canonical machine may be
+  included unchanged, never shadowed), machines of one composition binding a
+  shared named type with different domain shapes, and a composition that does
+  not validate against the catalog. The canonical entry points are unchanged
+  and render byte-identically through the same implementation.
+- `McpRouterAdapter::spawn_removal_drain` drives draining (Removing) MCP
+  servers to finalization in one background task per adapter. It is woken by
+  typed progress (a finished tool call, or the earliest removal timeout),
+  never a timer poll. meerkat-rpc and meerkat-rest use it in place of their
+  copies of a 100 ms poll loop. With `test-support`,
+  `McpRouterAdapter::wait_connect_results_delivered` and
+  `McpRouterAdapter::wait_removals_finalized` are typed waits for tests.
+- `meerkat_mob_mcp::live_delegation::LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE`
+  is public, so live end-to-end checks can strip the speech-transcript note
+  exactly instead of copying its wording.
+
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a

@@ -70,7 +70,10 @@ pub(crate) const LIVE_DELEGATION_ASSISTANT_CONTEXT_HEADING: &str = "Assistant al
 /// a speech transcript, and transcription spells punctuation out, so a file
 /// the user called "notes dot md" reached the worker as those words and was
 /// written as `notes-dot-md` (S106).
-pub(crate) const LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE: &str = "The request below is a speech transcript of the user's voice: spoken punctuation in names \
+///
+/// Public so live end-to-end checks can strip it exactly instead of copying
+/// its wording.
+pub const LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE: &str = "The request below is a speech transcript of the user's voice: spoken punctuation in names \
      means the character (\"dot\" is \".\", \"slash\" is \"/\", \"underscore\" is \"_\"), so \
      \"notes dot md\" names the file notes.md.";
 

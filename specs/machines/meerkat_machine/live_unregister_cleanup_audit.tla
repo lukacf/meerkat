@@ -19,7 +19,10 @@
 \*   "admitted" - open admission accepted, nothing staged;
 \*   "staged"   - execution mode resolved and execution staged;
 \*   "bound"    - playback owner registered and the execution bound by an
-\*                accepted WebRTC answer (Active).
+\*                accepted WebRTC answer (Active);
+\*   "running"  - staged, then a run started (phase Running);
+\*   "retired"  - running, then retire requested during the run and the run
+\*                ended into Retired, still holding the staged channel.
 \*
 \* Every explored state is checked against every generated invariant,
 \* including live_channel_state_requires_registered_session, and against
@@ -33,7 +36,8 @@ EXTENDS model
 
 \* Upper bound on model_step_count, including the deterministic prefix.
 CONSTANT AuditMaxSteps
-\* The channel's start state: "admitted", "staged" or "bound".
+\* The channel's start state: "admitted", "staged", "bound", "running" or
+\* "retired".
 CONSTANT AuditStart
 
 AuditSession == "sessionid_1"
@@ -44,6 +48,8 @@ AuditChannel == "channel_a"
 AuditPrefixLength ==
     CASE AuditStart = "admitted" -> 4
       [] AuditStart = "staged" -> 6
+      [] AuditStart = "running" -> 7
+      [] AuditStart = "retired" -> 9
       [] OTHER -> 8
 
 AuditPrefix ==
@@ -53,30 +59,62 @@ AuditPrefix ==
     \/ model_step_count = 3 /\ ResolveLiveOpenAdmissionAcceptedAttached(AuditSession, AuditChannel, AuditIdentity)
     \/ model_step_count = 4 /\ ResolveLiveExecutionModeAdmissionAttached(AuditSession, AuditChannel, "profile_1", "FunctionBridge", TRUE, FALSE)
     \/ model_step_count = 5 /\ StageExperimentalLiveExecutionAttached(AuditSession, AuditChannel, AuditRuntime, 1, 1, 0, "pending_a")
-    \/ model_step_count = 6 /\ RegisterLivePlaybackOwnerAttached(AuditSession, AuditChannel, AuditRuntime, 1, 1, "owner_1", "ready_1", "pending_a")
-    \/ model_step_count = 7 /\ RecordLiveWebrtcAnswerAcceptedAndBindExecutionAttached(AuditSession, AuditChannel, 1, AuditRuntime, 1, 1, 0, "activation_a")
+    \* "bound": bind the staged execution.
+    \/ AuditStart = "bound" /\ model_step_count = 6 /\ RegisterLivePlaybackOwnerAttached(AuditSession, AuditChannel, AuditRuntime, 1, 1, "owner_1", "ready_1", "pending_a")
+    \/ AuditStart = "bound" /\ model_step_count = 7 /\ RecordLiveWebrtcAnswerAcceptedAndBindExecutionAttached(AuditSession, AuditChannel, 1, AuditRuntime, 1, 1, 0, "activation_a")
+    \* "running" and "retired": start a run on the staged session.
+    \/ AuditStart \in {"running", "retired"} /\ model_step_count = 6 /\ StartImmediateAppendAttached("run_1")
+    \* "retired": retire during the run; the run ends into Retired.
+    \/ AuditStart = "retired" /\ model_step_count = 7 /\ RetireRequestedWhileRunBound(AuditSession)
+    \/ AuditStart = "retired" /\ model_step_count = 8 /\
+        \/ CommitRunningToRetired("input_1", "run_1")
+        \/ FailRunningToRetired("run_1")
+        \/ CancelRunningToRetired("run_1")
+        \/ RollbackRunRunningToRetired("run_1")
+        \/ ServiceTurnCommittedRunningToRetired("run_1")
 
 AuditBody ==
     \* Context preparation on the channel, so unregister meets its terminal
     \* records.
     \/ BeginLiveContextPreparationAttached(AuditSession, AuditChannel, "lease_1", 0, AuditRuntime, 1, 1)
     \/ GenerateLiveContextPreparationAttached(AuditSession, AuditChannel, "lease_1")
-    \* The channel's close paths.
+    \/ BeginLiveContextPreparationRunning(AuditSession, AuditChannel, "lease_1", 0, AuditRuntime, 1, 1)
+    \/ GenerateLiveContextPreparationRunning(AuditSession, AuditChannel, "lease_1")
+    \* The channel's close paths, in each phase the session can be in. Close
+    \* custody is revoked by exactly one receipt: the staged pending receipt
+    \* or the bound activation receipt.
     \/ RecordLiveCloseClosedAttached(AuditSession, AuditChannel, 1)
+    \/ RecordLiveCloseClosedRunning(AuditSession, AuditChannel, 1)
+    \/ RecordLiveCloseClosedRetired(AuditSession, AuditChannel, 1)
     \/ AbandonLiveOpenAdmissionAttached(AuditSession, AuditChannel)
-    \* Close custody is revoked by exactly one receipt: the staged pending
-    \* receipt or the bound activation receipt.
-    \/ RevokeLiveChannelCloseCustodyAttached(AuditSession, AuditChannel, Some("pending_a"), None)
-    \/ RevokeLiveChannelCloseCustodyAttached(AuditSession, AuditChannel, None, Some("activation_a"))
-    \/ RevokeLiveChannelCloseCustodyClosedReplayAttached(AuditSession, AuditChannel, Some("pending_a"), None)
-    \/ RevokeLiveChannelCloseCustodyClosedReplayAttached(AuditSession, AuditChannel, None, Some("activation_a"))
+    \/ AbandonLiveOpenAdmissionRunning(AuditSession, AuditChannel)
+    \/ AbandonLiveOpenAdmissionRetired(AuditSession, AuditChannel)
+    \/ \E receipt \in {<<Some("pending_a"), None>>, <<None, Some("activation_a")>>} :
+        \/ RevokeLiveChannelCloseCustodyAttached(AuditSession, AuditChannel, receipt[1], receipt[2])
+        \/ RevokeLiveChannelCloseCustodyRunning(AuditSession, AuditChannel, receipt[1], receipt[2])
+        \/ RevokeLiveChannelCloseCustodyClosedReplayAttached(AuditSession, AuditChannel, receipt[1], receipt[2])
+        \/ RevokeLiveChannelCloseCustodyClosedReplayRunning(AuditSession, AuditChannel, receipt[1], receipt[2])
+        \/ RevokeLiveChannelCloseCustodyClosedReplayRetired(AuditSession, AuditChannel, receipt[1], receipt[2])
     \/ DeferLiveCloseSettlementAttached(AuditSession, AuditChannel)
-    \* The unregister drain.
+    \/ DeferLiveCloseSettlementRunning(AuditSession, AuditChannel)
+    \/ DeferLiveCloseSettlementRetired(AuditSession, AuditChannel)
+    \* The unregister drain, in each phase.
     \/ BeginUnregisterSessionAttached(AuditSession, Some(AuditRuntime), Some(1), Some(1), None)
-    \/ \E forced \in BOOLEAN : RuntimeLoopStoppedForUnregisterAttached(AuditSession, forced)
-    \/ \E forced \in BOOLEAN : CommsDrainExitedForUnregisterAttached(AuditSession, forced)
+    \/ BeginUnregisterSessionRunning(AuditSession, Some(AuditRuntime), Some(1), Some(1), None)
+    \/ BeginUnregisterSessionRetainsSnapshotRetired(AuditSession, Some(AuditRuntime), Some(1), Some(1), None)
+    \/ \E forced \in BOOLEAN :
+        \/ RuntimeLoopStoppedForUnregisterAttached(AuditSession, forced)
+        \/ RuntimeLoopStoppedForUnregisterRunning(AuditSession, forced)
+        \/ RuntimeLoopStoppedForUnregisterRetired(AuditSession, forced)
+        \/ CommsDrainExitedForUnregisterAttached(AuditSession, forced)
+        \/ CommsDrainExitedForUnregisterRunning(AuditSession, forced)
+        \/ CommsDrainExitedForUnregisterRetired(AuditSession, forced)
     \/ CompletionWaitersResolvedForUnregisterAttached(AuditSession)
+    \/ CompletionWaitersResolvedForUnregisterRunning(AuditSession)
+    \/ CompletionWaitersResolvedForUnregisterRetired(AuditSession)
     \/ UnregisterSessionAttached(AuditSession, Some(AuditRuntime), Some(1), Some(1), None)
+    \/ UnregisterSessionRunning(AuditSession, Some(AuditRuntime), Some(1), Some(1), None)
+    \/ UnregisterSessionRetired(AuditSession, Some(AuditRuntime), Some(1), Some(1), None)
 
 AuditNext ==
     \/ (model_step_count < AuditPrefixLength /\ AuditPrefix)

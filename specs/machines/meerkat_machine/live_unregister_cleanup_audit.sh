@@ -48,7 +48,7 @@ replace_exact_line "SPECIFICATION Spec" "SPECIFICATION AuditSpec" "${audit_cfg}"
 replace_exact_line "  SessionIdValues = {}" '  SessionIdValues = {"sessionid_1"}' "${audit_cfg}"
 replace_exact_line "  AgentRuntimeIdValues = {}" '  AgentRuntimeIdValues = {"runtime_1"}' "${audit_cfg}"
 replace_exact_line "  SessionLlmIdentityValues = {}" '  SessionLlmIdentityValues = {"identity_1"}' "${audit_cfg}"
-replace_exact_line "  StringValues = {}" '  StringValues = {"", "channel_a", "profile_1", "pending_a", "owner_1", "ready_1", "activation_a", "lease_1"}' "${audit_cfg}"
+replace_exact_line "  StringValues = {}" '  StringValues = {"", "channel_a", "profile_1", "pending_a", "owner_1", "ready_1", "activation_a", "lease_1", "run_1", "input_1"}' "${audit_cfg}"
 replace_exact_line "CONSTANTS" "CONSTANTS
   AuditMaxSteps = ${max_steps}
   AuditStart = AUDIT_START" "${audit_cfg}"
@@ -86,7 +86,7 @@ run_tlc() {
 }
 extra_tlc_args=("$@")
 
-for start in admitted staged bound; do
+for start in admitted staged bound running retired; do
   start_cfg="${work_dir}/${start}.cfg"
   sed 's/AUDIT_START/"'"${start}"'"/' "${audit_cfg}" > "${start_cfg}"
   printf 'PROPERTY\n  AuditUnregisterNeverWhileBound\n' >> "${start_cfg}"
@@ -119,4 +119,4 @@ for start in admitted staged bound; do
     fi
   fi
 done
-echo "live unregister cleanup audit passed at model_step_count <= ${max_steps} (unregister reachable from admitted, staged and bound)"
+echo "live unregister cleanup audit passed at model_step_count <= ${max_steps} (unregister reachable from admitted, staged, bound, running and retired)"

@@ -199,7 +199,8 @@ them.
     no binding, custody or preparation state once it is unregistered.
   - `specs/machines/meerkat_machine/live_unregister_cleanup_audit.{tla,sh}`
     (run in the canonical TLC lane) proves unregister stays reachable through
-    the close transitions from an admitted, staged and bound channel.
+    the close transitions from an admitted, staged and bound channel, and
+    from a session running a turn or retired during one.
 
 - Tests that need the `mcp-test-server` fixture binary no longer pass
   without running when it is missing. Each test hand-rolled a

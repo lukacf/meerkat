@@ -159,8 +159,9 @@ TLC_WORKERS="${tlc_workers}" "${live_steer_audit}" "${LIVE_STEER_AUDIT_MAX_STEPS
 # every live channel being closed and its close custody settled, and then
 # clears the session's terminal context-preparation records. A third
 # hand-written audit over the same generated model starts one channel of a
-# registered session admitted, staged or bound and explores its context
-# preparation, its close transitions and the unregister drain under every
+# registered session admitted, staged, bound, under a running run or with the
+# session retired during that run, and explores its context preparation, its
+# close transitions and the unregister drain in each phase under every
 # generated invariant (including live_channel_state_requires_registered_session)
 # plus the property that unregister never fires while a channel is bound. It
 # requires unregister to be reachable from every start (no wedge) and to meet

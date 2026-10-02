@@ -497,6 +497,16 @@ them.
   by typed handoffs. The heartbeat now fires on a test-only signal sent when
   finalization starts waiting for the write lock, so the test still catches a
   finalization that blocks the Tokio worker.
+- Three meerkat-mob actor tests no longer fail under high test parallelism
+  (#1546). `test_queued_steer_during_running_turn_does_not_block_actor_commands`,
+  `test_internal_turn_completed_reply_does_not_block_actor_operations` and
+  `test_late_kickoff_failure_outcome_after_retire_is_benign` held their busy
+  turn with a timed delay and checked 100 ms and 250 ms budgets. Now the
+  mock executor's typed hold keeps the turn running, and a typed held-turn
+  count replaces polling. The checks assert that operations complete while
+  the turn is still held. The late-kickoff test joins the retirement saga to
+  its terminal reply instead of failing when `retire` runs out of its wait
+  budget.
 
 - Three meerkat-mob-mcp tests no longer fail on a loaded host (#1509). They
   now assert ordering with events instead of wall-clock margins.

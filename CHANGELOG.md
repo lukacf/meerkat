@@ -126,6 +126,31 @@ them.
   server remove, reload and replace. On Unix the whole process group of the
   server is killed (see Fixed).
 
+### Security
+
+- Agent mob tools no longer accept host-only configuration from model
+  arguments. The agent `mob_create` deserialized the internal
+  `MobDefinition`, so a member with create authority could put
+  `tools.mcp_servers` (MCP server configs, including a stdio `command`, its
+  `args` and `env`) and `rust_bundles` into a profile, and child members
+  built from it would launch those servers on the host. The public paths
+  already decoded through the public contract. Now every model-facing input
+  does:
+  - `mob_create` decodes `MobDefinitionInput` through
+    `decode_public_mob_definition`.
+  - `mob_profile_create` and `mob_profile_update` decode `MobProfileInput`
+    (new `meerkat_mob_mcp::decode_public_profile`), which also closes the
+    indirect route of storing MCP server configs in a realm profile and
+    referencing it from a later `mob_create`.
+  - The `tooling` of `mob_spawn_member` and `delegate` takes an inline
+    profile as `MobProfileInput`.
+  - `mob_spawn_member`'s `initial_message`, and the `MobMcpDispatcher` spawn
+    and respawn messages, take `WireContentInput`.
+  Behaviour change: a model-supplied definition or profile that names an
+  internal-only field (`mcp_servers`, `rust_bundles`, `is_implicit`,
+  `session_cleanup_policy`, ...) is now refused with `InvalidArguments`
+  before anything is created; previously such fields were accepted.
+
 ### Added
 
 - One runtime delivery inbox per persistence bundle, with an in-process

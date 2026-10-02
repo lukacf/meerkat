@@ -404,14 +404,14 @@ pub(crate) async fn redeliver_when_owners_revivable(
         .partition(|report| matches!(report.action, ForkRelinkAction::AwaitingOwner { .. }));
     let finished = redeliver_each(
         awaiting,
-        |owner_mob, reason, attempt| {
+        |owner_mob, reason, _attempt| {
             let delivery = &delivery;
             async move {
                 let Some(owner_handle) = delivery.mob_handle(&owner_mob, handle).await else {
                     return false;
                 };
                 let _waiting = delivery.waiting_owners.as_deref().map(WaitingOwner::arm);
-                reason.cleared(&owner_handle, attempt).await
+                reason.cleared(&owner_handle).await
             }
         },
         |child, job_id| {
@@ -2144,6 +2144,7 @@ mod tests {
             mob_id: mob_c.clone(),
             reason: OwnerRevivalDeferral::LifecycleOperationPending {
                 intent: "explicit_resume member owner-c".to_string(),
+                member: AgentIdentity::from("owner-c"),
             },
         };
         let (b_runs, b_runs_rx) = tokio::sync::watch::channel(false);

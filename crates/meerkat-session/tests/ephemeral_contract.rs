@@ -44,6 +44,15 @@ struct MockAgent {
     overlay_updates: Arc<std::sync::Mutex<Vec<Option<TurnToolOverlay>>>>,
     durable_identity: Option<meerkat_core::SessionLlmIdentity>,
     transient_turn_context_state: TransientTurnContextStateHandle,
+    turn_gate: Option<Arc<TurnGate>>,
+}
+
+/// Holds a mock turn open: the agent reports `started` and then waits for
+/// `release`, so a test can act while the session's turn is in flight.
+#[derive(Default)]
+struct TurnGate {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 fn transient_turn_context_handle_for_test() -> TransientTurnContextStateHandle {
@@ -59,6 +68,10 @@ impl SessionAgent for MockAgent {
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         if let Some(delay) = self.delay_ms {
             tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+        }
+        if let Some(gate) = &self.turn_gate {
+            gate.started.notify_one();
+            gate.release.notified().await;
         }
 
         let _ = event_tx
@@ -211,6 +224,7 @@ struct MockAgentBuilder {
     reject_system_messages: bool,
     overlay_updates: Arc<std::sync::Mutex<Vec<Option<TurnToolOverlay>>>>,
     durable_identity: Option<meerkat_core::SessionLlmIdentity>,
+    turn_gate: Option<Arc<TurnGate>>,
 }
 
 impl MockAgentBuilder {
@@ -223,6 +237,7 @@ impl MockAgentBuilder {
             reject_system_messages: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
             durable_identity: Some(test_llm_identity("mock")),
+            turn_gate: None,
         }
     }
 
@@ -235,6 +250,7 @@ impl MockAgentBuilder {
             reject_system_messages: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
             durable_identity: Some(test_llm_identity("mock")),
+            turn_gate: None,
         }
     }
 
@@ -247,6 +263,7 @@ impl MockAgentBuilder {
             reject_system_messages: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
             durable_identity: Some(test_llm_identity("mock")),
+            turn_gate: None,
         }
     }
 
@@ -259,6 +276,7 @@ impl MockAgentBuilder {
             reject_system_messages: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
             durable_identity: Some(test_llm_identity("mock")),
+            turn_gate: None,
         }
     }
 
@@ -271,6 +289,7 @@ impl MockAgentBuilder {
             reject_system_messages: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
             durable_identity: Some(test_llm_identity("mock")),
+            turn_gate: None,
         }
     }
 
@@ -284,6 +303,13 @@ impl MockAgentBuilder {
     fn rejecting_system_messages() -> Self {
         Self {
             reject_system_messages: true,
+            ..Self::new()
+        }
+    }
+
+    fn with_turn_gate(gate: Arc<TurnGate>) -> Self {
+        Self {
+            turn_gate: Some(gate),
             ..Self::new()
         }
     }
@@ -316,6 +342,7 @@ impl SessionAgentBuilder for MockAgentBuilder {
             overlay_updates: self.overlay_updates.clone(),
             durable_identity: self.durable_identity.clone(),
             transient_turn_context_state: transient_turn_context_handle_for_test(),
+            turn_gate: self.turn_gate.clone(),
         })
     }
 }
@@ -864,6 +891,93 @@ fn runtime_content_turn_req(prompt: &str) -> StartTurnRequest {
 // ---------------------------------------------------------------------------
 // Contract tests
 // ---------------------------------------------------------------------------
+
+/// A command parked on a session whose turn is in flight (the actor serves no
+/// commands until the turn ends) must not hold the service-wide session map:
+/// creating another session and reading a third must complete while the
+/// first session's turn is still running. Regression for the OB3 spawn stall,
+/// where a child's `create_session` waited out the parent's whole turn.
+///
+/// The paused clock makes the check deterministic: the runtime advances time
+/// only when every task is idle, so a create blocked behind the parent's turn
+/// trips the deadline at once instead of hanging the test.
+#[tokio::test(start_paused = true)]
+async fn session_map_is_not_held_across_a_command_parked_on_a_busy_turn() {
+    let gate = Arc::new(TurnGate::default());
+    let service = make_service(MockAgentBuilder::with_turn_gate(Arc::clone(&gate)));
+
+    let bystander = service
+        .create_session(create_req_deferred("bystander"))
+        .await
+        .expect("create bystander")
+        .session_id;
+    let parent = service
+        .create_session(create_req_deferred("parent"))
+        .await
+        .expect("create parent")
+        .session_id;
+
+    let parent_turn = tokio::spawn({
+        let service = Arc::clone(&service);
+        let parent = parent.clone();
+        async move { service.start_turn(&parent, turn_req("spawn workers")).await }
+    });
+    gate.started.notified().await;
+
+    // Parks on the parent's actor until its turn ends.
+    let parked = tokio::spawn({
+        let service = Arc::clone(&service);
+        let parent = parent.clone();
+        async move {
+            service
+                .update_session_mob_authority_context(&parent, None)
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !parked.is_finished(),
+        "the parent's actor is busy with its turn"
+    );
+
+    let child = tokio::time::timeout(
+        std::time::Duration::from_secs(3600),
+        service.create_session(create_req_deferred("child")),
+    )
+    .await
+    .expect("creating a child must not wait for the parent's turn to end")
+    .expect("create child");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3600),
+        service.read(&bystander),
+    )
+    .await
+    .expect("reading another session must not wait for the parent's turn to end")
+    .expect("read bystander");
+    assert!(
+        !parent_turn.is_finished(),
+        "the parent's turn is still in flight"
+    );
+    assert_ne!(child.session_id, parent);
+
+    gate.release.notify_one();
+    parent_turn
+        .await
+        .expect("parent turn task")
+        .expect("parent turn");
+    // The actor answers the parked command once the turn ends (this mock
+    // agent refuses authority updates); it is never dropped.
+    let parked = parked.await.expect("parked command task");
+    assert!(
+        !matches!(
+            parked,
+            Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(_)
+            ))
+        ),
+        "the parked command must reach the actor: {parked:?}"
+    );
+}
 
 #[tokio::test]
 async fn test_create_and_run_turn() {
@@ -1450,6 +1564,7 @@ async fn test_turn_tool_overlay_is_cleared_after_canceled_turn() {
             reject_system_messages: false,
             overlay_updates: overlay_updates.clone(),
             durable_identity: Some(test_llm_identity("mock")),
+            turn_gate: None,
         },
         10,
     ));

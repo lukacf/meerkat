@@ -4290,22 +4290,27 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         intents: Vec<meerkat_core::CompactionProjectionIntent>,
     ) -> Result<(), SessionError> {
-        let command_tx = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(id) {
-                Some(session) => session.command_tx.clone(),
-                None if intents.is_empty() => {
-                    // Runtime attachment may precede SessionTask
-                    // materialization. The empty outbox must still reach the
-                    // durable memory owner so crash-before-atomic-commit stages
-                    // are aborted; declaring success here would orphan them.
-                    return self
-                        .builder
-                        .abort_absent_session_compaction_stages(id)
-                        .await;
-                }
-                None => return Err(SessionError::NotFound { id: id.clone() }),
+        // The map is released before the durable abort or the actor round
+        // trip; see `session_command_tx`.
+        let command_tx = self
+            .sessions
+            .read()
+            .await
+            .get(id)
+            .map(|session| session.command_tx.clone());
+        let command_tx = match command_tx {
+            Some(command_tx) => command_tx,
+            None if intents.is_empty() => {
+                // Runtime attachment may precede SessionTask
+                // materialization. The empty outbox must still reach the
+                // durable memory owner so crash-before-atomic-commit stages
+                // are aborted; declaring success here would orphan them.
+                return self
+                    .builder
+                    .abort_absent_session_compaction_stages(id)
+                    .await;
             }
+            None => return Err(SessionError::NotFound { id: id.clone() }),
         };
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
@@ -4365,13 +4370,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         state: Option<meerkat_core::SessionToolVisibilityState>,
     ) -> Result<(), SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::SetToolVisibilityState {
                 state: state.map(Box::new),
                 reply_tx,
@@ -4401,13 +4402,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         identity: SessionLlmIdentity,
         request_policy: meerkat_core::SessionLlmRequestPolicy,
     ) -> Result<(), SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::HotSwapLlmIdentity {
                 client,
                 identity: Box::new(identity),
@@ -4447,11 +4444,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
     ) -> Result<Option<meerkat_core::AgentExecutionSnapshot>, SessionError> {
         let command_tx = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            handle.command_tx.clone()
+            let command_tx = self.session_command_tx(id).await?;
+            command_tx.clone()
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -4484,11 +4478,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
     ) -> Result<Option<meerkat_core::ToolScopeSnapshot>, SessionError> {
         let command_tx = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            handle.command_tx.clone()
+            let command_tx = self.session_command_tx(id).await?;
+            command_tx.clone()
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -4514,11 +4505,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
     ) -> Result<Vec<meerkat_core::ToolDef>, SessionError> {
         let command_tx = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            handle.command_tx.clone()
+            let command_tx = self.session_command_tx(id).await?;
+            command_tx.clone()
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -4544,11 +4532,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
     ) -> Result<Option<meerkat_core::ExternalToolSurfaceSnapshot>, SessionError> {
         let command_tx = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            handle.command_tx.clone()
+            let command_tx = self.session_command_tx(id).await?;
+            command_tx.clone()
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -4591,11 +4576,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         timeout_policy: meerkat_core::ToolDispatchTimeoutPolicy,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, SessionError> {
         let command_tx = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            handle.command_tx.clone()
+            let command_tx = self.session_command_tx(id).await?;
+            command_tx.clone()
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -4981,13 +4963,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         cause: meerkat_core::live_adapter::LiveAdapterErrorCode,
     ) -> Result<(), SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::RecordLiveTerminalError { cause, reply_tx })
             .await
             .map_err(|_| {
@@ -5013,13 +4991,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         dropped: u64,
     ) -> Result<(), SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::RecordLiveOutputAudioDegraded { dropped, reply_tx })
             .await
             .map_err(|_| {
@@ -5040,13 +5014,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         content: ContentInput,
     ) -> Result<(), SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::AppendExternalUserContent { content, reply_tx })
             .await
             .map_err(|_| {
@@ -5072,13 +5042,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         stop_reason: meerkat_core::types::StopReason,
         usage: Usage,
     ) -> Result<(), SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::AppendExternalAssistantOutput {
                 blocks,
                 stop_reason,
@@ -5127,13 +5093,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         event: RealtimeTranscriptEvent,
         channel_id: Option<meerkat_core::LiveChannelId>,
     ) -> Result<RealtimeTranscriptApplyOutcome, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::AppendRealtimeTranscriptEvent {
                 event,
                 channel_id,
@@ -5190,13 +5152,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         content_index: u32,
         context_observation_id: Option<meerkat_core::LiveContextObservationId>,
     ) -> Result<meerkat_core::LiveAssistantPlaybackTarget, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::AdmitLiveAssistantPlaybackTarget {
                 channel_id,
                 interaction_id,
@@ -5231,13 +5189,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         item_id: String,
         content_index: u32,
     ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTarget>, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::ResolveLiveAssistantPlaybackTarget {
                 channel_id,
                 item_id,
@@ -5264,12 +5218,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         channel_id: meerkat_core::LiveChannelId,
     ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTruncationEvidence>, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         let (reply_tx, reply_rx) = oneshot::channel();
         {
+            // The map guard ends with this block, before the reply wait.
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
             // Serialize command enqueue with turn admission, not turn execution.
             // A pending tool run owns the agent and must never strand close
             // behind its own completion or acquire cancellation by this path.
@@ -5314,13 +5269,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         provisional: meerkat_core::ProvisionalLiveHandoff,
         final_event: Option<RealtimeTranscriptEvent>,
     ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::CommitLiveUserTranscriptFinal {
                 provisional,
                 final_event,
@@ -5352,13 +5303,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         final_event: RealtimeTranscriptEvent,
         represented: Vec<meerkat_core::RepresentedLiveUserRow>,
     ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::CommitLiveUserTranscriptRepresented {
                 provisional,
                 final_event,
@@ -5394,13 +5341,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         content_index: u32,
         evidence: meerkat_core::LiveAssistantPlaybackEvidence,
     ) -> Result<meerkat_core::LiveAssistantPlaybackTruncationEvidence, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::CommitLiveAssistantPlaybackTruncation {
                 channel_id,
                 interaction_id,
@@ -5438,13 +5381,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         stop_reason: meerkat_core::StopReason,
         usage: meerkat_core::TurnUsage,
     ) -> Result<meerkat_core::LiveAssistantPlaybackTruncationEvidence, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::CommitLiveAssistantPlaybackComplete {
                 channel_id,
                 interaction_id,
@@ -5479,13 +5418,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         crate::live_transcript_authority::LiveAssistantPlaybackObservationResult,
         SessionError,
     > {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::ObserveLiveAssistantPlaybackTerminal {
                 channel_id,
                 interaction_id,
@@ -5515,13 +5450,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         item_id: String,
         content_index: u32,
     ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTruncationEvidence>, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::ObserveLiveAssistantPlaybackFinal {
                 channel_id,
                 interaction_id,
@@ -6136,6 +6067,27 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         .map_err(|(error, _admission)| error)?
         .into_public_result()
         .map_err(SessionError::Agent)
+    }
+
+    /// Clone one session's command sender without retaining the service-wide
+    /// session map.
+    ///
+    /// The session actor serves no commands while a turn runs, so a caller
+    /// that awaits an actor reply can wait for a whole turn. Holding the map's
+    /// read guard across that wait parks every later writer (a new session's
+    /// insert, archive) and, because the lock is fair, every later reader of
+    /// any session behind it. Every actor round trip therefore takes the
+    /// sender here and talks to the actor with the map released.
+    async fn session_command_tx(
+        &self,
+        id: &SessionId,
+    ) -> Result<mpsc::Sender<SessionCommand>, SessionError> {
+        self.sessions
+            .read()
+            .await
+            .get(id)
+            .map(|handle| handle.command_tx.clone())
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })
     }
 
     /// Get the event injector for a session, if available.
@@ -6971,13 +6923,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         client: Arc<dyn meerkat_core::AgentLlmClient>,
     ) -> Result<(), SessionError> {
         let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::ReplaceClient { client, reply_tx })
             .await
             .map_err(|_| {
@@ -7038,13 +6986,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         filter: meerkat_core::ToolFilter,
     ) -> Result<(), SessionError> {
         let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::StageToolFilter { filter, reply_tx })
             .await
             .map_err(|_| {
@@ -7241,13 +7185,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         id: &SessionId,
         authority_context: Option<MobToolAuthorityContext>,
     ) -> Result<(), SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let command_tx = self.session_command_tx(id).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::UpdateMobToolAuthority {
                 authority_context,
                 reply_tx,

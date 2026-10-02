@@ -242,6 +242,21 @@ configure_cargo_nextest() {
 # drop the Bazel test variables so nested processes resolve
 # MEERKAT_WORKSPACE_ROOT like a plain Cargo run (run 35820182455 failed the
 # xtask workflow test with "fatal: not a git repository" in the runfiles tree).
+# meerkat-mcp's form-elicitation integration tests spawn the exact
+# mcp-test-server binary named by MEERKAT_MCP_TEST_SERVER and fail without it
+# (the Bazel-native targets set it from runfiles; scripts/run-build-backend-lane
+# exports it for the local Cargo lanes). Build it with the lane's cargo and
+# target dir and name the artifact explicitly.
+export_mcp_test_server_fixture() {
+  "${CARGO}" build -p mcp-test-server --bin mcp-test-server --locked
+  MEERKAT_MCP_TEST_SERVER="${CARGO_TARGET_DIR}/debug/mcp-test-server"
+  if [[ ! -x "${MEERKAT_MCP_TEST_SERVER}" ]]; then
+    echo "mcp-test-server fixture was not built at ${MEERKAT_MCP_TEST_SERVER}" >&2
+    exit 1
+  fi
+  export MEERKAT_MCP_TEST_SERVER
+}
+
 configure_nested_cargo_workspace() {
   if ! command -v git >/dev/null 2>&1; then
     echo "git is required for the nested repo-cargo children of the unit and integration lanes" >&2
@@ -407,6 +422,7 @@ case "${lane}" in
     configure_cargo_nextest
     configure_nested_cargo_workspace
     export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
+    export_mcp_test_server_fixture
     "${CARGO_NEXTEST}" nextest run --workspace \
       -E 'kind(lib)' --no-tests=fail --no-fail-fast \
       --show-progress none --status-level none --final-status-level fail
@@ -416,6 +432,7 @@ case "${lane}" in
     configure_cargo_nextest
     configure_nested_cargo_workspace
     export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
+    export_mcp_test_server_fixture
     "${CARGO_NEXTEST}" nextest run --workspace \
       --profile fast -E 'kind(test)' --no-tests=fail --no-fail-fast \
       --show-progress none --status-level none --final-status-level fail

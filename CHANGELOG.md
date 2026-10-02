@@ -144,6 +144,18 @@ them.
   emitted as schema roots and generated Python and TypeScript SDK types.
   Their Rust vocabulary remains available without a feature gate.
 
+### Fixed
+
+- The GitHub-hosted Linux release binary jobs work again. The release
+  container marked the workspace safe for Git only after setup-rust-ci had
+  already asked Git for the repository root ("detected dubious ownership",
+  every run since 2026-08-28), and on the 16 GB runners the release build of
+  `meerkat-machine-schema` (8.7 GB peak) overlapping `meerkat-mob` (9.0 GB)
+  was OOM-killed on aarch64. The workspace is now trusted right after
+  Checkout, and the Linux build runs two jobs with the schema crate at
+  `opt-level = 1` (6.3 GB) through `--config`, so asset recovery dispatches
+  can build older tags too.
+
 ## [0.8.50] - 2026-10-01
 
 ### Breaking
@@ -499,6 +511,7 @@ them.
 
 ### Fixed
 
+- The release workflow's BuildBuddy unit and integration-fast cargo-equivalent lanes now build the mcp-test-server fixture and export `MEERKAT_MCP_TEST_SERVER`, so meerkat-mcp's form-elicitation tests run instead of panicking on the missing variable.
 - `make semver-breaks` no longer fails its own self-test when the release adds
   a publishable crate. The self-test compared a recorded 0.8.23 workspace
   report with the live checkable-crate set, so any new crate failed it before

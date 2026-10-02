@@ -1166,32 +1166,7 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
         witnesses: vec![CompositionWitness {
             name: witness_id("close_stops_attention_route"),
             preload_inputs: vec![
-                witness_input(
-                    "workgraph",
-                    "CreateOpen",
-                    vec![
-                        witness_field("due_at_utc_ms", Expr::None),
-                        witness_field("not_before_utc_ms", Expr::None),
-                        witness_field("snoozed_until_utc_ms", Expr::None),
-                        witness_field(
-                            "completion_policy",
-                            named_variant("WorkCompletionPolicy", "SelfAttest"),
-                        ),
-                        witness_field("completion_supervisor_owner_key", Expr::None),
-                        witness_field("completion_reviewer_quorum_threshold", Expr::None),
-                        witness_field(
-                            "failed_child_join_policy",
-                            named_variant("FailedChildJoinPolicy", "RequireSuccess"),
-                        ),
-                        witness_field(
-                            "cancelled_child_join_policy",
-                            named_variant("CancelledChildJoinPolicy", "RequireSuccess"),
-                        ),
-                        witness_field("unresolved_blocker_count", Expr::U64(0)),
-                        witness_field("admission_key", Expr::None),
-                        witness_field("admission_request_digest", Expr::None),
-                    ],
-                ),
+                workgraph_create_open_witness_input(Expr::None, Expr::None),
                 witness_input(
                     "workgraph",
                     "CloseCompleted",
@@ -1223,12 +1198,145 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
                 set_limit: 0,
                 map_limit: 0,
             },
-        }],
+        },
+        workgraph_keyed_admission_replay_witness(),
+        workgraph_unkeyed_admission_replay_witness()],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
         witness_domain_cardinality: 2,
         ci_limits: Some(default_ci_limits()),
         closed_world: true,
+    }
+}
+
+fn workgraph_create_open_witness_input(
+    admission_key: Expr,
+    admission_request_digest: Expr,
+) -> CompositionWitnessInput {
+    witness_input(
+        "workgraph",
+        "CreateOpen",
+        vec![
+            witness_field("due_at_utc_ms", Expr::None),
+            witness_field("not_before_utc_ms", Expr::None),
+            witness_field("snoozed_until_utc_ms", Expr::None),
+            witness_field(
+                "completion_policy",
+                named_variant("WorkCompletionPolicy", "SelfAttest"),
+            ),
+            witness_field("completion_supervisor_owner_key", Expr::None),
+            witness_field("completion_reviewer_quorum_threshold", Expr::None),
+            witness_field(
+                "failed_child_join_policy",
+                named_variant("FailedChildJoinPolicy", "RequireSuccess"),
+            ),
+            witness_field(
+                "cancelled_child_join_policy",
+                named_variant("CancelledChildJoinPolicy", "RequireSuccess"),
+            ),
+            witness_field("unresolved_blocker_count", Expr::U64(0)),
+            witness_field("admission_key", admission_key),
+            witness_field("admission_request_digest", admission_request_digest),
+        ],
+    )
+}
+
+fn workgraph_classify_admission_witness_input(key: Expr, digest: Expr) -> CompositionWitnessInput {
+    witness_input(
+        "workgraph",
+        "ClassifyAdmissionReplay",
+        vec![
+            witness_field("requested_admission_key", key),
+            witness_field("requested_request_digest", digest),
+        ],
+    )
+}
+
+fn workgraph_admission_witness_limits() -> CompositionStateLimits {
+    CompositionStateLimits {
+        step_limit: 8,
+        pending_input_limit: 8,
+        pending_route_limit: 0,
+        delivered_route_limit: 0,
+        emitted_effect_limit: 5,
+        seq_limit: 0,
+        set_limit: 0,
+        map_limit: 0,
+    }
+}
+
+/// A keyed item replays exactly under its own key and digest, conflicts under
+/// its key with another digest, and is a key mismatch under another key. Each
+/// expectation holds on every behavior that completes the script, so a guard
+/// that lets one request take a second classification arm fails the witness.
+fn workgraph_keyed_admission_replay_witness() -> CompositionWitness {
+    let key = "workadmissionkeyref_1";
+    let digest = "workadmissiondigestref_1";
+    CompositionWitness {
+        name: witness_id("keyed_admission_replay_classification"),
+        preload_inputs: vec![
+            workgraph_create_open_witness_input(some_string(key), some_string(digest)),
+            workgraph_classify_admission_witness_input(some_string(key), some_string(digest)),
+            workgraph_classify_admission_witness_input(
+                some_string(key),
+                some_string("workadmissiondigestref_2"),
+            ),
+            workgraph_classify_admission_witness_input(
+                some_string("workadmissionkeyref_2"),
+                some_string(digest),
+            ),
+        ],
+        expected_routes: vec![],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![
+            witness_transition("workgraph", "CreateOpen"),
+            witness_transition("workgraph", "ClassifyAdmissionReplayExactOpen"),
+            witness_transition("workgraph", "ClassifyAdmissionReplayConflictOpen"),
+            witness_transition("workgraph", "ClassifyAdmissionReplayKeyMismatchOpen"),
+        ],
+        expected_transition_order: vec![
+            CompositionWitnessTransitionOrder {
+                earlier: witness_transition("workgraph", "CreateOpen"),
+                later: witness_transition("workgraph", "ClassifyAdmissionReplayExactOpen"),
+            },
+            CompositionWitnessTransitionOrder {
+                earlier: witness_transition("workgraph", "ClassifyAdmissionReplayExactOpen"),
+                later: witness_transition("workgraph", "ClassifyAdmissionReplayConflictOpen"),
+            },
+            CompositionWitnessTransitionOrder {
+                earlier: witness_transition("workgraph", "ClassifyAdmissionReplayConflictOpen"),
+                later: witness_transition("workgraph", "ClassifyAdmissionReplayKeyMismatchOpen"),
+            },
+        ],
+        state_limits: workgraph_admission_witness_limits(),
+    }
+}
+
+/// An item created without admission identity is a key mismatch for any
+/// keyed request: an unkeyed create never replays or conflicts.
+fn workgraph_unkeyed_admission_replay_witness() -> CompositionWitness {
+    CompositionWitness {
+        name: witness_id("unkeyed_admission_replay_is_key_mismatch"),
+        preload_inputs: vec![
+            workgraph_create_open_witness_input(Expr::None, Expr::None),
+            workgraph_classify_admission_witness_input(
+                some_string("workadmissionkeyref_1"),
+                some_string("workadmissiondigestref_1"),
+            ),
+        ],
+        expected_routes: vec![],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![
+            witness_transition("workgraph", "CreateOpen"),
+            witness_transition("workgraph", "ClassifyAdmissionReplayKeyMismatchOpen"),
+        ],
+        expected_transition_order: vec![CompositionWitnessTransitionOrder {
+            earlier: witness_transition("workgraph", "CreateOpen"),
+            later: witness_transition("workgraph", "ClassifyAdmissionReplayKeyMismatchOpen"),
+        }],
+        state_limits: workgraph_admission_witness_limits(),
     }
 }
 

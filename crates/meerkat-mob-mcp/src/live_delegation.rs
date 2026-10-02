@@ -8067,6 +8067,7 @@ mod tests {
             append_lane: Arc::clone(&append_lane),
             mob_handle: None,
             source_identity: AgentIdentity::from("two-results-source"),
+            steer_delivery_chain: std::sync::Mutex::new(None),
         });
         let coordinator = ExperimentalLiveDelegationCoordinator::new(
             Arc::clone(&runtime),

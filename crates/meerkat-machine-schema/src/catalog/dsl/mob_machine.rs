@@ -19136,7 +19136,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition CompleteSpawnRunning {
             on signal CompleteSpawn { agent_identity }
-            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped }
+            guard { self.lifecycle_phase == Phase::Running }
             guard "pending_spawns_present" { self.pending_spawn_count > 0 }
             guard "pending_identity_present" { self.pending_spawn_sessions.contains_key(agent_identity) == true }
             update {
@@ -19145,6 +19145,25 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
+        }
+
+        // A spawn completing into a Stopped mob closes its pending slot and
+        // leaves the mob Stopped (#1500): only ResumeStopped leaves Stopped,
+        // and it releases the member run starts the Stop held. The completion
+        // holds the members again, the new one included, so every member of a
+        // Stopped mob is held whatever the shell ordering.
+        transition CompleteSpawnStopped {
+            on signal CompleteSpawn { agent_identity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "pending_spawns_present" { self.pending_spawn_count > 0 }
+            guard "pending_identity_present" { self.pending_spawn_sessions.contains_key(agent_identity) == true }
+            update {
+                self.pending_spawn_count -= 1;
+                self.pending_spawn_sessions.remove(agent_identity);
+            }
+            to Stopped
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
+            emit HoldMemberRunStarts
         }
 
         // 0.7.2 L5 D2a (row 14): a spawn completion that arrives after its

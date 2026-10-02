@@ -6258,6 +6258,16 @@ impl MeerkatMachine {
         self.test_run_start_held_parks.subscribe()
     }
 
+    /// Whether `session_id`'s run starts are held (#1500). Test support.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn run_starts_held_for_test(&self, session_id: &SessionId) -> Option<bool> {
+        self.session_dsl_state(session_id)
+            .await
+            .ok()
+            .map(|state| state.run_starts_held)
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn note_run_start_held_park(&self) {
         self.test_run_start_held_parks

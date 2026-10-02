@@ -631,6 +631,15 @@ pub(super) struct MemberStatusProjectionTarget {
     pub(super) fence_token: Option<FenceToken>,
 }
 
+/// Which internal-error site of the explicit resume's readiness fan-out a
+/// test fails (#1500).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResumeReadinessFaultForTest {
+    BeginReadiness,
+    TicketExhausted,
+}
+
 pub(super) enum MobCommand {
     Spawn {
         spec: Box<super::handle::SpawnMemberSpec>,
@@ -744,6 +753,13 @@ pub(super) enum MobCommand {
     #[cfg(test)]
     BeginStopQuiesceForTest {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// Test-only: make the next explicit resume's readiness fan-out fail at
+    /// one of its internal-error sites (#1500 re-hold coverage).
+    #[cfg(test)]
+    FailNextResumeReadinessForTest {
+        fault: ResumeReadinessFaultForTest,
+        reply_tx: oneshot::Sender<()>,
     },
     #[cfg(test)]
     SpawnPreparationProbe {
@@ -1682,6 +1698,8 @@ impl MobCommand {
             Self::SpawnPreparationProbe { .. } => "SpawnPreparationProbe",
             #[cfg(test)]
             Self::BeginStopQuiesceForTest { .. } => "BeginStopQuiesceForTest",
+            #[cfg(test)]
+            Self::FailNextResumeReadinessForTest { .. } => "FailNextResumeReadinessForTest",
             #[cfg(test)]
             Self::SpawnActivationCustodyProbe { .. } => "SpawnActivationCustodyProbe",
             #[cfg(test)]

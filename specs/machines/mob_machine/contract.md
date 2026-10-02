@@ -755,10 +755,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Authority: `PendingSpawnOperationOwnerAuthorized`
 - Source Inputs: `CancelPendingSpawn`
 - Source Signals: `StageSpawn`, `CompleteSpawn`
-- Transitions: `StageSpawnRunning`, `CompleteSpawnRunning`, `CompleteSpawnLateArrivalRunning`, `CompleteSpawnLateArrivalStopped`, `CompleteSpawnLateArrivalCompleted`, `CompleteSpawnDestroyed`, `CancelPendingSpawnPresentRunning`, `CancelPendingSpawnPresentStopped`, `CancelPendingSpawnPresentCompleted`, `CancelPendingSpawnAbsentRunning`, `CancelPendingSpawnAbsentStopped`, `CancelPendingSpawnAbsentCompleted`, `CancelPendingSpawnDestroyed`
+- Transitions: `StageSpawnRunning`, `CompleteSpawnRunning`, `CompleteSpawnStopped`, `CompleteSpawnLateArrivalRunning`, `CompleteSpawnLateArrivalStopped`, `CompleteSpawnLateArrivalCompleted`, `CompleteSpawnDestroyed`, `CancelPendingSpawnPresentRunning`, `CancelPendingSpawnPresentStopped`, `CancelPendingSpawnPresentCompleted`, `CancelPendingSpawnAbsentRunning`, `CancelPendingSpawnAbsentStopped`, `CancelPendingSpawnAbsentCompleted`, `CancelPendingSpawnDestroyed`
 - Guard Expansion:
   - `StageSpawnRunning`: `lifecycle_origin_open`, `pending_identity_unused`
   - `CompleteSpawnRunning`: `pending_spawns_present`, `pending_identity_present`
+  - `CompleteSpawnStopped`: `pending_spawns_present`, `pending_identity_present`
   - `CompleteSpawnLateArrivalRunning`: `pending_identity_absent`
   - `CompleteSpawnLateArrivalStopped`: `pending_identity_absent`
   - `CompleteSpawnLateArrivalCompleted`: `pending_identity_absent`
@@ -774,7 +775,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Effect Closure:
   - `PendingSpawnOperationOwnerAuthorized` via `PendingSpawnOperationOwnerAuthorized` (LocalPendingSpawnOwner) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
   - `EmitMemberLifecycleNotice` via `CompleteSpawn` (LocalSpawnCompletion) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
-- Emitted By Transitions: `EmitMemberLifecycleNotice`, `ExposePendingSpawn`, `PendingSpawnOperationOwnerAuthorized`
+- Emitted By Transitions: `EmitMemberLifecycleNotice`, `ExposePendingSpawn`, `HoldMemberRunStarts`, `PendingSpawnOperationOwnerAuthorized`
 
 ### `CanStartSpawn`
 - Authority: `CanStartSpawn`
@@ -802,10 +803,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Authority: `SpawnEffect`
 - Source Inputs: `CancelPendingSpawn`
 - Source Signals: `CompleteSpawn`
-- Transitions: `StageSpawnRunning`, `CompleteSpawnRunning`, `CompleteSpawnLateArrivalRunning`, `CompleteSpawnLateArrivalStopped`, `CompleteSpawnLateArrivalCompleted`, `CompleteSpawnDestroyed`, `CancelPendingSpawnPresentRunning`, `CancelPendingSpawnPresentStopped`, `CancelPendingSpawnPresentCompleted`, `CancelPendingSpawnAbsentRunning`, `CancelPendingSpawnAbsentStopped`, `CancelPendingSpawnAbsentCompleted`, `CancelPendingSpawnDestroyed`
+- Transitions: `StageSpawnRunning`, `CompleteSpawnRunning`, `CompleteSpawnStopped`, `CompleteSpawnLateArrivalRunning`, `CompleteSpawnLateArrivalStopped`, `CompleteSpawnLateArrivalCompleted`, `CompleteSpawnDestroyed`, `CancelPendingSpawnPresentRunning`, `CancelPendingSpawnPresentStopped`, `CancelPendingSpawnPresentCompleted`, `CancelPendingSpawnAbsentRunning`, `CancelPendingSpawnAbsentStopped`, `CancelPendingSpawnAbsentCompleted`, `CancelPendingSpawnDestroyed`
 - Guard Expansion:
   - `StageSpawnRunning`: `lifecycle_origin_open`, `pending_identity_unused`
   - `CompleteSpawnRunning`: `pending_spawns_present`, `pending_identity_present`
+  - `CompleteSpawnStopped`: `pending_spawns_present`, `pending_identity_present`
   - `CompleteSpawnLateArrivalRunning`: `pending_identity_absent`
   - `CompleteSpawnLateArrivalStopped`: `pending_identity_absent`
   - `CompleteSpawnLateArrivalCompleted`: `pending_identity_absent`
@@ -820,7 +822,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Command Effects: `EmitMemberLifecycleNotice`
 - Effect Closure:
   - `EmitMemberLifecycleNotice` via `SpawnEffect` (LocalSpawnCompletion) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
-- Emitted By Transitions: `EmitMemberLifecycleNotice`, `ExposePendingSpawn`, `PendingSpawnOperationOwnerAuthorized`
+- Emitted By Transitions: `EmitMemberLifecycleNotice`, `ExposePendingSpawn`, `HoldMemberRunStarts`, `PendingSpawnOperationOwnerAuthorized`
 
 ### `FailSpawn`
 - Authority: `FailSpawn`
@@ -13249,13 +13251,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Completed`
 
 ### `CompleteSpawnRunning`
-- From: `Running`, `Stopped`
+- From: `Running`
 - On: `CompleteSpawn`(agent_identity)
 - Guards:
   - `pending_spawns_present`
   - `pending_identity_present`
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Running`
+
+### `CompleteSpawnStopped`
+- From: `Stopped`
+- On: `CompleteSpawn`(agent_identity)
+- Guards:
+  - `pending_spawns_present`
+  - `pending_identity_present`
+- Emits: `EmitMemberLifecycleNotice`, `HoldMemberRunStarts`
+- To: `Stopped`
 
 ### `CompleteSpawnLateArrivalRunning`
 - From: `Running`

@@ -5828,6 +5828,9 @@ struct AuthorizedMobSpawnCompleted {
     generated_plan: generated_mob_command_capabilities::CommandPlanKind,
     generated_effect: generated_mob_command_capabilities::CommandPlanKind,
     agent_identity: AgentIdentity,
+    /// The completion landed in a Stopped mob, so MobMachine holds the
+    /// members' run starts again, the new member included (#1500).
+    hold_member_run_starts: bool,
 }
 
 impl AuthorizedMobSpawnStart {
@@ -7137,6 +7140,8 @@ pub(super) struct MobActor {
     pub(super) autonomous_stop_interrupted: BTreeMap<AgentIdentity, AutonomousStopInterrupted>,
     /// Per-member outcomes of the current Stop (#1500), reported on its reply.
     pub(super) stop_member_outcomes: BTreeMap<AgentIdentity, super::stop_report::MemberStopOutcome>,
+    #[cfg(test)]
+    pub(super) resume_readiness_fault: Option<super::state::ResumeReadinessFaultForTest>,
     /// Rotating admission cursor for the bounded off-actor interrupt window.
     pub(super) autonomous_stop_interrupt_cursor: usize,
     /// The Stop or Shutdown awaiting its interrupted members' end of turn.
@@ -14661,12 +14666,20 @@ impl MobActor {
             .map_or((None, None), |slot| (Some(slot.spawn), slot.task))
     }
 
+    /// Close a pending spawn slot. The returned flag is MobMachine's
+    /// `HoldMemberRunStarts` for a completion into a Stopped mob, which the
+    /// caller realizes (#1500).
     fn complete_pending_spawn_slot(
         &mut self,
         spawn_ticket: u64,
         context: &'static str,
-    ) -> (Option<PendingSpawn>, Option<tokio::task::JoinHandle<()>>) {
+    ) -> (
+        Option<PendingSpawn>,
+        Option<tokio::task::JoinHandle<()>>,
+        bool,
+    ) {
         let (pending, task) = self.take_pending_spawn_slot(spawn_ticket);
+        let mut hold_member_run_starts = false;
         if pending.is_some() || task.is_some() {
             if let Some(pending) = pending.as_ref() {
                 if let Ok(completed) = self.complete_orchestrator_spawn(
@@ -14675,6 +14688,7 @@ impl MobActor {
                     context,
                 ) {
                     debug_assert_eq!(completed.agent_identity, pending.agent_identity);
+                    hold_member_run_starts = completed.hold_member_run_starts;
                 }
             }
         }
@@ -14686,7 +14700,7 @@ impl MobActor {
                 "pending spawn alignment violated after completion"
             );
         }
-        (pending, task)
+        (pending, task, hold_member_run_starts)
     }
 
     fn stage_orchestrator_spawn(
@@ -15474,11 +15488,16 @@ impl MobActor {
             }
             return Err(error);
         }
+        let hold_member_run_starts = transition
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, mob_dsl::MobMachineEffect::HoldMemberRunStarts));
         let completed = AuthorizedMobSpawnCompleted {
             generated_plan:
                 generated_mob_command_capabilities::CommandPlanKind::AuthorizedMobSpawnStart,
             generated_effect: generated_mob_command_capabilities::CommandPlanKind::SpawnEffect,
             agent_identity: agent_identity.clone(),
+            hold_member_run_starts,
         };
         debug_assert_eq!(
             completed.generated_effect,
@@ -18894,7 +18913,22 @@ impl MobActor {
     /// A resume that released the members' run-start holds and then failed
     /// leaves the mob Stopped: hold them again (#1500), so their queued input
     /// still waits for a resume that succeeds.
-    async fn rehold_member_run_starts_after_failed_resume(&mut self) {
+    /// Realize MobMachine's `HoldMemberRunStarts` on a member provisioned by
+    /// a spawn that completed into a Stopped mob (#1500).
+    async fn hold_spawned_member_run_starts(&self, member_ref: &MemberRef) {
+        if let Err(error) = self
+            .provisioner
+            .stop_member_runtime(member_ref, None, false)
+            .await
+        {
+            tracing::warn!(
+                error = %error,
+                "holding a member spawned into a stopped mob failed"
+            );
+        }
+    }
+
+    async fn hold_member_run_starts_while_stopped(&mut self) {
         if self.state() != MobState::Stopped {
             return;
         }
@@ -19001,7 +19035,7 @@ impl MobActor {
                     "settle_undispatched_resume_preparation",
                 );
                 let result = settled.and_then(|()| self.finish_explicit_resume_attempt(Err(error)));
-                self.rehold_member_run_starts_after_failed_resume().await;
+                self.hold_member_run_starts_while_stopped().await;
                 let _ = reply_tx.send(result);
                 return;
             }
@@ -19014,7 +19048,7 @@ impl MobActor {
                     "settle_undispatched_resume_preparation",
                 );
                 let result = settled.and_then(|()| self.finish_explicit_resume_attempt(Err(error)));
-                self.rehold_member_run_starts_after_failed_resume().await;
+                self.hold_member_run_starts_while_stopped().await;
                 let _ = reply_tx.send(result);
                 return;
             }
@@ -19082,7 +19116,7 @@ impl MobActor {
                 self.finish_explicit_resume_attempt(Err(MobError::LifecycleOperationPending {
                     intent: "explicit_resume superseded by lifecycle control".to_string(),
                 }));
-            self.rehold_member_run_starts_after_failed_resume().await;
+            self.hold_member_run_starts_while_stopped().await;
             let _ = reply_tx.send(result);
             return;
         }
@@ -19091,7 +19125,7 @@ impl MobActor {
             Err(error) => {
                 self.provisioner.cancel_all_checkpointers().await;
                 let result = self.finish_explicit_resume_attempt(Err(error));
-                self.rehold_member_run_starts_after_failed_resume().await;
+                self.hold_member_run_starts_while_stopped().await;
                 let _ = reply_tx.send(result);
                 return;
             }
@@ -19102,7 +19136,7 @@ impl MobActor {
             "resume_preparation_resolved_admission",
         ) {
             let result = self.finish_explicit_resume_attempt(Err(error));
-            self.rehold_member_run_starts_after_failed_resume().await;
+            self.hold_member_run_starts_while_stopped().await;
             let _ = reply_tx.send(result);
             return;
         }
@@ -19137,7 +19171,8 @@ impl MobActor {
                         progress,
                         reply_tx,
                     },
-                );
+                )
+                .await;
             }
         }
     }
@@ -19152,21 +19187,45 @@ impl MobActor {
             .await;
     }
 
-    fn spawn_resume_readiness_fanout(
+    async fn spawn_resume_readiness_fanout(
         &mut self,
         targets: Vec<MemberReadinessTarget>,
         progress: Option<super::state::LifecycleProgressSignal>,
         mut pending: PendingResumeLifecycle,
     ) {
-        if let Err(error) = self.apply_explicit_resume_input(
+        #[cfg(test)]
+        let fault = self.resume_readiness_fault.take();
+        #[cfg(test)]
+        let begun = if fault == Some(super::state::ResumeReadinessFaultForTest::BeginReadiness) {
+            Err(MobError::Internal(
+                "injected readiness begin failure".to_string(),
+            ))
+        } else {
+            self.apply_explicit_resume_input(
+                |attempt| mob_dsl::MobMachineInput::BeginExplicitResumeReadiness { attempt },
+                "begin_explicit_resume_readiness",
+            )
+        };
+        #[cfg(not(test))]
+        let begun = self.apply_explicit_resume_input(
             |attempt| mob_dsl::MobMachineInput::BeginExplicitResumeReadiness { attempt },
             "begin_explicit_resume_readiness",
-        ) {
+        );
+        if let Err(error) = begun {
             let result = self.finish_explicit_resume_attempt(Err(error));
+            self.hold_member_run_starts_while_stopped().await;
             let _ = pending.reply_tx.send(result);
             return;
         }
-        let ticket = match self.next_resume_lifecycle_ticket.next() {
+        let ticket = self.next_resume_lifecycle_ticket.next();
+        #[cfg(test)]
+        let ticket = match fault {
+            Some(super::state::ResumeReadinessFaultForTest::TicketExhausted) => Err(
+                MobError::Internal("injected resume ticket exhaustion".to_string()),
+            ),
+            _ => ticket,
+        };
+        let ticket = match ticket {
             Ok(ticket) => ticket,
             Err(error) => {
                 let settled = self.apply_explicit_resume_input(
@@ -19174,6 +19233,7 @@ impl MobActor {
                     "settle_undispatched_resume_readiness",
                 );
                 let result = settled.and_then(|()| self.finish_explicit_resume_attempt(Err(error)));
+                self.hold_member_run_starts_while_stopped().await;
                 let _ = pending.reply_tx.send(result);
                 return;
             }
@@ -19324,7 +19384,7 @@ impl MobActor {
             }
             self.provisioner.cancel_all_checkpointers().await;
             let result = self.finish_explicit_resume_attempt(Err(error));
-            self.rehold_member_run_starts_after_failed_resume().await;
+            self.hold_member_run_starts_while_stopped().await;
             let _ = reply_tx.send(result);
             return;
         }
@@ -19439,7 +19499,7 @@ impl MobActor {
             Ok(attempt) => attempt,
             Err(error) => {
                 let result = self.finish_explicit_resume_attempt(Err(error));
-                self.rehold_member_run_starts_after_failed_resume().await;
+                self.hold_member_run_starts_while_stopped().await;
                 let _ = reply_tx.send(result);
                 return;
             }
@@ -24319,6 +24379,11 @@ impl MobActor {
                     ticket,
                 } => {
                     self.settle_member_turn_admission(&agent_identity, ticket);
+                }
+                #[cfg(test)]
+                MobCommand::FailNextResumeReadinessForTest { fault, reply_tx } => {
+                    self.resume_readiness_fault = Some(fault);
+                    let _ = reply_tx.send(());
                 }
                 #[cfg(test)]
                 MobCommand::BeginStopQuiesceForTest { reply_tx } => {
@@ -32050,13 +32115,24 @@ impl MobActor {
         }
 
         let mut pending_items = Vec::with_capacity(completions.len());
+        let mut hold_roster_run_starts = false;
         for (spawn_ticket, result) in completions {
             tracing::debug!(
                 spawn_ticket,
                 "MobActor::handle_spawn_provisioned_batch completing pending slot"
             );
-            let (pending, task_handle) =
+            let (pending, task_handle, hold_member_run_starts) =
                 self.complete_pending_spawn_slot(spawn_ticket, "spawn provisioned batch");
+            if hold_member_run_starts {
+                // A completion into a Stopped mob (#1500): hold the new
+                // member's runtime before anything finalizes it, and the
+                // roster after this batch.
+                hold_roster_run_starts = true;
+                if let Ok(receipt) = result.as_ref() {
+                    self.hold_spawned_member_run_starts(&receipt.member_ref)
+                        .await;
+                }
+            }
             let Some(pending) = pending else {
                 tracing::warn!(spawn_ticket, "received spawn completion for unknown ticket");
                 if let Some(handle) = task_handle {
@@ -32420,6 +32496,9 @@ impl MobActor {
             }
         }
 
+        if hold_roster_run_starts {
+            self.hold_member_run_starts_while_stopped().await;
+        }
         if let Err(error) = self.ensure_pending_spawn_alignment("spawn batch completion") {
             tracing::error!(
                 error = %error,

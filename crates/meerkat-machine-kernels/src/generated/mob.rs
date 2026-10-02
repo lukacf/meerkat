@@ -12242,6 +12242,7 @@ pub enum TransitionId {
     RetireAllStopped,
     RetireAllCompleted,
     CompleteSpawnRunning,
+    CompleteSpawnStopped,
     CompleteSpawnLateArrivalRunning,
     CompleteSpawnLateArrivalStopped,
     CompleteSpawnLateArrivalCompleted,

@@ -83124,6 +83124,81 @@ async fn test_stop_holds_an_admitted_member_input_until_resume() {
     );
 }
 
+/// #1500: a resume that fails at an internal-error site of its readiness
+/// fan-out must leave the mob Stopped with every member held again. Resume
+/// releases the members at its begin, so a failure that skipped the re-hold
+/// would leave a Stopped mob whose members can start runs.
+async fn assert_failed_resume_readiness_reholds_members(
+    fault: super::state::ResumeReadinessFaultForTest,
+) {
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+    let identity = AgentIdentity::from("lead-reheld-after-failed-resume");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle.stop().await.expect("stop the mob");
+    assert_eq!(
+        service
+            .runtime_adapter
+            .run_starts_held_for_test(&session_id)
+            .await,
+        Some(true),
+        "stop holds the member"
+    );
+
+    let armed = handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::FailNextResumeReadinessForTest {
+            fault,
+            reply_tx,
+        })
+        .await
+        .expect("arm enqueue");
+    tokio::time::timeout(Duration::from_secs(5), armed)
+        .await
+        .expect("arm answered")
+        .expect("arm reply");
+
+    let error = handle
+        .resume()
+        .await
+        .expect_err("the injected readiness failure fails the resume");
+    assert!(
+        error.to_string().contains("injected"),
+        "the resume fails with the injected error: {error:?}"
+    );
+    assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+    assert_eq!(
+        service
+            .runtime_adapter
+            .run_starts_held_for_test(&session_id)
+            .await,
+        Some(true),
+        "the failed resume holds the member again"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_failing_to_begin_readiness_reholds_members() {
+    assert_failed_resume_readiness_reholds_members(
+        super::state::ResumeReadinessFaultForTest::BeginReadiness,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_resume_exhausting_its_readiness_ticket_reholds_members() {
+    assert_failed_resume_readiness_reholds_members(
+        super::state::ResumeReadinessFaultForTest::TicketExhausted,
+    )
+    .await;
+}
+
 // Runtime-backed tracked-turn LLM identity and terminal-event regressions.
 #[tokio::test]
 async fn test_batched_steer_turns_fan_out_complete_commit_gated_event_streams() {

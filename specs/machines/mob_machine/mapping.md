@@ -3825,6 +3825,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CompleteSpawnRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `CompleteSpawnStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteSpawnLateArrivalRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

@@ -9910,6 +9910,8 @@ impl MobBuilder {
                 autonomous_stop_interrupts: BTreeMap::new(),
                 autonomous_stop_interrupted: BTreeMap::new(),
                 stop_member_outcomes: BTreeMap::new(),
+                #[cfg(test)]
+                resume_readiness_fault: None,
                 pending_autonomous_stop: None,
                 next_autonomous_stop_ticket: 0,
                 pending_autonomous_stop_controls: VecDeque::new(),

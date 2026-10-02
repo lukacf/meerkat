@@ -65,17 +65,20 @@ impl MobActor {
                 )
                 .await;
             }
-            Ok(Some(targets)) => self.spawn_resume_readiness_fanout(
-                targets,
-                Some(progress.clone()),
-                PendingResumeLifecycle {
-                    ticket: ResumeStepTicket::default(),
-                    phase: ResumeLifecyclePhase::PostCommitReadiness { post_commit_error },
-                    admission,
-                    progress,
-                    reply_tx,
-                },
-            ),
+            Ok(Some(targets)) => {
+                self.spawn_resume_readiness_fanout(
+                    targets,
+                    Some(progress.clone()),
+                    PendingResumeLifecycle {
+                        ticket: ResumeStepTicket::default(),
+                        phase: ResumeLifecyclePhase::PostCommitReadiness { post_commit_error },
+                        admission,
+                        progress,
+                        reply_tx,
+                    },
+                )
+                .await;
+            }
         }
     }
 

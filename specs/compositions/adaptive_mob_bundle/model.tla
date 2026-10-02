@@ -35525,7 +35525,7 @@ control_mob_CompleteSpawnRunning(arg_agent_identity) ==
        /\ packet.variant = "CompleteSpawn"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ ~HigherPriorityReady("control_mob_authority")
-       /\ control_mob_phase = "Running" \/ control_mob_phase = "Stopped"
+       /\ control_mob_phase = "Running"
        /\ (control_mob_pending_spawn_count > 0)
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_pending_spawn_sessions) = TRUE)
        /\ control_mob_phase' = "Running"
@@ -35538,6 +35538,29 @@ control_mob_CompleteSpawnRunning(arg_agent_identity) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "EmitMemberLifecycleNotice", payload |-> [kind |-> "Spawned"], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteSpawnRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "CompleteSpawnRunning", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_CompleteSpawnStopped(arg_agent_identity) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "CompleteSpawn"
+       /\ packet.payload.agent_identity = arg_agent_identity
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Stopped"
+       /\ (control_mob_pending_spawn_count > 0)
+       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_pending_spawn_sessions) = TRUE)
+       /\ control_mob_phase' = "Stopped"
+       /\ control_mob_pending_spawn_count' = (control_mob_pending_spawn_count) - 1
+       /\ control_mob_pending_spawn_sessions' = MapRemove(control_mob_pending_spawn_sessions, packet.payload.agent_identity)
+       /\ UnchangedFrame_b9751f8dbd8698b4
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "EmitMemberLifecycleNotice", payload |-> [kind |-> "Spawned"], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteSpawnStopped"], [machine |-> "control_mob", variant |-> "HoldMemberRunStarts", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteSpawnStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "CompleteSpawnStopped", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Stopped"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
 
@@ -71248,7 +71271,7 @@ layer_mob_CompleteSpawnRunning(arg_agent_identity) ==
        /\ packet.variant = "CompleteSpawn"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ ~HigherPriorityReady("layer_mob_authority")
-       /\ layer_mob_phase = "Running" \/ layer_mob_phase = "Stopped"
+       /\ layer_mob_phase = "Running"
        /\ (layer_mob_pending_spawn_count > 0)
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_pending_spawn_sessions) = TRUE)
        /\ layer_mob_phase' = "Running"
@@ -71261,6 +71284,29 @@ layer_mob_CompleteSpawnRunning(arg_agent_identity) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "EmitMemberLifecycleNotice", payload |-> [kind |-> "Spawned"], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteSpawnRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "CompleteSpawnRunning", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_CompleteSpawnStopped(arg_agent_identity) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "CompleteSpawn"
+       /\ packet.payload.agent_identity = arg_agent_identity
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Stopped"
+       /\ (layer_mob_pending_spawn_count > 0)
+       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_pending_spawn_sessions) = TRUE)
+       /\ layer_mob_phase' = "Stopped"
+       /\ layer_mob_pending_spawn_count' = (layer_mob_pending_spawn_count) - 1
+       /\ layer_mob_pending_spawn_sessions' = MapRemove(layer_mob_pending_spawn_sessions, packet.payload.agent_identity)
+       /\ UnchangedFrame_769d531aa6930940
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "EmitMemberLifecycleNotice", payload |-> [kind |-> "Spawned"], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteSpawnStopped"], [machine |-> "layer_mob", variant |-> "HoldMemberRunStarts", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteSpawnStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "CompleteSpawnStopped", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Stopped"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
 
@@ -74308,7 +74354,8 @@ EntryPacketAdmissible_control_mob(packet) ==
     \/ /\ (packet.variant = "RetireAll") /\ (control_mob_phase = "Running") /\ (control_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition))
     \/ /\ (packet.variant = "RetireAll") /\ (control_mob_phase = "Stopped") /\ (control_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition))
     \/ /\ (packet.variant = "RetireAll") /\ (control_mob_phase = "Completed") /\ (control_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition))
-    \/ /\ (packet.variant = "CompleteSpawn") /\ (control_mob_phase = "Running" \/ control_mob_phase = "Stopped") /\ ((control_mob_pending_spawn_count > 0)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_pending_spawn_sessions) = TRUE))
+    \/ /\ (packet.variant = "CompleteSpawn") /\ (control_mob_phase = "Running") /\ ((control_mob_pending_spawn_count > 0)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_pending_spawn_sessions) = TRUE))
+    \/ /\ (packet.variant = "CompleteSpawn") /\ (control_mob_phase = "Stopped") /\ ((control_mob_pending_spawn_count > 0)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_pending_spawn_sessions) = TRUE))
     \/ /\ (packet.variant = "CompleteSpawn") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_pending_spawn_sessions) = FALSE))
     \/ /\ (packet.variant = "CompleteSpawn") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_pending_spawn_sessions) = FALSE))
     \/ /\ (packet.variant = "CompleteSpawn") /\ (control_mob_phase = "Completed") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_pending_spawn_sessions) = FALSE))
@@ -75920,7 +75967,8 @@ EntryPacketAdmissible_layer_mob(packet) ==
     \/ /\ (packet.variant = "RetireAll") /\ (layer_mob_phase = "Running") /\ (layer_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition))
     \/ /\ (packet.variant = "RetireAll") /\ (layer_mob_phase = "Stopped") /\ (layer_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition))
     \/ /\ (packet.variant = "RetireAll") /\ (layer_mob_phase = "Completed") /\ (layer_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition))
-    \/ /\ (packet.variant = "CompleteSpawn") /\ (layer_mob_phase = "Running" \/ layer_mob_phase = "Stopped") /\ ((layer_mob_pending_spawn_count > 0)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_pending_spawn_sessions) = TRUE))
+    \/ /\ (packet.variant = "CompleteSpawn") /\ (layer_mob_phase = "Running") /\ ((layer_mob_pending_spawn_count > 0)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_pending_spawn_sessions) = TRUE))
+    \/ /\ (packet.variant = "CompleteSpawn") /\ (layer_mob_phase = "Stopped") /\ ((layer_mob_pending_spawn_count > 0)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_pending_spawn_sessions) = TRUE))
     \/ /\ (packet.variant = "CompleteSpawn") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_pending_spawn_sessions) = FALSE))
     \/ /\ (packet.variant = "CompleteSpawn") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_pending_spawn_sessions) = FALSE))
     \/ /\ (packet.variant = "CompleteSpawn") /\ (layer_mob_phase = "Completed") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_pending_spawn_sessions) = FALSE))
@@ -77311,6 +77359,7 @@ CoreNext ==
     \/ control_mob_RetireAllStopped
     \/ control_mob_RetireAllCompleted
     \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_CompleteSpawnRunning(arg_agent_identity)
+    \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_CompleteSpawnStopped(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_CompleteSpawnLateArrivalRunning(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_CompleteSpawnLateArrivalStopped(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_CompleteSpawnLateArrivalCompleted(arg_agent_identity)
@@ -78631,6 +78680,7 @@ CoreNext ==
     \/ layer_mob_RetireAllStopped
     \/ layer_mob_RetireAllCompleted
     \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_CompleteSpawnRunning(arg_agent_identity)
+    \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_CompleteSpawnStopped(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_CompleteSpawnLateArrivalRunning(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_CompleteSpawnLateArrivalStopped(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_CompleteSpawnLateArrivalCompleted(arg_agent_identity)

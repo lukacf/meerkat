@@ -2739,6 +2739,88 @@ mod tests {
         MobMachineMutator::apply(authority, MobMachineInput::Resume).expect("durable resume");
     }
 
+    /// #1500: a spawn that completes into a Stopped mob closes its pending
+    /// slot, holds the members (the new one included) and leaves the mob
+    /// Stopped. Only ResumeStopped leaves Stopped, and it releases the member
+    /// run starts exactly once.
+    #[test]
+    fn spawn_completing_into_a_stopped_mob_leaves_it_stopped_until_resume() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("held-member");
+        let runtime_id = AgentRuntimeId::from("held-member:0");
+        seed_live_member(&mut authority, &identity, &runtime_id);
+        let spawning = AgentIdentity::from("spawning-member");
+        authority
+            .apply_signal(MobMachineSignal::StageSpawn {
+                agent_identity: spawning.clone(),
+                session_id: SessionId::from("spawning-session"),
+            })
+            .expect("stage a spawn while Running");
+        let quiesce = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::BeginPlacedCompletionLifecycleQuiesce {
+                intent: PlacedCompletionLifecycleIntentKind::Stop,
+            },
+        )
+        .expect("begin the stop quiesce");
+        assert!(
+            quiesce
+                .effects()
+                .iter()
+                .any(|effect| matches!(effect, MobMachineEffect::HoldMemberRunStarts)),
+            "the stop holds the members"
+        );
+        MobMachineMutator::apply(&mut authority, MobMachineInput::Stop).expect("stop");
+
+        let completed = authority
+            .apply_signal(MobMachineSignal::CompleteSpawn {
+                agent_identity: spawning,
+            })
+            .expect("the spawn completes into the stopped mob");
+        assert_eq!(authority.state().lifecycle_phase, MobPhase::Stopped);
+        assert_eq!(authority.state().pending_spawn_count, 0);
+        assert!(
+            completed
+                .effects()
+                .iter()
+                .any(|effect| matches!(effect, MobMachineEffect::HoldMemberRunStarts)),
+            "the completion holds the members, the new one included"
+        );
+        assert!(
+            !completed
+                .effects()
+                .iter()
+                .any(|effect| matches!(effect, MobMachineEffect::ReleaseMemberRunStarts)),
+            "a spawn completion releases nothing"
+        );
+
+        let attempt = ResumeAttemptId("resume-after-spawn".to_string());
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::BeginExplicitResume {
+                attempt: attempt.clone(),
+            },
+        )
+        .expect("begin resume");
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SettleExplicitResumePreparation { attempt },
+        )
+        .expect("preparation settled");
+        let resumed =
+            MobMachineMutator::apply(&mut authority, MobMachineInput::Resume).expect("resume");
+        assert_eq!(authority.state().lifecycle_phase, MobPhase::Running);
+        assert_eq!(
+            resumed
+                .effects()
+                .iter()
+                .filter(|effect| matches!(effect, MobMachineEffect::ReleaseMemberRunStarts))
+                .count(),
+            1,
+            "resume releases the held members exactly once"
+        );
+    }
+
     #[test]
     fn explicit_resume_cancellation_retains_preparation_until_settlement() {
         let (mut authority, attempt, _, _) = explicit_resume_fixture();

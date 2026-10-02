@@ -16574,10 +16574,21 @@ RetireAllCompleted ==
 
 
 CompleteSpawnRunning(agent_identity) ==
-    /\ phase = "Running" \/ phase = "Stopped"
+    /\ phase = "Running"
     /\ (pending_spawn_count > 0)
     /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE)
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ pending_spawn_count' = (pending_spawn_count) - 1
+    /\ pending_spawn_sessions' = MapRemove(pending_spawn_sessions, agent_identity)
+    /\ UnchangedFrame_4c983ae9c7aa4a6f
+
+
+CompleteSpawnStopped(agent_identity) ==
+    /\ phase = "Stopped"
+    /\ (pending_spawn_count > 0)
+    /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE)
+    /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ pending_spawn_count' = (pending_spawn_count) - 1
     /\ pending_spawn_sessions' = MapRemove(pending_spawn_sessions, agent_identity)
@@ -18548,7 +18559,8 @@ Next ==
     \/ RetireAllRunning
     \/ RetireAllStopped
     \/ RetireAllCompleted
-    \/ (phase = "Running" \/ phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : CompleteSpawnRunning(agent_identity)
+    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : CompleteSpawnRunning(agent_identity)
+    \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : CompleteSpawnStopped(agent_identity)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : CompleteSpawnLateArrivalRunning(agent_identity)
     \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : CompleteSpawnLateArrivalStopped(agent_identity)
     \/ (phase = "Completed") /\ \E agent_identity \in AgentIdentityValues : CompleteSpawnLateArrivalCompleted(agent_identity)

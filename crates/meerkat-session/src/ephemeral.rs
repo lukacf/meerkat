@@ -2255,6 +2255,92 @@ struct SessionSummaryCache {
     last_assistant_text: Option<String>,
 }
 
+/// Why a committed live channel close was not published as
+/// `AgentEvent::LiveChannelClosed` on the session event stream. Every
+/// committed close is either published in order or ends in one of these,
+/// which whoever observed it logs; it is never lost silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum LiveChannelClosedNotPublished {
+    /// The session has no running actor, so its stream has no observers.
+    #[error("the session has no running actor")]
+    SessionNotRunning,
+    /// The session actor exited before it took the notice.
+    #[error("the session actor exited before publishing the close")]
+    ActorExited,
+    /// The session actor took the notice while draining for shutdown.
+    #[error("the session actor was draining for shutdown")]
+    ActorDraining,
+}
+
+/// One committed live channel close waiting in a session's close outbox.
+struct LiveChannelClosedNotice {
+    session_id: SessionId,
+    channel_id: meerkat_core::LiveChannelId,
+    reason: meerkat_core::LiveChannelCloseReason,
+    reopen_recommended: bool,
+}
+
+fn spawn_live_close_notice_forwarder(
+    command_tx: mpsc::WeakSender<SessionCommand>,
+    notices: mpsc::UnboundedReceiver<LiveChannelClosedNotice>,
+) {
+    #[cfg(not(target_arch = "wasm32"))]
+    tokio::spawn(forward_live_close_notices(command_tx, notices));
+    #[cfg(target_arch = "wasm32")]
+    crate::tokio::task::spawn(forward_live_close_notices(command_tx, notices));
+}
+
+/// Carry close notices onto the session command queue one at a time, in
+/// close order. The forwarder holds only a weak sender, so it never keeps an
+/// otherwise-unreferenced actor alive, and it ends when the session handle
+/// drops the outbox.
+async fn forward_live_close_notices(
+    command_tx: mpsc::WeakSender<SessionCommand>,
+    mut notices: mpsc::UnboundedReceiver<LiveChannelClosedNotice>,
+) {
+    while let Some(notice) = notices.recv().await {
+        let session_id = notice.session_id.clone();
+        let channel_id = notice.channel_id.clone();
+        let reason = notice.reason;
+        if let Err(not_published) = publish_live_close_notice(&command_tx, notice).await {
+            tracing::warn!(
+                %session_id,
+                channel = %channel_id,
+                ?reason,
+                ?not_published,
+                "a committed live channel close was not published on the session event stream"
+            );
+        }
+    }
+}
+
+async fn publish_live_close_notice(
+    command_tx: &mpsc::WeakSender<SessionCommand>,
+    notice: LiveChannelClosedNotice,
+) -> Result<(), LiveChannelClosedNotPublished> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    {
+        let command_tx = command_tx
+            .upgrade()
+            .ok_or(LiveChannelClosedNotPublished::ActorExited)?;
+        command_tx
+            .send(SessionCommand::PublishLiveChannelClosed {
+                channel_id: notice.channel_id,
+                reason: notice.reason,
+                reopen_recommended: notice.reopen_recommended,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| LiveChannelClosedNotPublished::ActorExited)?;
+    }
+    match reply_rx.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(LiveChannelClosedNotPublished::ActorDraining),
+        Err(_) => Err(LiveChannelClosedNotPublished::ActorExited),
+    }
+}
+
 /// Handle stored in the sessions map.
 struct SessionHandle {
     /// Exact incarnation identity for this registry entry.  Logical-session
@@ -2312,6 +2398,11 @@ struct SessionHandle {
     /// cannot drop projector input.
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     lossless_event_projection_tx: Arc<tokio::sync::Mutex<Option<Arc<LosslessEventProjectionSink>>>>,
+    /// In-order outbox for committed live channel closes, created with its
+    /// forwarder on the first close. A close never waits on the actor (which
+    /// does not read commands during a turn); the forwarder carries each
+    /// notice onto the command queue in close order.
+    live_close_notices: std::sync::Mutex<Option<mpsc::UnboundedSender<LiveChannelClosedNotice>>>,
 }
 
 /// Cancellation-safe custody of one generated turn-admission claim.
@@ -5090,44 +5181,50 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .map_err(SessionError::Agent)
     }
 
-    /// Publish the typed fact that the runtime closed one of the session's
-    /// live channels (`AgentEvent::LiveChannelClosed`) on the session event
+    /// Enqueue the typed fact that the runtime closed one of the session's
+    /// live channels (`AgentEvent::LiveChannelClosed`) for the session event
     /// stream. Called after the close committed; observers learn the cause
     /// and the reopen recommendation without polling channel status.
-    pub async fn publish_live_channel_closed(
+    ///
+    /// This never waits on the session actor, which does not read commands
+    /// while a turn runs. The notice joins the session's close outbox, and
+    /// its forwarder puts it on the command queue in close order, after every
+    /// command already queued, so the actor publishes it after the events it
+    /// owed before the close. `Ok` means enqueued. A notice the actor later
+    /// refuses (it exited or drained for shutdown) is logged by the forwarder
+    /// as a typed [`LiveChannelClosedNotPublished`].
+    pub async fn enqueue_live_channel_closed(
         &self,
         id: &SessionId,
         channel_id: meerkat_core::LiveChannelId,
         reason: meerkat_core::LiveChannelCloseReason,
         reopen_recommended: bool,
-    ) -> Result<(), SessionError> {
+    ) -> Result<(), LiveChannelClosedNotPublished> {
         let sessions = self.sessions.read().await;
         let handle = sessions
             .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
-            .send(SessionCommand::PublishLiveChannelClosed {
-                channel_id,
-                reason,
-                reopen_recommended,
-                reply_tx,
-            })
-            .await
-            .map_err(|_| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    "Session task has exited".to_string(),
-                ))
-            })?;
-        reply_rx
-            .await
-            .map_err(|_| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    "Session task dropped the reply channel".to_string(),
-                ))
-            })?
-            .map_err(SessionError::Agent)
+            .filter(|handle| !handle.command_tx.is_closed())
+            .ok_or(LiveChannelClosedNotPublished::SessionNotRunning)?;
+        let notice = LiveChannelClosedNotice {
+            session_id: id.clone(),
+            channel_id,
+            reason,
+            reopen_recommended,
+        };
+        let mut outbox = handle
+            .live_close_notices
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let notices = outbox.get_or_insert_with(|| {
+            let (notices_tx, notices_rx) = mpsc::unbounded_channel();
+            spawn_live_close_notice_forwarder(handle.command_tx.downgrade(), notices_rx);
+            notices_tx
+        });
+        // The forwarder only stops when this handle drops its sender, so a
+        // send from a live handle always lands.
+        notices
+            .send(notice)
+            .map_err(|_| LiveChannelClosedNotPublished::ActorExited)
     }
 
     /// Apply an identity-bearing provider realtime transcript event.
@@ -6769,6 +6866,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             event_journal,
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             lossless_event_projection_tx,
+            live_close_notices: std::sync::Mutex::new(None),
         };
 
         let rejected_handle = {
@@ -12108,6 +12206,109 @@ mod archive_shutdown_drain_tests {
         assert!(
             matches!(pending.result, Err(AgentError::Cancelled)),
             "pending start-turn must resolve with the typed cancellation, got {pending:?}"
+        );
+    }
+
+    /// S101: a committed live channel close never waits on a member session
+    /// that is busy in a turn. While the turn is held, every close enqueue
+    /// completes without yielding, more closes than the command queue holds
+    /// included. Nothing is published while the turn runs; after the turn
+    /// releases, the actor publishes every `LiveChannelClosed`, in close
+    /// order.
+    #[tokio::test]
+    async fn live_channel_closed_enqueues_during_a_held_turn_and_publishes_after_it() {
+        use futures::FutureExt as _;
+
+        let hooks = DrainProbeHooks::new();
+        let service = Arc::new(EphemeralSessionService::new(
+            DrainProbeBuilder {
+                hooks: hooks.clone(),
+            },
+            1,
+        ));
+        let session_id = service
+            .create_session(create_request())
+            .await
+            .expect("create member session")
+            .session_id;
+        let mut events = service
+            .subscribe_session_events_raw(&session_id)
+            .await
+            .expect("subscribe to session events");
+
+        let turn_service = Arc::clone(&service);
+        let turn_session = session_id.clone();
+        let turn = tokio::spawn(async move {
+            turn_service
+                .start_turn(&turn_session, start_turn_request())
+                .await
+        });
+        tokio::time::timeout(WAITER_TIMEOUT, hooks.entered_run.notified())
+            .await
+            .expect("turn should enter the probe run");
+
+        let closes = COMMAND_CHANNEL_CAPACITY + 2;
+        for index in 0..closes {
+            service
+                .enqueue_live_channel_closed(
+                    &session_id,
+                    meerkat_core::LiveChannelId::new(format!("channel-{index}")),
+                    meerkat_core::LiveChannelCloseReason::ClientRequested,
+                    false,
+                )
+                .now_or_never()
+                .expect("a close enqueue never waits on the busy session")
+                .expect("a running session accepts the close notice");
+        }
+        tokio::task::yield_now().await;
+        while let Ok(envelope) = events.try_recv() {
+            assert!(
+                !matches!(envelope.payload, AgentEvent::LiveChannelClosed { .. }),
+                "LiveChannelClosed must not publish while the turn holds the actor"
+            );
+        }
+
+        hooks.release_run.add_permits(1);
+        let mut published = Vec::new();
+        while published.len() < closes {
+            let envelope = tokio::time::timeout(WAITER_TIMEOUT, events.recv())
+                .await
+                .expect("the actor publishes the closes after the turn releases")
+                .expect("session event stream stays open");
+            if let AgentEvent::LiveChannelClosed { channel_id, .. } = envelope.payload {
+                published.push(channel_id);
+            }
+        }
+        let expected: Vec<String> = (0..closes)
+            .map(|index| format!("channel-{index}"))
+            .collect();
+        assert_eq!(published, expected, "closes publish in close order");
+        tokio::time::timeout(WAITER_TIMEOUT, turn)
+            .await
+            .expect("turn task should finish")
+            .expect("turn task should not panic")
+            .expect("held turn completes");
+    }
+
+    #[tokio::test]
+    async fn live_channel_closed_for_a_session_with_no_actor_is_a_typed_drop() {
+        let service = EphemeralSessionService::new(
+            DrainProbeBuilder {
+                hooks: DrainProbeHooks::new(),
+            },
+            1,
+        );
+        let outcome = service
+            .enqueue_live_channel_closed(
+                &SessionId::new(),
+                meerkat_core::LiveChannelId::new("channel"),
+                meerkat_core::LiveChannelCloseReason::ClientRequested,
+                false,
+            )
+            .await;
+        assert_eq!(
+            outcome,
+            Err(LiveChannelClosedNotPublished::SessionNotRunning)
         );
     }
 

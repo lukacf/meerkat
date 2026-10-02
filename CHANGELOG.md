@@ -178,6 +178,12 @@ them.
   mirrored in the default profile, whose overrides apply to all profiles; that
   also gives the existing `ci-pr` profile the overrides it was missing.
 
+- The GitHub-hosted Linux release binary jobs no longer fail in their first
+  minute with "detected dubious ownership": the release container marks the
+  workspace safe for Git before setup-rust-ci asks Git for the repository
+  root (it did so only afterwards since 2026-08-28), so the GitHub-hosted
+  release path builds Linux binaries without a BuildBuddy assets dispatch.
+
 - Tests that need the `mcp-test-server` fixture binary no longer pass
   without running when it is missing. Each test hand-rolled a
   `target/debug/mcp-test-server` lookup and returned early when nothing was

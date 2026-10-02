@@ -2452,6 +2452,15 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     incremental: Option<Arc<dyn IncrementalSessionStore>>,
     runtime_store: Arc<dyn RuntimeStore>,
     blob_store: Arc<dyn BlobStore>,
+    /// The runtime machine that hosts this service's session runtimes.
+    ///
+    /// The surface composition that builds the service binds the machine it
+    /// returns and installs its hosts on (`with_canonical_runtime_adapter`),
+    /// so every consumer that asks the service for its runtime reaches that
+    /// one machine. A service constructed directly, outside a composition,
+    /// gets a machine of its own on first use, which lives and dies with this
+    /// instance.
+    runtime_adapter: std::sync::OnceLock<Arc<MeerkatMachine>>,
     event_store: Option<Arc<dyn EventStore>>,
     projector: Option<Arc<SessionProjector>>,
     /// Gates for active keep-alive checkpointers, keyed by session ID.
@@ -8530,6 +8539,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             incremental,
             runtime_store,
             blob_store,
+            runtime_adapter: std::sync::OnceLock::new(),
             event_store: None,
             projector: None,
             checkpointer_gates: Mutex::new(HashMap::new()),
@@ -8565,6 +8575,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Decoded sessions typically take a small multiple of their serialized
     /// size in memory. Zero disables retention: every consumer then decodes
     /// the committed document itself.
+    /// Bind the runtime machine the surface composition built for this
+    /// service: the machine it returns and installs its hosts (LLM
+    /// reconfigure, interrupted-tool evidence) on. [`Self::canonical_runtime_adapter`]
+    /// then answers with exactly that machine.
+    #[must_use]
+    pub fn with_canonical_runtime_adapter(self, adapter: Arc<MeerkatMachine>) -> Self {
+        // A fresh service has no machine yet; binding replaces nothing.
+        let _ = self.runtime_adapter.set(adapter);
+        self
+    }
+
+    /// The runtime machine hosting this service's session runtimes: the one
+    /// the surface composition bound, or, for a service constructed directly,
+    /// a machine of its own created on first use and owned by this instance.
+    pub fn canonical_runtime_adapter(&self) -> Arc<MeerkatMachine> {
+        Arc::clone(self.runtime_adapter.get_or_init(|| {
+            Arc::new(MeerkatMachine::persistent(
+                Arc::clone(&self.runtime_store),
+                Arc::clone(&self.blob_store),
+            ))
+        }))
+    }
+
     #[must_use]
     pub fn with_whole_blob_body_cache_bytes(mut self, bytes: usize) -> Self {
         self.whole_blob_body_budget_bytes = bytes;

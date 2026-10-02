@@ -49,6 +49,21 @@ them.
   `None` and `false` keep today's behaviour. On the wire both are omitted when
   unset, so payloads to and from members that predate them are unchanged. The
   supervisor bridge protocol version stays V6.
+- `meerkat::session_runtime::llm_reconfigure::SessionRuntimeLlmReconfigureHost::service`
+  changes from `Arc<dyn SessionRuntimeLlmReconfigureService>` to
+  `std::sync::Weak<dyn SessionRuntimeLlmReconfigureService>`; construct it
+  with `Arc::downgrade`. The service now owns the runtime machine the host is
+  installed on, so a strong back-reference would leak both. A host whose
+  service was dropped answers every call with `RuntimeDriverError::Destroyed`.
+  `meerkat_session::PersistentSessionService` adds
+  `with_canonical_runtime_adapter` and `canonical_runtime_adapter`; the
+  runtime-backed surface composition binds the machine it returns. Behaviour:
+  a mob on a persistent service built by that composition runs on the
+  surface's machine (with its LLM reconfigure host) instead of a private
+  second machine, so per-turn LLM overrides and host `stop_run` work without
+  `MobBuilder::with_runtime_adapter` (#1435). A directly constructed service
+  owns a machine of its own, created on first use; the global pointer-keyed
+  cache is gone.
 - Behaviour-only (not measured by the gate): rkat-rpc callback routing is
   owned per connection (#1451). Over TCP, a session's callback tools route
   only to the connection that created it, and `tools/register` changes only

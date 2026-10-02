@@ -210,6 +210,9 @@ pub fn build_runtime_backed_service_with_capacities(
             runtime_delivery_inbox,
         ));
     }
+    // The service carries the machine this composition returns, so a
+    // consumer asking the service for its runtime (a mob) reaches the same
+    // machine the host drives and installs its reconfigure host on.
     let mut service = PersistentSessionService::new_with_capacities(
         builder,
         active_session_capacity,
@@ -217,7 +220,8 @@ pub fn build_runtime_backed_service_with_capacities(
         store,
         runtime_store,
         blob_store,
-    );
+    )
+    .with_canonical_runtime_adapter(Arc::clone(&runtime_adapter));
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     if let Some((event_store, projector)) = event_projection {
         service = service.with_event_projection(event_store, projector);

@@ -1303,6 +1303,7 @@ fn jdk_java_options_mirror_the_tlc_stack_flag_for_the_launcher_main_thread() {
     );
 }
 
+#[cfg(feature = "machine-authority")]
 #[test]
 fn composition_positive_coverage_requires_a_completing_witness_or_an_exploring_sweep() {
     // A completing witness alone is positive coverage, even with an init-only sweep.
@@ -1323,6 +1324,7 @@ fn composition_positive_coverage_requires_a_completing_witness_or_an_exploring_s
     assert!(format!("{err:#}").contains("main sweep is skipped"));
 }
 
+#[cfg(feature = "machine-authority")]
 #[test]
 fn tlc_distinct_state_count_is_the_final_report() {
     let output = "\

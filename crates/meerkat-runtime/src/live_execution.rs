@@ -183,6 +183,13 @@ pub trait LiveChannelCloseEventPublisher: Send + Sync {
         reason: meerkat_core::LiveChannelCloseReason,
         reopen_recommended: bool,
     );
+
+    /// Finalized unregister removed the session's runtime entry, so the
+    /// machine no longer holds a Closed record for any of its channels and
+    /// the close tombstones kept for them may go. Called exactly once per
+    /// committed unregister, after its durability transaction; never on a
+    /// resume or on an unregister that rolled back.
+    async fn retire_live_session_close_tombstones(&self, _session_id: &SessionId) {}
 }
 
 /// The generated verdict on one channel's first assistant output

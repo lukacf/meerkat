@@ -452,6 +452,7 @@ pub enum ExperimentalLiveChannelCloseError {
 /// running actor has no stream observers.
 struct ServiceLiveChannelClosePublisher<B: SessionAgentBuilder + 'static> {
     service: std::sync::Weak<PersistentSessionService<B>>,
+    host: std::sync::Weak<LiveAdapterHost>,
 }
 
 #[async_trait::async_trait]
@@ -493,6 +494,12 @@ impl<B: SessionAgentBuilder + 'static>
                 ?not_published,
                 "a committed live channel close has no session event stream to publish on"
             );
+        }
+    }
+
+    async fn retire_live_session_close_tombstones(&self, session_id: &SessionId) {
+        if let Some(host) = self.host.upgrade() {
+            host.retire_session_close_tombstones(session_id).await;
         }
     }
 }
@@ -1467,6 +1474,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             .runtime_adapter
             .set_live_channel_close_publisher(Arc::new(ServiceLiveChannelClosePublisher {
                 service: Arc::downgrade(&config.service),
+                host: Arc::downgrade(&config.host),
             }));
         Self {
             service: config.service,

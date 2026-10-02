@@ -1972,7 +1972,7 @@ workgraph_ClassifyPublicErrorStoreErrorAbsent(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Absent"
-       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired")))
+       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch"))))
        /\ workgraph_phase' = "Absent"
        /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -1991,7 +1991,7 @@ workgraph_ClassifyPublicErrorStoreErrorOpen(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Open"
-       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired")))
+       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch"))))
        /\ workgraph_phase' = "Open"
        /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2010,7 +2010,7 @@ workgraph_ClassifyPublicErrorStoreErrorInProgress(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "InProgress"
-       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired")))
+       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch"))))
        /\ workgraph_phase' = "InProgress"
        /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2029,7 +2029,7 @@ workgraph_ClassifyPublicErrorStoreErrorBlocked(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Blocked"
-       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired")))
+       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch"))))
        /\ workgraph_phase' = "Blocked"
        /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2048,7 +2048,7 @@ workgraph_ClassifyPublicErrorStoreErrorCompleted(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Completed"
-       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired")))
+       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch"))))
        /\ workgraph_phase' = "Completed"
        /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2067,7 +2067,7 @@ workgraph_ClassifyPublicErrorStoreErrorCancelled(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Cancelled"
-       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired")))
+       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch"))))
        /\ workgraph_phase' = "Cancelled"
        /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2086,7 +2086,7 @@ workgraph_ClassifyPublicErrorStoreErrorFailed(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Failed"
-       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired")))
+       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch"))))
        /\ workgraph_phase' = "Failed"
        /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -7785,13 +7785,13 @@ EntryPacketAdmissible_workgraph(packet) ==
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ ((packet.payload.kind = "UnsupportedBackend"))
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.kind = "UnsupportedBackend"))
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ ((packet.payload.kind = "UnsupportedBackend"))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Blocked") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired"))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Blocked") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch")))))
     \/ /\ (packet.variant = "ClassifyTerminality") /\ (workgraph_phase = "Completed")
     \/ /\ (packet.variant = "ClassifyTerminality") /\ (workgraph_phase = "Cancelled")
     \/ /\ (packet.variant = "ClassifyTerminality") /\ (workgraph_phase = "Failed")

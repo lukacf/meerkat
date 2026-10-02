@@ -516,6 +516,104 @@ mod sqlite {
         }
     }
 
+    /// A file stamped workgraph v4 by an unreleased build that used the
+    /// number for its own `workgraph_admissions` table is refused with a
+    /// typed mismatch naming the missing table, on open and on every later
+    /// operation, and is never treated as current.
+    #[tokio::test]
+    async fn foreign_v4_catalog_is_a_typed_schema_mismatch_never_current() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let (store, service) = open_service(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).expect("raw");
+            conn.execute_batch(
+                "DROP TABLE workgraph_item_admissions;
+                 CREATE TABLE workgraph_admissions (
+                     realm_id TEXT NOT NULL,
+                     namespace TEXT NOT NULL,
+                     admission_key TEXT NOT NULL,
+                     item_id TEXT NOT NULL,
+                     payload_digest TEXT NOT NULL,
+                     PRIMARY KEY (realm_id, namespace, admission_key),
+                     UNIQUE (realm_id, namespace, item_id)
+                 );",
+            )
+            .expect("forge private v4 catalog");
+        }
+        let assert_mismatch = |error: WorkGraphError| match error {
+            WorkGraphError::SchemaMismatch {
+                version,
+                missing_objects,
+                unexpected_objects,
+                changed_objects,
+            } => {
+                assert_eq!(version, 4);
+                assert_eq!(
+                    missing_objects,
+                    vec!["table:workgraph_item_admissions".to_string()]
+                );
+                // The private table is not a workgraph-owned name, so it is
+                // a foreign co-tenant, not an "unexpected" owned object.
+                assert!(unexpected_objects.is_empty(), "{unexpected_objects:?}");
+                assert!(changed_objects.is_empty(), "{changed_objects:?}");
+            }
+            other => panic!("expected a typed schema mismatch, got {other:?}"),
+        };
+        // An already-open handle refuses the next operation.
+        assert_mismatch(
+            service
+                .create_idempotent(key("setup-1"), request("setup"))
+                .await
+                .expect_err("operation on a foreign v4 catalog"),
+        );
+        drop((store, service));
+        // A fresh open refuses the file.
+        assert_mismatch(
+            SqliteWorkGraphStore::open(&path)
+                .err()
+                .expect("open of a foreign v4 catalog"),
+        );
+    }
+
+    /// The expected table with different columns is a typed mismatch naming
+    /// the changed table.
+    #[tokio::test]
+    async fn current_admission_table_with_other_columns_is_a_typed_schema_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        drop(open_service(&path));
+        {
+            let conn = rusqlite::Connection::open(&path).expect("raw");
+            conn.execute_batch(
+                "DROP TABLE workgraph_item_admissions;
+                 CREATE TABLE workgraph_item_admissions (
+                     realm_id TEXT NOT NULL,
+                     namespace TEXT NOT NULL,
+                     admission_key TEXT NOT NULL,
+                     item_id TEXT NOT NULL,
+                     PRIMARY KEY (realm_id, namespace, admission_key)
+                 );",
+            )
+            .expect("forge column drift");
+        }
+        match SqliteWorkGraphStore::open(&path).err().expect("refused") {
+            WorkGraphError::SchemaMismatch {
+                version: 4,
+                missing_objects,
+                changed_objects,
+                ..
+            } => {
+                assert!(missing_objects.is_empty(), "{missing_objects:?}");
+                assert_eq!(
+                    changed_objects,
+                    vec!["table:workgraph_item_admissions".to_string()]
+                );
+            }
+            other => panic!("expected a typed schema mismatch, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn released_v3_file_migrates_to_the_admission_index_on_open() {
         let dir = tempfile::tempdir().expect("tempdir");

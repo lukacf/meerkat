@@ -2363,9 +2363,12 @@ impl SqliteWorkGraphStore {
                     ..Default::default()
                 },
             )
-            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-            meerkat_sqlite::apply_domain_migrations(&mut conn, &WORKGRAPH_DOMAIN)
-                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            .map_err(|err| {
+                workgraph_schema_error(err, |err| WorkGraphError::Store(err.to_string()))
+            })?;
+            meerkat_sqlite::apply_domain_migrations(&mut conn, &WORKGRAPH_DOMAIN).map_err(
+                |err| workgraph_schema_error(err, |err| WorkGraphError::Store(err.to_string())),
+            )?;
         }
         Ok(store)
     }
@@ -2437,8 +2440,9 @@ impl SqliteWorkGraphStore {
                 WORKGRAPH_DOMAIN.supported_version(),
             )));
         }
-        meerkat_sqlite::preflight_schema_eligibility(&tx, &WORKGRAPH_DOMAIN)
-            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        meerkat_sqlite::preflight_schema_eligibility(&tx, &WORKGRAPH_DOMAIN).map_err(|err| {
+            workgraph_schema_error(err, |err| WorkGraphError::Store(err.to_string()))
+        })?;
         let result = f(&tx)?;
         tx.commit()
             .map_err(|err| WorkGraphError::Store(err.to_string()))?;
@@ -2495,7 +2499,7 @@ impl SqliteWorkGraphStore {
                 ..Default::default()
             },
         )
-        .map_err(|err| self.backing_store_unavailable(err))?;
+        .map_err(|err| workgraph_schema_error(err, |err| self.backing_store_unavailable(err)))?;
         let version = meerkat_sqlite::domain_version(&conn, WORKGRAPH_DOMAIN.name)
             .map_err(|err| WorkGraphError::Store(err.to_string()))?;
         if version != Some(WORKGRAPH_DOMAIN.supported_version()) {
@@ -2505,6 +2509,31 @@ impl SqliteWorkGraphStore {
             )));
         }
         f(&mut conn)
+    }
+}
+
+/// A file stamped with the current workgraph version whose catalog is not
+/// that schema is a typed refusal naming the differing objects; every other
+/// open or preflight failure keeps the call site's existing mapping.
+#[cfg(not(target_arch = "wasm32"))]
+fn workgraph_schema_error(
+    error: meerkat_sqlite::SqliteStoreError,
+    otherwise: impl FnOnce(meerkat_sqlite::SqliteStoreError) -> WorkGraphError,
+) -> WorkGraphError {
+    match error {
+        meerkat_sqlite::SqliteStoreError::CurrentSchemaMismatch {
+            version,
+            missing_objects,
+            unexpected_objects,
+            changed_objects,
+            ..
+        } => WorkGraphError::SchemaMismatch {
+            version,
+            missing_objects,
+            unexpected_objects,
+            changed_objects,
+        },
+        other => otherwise(other),
     }
 }
 

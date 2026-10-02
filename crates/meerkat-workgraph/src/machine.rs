@@ -1479,6 +1479,7 @@ fn work_graph_error_kind(error: &WorkGraphError) -> wg_dsl::WorkGraphErrorKind {
         WorkGraphError::UnpairedAdmissionIdentity { .. } => {
             wg_dsl::WorkGraphErrorKind::UnpairedAdmissionIdentity
         }
+        WorkGraphError::SchemaMismatch { .. } => wg_dsl::WorkGraphErrorKind::SchemaMismatch,
     }
 }
 
@@ -2823,6 +2824,15 @@ mod tests {
                     request_digest_present: false,
                 },
                 WorkGraphPublicErrorClass::InvalidArguments,
+            ),
+            (
+                WorkGraphError::SchemaMismatch {
+                    version: 4,
+                    missing_objects: vec!["table:workgraph_item_admissions".to_string()],
+                    unexpected_objects: Vec::new(),
+                    changed_objects: Vec::new(),
+                },
+                WorkGraphPublicErrorClass::StoreError,
             ),
             (
                 WorkGraphError::InvalidInput("bad".to_string()),

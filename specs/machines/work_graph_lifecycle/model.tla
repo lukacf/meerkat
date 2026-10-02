@@ -897,7 +897,7 @@ ClassifyPublicErrorCapabilityUnavailableFailed(kind) ==
 
 ClassifyPublicErrorStoreErrorAbsent(kind) ==
     /\ phase = "Absent"
-    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (kind = "NamespaceAssignmentRequired")))
+    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (kind = "SchemaMismatch"))))
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -905,7 +905,7 @@ ClassifyPublicErrorStoreErrorAbsent(kind) ==
 
 ClassifyPublicErrorStoreErrorOpen(kind) ==
     /\ phase = "Open"
-    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (kind = "NamespaceAssignmentRequired")))
+    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (kind = "SchemaMismatch"))))
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -913,7 +913,7 @@ ClassifyPublicErrorStoreErrorOpen(kind) ==
 
 ClassifyPublicErrorStoreErrorInProgress(kind) ==
     /\ phase = "InProgress"
-    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (kind = "NamespaceAssignmentRequired")))
+    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (kind = "SchemaMismatch"))))
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -921,7 +921,7 @@ ClassifyPublicErrorStoreErrorInProgress(kind) ==
 
 ClassifyPublicErrorStoreErrorBlocked(kind) ==
     /\ phase = "Blocked"
-    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (kind = "NamespaceAssignmentRequired")))
+    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (kind = "SchemaMismatch"))))
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -929,7 +929,7 @@ ClassifyPublicErrorStoreErrorBlocked(kind) ==
 
 ClassifyPublicErrorStoreErrorCompleted(kind) ==
     /\ phase = "Completed"
-    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (kind = "NamespaceAssignmentRequired")))
+    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (kind = "SchemaMismatch"))))
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -937,7 +937,7 @@ ClassifyPublicErrorStoreErrorCompleted(kind) ==
 
 ClassifyPublicErrorStoreErrorCancelled(kind) ==
     /\ phase = "Cancelled"
-    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (kind = "NamespaceAssignmentRequired")))
+    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (kind = "SchemaMismatch"))))
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -945,7 +945,7 @@ ClassifyPublicErrorStoreErrorCancelled(kind) ==
 
 ClassifyPublicErrorStoreErrorFailed(kind) ==
     /\ phase = "Failed"
-    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (kind = "NamespaceAssignmentRequired")))
+    /\ (IF (kind = "Store") THEN TRUE ELSE (IF (kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (kind = "SchemaMismatch"))))
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f

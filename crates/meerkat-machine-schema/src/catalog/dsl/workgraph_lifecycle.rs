@@ -313,6 +313,7 @@ pub enum WorkGraphErrorKind {
     AttentionTargetRealmMismatch,
     BackingStoreUnavailable,
     UnpairedAdmissionIdentity,
+    SchemaMismatch,
 }
 
 /// Machine-owned public error classification surfaced to REST/RPC callers. The
@@ -1997,6 +1998,7 @@ machine! {
                 kind == WorkGraphErrorKind::Store
                     || kind == WorkGraphErrorKind::BackingStoreUnavailable
                     || kind == WorkGraphErrorKind::NamespaceAssignmentRequired
+                    || kind == WorkGraphErrorKind::SchemaMismatch
             }
             update {}
             to Absent

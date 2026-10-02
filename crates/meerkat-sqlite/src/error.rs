@@ -124,6 +124,27 @@ pub enum SqliteStoreError {
         detail: String,
     },
 
+    /// A ledger row stamps the domain's CURRENT version, but the file's
+    /// domain-owned catalog is not that version's schema: owned objects are
+    /// missing, objects the current schema does not own (including retired
+    /// ones) are present, or an owned object's definition (for a table, its
+    /// columns and constraints) differs. Each list names objects as
+    /// `kind:name`. Typical cause: a file stamped by an unreleased build that
+    /// reused this version number for a different schema. The file is refused
+    /// before any access; it is never treated as current.
+    #[error(
+        "schema for domain `{domain}` is stamped current version {version} but its catalog is \
+         not that schema: missing {missing_objects:?}, unexpected {unexpected_objects:?}, \
+         changed {changed_objects:?}"
+    )]
+    CurrentSchemaMismatch {
+        domain: String,
+        version: i64,
+        missing_objects: Vec<String>,
+        unexpected_objects: Vec<String>,
+        changed_objects: Vec<String>,
+    },
+
     /// A file has no ledger row for a domain but already contains one or more
     /// objects owned by that domain. At the 0.8.10 compatibility floor this
     /// is neither a fresh domain nor an authenticated released predecessor:

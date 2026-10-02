@@ -222,6 +222,7 @@ impl From<meerkat_sqlite::SqliteStoreError> for StoreError {
             | E::MigrationBrokeTransaction { .. }
             | E::UnsupportedSchemaPredecessor { .. }
             | E::SchemaFingerprintMismatch { .. }
+            | E::CurrentSchemaMismatch { .. }
             | E::UnledgeredSchemaNoMatch { .. }
             | E::UnledgeredSchemaAmbiguous { .. }
             // Both WAL-establishment failures stay one typed refusal at this

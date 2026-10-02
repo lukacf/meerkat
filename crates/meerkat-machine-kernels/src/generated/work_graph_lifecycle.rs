@@ -822,6 +822,8 @@ pub enum WorkGraphErrorKind {
     BackingStoreUnavailable,
     #[serde(rename = "UnpairedAdmissionIdentity")]
     UnpairedAdmissionIdentity,
+    #[serde(rename = "SchemaMismatch")]
+    SchemaMismatch,
 }
 impl WorkGraphErrorKind {
     pub fn as_str(&self) -> &'static str {
@@ -839,6 +841,7 @@ impl WorkGraphErrorKind {
             Self::AttentionTargetRealmMismatch => "AttentionTargetRealmMismatch",
             Self::BackingStoreUnavailable => "BackingStoreUnavailable",
             Self::UnpairedAdmissionIdentity => "UnpairedAdmissionIdentity",
+            Self::SchemaMismatch => "SchemaMismatch",
         }
     }
 }
@@ -859,6 +862,7 @@ impl std::convert::TryFrom<&str> for WorkGraphErrorKind {
             "AttentionTargetRealmMismatch" => Ok(Self::AttentionTargetRealmMismatch),
             "BackingStoreUnavailable" => Ok(Self::BackingStoreUnavailable),
             "UnpairedAdmissionIdentity" => Ok(Self::UnpairedAdmissionIdentity),
+            "SchemaMismatch" => Ok(Self::SchemaMismatch),
             other => Err(format!("invalid WorkGraphErrorKind value `{other}`")),
         }
     }

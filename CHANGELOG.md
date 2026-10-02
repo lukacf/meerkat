@@ -127,10 +127,19 @@ them.
     `TransitionId` gains `CreateOpenRejectedUnpairedAdmission` and
     `CreateBlockedRejectedUnpairedAdmission` (appended, so existing
     discriminants are unchanged).
-  - `meerkat_workgraph::WorkGraphError` gains the variant
-    `UnpairedAdmissionIdentity { admission_key_present, request_digest_present }`,
-    and the generated `WorkGraphErrorKind` gains `UnpairedAdmissionIdentity`
-    (appended), classified as `invalid_arguments`.
+  - `meerkat_workgraph::WorkGraphError` gains the variants
+    `UnpairedAdmissionIdentity { admission_key_present, request_digest_present }`
+    and `SchemaMismatch { version, missing_objects, unexpected_objects,
+    changed_objects }`; the generated `WorkGraphErrorKind` gains
+    `UnpairedAdmissionIdentity` (classified `invalid_arguments`) and
+    `SchemaMismatch` (classified `store_error`), both appended.
+- `meerkat_sqlite::SqliteStoreError` gains `CurrentSchemaMismatch { domain,
+  version, missing_objects, unexpected_objects, changed_objects }`. A file
+  whose ledger row stamps a domain's CURRENT version but whose owned catalog is
+  not that schema is now reported with it, naming the missing, unexpected and
+  changed objects, instead of `SchemaFingerprintMismatch` (which remains for
+  released predecessors and post-migration self-checks). Exhaustive matches
+  must handle the new variant.
 - Typed tool choice (see Added). Struct literals and exhaustive matches must
   handle the new members:
   - `meerkat_llm_core::LlmRequest` gains `tool_choice: ToolChoice` (serde
@@ -322,6 +331,12 @@ them.
     surfaced as the new `WorkGraphError::UnpairedAdmissionIdentity`
     (public class `invalid_arguments`), never a guard failure.
   - Item JSON is unchanged; existing items load as unkeyed.
+  - A file stamped workgraph schema version 4 whose catalog is not this v4
+    (for example a development file from an unreleased build that used v4 for
+    a different admissions table) is refused with
+    `WorkGraphError::SchemaMismatch` naming the missing or changed objects, on
+    open and on every operation; it is never treated as current. Recreate such
+    files.
   - SQLite indexes the key in the new `workgraph_item_admissions` table
     (workgraph schema version 4; version 3 files migrate on open), in the
     same transaction as the item and its event: a failure between the writes

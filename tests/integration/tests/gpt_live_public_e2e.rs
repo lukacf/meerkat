@@ -4183,6 +4183,63 @@ async fn wait_executor_turn(
     }
 }
 
+/// Wait until every live delegation of the session has its executor result
+/// acknowledged delivered (`Delivered`), then until the peer observed each
+/// result's `session.commentary.appended` (one per
+/// `session.delegation.created`). The typed-event version of "the results
+/// have been told": nothing is anchored on assistant quiet.
+async fn wait_all_result_commentaries(
+    live: &mut PublicLiveHarness,
+    label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_runtime::live_execution::LiveDelegationResultDeliveryObservation;
+    let runtime = live.shared()?.0.runtime.clone();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let snapshots = runtime
+            .live_delegation_recovery_snapshots(&live.session_id)
+            .await?;
+        let mut pending = 0usize;
+        for snapshot in &snapshots {
+            match snapshot.result_delivery() {
+                Some(LiveDelegationResultDeliveryObservation::Delivered) => {}
+                Some(observation) => {
+                    return Err(format!(
+                        "{label}: executor result {} was not delivered: {observation:?}",
+                        snapshot.operation_id()
+                    )
+                    .into());
+                }
+                None => pending += 1,
+            }
+        }
+        if !snapshots.is_empty() && pending == 0 {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let timeline = live.peer.timeline().await?;
+            return Err(format!(
+                "{label}: {pending} executor result(s) not delivered within 90 s; timeline:\n{}",
+                format_timeline(&timeline)
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+    let created: Vec<u64> = live
+        .peer
+        .timeline()
+        .await?
+        .iter()
+        .filter(|entry| entry.kind == TimelineKind::DelegationCreated)
+        .map(|entry| entry.t_ms)
+        .collect();
+    for delegation_created_ms in created {
+        wait_peer_result_commentary(live, label, delegation_created_ms).await?;
+    }
+    Ok(())
+}
+
 /// Wait until the runtime records the delegated result's provider
 /// acknowledgement (`Delivered`), then return the peer's arrival time of the
 /// result's `session.commentary.appended`.
@@ -4230,6 +4287,17 @@ async fn wait_result_commentary(
         }
         sleep(Duration::from_millis(200)).await;
     }
+    wait_peer_result_commentary(live, label, delegation_created_ms).await
+}
+
+/// The peer's arrival time of the delivered result commentary for the
+/// delegation created at `delegation_created_ms` (its `client_event_id` is
+/// keyed by that delegation's provider id).
+async fn wait_peer_result_commentary(
+    live: &mut PublicLiveHarness,
+    label: &str,
+    delegation_created_ms: u64,
+) -> Result<u64, Box<dyn std::error::Error>> {
     let timeline = live.peer.timeline().await?;
     let events = live.peer.events().await?;
     let delegation_event = timeline
@@ -8182,6 +8250,13 @@ async fn run_s105_fork_and_merge_parallel(
         }
         live.record_workgraph_mode("S105", 2, &mut deterministic_failures).await?;
 
+        // Both executor results reach the model as commentary after the
+        // forks are terminal, on their own schedule. Speaking (or typing)
+        // before they are delivered races them: a result landing during the
+        // recall utterance makes the assistant talk over it and fragments the
+        // recall into several finals. Proceed only once every result is
+        // acknowledged delivered and its commentary reached the peer.
+        wait_all_result_commentaries(&mut live, "S105").await?;
         // Typed correction while live, then the voice recall.
         evidence.stage(EvidenceStage::ForkCorrection)?;
         wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(60)).await?;
@@ -8215,6 +8290,12 @@ async fn run_s105_fork_and_merge_parallel(
             format!("number={number_after:?} doubled={doubled_after:?}"),
             &mut tolerant_failures,
         )?;
+        // The correction's own executor result is delivered on the same
+        // serialized result channel. The recall asks about the corrected
+        // numbers, so it waits for every result, the correction's included,
+        // to reach the model; otherwise delegating the recall is a correct
+        // answer to a model that has not heard the result yet.
+        wait_all_result_commentaries(&mut live, "S105 after the typed correction").await?;
         let events_before_recall = live.peer.events().await?.len();
         let (recall, answer, _, _) = native_question(
             &mut live,

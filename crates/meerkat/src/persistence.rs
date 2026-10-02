@@ -196,6 +196,10 @@ pub struct PersistenceBundle {
     job_store: Arc<dyn meerkat_jobs::DetachedJobStore>,
     #[cfg(feature = "session-store")]
     runtime_store: Arc<dyn RuntimeStore>,
+    /// The one runtime delivery inbox over `runtime_store`. Every consumer
+    /// gets a clone so all of them share its commit signal.
+    #[cfg(feature = "session-store")]
+    runtime_delivery_inbox: meerkat_runtime::RuntimeDeliveryInbox,
     #[cfg(feature = "session-store")]
     session_persistence_profile: RuntimeSessionPersistenceProfile,
     blob_store: Arc<dyn BlobStore>,
@@ -258,6 +262,8 @@ impl PersistenceBundle {
         workgraph_store: Arc<dyn WorkGraphStore>,
     ) -> Self {
         let session_persistence_profile = runtime_store.session_persistence_profile();
+        let runtime_delivery_inbox =
+            meerkat_runtime::RuntimeDeliveryInbox::new(runtime_store.clone());
         let runtime_adapter = Arc::new(MeerkatMachine::persistent(
             runtime_store.clone(),
             blob_store.clone(),
@@ -272,6 +278,7 @@ impl PersistenceBundle {
             workgraph_store,
             job_store: Arc::new(meerkat_jobs::MemoryDetachedJobStore::new()),
             runtime_store,
+            runtime_delivery_inbox,
             session_persistence_profile,
             blob_store,
             artifact_store: Arc::new(meerkat_store::MemoryArtifactStore::new()),
@@ -391,6 +398,15 @@ impl PersistenceBundle {
     #[cfg(feature = "session-store")]
     pub fn runtime_store(&self) -> Arc<dyn RuntimeStore> {
         self.runtime_store.clone()
+    }
+
+    /// The bundle's runtime delivery inbox. Always a clone of the one
+    /// instance the bundle owns, so every caller shares its commit signal;
+    /// constructing a second `RuntimeDeliveryInbox` over the same store would
+    /// not observe commits made through this one.
+    #[cfg(feature = "session-store")]
+    pub fn runtime_delivery_inbox(&self) -> meerkat_runtime::RuntimeDeliveryInbox {
+        self.runtime_delivery_inbox.clone()
     }
 
     #[cfg(feature = "session-store")]
@@ -2975,6 +2991,54 @@ mod tests {
             "sqlite realms must not pair durable stores with an in-memory blob store"
         );
 
+        Ok(())
+    }
+
+    /// The bundle owns exactly one runtime delivery inbox: every accessor call
+    /// is a clone sharing one commit signal, so a commit made through any
+    /// handle is observed by all of them (a second `RuntimeDeliveryInbox`
+    /// over the same store would observe nothing). Replays do not signal.
+    #[tokio::test]
+    async fn bundle_hands_out_one_runtime_delivery_inbox_with_a_shared_commit_signal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> =
+            Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
+        let bundle = PersistenceBundle::new(
+            store,
+            runtime_store.clone(),
+            Arc::new(MemoryBlobStore::new()),
+        );
+
+        let observer = bundle.runtime_delivery_inbox();
+        let producer = bundle.runtime_delivery_inbox();
+        let stray = meerkat_runtime::RuntimeDeliveryInbox::new(runtime_store);
+        assert!(observer.shares_commit_signal_with(&producer));
+        assert!(!observer.shares_commit_signal_with(&stray));
+
+        let mut commits = observer.subscribe_commits();
+        let runtime = meerkat_runtime::LogicalRuntimeId::for_session(&SessionId::new());
+        let submission = meerkat_runtime::RuntimeDeliverySubmission::new(
+            meerkat_runtime::RuntimeDeliveryId::new("delivery-1")?,
+            meerkat_runtime::RuntimeDeliveryKind::JobTerminal,
+            "job-source",
+            1,
+            "lineage",
+            b"payload".to_vec(),
+        )?;
+        producer.submit(&runtime, submission.clone()).await?;
+        assert!(
+            commits.has_changed()?,
+            "a commit through any bundle handle is observed"
+        );
+        assert_eq!(*commits.borrow_and_update(), 1);
+
+        let replay = producer.submit(&runtime, submission).await?;
+        assert!(replay.deduplicated);
+        assert!(
+            !commits.has_changed()?,
+            "an exact replay is not a new commit"
+        );
         Ok(())
     }
 

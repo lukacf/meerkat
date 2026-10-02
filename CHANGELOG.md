@@ -112,6 +112,15 @@ them.
 
 ### Added
 
+- One runtime delivery inbox per persistence bundle, with an in-process
+  commit signal (#1497):
+  - `meerkat::PersistenceBundle::runtime_delivery_inbox()` returns a clone of
+    the single inbox the bundle owns. RPC and the shared runtime-backed
+    builder now use it instead of each constructing their own.
+  - `RuntimeDeliveryInbox::subscribe_commits()` is a watch whose generation
+    advances once per newly committed row; exact replays do not advance it.
+  - `RuntimeDeliveryInbox::shares_commit_signal_with()`.
+
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a

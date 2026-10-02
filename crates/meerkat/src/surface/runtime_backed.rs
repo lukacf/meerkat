@@ -186,8 +186,7 @@ pub fn build_runtime_backed_service_with_capacities(
     #[cfg(not(target_arch = "wasm32"))]
     let detached_job_store = persistence.job_store();
     #[cfg(not(target_arch = "wasm32"))]
-    let runtime_delivery_inbox =
-        meerkat_runtime::RuntimeDeliveryInbox::new(persistence.runtime_store());
+    let runtime_delivery_inbox = persistence.runtime_delivery_inbox();
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     let event_projection = persistence.event_projection();
     let (store, runtime_store, blob_store) = persistence.into_parts();

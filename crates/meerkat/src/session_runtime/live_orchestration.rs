@@ -55,24 +55,15 @@ use crate::session_runtime::errors::LiveOpenPrecheckError;
 /// close verb applies it on every feature set.
 pub const LIVE_CLOSE_CONFIRMATION_BOUND: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// How long one deferred close-time playback settlement waits for the
-/// member's turn-finalization boundary before trying again. A member turn is
-/// bounded by its own tool round; ten minutes covers the longest ordinary
-/// turn without holding the settlement task forever.
+/// The hang guard of one deferred close-time playback settlement: how long it
+/// may wait, in total, for the member's turn-finalization boundary and for
+/// that turn's commit to land. A member turn is bounded by its own tool
+/// round; ten minutes covers the longest ordinary turn. Past it the
+/// settlement is given up with a warning and the deferral stays recorded on
+/// the closed channel. This is a failure bound, not a pacing timer: retries
+/// are driven by `PersistentSessionService::live_authority_advanced`.
 pub const LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND: std::time::Duration =
     std::time::Duration::from_secs(600);
-
-/// Bounded waits for one deferred settlement before it is given up with a
-/// warning; the deferral stays recorded on the closed channel.
-pub const LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS: usize = 6;
-
-/// Pause between deferred settlement attempts that found the member turn's
-/// boundary commit still landing in the store (the settlement won the
-/// boundary the instant the turn released it). The checkpoint lands within
-/// milliseconds; the pause keeps the bounded attempts from being spent in
-/// that one window.
-pub const LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY: std::time::Duration =
-    std::time::Duration::from_millis(250);
 
 #[cfg(feature = "openai-live")]
 use crate::session_runtime::live_summary;
@@ -759,7 +750,11 @@ pub fn builtin_tool_visibility_witness() -> meerkat_core::ToolVisibilityWitness 
     feature = "openai-live",
     not(target_arch = "wasm32")
 ))]
-pub(crate) use orchestrator::settle_live_close_playback_deferred;
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use orchestrator::{
+    DeferredCloseSettlementGiveUp, DeferredCloseSettlementOutcome,
+    settle_live_close_playback_deferred,
+};
 /// Phase 4 R1: surface-agnostic [`LiveOrchestrator`] that owns the
 /// load-bearing live-channel methods previously stranded on
 /// `meerkat-rpc::SessionRuntime`.
@@ -988,8 +983,8 @@ mod orchestrator {
 
     /// Settle a closed channel's pending assistant playback row once the
     /// member's turn boundary is free. Runs off the close path: `live/close`
-    /// records its result first and this task follows. Each wait is bounded by
-    /// [`super::LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND`]; a session that is gone has
+    /// records its result first and this task follows. The whole settlement is
+    /// bounded by [`super::LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND`]; a session that is gone has
     /// nothing left to settle and resolves the deferral as well.
     ///
     /// Projections the transport deferred while the close was in flight
@@ -1002,10 +997,13 @@ mod orchestrator {
     ///
     /// A settlement that wins the boundary while the member turn's boundary
     /// commit is still landing in the store is `Busy` (see
-    /// `PersistentSessionService::resolve_live_assistant_playback_on_channel_close_within`);
-    /// the task pauses [`super::LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY`] and
-    /// tries again so the turn's rows and checkpoint receipt are never
-    /// synchronized away from under its finalization.
+    /// `PersistentSessionService::resolve_live_assistant_playback_on_channel_close_within`).
+    /// The task then waits for `PersistentSessionService::live_authority_advanced`
+    /// (the commit acknowledged, a persist landed, or the live actor resynced
+    /// or discarded) and tries again, so the turn's rows and checkpoint
+    /// receipt are never synchronized away from under its finalization. No
+    /// timer paces the retries; the whole settlement is bounded once by
+    /// [`super::LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND`].
     pub(crate) async fn settle_live_close_playback_deferred<B: SessionAgentBuilder + 'static>(
         service: Arc<PersistentSessionService<B>>,
         runtime: Arc<MeerkatMachine>,
@@ -1013,7 +1011,7 @@ mod orchestrator {
         deferred_projections: Vec<meerkat_core::live_adapter::LiveAdapterObservation>,
         session_id: SessionId,
         channel_id: LiveChannelId,
-    ) {
+    ) -> DeferredCloseSettlementOutcome {
         let retention = host
             .retain_channel_close_projection(&session_id, &channel_id)
             .await
@@ -1035,102 +1033,140 @@ mod orchestrator {
         } else {
             (std::collections::VecDeque::new(), deferred_projections)
         };
-        for attempt in 1..=super::LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS {
-            while let Some(observation) = transcript_first.front() {
-                match tokio::time::timeout(
-                    super::LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND,
-                    host.apply_observation(&channel_id, observation),
-                )
-                .await
-                {
-                    Err(_) => break,
-                    Ok(Err(meerkat_live::LiveAdapterHostError::ProjectionError(
-                        meerkat_live::LiveProjectionError::SessionBusy(_),
-                    ))) => {
-                        tokio::time::sleep(super::LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY).await;
+        // One documented hang guard bounds the whole settlement. The member
+        // turn may itself be waiting on this close, and a stopped turn commits
+        // no boundary, so a deferral that can never settle must not hold this
+        // task (and the closed channel's retention) forever.
+        let deadline = tokio::time::Instant::now() + super::LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND;
+        let mut give_up = None;
+        while let Some(observation) = transcript_first.front() {
+            // Registered before the attempt: an advance that lands between a
+            // refusal and the wait below is not lost.
+            let advanced = service.live_authority_advanced();
+            tokio::pin!(advanced);
+            advanced.as_mut().enable();
+            match tokio::time::timeout_at(
+                deadline,
+                host.apply_observation(&channel_id, observation),
+            )
+            .await
+            {
+                Err(_) => {
+                    give_up = Some(DeferredCloseSettlementGiveUp::HangGuard);
+                    break;
+                }
+                Ok(Err(meerkat_live::LiveAdapterHostError::ProjectionError(
+                    meerkat_live::LiveProjectionError::SessionBusy(_),
+                ))) => {
+                    if service.live_projection_turn_boundary_released(&session_id, &channel_id) {
+                        // A close released this channel's projections from
+                        // the held turn boundary after this settlement
+                        // restored the wait. Replaying deferred projections
+                        // at the boundary is this settlement's job: re-arm the
+                        // wait, and the retry waits on the boundary itself.
+                        service
+                            .restore_live_projection_turn_boundary_wait(&session_id, &channel_id);
+                        continue;
+                    }
+                    if service.live_transcript_awaits_no_boundary_commit(&session_id) {
+                        give_up = Some(DeferredCloseSettlementGiveUp::BoundaryNotCommitted);
                         break;
                     }
-                    Ok(Ok(outcome)) => {
-                        tracing::info!(
-                            target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
-                            channel = %channel_id,
-                            ?observation,
-                            ?outcome,
-                            "deferred live projection applied before the close settlement"
-                        );
-                        transcript_first.pop_front();
-                    }
-                    Ok(Err(error)) => {
-                        tracing::info!(
-                            target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
-                            channel = %channel_id,
-                            ?observation,
-                            %error,
-                            "deferred live projection was refused after the close"
-                        );
-                        transcript_first.pop_front();
+                    tracing::info!(
+                        target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
+                        channel = %channel_id,
+                        "deferred live transcript projection waits for the member turn's commit to land"
+                    );
+                    if tokio::time::timeout_at(deadline, advanced).await.is_err() {
+                        give_up = Some(DeferredCloseSettlementGiveUp::HangGuard);
+                        break;
                     }
                 }
+                Ok(Ok(outcome)) => {
+                    tracing::info!(
+                        target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
+                        channel = %channel_id,
+                        ?observation,
+                        ?outcome,
+                        "deferred live projection applied before the close settlement"
+                    );
+                    transcript_first.pop_front();
+                }
+                Ok(Err(error)) => {
+                    tracing::info!(
+                        target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
+                        channel = %channel_id,
+                        ?observation,
+                        %error,
+                        "deferred live projection was refused after the close"
+                    );
+                    transcript_first.pop_front();
+                }
             }
-            if transcript_first.is_empty() {
-                break;
-            }
-            tracing::warn!(
-                %channel_id,
-                attempt,
-                "deferred live transcript projection still waits for the member turn"
-            );
         }
-        if !transcript_first.is_empty() {
+        if let Some(reason) = give_up {
             tracing::warn!(
                 %channel_id,
+                ?reason,
                 deferred_projections = transcript_first.len(),
                 "deferred live transcript projections gave up waiting for the member turn boundary; the deferral stays recorded"
             );
-            return;
+            return DeferredCloseSettlementOutcome::GaveUp(reason);
         }
-        let mut settled = false;
-        for attempt in 1..=super::LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS {
+        loop {
+            let advanced = service.live_authority_advanced();
+            tokio::pin!(advanced);
+            advanced.as_mut().enable();
             match meerkat_live::traced_live_close_step(
                 Some(&channel_id),
                 "deferred_settlement",
                 service.resolve_live_assistant_playback_on_channel_close_within(
                     &session_id,
                     channel_id.clone(),
-                    super::LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND,
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
                 ),
             )
             .await
             {
+                // Either the turn boundary stayed held to the guard (the wait
+                // below then ends at once), or the member turn's boundary
+                // commit is still landing in the store: wait for it to land.
                 Err(SessionError::Busy { .. }) => {
-                    tracing::warn!(
-                        %channel_id,
-                        attempt,
-                        "deferred live close settlement still waits for the member turn to commit"
-                    );
-                    tokio::time::sleep(super::LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY).await;
-                    continue;
+                    let reason = if service.live_transcript_awaits_no_boundary_commit(&session_id) {
+                        // The member turn ended with an error: no boundary
+                        // commit is coming for this image, so do not wait.
+                        Some(DeferredCloseSettlementGiveUp::BoundaryNotCommitted)
+                    } else {
+                        tracing::info!(
+                            target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
+                            channel = %channel_id,
+                            "deferred live close settlement waits for the member turn's commit to land"
+                        );
+                        tokio::time::timeout_at(deadline, advanced)
+                            .await
+                            .is_err()
+                            .then_some(DeferredCloseSettlementGiveUp::HangGuard)
+                    };
+                    if let Some(reason) = reason {
+                        tracing::warn!(
+                            %channel_id,
+                            ?reason,
+                            deferred_projections = deferred_projections.len(),
+                            "deferred live close settlement gave up waiting for the member turn boundary; the deferral stays recorded"
+                        );
+                        return DeferredCloseSettlementOutcome::GaveUp(reason);
+                    }
                 }
-                Ok(_) => {}
+                Ok(_) => break,
                 Err(error) => {
                     tracing::warn!(
                         %error,
                         %channel_id,
                         "deferred live close settlement found nothing to settle"
                     );
+                    break;
                 }
             }
-            settled = true;
-            break;
-        }
-        if !settled {
-            tracing::warn!(
-                %channel_id,
-                attempts = super::LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS,
-                deferred_projections = deferred_projections.len(),
-                "deferred live close settlement gave up waiting for the member turn boundary; the deferral stays recorded"
-            );
-            return;
         }
         for observation in deferred_projections {
             match meerkat_live::traced_live_close_step(
@@ -1163,6 +1199,28 @@ mod orchestrator {
         {
             tracing::warn!(%error, %channel_id, "deferred live close settlement could not be resolved in the machine");
         }
+        DeferredCloseSettlementOutcome::Settled
+    }
+
+    /// How one deferred close settlement ended.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum DeferredCloseSettlementOutcome {
+        /// Playback settled (or there was nothing left to settle) and the
+        /// deferral was resolved.
+        Settled,
+        /// The settlement stopped; the deferral stays recorded on the closed
+        /// channel.
+        GaveUp(DeferredCloseSettlementGiveUp),
+    }
+
+    /// Why a deferred close settlement stopped without settling.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum DeferredCloseSettlementGiveUp {
+        /// The member turn ended with an error, so no boundary commit is
+        /// coming for the live transcript held ahead of the store.
+        BoundaryNotCommitted,
+        /// No signal arrived within [`super::LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND`].
+        HangGuard,
     }
 
     fn is_unmeasured_playback_release(

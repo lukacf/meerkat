@@ -13315,6 +13315,241 @@ mod tests {
         retire_sideband_actors(active, SidebandActorRetirement::Graceful).await;
     }
 
+    /// A runtime-backed member session with a closed channel whose playback
+    /// settlement is deferred, as a close during the member turn leaves it.
+    async fn deferred_settlement_fixture() -> (
+        Arc<crate::PersistentSessionService<crate::FactoryAgentBuilder>>,
+        Arc<meerkat_runtime::MeerkatMachine>,
+        meerkat_core::SessionId,
+        meerkat_live::LiveChannelId,
+        tempfile::TempDir,
+    ) {
+        use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
+
+        let persistence = crate::PersistenceBundle::new(
+            Arc::new(crate::MemoryStore::new()),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        );
+        let temp = tempfile::tempdir().expect("tempdir");
+        let factory = crate::AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let mut builder = crate::FactoryAgentBuilder::new(factory, crate::Config::default());
+        builder.default_llm_client = Some(Arc::new(meerkat_client::TestClient::default()));
+        let (service, runtime) =
+            crate::surface::build_runtime_backed_service(builder, 4, persistence);
+        let service = Arc::new(service);
+        let session = crate::Session::new();
+        let session_id = session.id().clone();
+        let executor_service = Arc::clone(&service);
+        let executor_runtime = Arc::clone(&runtime);
+        Box::pin(crate::surface::materialize_session(
+            &service,
+            &runtime,
+            session,
+            crate::CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-realtime-2".to_string(),
+                prompt: meerkat_core::ContentInput::Text(String::new()),
+                system_prompt: crate::SystemPromptOverride::Disable,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            },
+            move |materialized_session_id| {
+                crate::surface::default_persistent_executor(
+                    executor_service,
+                    executor_runtime,
+                    materialized_session_id,
+                )
+            },
+        ))
+        .await
+        .expect("materialize deferred-settlement fixture session");
+        let channel_id = meerkat_live::LiveChannelId::new("deferred-close-settlement");
+        runtime
+            .resolve_live_open_admission(
+                &session_id,
+                &channel_id,
+                &meerkat_core::SessionLlmIdentity {
+                    model: "gpt-realtime-2".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+            )
+            .await
+            .expect("channel admitted");
+        runtime
+            .abandon_live_open_admission(&session_id, &channel_id)
+            .await
+            .expect("channel closed");
+        runtime
+            .defer_live_close_settlement(&session_id, &channel_id)
+            .await
+            .expect("deferral recorded on the closed channel");
+        (service, runtime, session_id, channel_id, temp)
+    }
+
+    /// Drive one runtime content turn on the member session without the
+    /// runtime committing it: the live transcript is then ahead of the store.
+    async fn run_uncommitted_member_turn(
+        service: &crate::PersistentSessionService<crate::FactoryAgentBuilder>,
+        session_id: &meerkat_core::SessionId,
+    ) {
+        let mut request = meerkat_core::StartTurnRequest {
+            injected_context: Vec::new(),
+            prompt: "a member turn whose commit has not landed"
+                .to_string()
+                .into(),
+            system_prompt: None,
+            event_tx: None,
+            runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
+        };
+        request.runtime.turn_metadata = Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+                ..Default::default()
+            },
+        );
+        service
+            .apply_runtime_turn(
+                session_id,
+                meerkat_core::lifecycle::RunId::new(),
+                request,
+                meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await
+            .expect("the member turn builds its output without a commit");
+    }
+
+    fn settle_deferred(
+        service: &Arc<crate::PersistentSessionService<crate::FactoryAgentBuilder>>,
+        runtime: &Arc<meerkat_runtime::MeerkatMachine>,
+        session_id: &meerkat_core::SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> impl std::future::Future<
+        Output = crate::session_runtime::live_orchestration::DeferredCloseSettlementOutcome,
+    > + Send
+    + 'static {
+        crate::session_runtime::live_orchestration::settle_live_close_playback_deferred(
+            Arc::clone(service),
+            Arc::clone(runtime),
+            meerkat_live::LiveAdapterHost::new(Arc::new(meerkat_live::NoOpProjectionSink)),
+            Vec::new(),
+            session_id.clone(),
+            channel_id.clone(),
+        )
+    }
+
+    /// The commit-acknowledgement wakeup itself is proven in meerkat-session
+    /// (`close_settlement_refused_ahead_of_the_store_retries_when_the_turn_commit_lands`);
+    /// here a live-actor discard, another typed advance, drives the
+    /// orchestration end to end.
+    #[tokio::test]
+    async fn deferred_close_settlement_settles_when_live_authority_advances() {
+        let (service, runtime, session_id, channel_id, _temp) = deferred_settlement_fixture().await;
+        run_uncommitted_member_turn(&service, &session_id).await;
+        let settlement = tokio::spawn(settle_deferred(
+            &service,
+            &runtime,
+            &session_id,
+            &channel_id,
+        ));
+        // Live authority advances: the settlement retries on that typed
+        // wakeup, wherever it was when it landed, and finds nothing left to
+        // settle.
+        service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the member's live actor");
+        assert_eq!(
+            settlement.await.expect("settlement task"),
+            crate::session_runtime::live_orchestration::DeferredCloseSettlementOutcome::Settled
+        );
+        assert!(
+            runtime
+                .live_close_settlement_deferred_channels(&session_id)
+                .await
+                .is_empty(),
+            "the machine no longer holds the deferral"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_close_settlement_after_an_errored_member_turn_stops_without_waiting() {
+        let (service, runtime, session_id, channel_id, _temp) = deferred_settlement_fixture().await;
+        run_uncommitted_member_turn(&service, &session_id).await;
+        // The member turn ends with an error: no boundary commit is coming.
+        service
+            .apply_runtime_turn(
+                &session_id,
+                meerkat_core::lifecycle::RunId::new(),
+                meerkat_core::StartTurnRequest {
+                    injected_context: Vec::new(),
+                    prompt: String::new().into(),
+                    system_prompt: None,
+                    event_tx: None,
+                    runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
+                },
+                meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await
+            .expect_err("a runtime turn without an execution kind ends with an error");
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            settle_deferred(&service, &runtime, &session_id, &channel_id).await,
+            crate::session_runtime::live_orchestration::DeferredCloseSettlementOutcome::GaveUp(
+                crate::session_runtime::live_orchestration::DeferredCloseSettlementGiveUp::BoundaryNotCommitted
+            ),
+        );
+        assert!(
+            started.elapsed()
+                < crate::session_runtime::live_orchestration::LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND,
+            "the typed outcome arrives without waiting out the hang guard"
+        );
+        assert_eq!(
+            runtime
+                .live_close_settlement_deferred_channels(&session_id)
+                .await,
+            vec![channel_id],
+            "the deferral stays recorded, as on today's give-up path"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_close_settlement_with_no_signal_ends_at_the_hang_guard() {
+        let (service, runtime, session_id, channel_id, _temp) = deferred_settlement_fixture().await;
+        // The member turn holds its boundary and never releases it.
+        let _boundary = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            settle_deferred(&service, &runtime, &session_id, &channel_id).await,
+            crate::session_runtime::live_orchestration::DeferredCloseSettlementOutcome::GaveUp(
+                crate::session_runtime::live_orchestration::DeferredCloseSettlementGiveUp::HangGuard
+            ),
+        );
+        assert!(
+            started.elapsed()
+                >= crate::session_runtime::live_orchestration::LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND,
+            "only the documented hang guard ends a settlement no signal reaches"
+        );
+        assert_eq!(
+            runtime
+                .live_close_settlement_deferred_channels(&session_id)
+                .await,
+            vec![channel_id],
+            "the deferral stays recorded"
+        );
+    }
+
     /// Finding C (S104): a close while the member's own turn is running must
     /// not wait for that turn. The close records its result and defers the
     /// playback settlement; the deferred task settles once the turn releases

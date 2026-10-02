@@ -1043,8 +1043,14 @@ impl Journal {
 
     /// One journal under `target/e2e-live-audio-artifacts/<label>/<uuid>`.
     pub fn create_for(label: &'static str, expected_phrase: String) -> Result<Self, Fault> {
-        let directory = super::workspace_root()
-            .join("target/e2e-live-audio-artifacts")
+        // Under Bazel the journal goes to the test's undeclared outputs, so a
+        // remote (BuildBuddy) run returns it with the test logs; locally it
+        // stays under target/.
+        let root = std::env::var_os("TEST_UNDECLARED_OUTPUTS_DIR")
+            .filter(|dir| !dir.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| super::workspace_root().join("target/e2e-live-audio-artifacts"));
+        let directory = root
             .join(label.to_ascii_lowercase())
             .join(uuid::Uuid::new_v4().to_string());
         let secrets = [

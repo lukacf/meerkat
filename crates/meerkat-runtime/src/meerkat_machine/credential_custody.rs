@@ -206,10 +206,6 @@ impl NativeCredentialCustody {
             }
         }
     }
-
-    pub(crate) fn governed(&self) -> bool {
-        !matches!(self, Self::Ungoverned)
-    }
 }
 
 impl super::MeerkatMachine {

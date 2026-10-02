@@ -65,6 +65,7 @@ pub mod host_stack;
 pub mod identifiers;
 pub mod ingress_types;
 pub mod input;
+pub mod input_admission_custody;
 pub mod input_audit;
 pub mod input_authority;
 pub mod input_ledger;

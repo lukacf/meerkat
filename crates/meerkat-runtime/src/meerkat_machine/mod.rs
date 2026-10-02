@@ -2550,6 +2550,12 @@ impl MeerkatMachine {
         Ok(self)
     }
 
+    /// Whether the actual native owner was installed before this machine was
+    /// shared. This is a composition observation, never a permission decision.
+    pub fn has_native_work_authorization_host(&self) -> bool {
+        self.native_work_authorization_host.get().is_some()
+    }
+
     /// Take the interrupted-run notices owed to `session_id`'s model, if any.
     pub(crate) async fn take_interrupted_tool_notices(
         &self,

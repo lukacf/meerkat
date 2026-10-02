@@ -542,6 +542,7 @@ impl PersistentRuntimeDriver {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_control_and_durability_health(
         runtime_id: LogicalRuntimeId,
         store: Arc<dyn RuntimeStore>,

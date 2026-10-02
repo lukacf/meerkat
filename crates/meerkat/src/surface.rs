@@ -1371,6 +1371,60 @@ pub async fn emit_mcp_lifecycle_events(
     }
 }
 
+/// Project only native admission refusal/readiness into the shared wire contract.
+/// Unrelated validation, lifecycle, and internal errors keep their existing
+/// surface mapping. The result contains no authority-bearing or private data.
+pub fn native_admission_error_detail(
+    error: &meerkat_runtime::RuntimeDriverError,
+) -> Option<meerkat_contracts::wire::WireInputAdmissionErrorDetail> {
+    use meerkat_contracts::wire::{
+        WireControllerReadinessFailure as WireReady, WireInputAdmissionErrorDetail as WireDetail,
+        WireInputRefusalKind as WireRefusal,
+    };
+    use meerkat_core::OperationRefusalKind;
+    use meerkat_runtime::RuntimeDriverError;
+    use meerkat_runtime::traits::ControllerReadinessFailure;
+
+    let reason = match error {
+        RuntimeDriverError::InputRefused { refusal } => {
+            return Some(match refusal.kind() {
+                OperationRefusalKind::Denied => WireDetail::Refused {
+                    kind: WireRefusal::Denied,
+                },
+                OperationRefusalKind::MalformedFacts => WireDetail::Refused {
+                    kind: WireRefusal::MalformedFacts,
+                },
+                OperationRefusalKind::ReprepareRequired => WireDetail::NotReady {
+                    reason: WireReady::PolicyChanged {},
+                },
+            });
+        }
+        RuntimeDriverError::ControllerReadinessUnavailable { reason } => reason,
+        _ => return None,
+    };
+    let reason = match *reason {
+        ControllerReadinessFailure::PolicyUnavailable => WireReady::PolicyUnavailable {},
+        ControllerReadinessFailure::ExecutorUnavailable => WireReady::ExecutorUnavailable {},
+        ControllerReadinessFailure::FactsUnavailable => WireReady::FactsUnavailable {},
+        ControllerReadinessFailure::Busy => WireReady::Busy {},
+        ControllerReadinessFailure::AuthorityUnavailable => WireReady::AuthorityUnavailable {},
+        ControllerReadinessFailure::AuthorityChanged => WireReady::AuthorityChanged {},
+        ControllerReadinessFailure::UnsupportedScope => WireReady::UnsupportedScope {},
+        ControllerReadinessFailure::CredentialUnusable { disposition } => {
+            WireReady::CredentialUnusable {
+                disposition: disposition.into(),
+            }
+        }
+        ControllerReadinessFailure::CredentialPreparationFailed { kind } => {
+            WireReady::CredentialPreparationFailed { cause: kind }
+        }
+        ControllerReadinessFailure::PolicyChanged => WireReady::PolicyChanged {},
+        ControllerReadinessFailure::ReplacementNotEmpty => WireReady::ReplacementNotEmpty {},
+        _ => WireReady::Unknown {},
+    };
+    Some(WireDetail::NotReady { reason })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2437,5 +2491,186 @@ family = "gemma-4"
         let restored: meerkat_contracts::CatalogModelEntry =
             serde_json::from_value(wire).expect("old shape");
         assert_eq!(restored.max_input_tokens, None);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod native_admission_projection_tests {
+    use super::*;
+    use meerkat_contracts::wire::{
+        WireControllerReadinessFailure as WireReady, WireCredentialUseDisposition as WireUse,
+        WireInputAdmissionErrorDetail as WireDetail, WireInputRefusalKind as WireRefusal,
+    };
+    use meerkat_core::handles::CredentialUseDisposition as Use;
+    use meerkat_core::{OperationRefusalKind, OperationRefused};
+    use meerkat_runtime::input_authority::NativeAdmissionError;
+    use meerkat_runtime::traits::{ControllerReadinessFailure as Ready, RuntimeDriverError};
+
+    #[test]
+    fn native_admission_projection_preserves_refusal_readiness_and_validation() {
+        for (kind, expected) in [
+            (OperationRefusalKind::Denied, WireRefusal::Denied),
+            (
+                OperationRefusalKind::MalformedFacts,
+                WireRefusal::MalformedFacts,
+            ),
+        ] {
+            let error = RuntimeDriverError::from(NativeAdmissionError::Refused(
+                OperationRefused::new(kind),
+            ));
+            assert_eq!(
+                native_admission_error_detail(&error),
+                Some(WireDetail::Refused { kind: expected })
+            );
+        }
+        let changed = RuntimeDriverError::from(NativeAdmissionError::Refused(
+            OperationRefused::new(OperationRefusalKind::ReprepareRequired),
+        ));
+        assert_eq!(
+            native_admission_error_detail(&changed),
+            Some(WireDetail::NotReady {
+                reason: WireReady::PolicyChanged {}
+            })
+        );
+        for failure in [
+            meerkat_core::OperationAuthorizationError::Unavailable,
+            meerkat_core::OperationAuthorizationError::ObservationUnavailable(
+                meerkat_core::authorization::OperationObservationError,
+            ),
+        ] {
+            let error = RuntimeDriverError::from(NativeAdmissionError::from(failure));
+            assert_eq!(
+                native_admission_error_detail(&error),
+                Some(WireDetail::NotReady {
+                    reason: WireReady::PolicyUnavailable {},
+                })
+            );
+        }
+        for (actual, expected) in [
+            (Ready::PolicyUnavailable, WireReady::PolicyUnavailable {}),
+            (
+                Ready::ExecutorUnavailable,
+                WireReady::ExecutorUnavailable {},
+            ),
+            (Ready::FactsUnavailable, WireReady::FactsUnavailable {}),
+            (Ready::Busy, WireReady::Busy {}),
+            (
+                Ready::AuthorityUnavailable,
+                WireReady::AuthorityUnavailable {},
+            ),
+            (Ready::AuthorityChanged, WireReady::AuthorityChanged {}),
+            (Ready::UnsupportedScope, WireReady::UnsupportedScope {}),
+            (Ready::PolicyChanged, WireReady::PolicyChanged {}),
+            (
+                Ready::ReplacementNotEmpty,
+                WireReady::ReplacementNotEmpty {},
+            ),
+        ] {
+            let error = RuntimeDriverError::ControllerReadinessUnavailable { reason: actual };
+            assert_eq!(
+                native_admission_error_detail(&error),
+                Some(WireDetail::NotReady { reason: expected })
+            );
+        }
+        for (disposition, expected) in [
+            (Use::Authorized, WireUse::Authorized),
+            (Use::RefreshRequired, WireUse::RefreshRequired),
+            (Use::RefreshDisallowed, WireUse::RefreshDisallowed),
+            (Use::ReauthRequired, WireUse::ReauthRequired),
+            (Use::LeaseAbsent, WireUse::LeaseAbsent),
+            (Use::AlreadyRefreshing, WireUse::AlreadyRefreshing),
+        ] {
+            let error = RuntimeDriverError::ControllerReadinessUnavailable {
+                reason: Ready::CredentialUnusable { disposition },
+            };
+            assert_eq!(
+                native_admission_error_detail(&error),
+                Some(WireDetail::NotReady {
+                    reason: WireReady::CredentialUnusable {
+                        disposition: expected
+                    },
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn native_admission_projection_has_no_sensitive_validation_fallback() {
+        for error in [
+            RuntimeDriverError::ValidationFailed {
+                reason: "private-validation-canary".into(),
+            },
+            RuntimeDriverError::Internal("private-internal-canary".into()),
+            RuntimeDriverError::ControllerInUse,
+        ] {
+            assert!(native_admission_error_detail(&error).is_none());
+        }
+        let detail = native_admission_error_detail(&RuntimeDriverError::from(
+            NativeAdmissionError::Refused(OperationRefused::new(OperationRefusalKind::Denied)),
+        ))
+        .unwrap();
+        let encoded = serde_json::to_value(detail.to_wire_error().unwrap()).unwrap();
+        assert_eq!(encoded["message"], "input refused");
+        assert_eq!(
+            encoded["details"],
+            serde_json::json!({"type":"refused","kind":"denied"})
+        );
+        assert!(encoded.get("capability_hint").is_none());
+    }
+
+    #[test]
+    fn native_credential_preparation_retains_the_core_kind_without_retry_advice() {
+        use meerkat_core::auth::AuthErrorKind;
+        for kind in [
+            AuthErrorKind::MissingSecret,
+            AuthErrorKind::UnsupportedCombination,
+            AuthErrorKind::MissingRequiredMetadata,
+            AuthErrorKind::WorkspaceMismatch,
+            AuthErrorKind::StaleCredential,
+            AuthErrorKind::RefreshRequired,
+            AuthErrorKind::LeaseAbsent,
+            AuthErrorKind::UserReauthRequired,
+            AuthErrorKind::Expired,
+            AuthErrorKind::RefreshFailed,
+            AuthErrorKind::ResolveRequired,
+            AuthErrorKind::InteractiveLoginRequired,
+            AuthErrorKind::HostOwnedUnavailable,
+            AuthErrorKind::Io,
+            AuthErrorKind::Other,
+        ] {
+            let error = RuntimeDriverError::ControllerReadinessUnavailable {
+                reason: Ready::CredentialPreparationFailed { kind },
+            };
+            let detail = native_admission_error_detail(&error).unwrap();
+            assert_eq!(
+                detail,
+                WireDetail::NotReady {
+                    reason: WireReady::CredentialPreparationFailed { cause: kind },
+                }
+            );
+            let wire = serde_json::to_value(detail.to_wire_error().unwrap()).unwrap();
+            assert_eq!(
+                wire,
+                serde_json::json!({
+                    "code": "INPUT_NOT_READY",
+                    "category": "capability",
+                    "message": "input readiness unavailable",
+                    "details": {
+                        "type": "not_ready",
+                        "reason": { "kind": "credential_preparation_failed", "cause": kind },
+                    },
+                })
+            );
+            let round: WireDetail = serde_json::from_value(wire["details"].clone()).unwrap();
+            assert_eq!(round, detail);
+        }
+        for bad in [
+            serde_json::json!({"type":"not_ready","reason":{"kind":"credential_preparation_failed"}}),
+            serde_json::json!({"type":"not_ready","reason":{"kind":"credential_preparation_failed","cause":"made_up"}}),
+            serde_json::json!({"type":"not_ready","reason":{"kind":"credential_preparation_failed","cause":"expired","token":"private-token-canary"}}),
+        ] {
+            assert!(serde_json::from_value::<WireDetail>(bad).is_err());
+        }
     }
 }

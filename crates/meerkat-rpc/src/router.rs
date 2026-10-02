@@ -1260,6 +1260,8 @@ impl RoutedRpcResponse {
 /// Dispatches incoming JSON-RPC requests to the appropriate handler.
 #[derive(Clone)]
 pub struct MethodRouter {
+    #[cfg(feature = "local-authorization")]
+    governed_connection: Option<Arc<crate::governed_jsonl::GovernedConnection>>,
     runtime: Arc<SessionRuntime>,
     config_store: Arc<dyn ConfigStore>,
     notification_sink: NotificationSink,
@@ -1350,6 +1352,8 @@ impl MethodRouter {
         runtime.set_notification_sink(notification_sink.clone());
         runtime.arm_job_delivery_driver();
         Self {
+            #[cfg(feature = "local-authorization")]
+            governed_connection: None,
             runtime,
             config_store,
             notification_sink,
@@ -1390,6 +1394,15 @@ impl MethodRouter {
             experimental_live_context_mirror_host: Arc::new(StdRwLock::new(None)),
             live_session_factory: None,
         }
+    }
+
+    #[cfg(feature = "local-authorization")]
+    pub(crate) fn with_governed_connection(
+        mut self,
+        connection: Arc<crate::governed_jsonl::GovernedConnection>,
+    ) -> Self {
+        self.governed_connection = Some(connection);
+        self
     }
 
     fn attach_live_host(&mut self, host: Arc<meerkat_live::LiveAdapterHost>) {
@@ -1864,6 +1877,8 @@ impl MethodRouter {
         // executors created lazily read the current sink at apply time.
         runtime.set_notification_sink(notification_sink.clone());
         Self {
+            #[cfg(feature = "local-authorization")]
+            governed_connection: None,
             runtime,
             config_store,
             notification_sink,
@@ -2094,6 +2109,37 @@ impl MethodRouter {
 
         let id = request.id.clone();
         let params = request.params.as_deref();
+
+        #[cfg(feature = "local-authorization")]
+        if let Some(connection) = &self.governed_connection {
+            return Some(RoutedRpcResponse::new(
+                crate::governed_jsonl::dispatch(
+                    connection,
+                    &request.method,
+                    id,
+                    params,
+                    &self.runtime,
+                    &self.notification_sink,
+                    request_context,
+                )
+                .await,
+            ));
+        }
+        // A legacy constructor is not a process-authenticated governed entry.
+        // Refuse before any setup/cold/tool/config handler sees the request.
+        if request.method != "initialize"
+            && self.runtime_adapter.has_native_work_authorization_host()
+        {
+            return Some(RoutedRpcResponse::new(RpcResponse::from_error(
+                id,
+                crate::session_runtime::runtime_driver_error_to_rpc(
+                    meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                        reason:
+                            meerkat_runtime::traits::ControllerReadinessFailure::UnsupportedScope,
+                    },
+                ),
+            )));
+        }
 
         let response = match request.method.as_str() {
             "initialize" => handlers::initialize::handle_initialize(

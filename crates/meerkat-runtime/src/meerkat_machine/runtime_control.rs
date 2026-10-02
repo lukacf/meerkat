@@ -15204,6 +15204,43 @@ impl MeerkatMachine {
         replay_policy: crate::accept::InputReplayPolicy,
     ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
     {
+        self.accept_input_for_attachment_with_optional_custody(witness, input, replay_policy, None)
+            .await
+    }
+
+    /// Transfer an existing process-local input resource owner at the same
+    /// credential boundary as ordinary exact-attachment admission. Before that
+    /// boundary, dropping the returned future settles `NotAdmitted`. After it,
+    /// dropping the acknowledgement cannot cancel the native-owned settlement.
+    ///
+    /// An `ExactPrompt` replay can consume the supplied custody. A key-only
+    /// duplicate cannot prove the reserved payload was admitted, so it settles
+    /// `Uncertain` instead. This does not change the native admission result.
+    pub fn accept_input_with_completion_for_attachment_and_replay_policy_with_custody<'a>(
+        &'a self,
+        witness: &'a RuntimeExecutorAttachmentWitness,
+        input: Input,
+        replay_policy: crate::accept::InputReplayPolicy,
+        custody: Box<dyn crate::input_admission_custody::NativeInputAdmissionCustody>,
+    ) -> AcceptInputWithCompletionFuture<'a> {
+        // Construct before boxing: even a never-polled future owns its cleanup.
+        let custody = crate::input_admission_custody::NativeInputAdmissionGuard::new(custody);
+        Box::pin(self.accept_input_for_attachment_with_optional_custody(
+            witness,
+            input,
+            replay_policy,
+            Some(custody),
+        ))
+    }
+
+    async fn accept_input_for_attachment_with_optional_custody(
+        &self,
+        witness: &RuntimeExecutorAttachmentWitness,
+        input: Input,
+        replay_policy: crate::accept::InputReplayPolicy,
+        admission_custody: Option<crate::input_admission_custody::NativeInputAdmissionGuard>,
+    ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
+    {
         if replay_policy == crate::accept::InputReplayPolicy::ExactPrompt
             && (!matches!(input, Input::Prompt(_)) || input.header().idempotency_key.is_none())
         {
@@ -15218,14 +15255,17 @@ impl MeerkatMachine {
             });
         }
         match self
-            .execute_meerkat_machine_ingress_command(MeerkatMachineCommand::AcceptWithCompletion {
-                session_id: witness.session_id().clone(),
-                input,
-                register_completion: true,
-                replay_policy,
-                member_residency: MemberResidencyExpectation::Unfenced,
-                expected_attachment: Some(witness.clone()),
-            })
+            .execute_meerkat_machine_ingress_command_with_custody(
+                MeerkatMachineCommand::AcceptWithCompletion {
+                    session_id: witness.session_id().clone(),
+                    input,
+                    register_completion: true,
+                    replay_policy,
+                    member_residency: MemberResidencyExpectation::Unfenced,
+                    expected_attachment: Some(witness.clone()),
+                },
+                admission_custody,
+            )
             .await?
         {
             MeerkatMachineCommandResult::AcceptWithCompletion {

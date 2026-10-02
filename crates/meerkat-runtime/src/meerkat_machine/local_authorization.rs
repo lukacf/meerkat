@@ -443,6 +443,7 @@ impl PreparedOperationAuthorization for NativePreparedAuthorization {
 fn malformed() -> OperationRefused {
     OperationRefused::new(OperationRefusalKind::MalformedFacts)
 }
+#[cfg(test)]
 fn denied() -> OperationRefused {
     OperationRefused::new(OperationRefusalKind::Denied)
 }

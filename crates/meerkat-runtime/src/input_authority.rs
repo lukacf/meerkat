@@ -159,7 +159,7 @@ impl From<NativeAdmissionError> for RuntimeDriverError {
                     reason: crate::traits::ControllerReadinessFailure::PolicyChanged,
                 }
             }
-            NativeAdmissionError::Refused(_) => unavailable(),
+            NativeAdmissionError::Refused(refusal) => Self::InputRefused { refusal },
         }
     }
 }
@@ -179,7 +179,7 @@ impl From<NativeAdmissionError> for RuntimeDriverError {
 /// authentication reference.
 pub trait NativeWorkAuthorizationHost: Send + Sync {
     /// Preserve controller setup/readiness failures for the native boundary.
-    /// Ordinary policy refusal remains a validation failure at admission.
+    /// Ordinary policy refusal retains the exact canonical refusal kind.
     fn authenticate_association(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -954,6 +954,54 @@ mod admission_error_tests {
         assert!(!matches!(
             RuntimeDriverError::from(denied),
             RuntimeDriverError::ControllerReadinessUnavailable { .. }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod admission_projection_regressions {
+    use super::*;
+    use meerkat_core::{OperationRefusalKind, OperationRefused};
+
+    // Old-API behavioral regression. This must not become a generic validation
+    // error before a surface can project the actual owner disposition.
+    #[test]
+    fn refusal_conversion_must_not_erase_the_owner_class() {
+        for kind in [
+            OperationRefusalKind::Denied,
+            OperationRefusalKind::MalformedFacts,
+        ] {
+            let error = RuntimeDriverError::from(NativeAdmissionError::Refused(
+                OperationRefused::new(kind),
+            ));
+            assert!(
+                !matches!(error, RuntimeDriverError::ValidationFailed { .. }),
+                "actual admission refusal was erased: {error:?}"
+            );
+        }
+    }
+
+    // New carrier API: no old behavioral RED is claimed for this assertion.
+    #[test]
+    fn refusal_conversion_retains_exact_kind() {
+        for kind in [
+            OperationRefusalKind::Denied,
+            OperationRefusalKind::MalformedFacts,
+        ] {
+            let error = RuntimeDriverError::from(NativeAdmissionError::Refused(
+                OperationRefused::new(kind),
+            ));
+            assert!(matches!(error,
+                RuntimeDriverError::InputRefused { refusal } if refusal.kind() == kind));
+        }
+        let changed = RuntimeDriverError::from(NativeAdmissionError::Refused(
+            OperationRefused::new(OperationRefusalKind::ReprepareRequired),
+        ));
+        assert!(matches!(
+            changed,
+            RuntimeDriverError::ControllerReadinessUnavailable {
+                reason: crate::traits::ControllerReadinessFailure::PolicyChanged,
+            }
         ));
     }
 }

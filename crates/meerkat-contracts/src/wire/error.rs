@@ -106,6 +106,104 @@ impl WireMobErrorDetail {
     }
 }
 
+/// Safe projection of the actual credential-use disposition. This carries no
+/// account, lease, token, or authorization authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireCredentialUseDisposition {
+    Authorized,
+    RefreshRequired,
+    RefreshDisallowed,
+    ReauthRequired,
+    LeaseAbsent,
+    AlreadyRefreshing,
+}
+
+impl From<meerkat_core::handles::CredentialUseDisposition> for WireCredentialUseDisposition {
+    fn from(disposition: meerkat_core::handles::CredentialUseDisposition) -> Self {
+        use meerkat_core::handles::CredentialUseDisposition;
+        match disposition {
+            CredentialUseDisposition::Authorized => Self::Authorized,
+            CredentialUseDisposition::RefreshRequired => Self::RefreshRequired,
+            CredentialUseDisposition::RefreshDisallowed => Self::RefreshDisallowed,
+            CredentialUseDisposition::ReauthRequired => Self::ReauthRequired,
+            CredentialUseDisposition::LeaseAbsent => Self::LeaseAbsent,
+            CredentialUseDisposition::AlreadyRefreshing => Self::AlreadyRefreshing,
+        }
+    }
+}
+
+/// Audience-safe native readiness causes. These describe unaccepted input;
+/// they neither grant permission nor prescribe a blind retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WireControllerReadinessFailure {
+    PolicyUnavailable {},
+    ExecutorUnavailable {},
+    FactsUnavailable {},
+    Busy {},
+    AuthorityUnavailable {},
+    AuthorityChanged {},
+    UnsupportedScope {},
+    CredentialUnusable {
+        disposition: WireCredentialUseDisposition,
+    },
+    /// The existing core auth error discriminant, with no provider diagnostic.
+    CredentialPreparationFailed {
+        cause: meerkat_core::auth::AuthErrorKind,
+    },
+    PolicyChanged {},
+    ReplacementNotEmpty {},
+    /// A future native readiness cause without an available public projection.
+    Unknown {},
+}
+
+/// Closed input-refusal projection. Stale preparation is represented by
+/// `WireControllerReadinessFailure::PolicyChanged {}`, never by this kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireInputRefusalKind {
+    Denied,
+    MalformedFacts,
+}
+
+/// Canonical native input code/detail pairing, shared by protocol surfaces.
+/// Only typed, audience-safe owner dispositions are projected; no Debug or
+/// Display payload, principal, resource, or credential is serialized here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WireInputAdmissionErrorDetail {
+    Refused {
+        kind: WireInputRefusalKind,
+    },
+    NotReady {
+        reason: WireControllerReadinessFailure,
+    },
+}
+
+impl WireInputAdmissionErrorDetail {
+    pub const fn code(&self) -> ErrorCode {
+        match self {
+            Self::Refused { .. } => ErrorCode::InputRefused,
+            Self::NotReady { .. } => ErrorCode::InputNotReady,
+        }
+    }
+
+    /// Build the safe shared envelope without swallowing serialization errors.
+    pub fn to_wire_error(&self) -> Result<crate::error::WireError, serde_json::Error> {
+        let message = match self {
+            Self::Refused { .. } => "input refused",
+            Self::NotReady { .. } => "input readiness unavailable",
+        };
+        Ok(crate::error::WireError::new(self.code(), message)
+            .with_details(serde_json::to_value(self)?))
+    }
+}
+
 /// Conversion error surfaced when a wire variant has no core counterpart or
 /// when a core-only internal event has no safe public-wire representation.
 ///
@@ -370,5 +468,129 @@ mod tests {
             assert_eq!(code.http_status(), http, "{code:?} http agreement");
             assert_eq!(code.cli_exit_code(), cli, "{code:?} cli agreement");
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod native_admission_wire_tests {
+    use super::*;
+    use crate::error::ErrorCategory;
+    use serde_json::json;
+
+    #[test]
+    fn native_admission_details_are_closed_and_preserve_canonical_kinds() {
+        let cases = [
+            WireInputAdmissionErrorDetail::Refused {
+                kind: WireInputRefusalKind::Denied,
+            },
+            WireInputAdmissionErrorDetail::Refused {
+                kind: WireInputRefusalKind::MalformedFacts,
+            },
+            WireInputAdmissionErrorDetail::NotReady {
+                reason: WireControllerReadinessFailure::CredentialUnusable {
+                    disposition: WireCredentialUseDisposition::ReauthRequired,
+                },
+            },
+        ];
+        for case in cases {
+            let encoded = serde_json::to_value(case).unwrap();
+            let round: WireInputAdmissionErrorDetail =
+                serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(round, case);
+            let mut extra = encoded;
+            extra["principal"] = json!("private-principal-canary");
+            assert!(serde_json::from_value::<WireInputAdmissionErrorDetail>(extra).is_err());
+        }
+        assert_eq!(
+            serde_json::to_value(cases[0]).unwrap(),
+            json!({"type":"refused","kind":"denied"})
+        );
+        for bad in [
+            json!({"type":"refused"}),
+            json!({"type":"refused","kind":"made_up"}),
+            json!({"type":"not_ready","reason":{"kind":"busy","token":"private-token-canary"}}),
+            json!({"type":"not_ready","reason":{"kind":"credential_unusable"}}),
+            json!({"type":"not_ready","reason":{"kind":"credential_unusable","disposition":"made_up"}}),
+        ] {
+            assert!(serde_json::from_value::<WireInputAdmissionErrorDetail>(bad).is_err());
+        }
+    }
+
+    #[test]
+    fn native_admission_code_pairing_and_allocations_are_exact() {
+        for (detail, code, rpc, http, cli, category) in [
+            (
+                WireInputAdmissionErrorDetail::Refused {
+                    kind: WireInputRefusalKind::Denied,
+                },
+                ErrorCode::InputRefused,
+                -32030,
+                403,
+                50,
+                ErrorCategory::Hook,
+            ),
+            (
+                WireInputAdmissionErrorDetail::NotReady {
+                    reason: WireControllerReadinessFailure::PolicyUnavailable {},
+                },
+                ErrorCode::InputNotReady,
+                -32031,
+                503,
+                51,
+                ErrorCategory::Capability,
+            ),
+        ] {
+            assert_eq!(detail.code(), code);
+            let wire = detail.to_wire_error().unwrap();
+            assert_eq!(wire.code, code);
+            assert_eq!(wire.category, category);
+            assert_eq!(wire.details, Some(serde_json::to_value(detail).unwrap()));
+            assert_eq!(code.jsonrpc_code(), rpc);
+            assert_eq!(code.http_status(), http);
+            assert_eq!(code.cli_exit_code(), cli);
+            assert_eq!(ErrorCode::from_jsonrpc_code(rpc), Some(code));
+        }
+        assert_eq!(ErrorCode::MemberReloadRequired.jsonrpc_code(), -32029);
+        assert_eq!(ErrorCode::MemberReloadRequired.cli_exit_code(), 49);
+    }
+
+    #[test]
+    fn readiness_envelopes_do_not_prescribe_automatic_retry() {
+        for reason in [
+            WireControllerReadinessFailure::Busy {},
+            WireControllerReadinessFailure::PolicyUnavailable {},
+            WireControllerReadinessFailure::PolicyChanged {},
+            WireControllerReadinessFailure::UnsupportedScope {},
+            WireControllerReadinessFailure::ReplacementNotEmpty {},
+            WireControllerReadinessFailure::CredentialUnusable {
+                disposition: WireCredentialUseDisposition::ReauthRequired,
+            },
+        ] {
+            let detail = WireInputAdmissionErrorDetail::NotReady { reason };
+            let wire = detail.to_wire_error().unwrap();
+            let encoded = serde_json::to_value(wire).unwrap();
+            assert_eq!(
+                encoded,
+                json!({
+                    "code": "INPUT_NOT_READY",
+                    "category": "capability",
+                    "message": "input readiness unavailable",
+                    "details": serde_json::to_value(detail).unwrap(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn native_admission_refusal_decoder_rejects_reprepare_required() {
+        let decoded = serde_json::from_value::<WireInputAdmissionErrorDetail>(json!({
+            "type": "refused",
+            "kind": "reprepare_required",
+        }));
+        assert!(
+            decoded.is_err(),
+            "stale preparation is readiness, not input refusal: {decoded:?}"
+        );
     }
 }

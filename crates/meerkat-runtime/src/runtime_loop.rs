@@ -791,6 +791,7 @@ impl InteractionTerminalPublicationError {
             // A receipt-less terminal is a legitimate read verdict, but
             // terminal publication expects the receipt its run staged.
             crate::RuntimeDriverError::ValidationFailed { .. }
+            | crate::RuntimeDriverError::InputRefused { .. }
             | crate::RuntimeDriverError::InputIdempotencyConflict { .. }
             | crate::RuntimeDriverError::RecoveryCorruption { .. }
             | crate::RuntimeDriverError::InputTerminalWithoutReceipt { .. }

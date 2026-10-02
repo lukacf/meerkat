@@ -4426,6 +4426,7 @@ impl EphemeralRuntimeDriver {
         custody.validate(&self.work_authorization_host, input)
     }
 
+    #[cfg(test)]
     pub(crate) async fn accept_resolved_input(
         &mut self,
         input: Input,

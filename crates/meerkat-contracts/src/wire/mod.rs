@@ -89,8 +89,9 @@ pub use auth::{
     PrincipalQualification, PrincipalRef, TrustDomainId, VisibilityClass,
 };
 pub use error::{
-    WireConversionError, WireHostUnavailableDetail, WireMobErrorDetail, WireStaleCursorDetail,
-    WireStaleFenceDetail,
+    WireControllerReadinessFailure, WireConversionError, WireCredentialUseDisposition,
+    WireHostUnavailableDetail, WireInputAdmissionErrorDetail, WireInputRefusalKind,
+    WireMobErrorDetail, WireStaleCursorDetail, WireStaleFenceDetail,
 };
 pub use event::{
     EventReplayCursor, EventReplayCursorError, EventReplayEnvelope, EventReplayEventId,

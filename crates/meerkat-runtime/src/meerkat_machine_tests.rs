@@ -44080,6 +44080,9 @@ fn summarize_runtime_parity_command_result(result: &MeerkatMachineCommandResult)
 
 fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
     match error {
+        RuntimeDriverError::InputRefused { refusal } => {
+            format!("input_refused:{:?}", refusal.kind())
+        }
         RuntimeDriverError::ControllerReadinessUnavailable { reason } => {
             format!("controller_readiness:{reason:?}")
         }
@@ -44146,6 +44149,9 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
 
 fn summarize_runtime_parity_control_error(error: &RuntimeControlPlaneError) -> String {
     match error {
+        RuntimeControlPlaneError::InputRefused { refusal } => {
+            format!("input_refused:{:?}", refusal.kind())
+        }
         RuntimeControlPlaneError::ControllerReadinessUnavailable { reason } => {
             format!("controller_readiness:{reason:?}")
         }

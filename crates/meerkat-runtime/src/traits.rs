@@ -53,6 +53,13 @@ pub enum ControllerReadinessFailure {
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum RuntimeDriverError {
+    /// The native owner declined this input before acceptance.
+    /// This is not a terminal failure for existing admitted work.
+    #[error("input refused")]
+    InputRefused {
+        refusal: meerkat_core::OperationRefused,
+    },
+
     #[error("controller input is not ready: {reason}")]
     ControllerReadinessUnavailable { reason: ControllerReadinessFailure },
 
@@ -189,6 +196,13 @@ impl RuntimeDriverError {
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum RuntimeControlPlaneError {
+    /// The native owner declined this input before acceptance.
+    /// This is not a terminal failure for existing admitted work.
+    #[error("input refused")]
+    InputRefused {
+        refusal: meerkat_core::OperationRefused,
+    },
+
     #[error("controller input is not ready: {reason}")]
     ControllerReadinessUnavailable { reason: ControllerReadinessFailure },
 

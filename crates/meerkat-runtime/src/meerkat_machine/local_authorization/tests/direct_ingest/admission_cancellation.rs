@@ -336,3 +336,5 @@ async fn ordinary_accept_without_wake_stays_owned_after_credential_custody() {
 async fn ordinary_ingest_stays_owned_after_credential_custody() {
     drop_after_custody(Route::Ingest).await;
 }
+
+mod admission_custody;

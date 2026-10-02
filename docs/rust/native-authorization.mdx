@@ -5,7 +5,7 @@ icon: "shield-check"
 ---
 
 This guide starts with explicitly configured, storeless native Rust sessions
-and describes the staged in-memory persistence composition.
+and describes the in-memory persistence composition.
 The embedding application is trusted code: it authenticates callers, supplies
 current policy owners, and attaches the actual controller and executor. Merely
 enabling a Cargo feature or calling `agent.run(...)` does not establish this
@@ -17,7 +17,10 @@ on tested tree `f68f905ad37ddc2dca7af84ca7921c7d64bed04d`. This is evidence for
 that source snapshot, not a released support claim. Stock CLI, REST, RPC and
 MCP paths do not acquire governed activation from this API. SQLite, restart and
 recovery, full surface coverage, human consent and OS confinement remain separate
-integration work. This page makes no performance or live-provider coverage claim.
+integration work. The additive `meerkat_rpc::governed_jsonl` entry provides a
+fixed-host, single-connection profile. It requires `default-features = false`
+plus `local-authorization` and does not activate ordinary RPC constructors.
+This page makes no performance or live-provider coverage claim.
 </Note>
 
 ## Install the real owners before sharing the machine
@@ -155,13 +158,115 @@ context does not itself admit work. Do not mutate the bound payload, manufacture
 a `WorkAuthorizationContext`, or reuse one from a prior turn; the native owner
 builds it from the admitted contributors.
 
+## Serve one fixed governed JSONL connection
+
+Enable `meerkat-rpc` with `default-features = false` and
+`local-authorization`. This profile takes a fresh, unshared in-memory
+`PersistenceBundle`, a selected `LlmClient`, one fixed `Config`, and a nonempty
+`Vec<ToolDef>` of callback tools. Leave the bundle unconfigured: the entry
+installs the `NativeGrantWorkConfiguration` described above. Initialize the
+selected credential through that bundle's normal auth lifecycle first.
+
+The retained client does not bypass configuration validation. Its actual
+`ControllerModelSelection::auth_binding()` must name a binding in
+`config.realm[binding.realm]`. Populate that realm's `binding`, `backend` and
+`auth` maps with the corresponding `ProviderBindingConfig`,
+`BackendProfileConfig` and `AuthProfileConfig`. The binding must resolve through
+`resolve_explicit_auth_binding_target` to the selected credential identity, and
+its provider/backend/auth combination must be supported by
+`ProviderRuntimeCatalog`. Keep the actual endpoint and credential account
+consistent with the selected client. The binding realm must equal the connection
+realm, and `config.agent.model` must equal the selected model.
+
+Authenticate the connection in trusted host code. Construct qualified requester,
+ingress actor and optional represented-subject identities there, with their realm
+and historical authentication evidence. Supply an `Arc<InputAssociationProducer>`:
+it receives the final merged `Input`, actual runtime ID and pinned
+`ControllerModelClient`, and returns an `InputAuthorityAssociation` referencing
+real issued grants. These are historical claims, not permission or proof of the
+semantic provenance of prompt text. The installed native owners still validate
+them and current permissions before admission.
+
+This excerpt assumes those host-owned values, the fresh `bundle`, and one JSONL
+`reader`/`writer` pair:
+
+```rust
+use meerkat_rpc::governed_jsonl::{
+    GovernedConnection, GovernedJsonlSetup, serve_governed_jsonl,
+};
+
+let connection = GovernedConnection::new(
+    requester, represented_subject, ingress_actor, realm,
+    authentication_evidence, association_producer,
+)?;
+let setup = GovernedJsonlSetup {
+    config,
+    persistence: bundle,
+    authorization: owners,
+    client: selected_client,
+    connection,
+    tools: catalog,
+};
+serve_governed_jsonl(reader, writer, setup).await?;
+```
+
+The entry constructs `AgentFactory::minimal()` internally and owns one private
+runtime, config store and callback connection. It installs the host's catalog once
+and supplies the same fixed definitions as inline session tools. Wire requests
+cannot replace that registry or choose principals, grants, model or credentials.
+Core catalog controls such as `tool_catalog_search` and `tool_catalog_load` may
+still be advertised. They remain subject to native operation policy and cannot
+register tools or expand this fixed callback registry; dynamic `tools/register`
+is unsupported.
+
+After initialization, use `session/create` with `initial_turn: "deferred"`, then
+`turn/start`. Both accept `prompt` and optional `injected_context`; the turn also
+identifies its session. The entry merges the deferred seed and contexts before
+binding native ingress, retaining the actual actor and controller across an input
+permission refusal. The client must handle server `tool/execute` requests and
+return their results on that same connection.
+
+A refused tool operation becomes safe model feedback without entering that
+callback; permitted sibling operations can continue. Input refusal, readiness,
+infrastructure failure and post-effect settlement remain distinct, as described
+below. A later cleanup or settlement failure does not authorize repeating an
+effect.
+
+This first slice supports deferred create, turn execution, callback replies and
+necessary initialization/cancellation protocol. Dynamic tool registration,
+configuration changes, cold/restarted sessions, public history/observation and
+MCP setup are outside it. The constructor rejects an MCP-enabled build and
+configurations enabling skills, hooks, built-in tools, shell, comms, mobs,
+scheduling, workgraphs, model fallback or a system-prompt file. Broader transport,
+SQLite/recovery, policy-administration and full ADR coverage remain pending.
+
+The focused fixture requires the non-MCP feature profile:
+
+```bash
+./scripts/repo-cargo test --locked -p meerkat-rpc --lib \
+  --no-default-features --features local-authorization \
+  governed_jsonl::tests:: -- --test-threads=1
+```
+
+The fixture uses a loopback provider to check authenticated ingress, two model
+requests and one allowed read callback, with zero denied-delete callbacks. It
+also checks retained seed/context/controller ownership, committed audit and the
+saved transcript. These fixture checks do not establish live-provider coverage.
+
 ## Preserve the result and test the actual effect
 
 An operation-local `OperationAuthorizationError::Refused` can become safe model
 feedback while permitted work continues. `Unavailable` and
 `ObservationUnavailable` are distinct infrastructure outcomes, not permission
-denials. Admission readiness is reported separately through
-`RuntimeDriverError::ControllerReadinessUnavailable`.
+denials. Native input refusal is retained as `RuntimeDriverError::InputRefused`;
+admission readiness is reported separately through
+`RuntimeDriverError::ControllerReadinessUnavailable`. The facade's
+`native_admission_error_detail` projects these to finite
+`WireInputAdmissionErrorDetail` values: `ErrorCode::InputRefused` (-32030) or
+`ErrorCode::InputNotReady` (-32031). Preserve that distinction and handle
+serialization failure; a readiness result does not prescribe automatic retry.
+`ErrorCode` is publicly exhaustive, so downstream Rust matches must add both
+variants. This Rust/JSONL projection does not imply new typed SDK decoders.
 
 Retain `settlement_failures` alongside the physical result. A diagnostic after a
 successful effect does not authorize repeating it. Use native input audit
@@ -171,7 +276,9 @@ alongside the committed transcript. Keep authorization checks local and persist
 observations through these existing commit boundaries. This does not prove
 crash-safe recovery.
 Route controller grant/policy removal and credential maintenance through their
-custody-aware owners so unfinished work retains its controller.
+custody-aware owners so unfinished work retains its controller. Persistent
+controller/grant administrative mutation remains unavailable in this checkpoint;
+the memory-backed admission path does not remove that limit.
 
 The repository fixture
 `crates/meerkat-authorization/tests/native_governed_loop/e1_policy_control.rs`

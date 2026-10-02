@@ -981,6 +981,9 @@ impl MeerkatMachine {
         err: RuntimeDriverError,
     ) -> RuntimeControlPlaneError {
         match err {
+            RuntimeDriverError::InputRefused { refusal } => {
+                RuntimeControlPlaneError::InputRefused { refusal }
+            }
             RuntimeDriverError::ControllerReadinessUnavailable { reason } => {
                 RuntimeControlPlaneError::ControllerReadinessUnavailable { reason }
             }
@@ -992,6 +995,9 @@ impl MeerkatMachine {
         err: RuntimeControlPlaneError,
     ) -> RuntimeDriverError {
         match err {
+            RuntimeControlPlaneError::InputRefused { refusal } => {
+                RuntimeDriverError::InputRefused { refusal }
+            }
             RuntimeControlPlaneError::ControllerReadinessUnavailable { reason } => {
                 RuntimeDriverError::ControllerReadinessUnavailable { reason }
             }
@@ -3990,5 +3996,30 @@ mod tests {
             ),
             "not-found must not be laundered into NotReady{{Destroyed}}"
         );
+    }
+}
+
+#[cfg(test)]
+mod admission_projection_roundtrip_tests {
+    use super::*;
+    use meerkat_core::{OperationRefusalKind, OperationRefused};
+
+    #[test]
+    fn direct_control_preserves_input_refusal() {
+        for kind in [
+            OperationRefusalKind::Denied,
+            OperationRefusalKind::MalformedFacts,
+        ] {
+            let control = MeerkatMachine::control_plane_error_from_driver_error(
+                RuntimeDriverError::InputRefused {
+                    refusal: OperationRefused::new(kind),
+                },
+            );
+            assert!(matches!(&control,
+                RuntimeControlPlaneError::InputRefused { refusal } if refusal.kind() == kind));
+            let driver = MeerkatMachine::driver_error_from_control_plane_error(control);
+            assert!(matches!(driver,
+                RuntimeDriverError::InputRefused { refusal } if refusal.kind() == kind));
+        }
     }
 }

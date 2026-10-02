@@ -297,14 +297,15 @@ async fn exercise_revalidated_stock_persistent(server: &Server, cleanup: &Cleanu
     let refused = machine
         .accept_input_with_completion(&session_id, submitted.clone())
         .await;
-    // Current public native conversion collapses the owner's exact Denied to
-    // ValidationFailed. A separate reviewed projection is not installed here.
+    // Apply this oracle only with the separately reviewed native admission
+    // projection installed. The owner decision and all effect checks are unchanged.
     assert!(
         matches!(
             &refused,
-            Err(meerkat_runtime::RuntimeDriverError::ValidationFailed { .. })
+            Err(meerkat_runtime::RuntimeDriverError::InputRefused { refusal })
+                if refusal.kind() == OperationRefusalKind::Denied
         ),
-        "current native rejection class: {:?}",
+        "projected native rejection class: {:?}",
         refused.as_ref().err()
     );
     let refusal_decisions = decisions.lock().unwrap().clone();

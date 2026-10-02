@@ -486,6 +486,8 @@ pub struct InMemoryRuntimeStore {
     #[cfg(test)]
     atomic_input_persist_before: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
     #[cfg(test)]
+    atomic_input_persist_ack_loss: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
     input_state_batch_cas_before: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
     #[cfg(test)]
     input_state_batch_cas_after_commit: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
@@ -547,6 +549,12 @@ impl InMemoryRuntimeStore {
         *self.atomic_input_persist_before.lock().unwrap() = Some((entered, release));
     }
 
+    #[cfg(test)]
+    pub(crate) fn lose_next_atomic_input_persist_acknowledgement(&self) {
+        self.atomic_input_persist_ack_loss
+            .store(true, Ordering::Release);
+    }
+
     /// Install committed WholeBlob body bytes verbatim, bypassing every
     /// writer-side guard, so recovery tests can start from a document the
     /// current decoder refuses. The authority advances exactly as a real
@@ -586,6 +594,8 @@ impl InMemoryRuntimeStore {
             ops_lifecycle_persist_before: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             atomic_input_persist_before: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            atomic_input_persist_ack_loss: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             input_state_batch_cas_before: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
@@ -3003,6 +3013,15 @@ impl RuntimeStore for InMemoryRuntimeStore {
                 .collect(),
         )?;
         apply_prepared_memory_input_state_mutations(&mut inner, &runtime_id.0, prepared);
+        #[cfg(test)]
+        if self
+            .atomic_input_persist_ack_loss
+            .swap(false, Ordering::AcqRel)
+        {
+            return Err(RuntimeStoreError::WriteFailed(
+                "scripted atomic input persistence acknowledgement lost after commit".into(),
+            ));
+        }
         Ok(())
     }
 

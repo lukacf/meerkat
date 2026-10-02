@@ -71,6 +71,7 @@ impl RunlessTerminalConvergenceError {
             // A receipt-less terminal is a legitimate read verdict, but a
             // runless terminal convergence expects the receipt it staged.
             error @ (RuntimeDriverError::ValidationFailed { .. }
+            | RuntimeDriverError::InputRefused { .. }
             | RuntimeDriverError::InputIdempotencyConflict { .. }
             | RuntimeDriverError::RecoveryCorruption { .. }
             | RuntimeDriverError::InputTerminalWithoutReceipt { .. }

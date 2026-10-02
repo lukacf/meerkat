@@ -37,6 +37,12 @@ them.
 
 ### Breaking
 
+- The publicly exhaustive `meerkat_contracts::ErrorCode` enum gains
+  `InputRefused` and `InputNotReady`. Downstream exhaustive matches must add
+  both variants; this is a Rust source compatibility break. Their JSON-RPC
+  codes are -32030 and -32031. `WireInputAdmissionErrorDetail` preserves the
+  finite native refusal or readiness cause without private diagnostics.
+  Readiness is not a permission denial or an instruction to retry an effect.
 - Removed `meerkat_core::clear_tokens_and_publish_lifecycle_released` and
   `clear_tokens_and_publish_lifecycle_released_for_identity`, including their
   `auth` and `auth::lifecycle` paths. Use the native
@@ -119,12 +125,20 @@ them.
   native input admission, the actual pinned controller, current application
   policy and exact operation checks. Local refusals can return as model feedback;
   native audit and typed settlement companions retain distinct infrastructure
-  failures and physical results. Enable `meerkat-runtime`'s `local-authorization`
-  feature and install the real owners before sharing an empty storeless machine.
-  This checkpoint does not activate stock CLI/REST/RPC/MCP governance or provide
-  persistent admission, durable grant recovery, consent, OS confinement or full
-  execution-mode coverage. See `docs/rust/native-authorization.mdx` for the
-  supported integration boundary; performance acceptance remains unmeasured.
+  failures and physical results. Enable the `local-authorization` feature and
+  install the real owners before sharing the machine or persistence bundle.
+  The supported memory-backed composition uses the actual stock
+  `PersistenceBundle`, `PersistentSessionService` and persistent executor for
+  process-lifetime input, session and audit commits. Persistent controller/grant
+  administration remains unavailable. SQLite admission, restart recovery,
+  durable grant recovery, consent, OS confinement and full execution-mode
+  coverage remain separate work. See `docs/rust/native-authorization.mdx` for
+  the integration boundary; performance acceptance remains unmeasured.
+- The additive `meerkat_rpc::governed_jsonl` entry provides a fixed-host,
+  single-connection profile with native input admission and a fixed callback
+  catalog. It requires `default-features = false` plus `local-authorization`;
+  ordinary RPC constructors and stock CLI/REST/MCP/SDK entry points do not
+  acquire governed activation from this API.
 
 - Canonical principal, trust-domain, grant and visibility contracts are now
   emitted as schema roots and generated Python and TypeScript SDK types.

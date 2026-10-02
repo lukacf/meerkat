@@ -118798,6 +118798,16 @@
             "const": "MEMBER_RELOAD_REQUIRED",
             "description": "A mob member's runtime registration is durability-degraded and\nrefuses ordinary work until an explicit registration-authorized cold\nreload replaces it (`MobError::MemberReloadRequired`). Deliberately\nits own code rather than [`Self::SessionBusy`]: the condition never\nclears on its own, so ordinary busy/backoff retry is never correct —\nonly the named `reload_member_registration` repair resolves it.",
             "type": "string"
+          },
+          {
+            "const": "INPUT_REFUSED",
+            "description": "The native owner declined an unaccepted input. Details retain the\ncanonical refusal kind without private policy or principal data.",
+            "type": "string"
+          },
+          {
+            "const": "INPUT_NOT_READY",
+            "description": "Current native input readiness is unavailable. This is an operational\ncondition, not a permission verdict or a terminal result for prior work.",
+            "type": "string"
           }
         ]
       },
@@ -142411,6 +142421,228 @@
     "title": "WireControlScope",
     "type": "string"
   },
+  "WireControllerReadinessFailure": {
+    "$defs": {
+      "AuthErrorKind": {
+        "description": "Stable discriminant for [`AuthError`]. Used in serialized error summaries\nand for SDK-facing wire codes.",
+        "enum": [
+          "missing_secret",
+          "unsupported_combination",
+          "missing_required_metadata",
+          "workspace_mismatch",
+          "stale_credential",
+          "refresh_required",
+          "lease_absent",
+          "user_reauth_required",
+          "expired",
+          "refresh_failed",
+          "resolve_required",
+          "interactive_login_required",
+          "host_owned_unavailable",
+          "io",
+          "other"
+        ],
+        "type": "string"
+      },
+      "WireCredentialUseDisposition": {
+        "description": "Safe projection of the actual credential-use disposition. This carries no\naccount, lease, token, or authorization authority.",
+        "enum": [
+          "authorized",
+          "refresh_required",
+          "refresh_disallowed",
+          "reauth_required",
+          "lease_absent",
+          "already_refreshing"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Audience-safe native readiness causes. These describe unaccepted input;\nthey neither grant permission nor prescribe a blind retry.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "policy_unavailable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "executor_unavailable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "facts_unavailable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "busy",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "authority_unavailable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "authority_changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "unsupported_scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "disposition": {
+            "$ref": "#/$defs/WireCredentialUseDisposition"
+          },
+          "kind": {
+            "const": "credential_unusable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "disposition"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "The existing core auth error discriminant, with no provider diagnostic.",
+        "properties": {
+          "cause": {
+            "$ref": "#/$defs/AuthErrorKind"
+          },
+          "kind": {
+            "const": "credential_preparation_failed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "cause"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "policy_changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "replacement_not_empty",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "A future native readiness cause without an available public projection.",
+        "properties": {
+          "kind": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireControllerReadinessFailure"
+  },
+  "WireCredentialUseDisposition": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Safe projection of the actual credential-use disposition. This carries no\naccount, lease, token, or authorization authority.",
+    "enum": [
+      "authorized",
+      "refresh_required",
+      "refresh_disallowed",
+      "reauth_required",
+      "lease_absent",
+      "already_refreshing"
+    ],
+    "title": "WireCredentialUseDisposition",
+    "type": "string"
+  },
   "WireDeviceCompleteResult": {
     "$defs": {
       "BindingId": {
@@ -154725,6 +154957,261 @@
       }
     ],
     "title": "ImageOperationPhase"
+  },
+  "WireInputAdmissionErrorDetail": {
+    "$defs": {
+      "AuthErrorKind": {
+        "description": "Stable discriminant for [`AuthError`]. Used in serialized error summaries\nand for SDK-facing wire codes.",
+        "enum": [
+          "missing_secret",
+          "unsupported_combination",
+          "missing_required_metadata",
+          "workspace_mismatch",
+          "stale_credential",
+          "refresh_required",
+          "lease_absent",
+          "user_reauth_required",
+          "expired",
+          "refresh_failed",
+          "resolve_required",
+          "interactive_login_required",
+          "host_owned_unavailable",
+          "io",
+          "other"
+        ],
+        "type": "string"
+      },
+      "WireControllerReadinessFailure": {
+        "description": "Audience-safe native readiness causes. These describe unaccepted input;\nthey neither grant permission nor prescribe a blind retry.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "policy_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "executor_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "facts_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "busy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "authority_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "authority_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unsupported_scope",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "disposition": {
+                "$ref": "#/$defs/WireCredentialUseDisposition"
+              },
+              "kind": {
+                "const": "credential_unusable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The existing core auth error discriminant, with no provider diagnostic.",
+            "properties": {
+              "cause": {
+                "$ref": "#/$defs/AuthErrorKind"
+              },
+              "kind": {
+                "const": "credential_preparation_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "cause"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "policy_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "replacement_not_empty",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A future native readiness cause without an available public projection.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireCredentialUseDisposition": {
+        "description": "Safe projection of the actual credential-use disposition. This carries no\naccount, lease, token, or authorization authority.",
+        "enum": [
+          "authorized",
+          "refresh_required",
+          "refresh_disallowed",
+          "reauth_required",
+          "lease_absent",
+          "already_refreshing"
+        ],
+        "type": "string"
+      },
+      "WireInputRefusalKind": {
+        "description": "Closed input-refusal projection. Stale preparation is represented by\n`WireControllerReadinessFailure::PolicyChanged {}`, never by this kind.",
+        "enum": [
+          "denied",
+          "malformed_facts"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Canonical native input code/detail pairing, shared by protocol surfaces.\nOnly typed, audience-safe owner dispositions are projected; no Debug or\nDisplay payload, principal, resource, or credential is serialized here.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WireInputRefusalKind"
+          },
+          "type": {
+            "const": "refused",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "$ref": "#/$defs/WireControllerReadinessFailure"
+          },
+          "type": {
+            "const": "not_ready",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "reason"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireInputAdmissionErrorDetail"
   },
   "WireInputLifecycleState": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

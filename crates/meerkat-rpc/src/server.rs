@@ -975,6 +975,15 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         }
     }
 
+    #[cfg(feature = "local-authorization")]
+    pub(crate) fn with_governed_connection(
+        mut self,
+        connection: Arc<crate::governed_jsonl::GovernedConnection>,
+    ) -> Self {
+        self.router = self.router.with_governed_connection(connection);
+        self
+    }
+
     pub fn with_live_session_factory_opt(
         mut self,
         factory: Option<Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>>,

@@ -60,6 +60,12 @@ pub enum ErrorCode {
     /// clears on its own, so ordinary busy/backoff retry is never correct —
     /// only the named `reload_member_registration` repair resolves it.
     MemberReloadRequired,
+    /// The native owner declined an unaccepted input. Details retain the
+    /// canonical refusal kind without private policy or principal data.
+    InputRefused,
+    /// Current native input readiness is unavailable. This is an operational
+    /// condition, not a permission verdict or a terminal result for prior work.
+    InputNotReady,
 }
 
 impl ErrorCode {
@@ -87,6 +93,8 @@ impl ErrorCode {
             Self::StaleCursor => -32027,
             Self::StaleFence => -32028,
             Self::MemberReloadRequired => -32029,
+            Self::InputRefused => -32030,
+            Self::InputNotReady => -32031,
         }
     }
 
@@ -114,6 +122,8 @@ impl ErrorCode {
             -32027 => Some(Self::StaleCursor),
             -32028 => Some(Self::StaleFence),
             -32029 => Some(Self::MemberReloadRequired),
+            -32030 => Some(Self::InputRefused),
+            -32031 => Some(Self::InputNotReady),
             _ => None,
         }
     }
@@ -131,12 +141,12 @@ impl ErrorCode {
             Self::RequestCancelled => 499,
             Self::ProviderError => 502,
             Self::BudgetExhausted => 429,
-            Self::HookDenied | Self::ScopeDenied => 403,
+            Self::HookDenied | Self::ScopeDenied | Self::InputRefused => 403,
             Self::AgentError | Self::InternalError => 500,
             Self::CapabilityUnavailable => 501,
             Self::SkillResolutionFailed => 422,
             Self::InvalidParams => 400,
-            Self::HostUnavailable => 503,
+            Self::HostUnavailable | Self::InputNotReady => 503,
             Self::StaleCursor => 410,
         }
     }
@@ -165,6 +175,8 @@ impl ErrorCode {
             Self::StaleCursor => 47,
             Self::StaleFence => 48,
             Self::MemberReloadRequired => 49,
+            Self::InputRefused => 50,
+            Self::InputNotReady => 51,
         }
     }
 }
@@ -223,9 +235,9 @@ impl ErrorCode {
             Self::ProviderError | Self::HostUnavailable => ErrorCategory::Provider,
             Self::BudgetExhausted => ErrorCategory::Budget,
             // Hook is the existing 403 permission-denial class.
-            Self::HookDenied | Self::ScopeDenied => ErrorCategory::Hook,
+            Self::HookDenied | Self::ScopeDenied | Self::InputRefused => ErrorCategory::Hook,
             Self::AgentError => ErrorCategory::Agent,
-            Self::CapabilityUnavailable => ErrorCategory::Capability,
+            Self::CapabilityUnavailable | Self::InputNotReady => ErrorCategory::Capability,
             Self::SkillNotFound | Self::SkillResolutionFailed => ErrorCategory::Skill,
             Self::InvalidParams => ErrorCategory::Validation,
             Self::InternalError => ErrorCategory::Internal,

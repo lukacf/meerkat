@@ -4523,6 +4523,7 @@ impl DriverEntry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn accept_resolved_input(
         &mut self,
         input: Input,

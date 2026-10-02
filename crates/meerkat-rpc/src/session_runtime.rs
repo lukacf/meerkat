@@ -13,6 +13,10 @@
 #[path = "session_runtime/schedule_host.rs"]
 mod schedule_host;
 
+#[cfg(feature = "local-authorization")]
+#[path = "session_runtime/governed.rs"]
+mod governed;
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 #[cfg(feature = "mcp")]
@@ -101,6 +105,59 @@ pub(crate) async fn realtime_open_projection_test_guard() -> tokio::sync::OwnedM
         .await
 }
 
+// The existing exact-input capacity ledger also owns a claimed deferred seed.
+// Only actual native admission may make that claim available to the executor.
+struct RuntimePreAdmissionEntry {
+    input_id: InputId,
+    admission: RpcRuntimePreAdmission,
+}
+
+pub(crate) struct RpcRuntimePreAdmission {
+    admission: Option<RuntimePreAdmission>,
+    #[cfg(feature = "local-authorization")]
+    promotion: Option<PendingPromotionCleanup>,
+    #[cfg(feature = "local-authorization")]
+    unresolved: bool,
+}
+
+impl RpcRuntimePreAdmission {
+    fn ordinary(admission: RuntimePreAdmission) -> Self {
+        Self {
+            admission: Some(admission),
+            #[cfg(feature = "local-authorization")]
+            promotion: None,
+            #[cfg(feature = "local-authorization")]
+            unresolved: false,
+        }
+    }
+
+    fn can_apply(&self) -> bool {
+        #[cfg(feature = "local-authorization")]
+        if self.unresolved {
+            return false;
+        }
+        true
+    }
+
+    async fn prepare(mut self) -> Result<RuntimePreAdmission, RpcError> {
+        #[cfg(feature = "local-authorization")]
+        if let Some(mut promotion) = self.promotion.take() {
+            if !promotion.finish_now().await {
+                promotion.retain_unresolved();
+                return Err(runtime_driver_error_to_rpc(
+                    crate::governed_jsonl::unsupported(),
+                ));
+            }
+            promotion.disarm();
+        }
+        self.admission.take().ok_or_else(|| RpcError {
+            code: error::INTERNAL_ERROR,
+            message: "native input has no retained capacity".into(),
+            data: None,
+        })
+    }
+}
+
 /// Whether the current caller must acquire the stable service turn boundary
 /// before applying an LLM identity reconfiguration.
 #[derive(Clone, Copy)]
@@ -141,9 +198,9 @@ pub(crate) use meerkat::session_runtime::admission::{
 };
 
 pub(crate) use meerkat::session_runtime::admission::{
-    RuntimePreAdmission, RuntimePreAdmissionEntry, RuntimePreAdmissionGuard,
-    RuntimePreAdmissionRegistration, RuntimePreAdmissionRestore, RuntimeRegistrationLockLease,
-    StagedAdmissionRestore, StagedArchiveRollbackGuard,
+    RuntimePreAdmission, RuntimePreAdmissionGuard, RuntimePreAdmissionRegistration,
+    RuntimePreAdmissionRestore, RuntimeRegistrationLockLease, StagedAdmissionRestore,
+    StagedArchiveRollbackGuard,
 };
 pub(crate) use meerkat::session_runtime::recovery::{
     RecoveredCreateRequest, RecoveryRuntimeBindingMode,
@@ -1848,7 +1905,22 @@ fn runtime_driver_error_to_session_error(err: RuntimeDriverError) -> SessionErro
     ))
 }
 
-fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
+pub(crate) fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
+    #[cfg(feature = "local-authorization")]
+    if let Some(detail) = meerkat::surface::native_admission_error_detail(&err) {
+        return match detail.to_wire_error() {
+            Ok(wire) => RpcError {
+                code: wire.code.jsonrpc_code(),
+                message: wire.message.into_owned(),
+                data: wire.details,
+            },
+            Err(_) => RpcError {
+                code: error::INTERNAL_ERROR,
+                message: "input error projection unavailable".into(),
+                data: None,
+            },
+        };
+    }
     // A teardown that outlived its bounded wait is still running: answer the
     // retryable busy class with its typed data, not an internal error.
     if let Some(in_progress) = err.teardown_in_progress_session_error() {
@@ -2126,6 +2198,7 @@ pub struct SessionRuntime {
     /// Phase 4 R1: slot-shared with the inner [`MeerkatSessionRuntime`].
     backend: Arc<StdRwLock<Option<String>>>,
     config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
+    commissioned_config_store: Option<Arc<dyn ConfigStore>>,
     /// Per-realm config-document source for inheritance composition (decision
     /// 2/3). When present, the auth-resolution read path composes the active
     /// realm's parent chain (workspace head ⊕ home-rooted `global`) into the
@@ -2976,6 +3049,7 @@ impl SessionRuntime {
             staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
+            commissioned_config_store: None,
             runtime_actor_witness_slots: Arc::new(StdRwLock::new(HashMap::new())),
             runtime_publication_handles: Arc::new(StdRwLock::new(HashMap::new())),
             #[cfg(test)]
@@ -3130,6 +3204,7 @@ impl SessionRuntime {
             staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
+            commissioned_config_store: None,
             runtime_actor_witness_slots: Arc::new(StdRwLock::new(HashMap::new())),
             runtime_publication_handles: Arc::new(StdRwLock::new(HashMap::new())),
             #[cfg(test)]
@@ -3176,6 +3251,11 @@ impl SessionRuntime {
             live_adapter_host,
             inner,
         }
+    }
+
+    #[cfg(feature = "local-authorization")]
+    pub(crate) fn use_commissioned_config_store(&mut self, store: Arc<dyn ConfigStore>) {
+        self.commissioned_config_store = Some(store);
     }
 
     /// Attach realm context defaults used for session metadata.
@@ -3457,7 +3537,7 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         input_ids: &[InputId],
-    ) -> Option<RuntimePreAdmission> {
+    ) -> Option<RpcRuntimePreAdmission> {
         if input_ids.is_empty() {
             return None;
         }
@@ -3468,7 +3548,7 @@ impl SessionRuntime {
         let entries = pre_admissions.get_mut(session_id)?;
         let index = entries
             .iter()
-            .position(|entry| input_ids.contains(&entry.input_id))?;
+            .position(|entry| input_ids.contains(&entry.input_id) && entry.admission.can_apply())?;
         let entry = entries.remove(index);
         if entries.is_empty() {
             pre_admissions.remove(session_id);
@@ -3496,7 +3576,7 @@ impl SessionRuntime {
         }
         entries.push(RuntimePreAdmissionEntry {
             input_id,
-            admission: admission.into(),
+            admission: RpcRuntimePreAdmission::ordinary(admission.into()),
         });
         Ok(())
     }
@@ -5411,6 +5491,12 @@ impl SessionRuntime {
                     message: format!("Failed to load config: {e}"),
                     data: None,
                 })?
+        } else if let Some(store) = &self.commissioned_config_store {
+            store.get().await.map_err(|_| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: "commissioned config unavailable".into(),
+                data: None,
+            })?
         } else {
             meerkat_core::Config::default()
         };
@@ -8091,9 +8177,31 @@ impl SessionRuntime {
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
-        pre_admission: Option<RuntimePreAdmission>,
+        pre_admission: Option<RpcRuntimePreAdmission>,
         llm_reconfigure_boundary: LlmReconfigureBoundaryOwnership,
     ) -> Result<CoreApplyOutput, RpcError> {
+        // The configured native owner must hand this executor both the admitted
+        // work context and the exact-input capacity/seed claim. A missing or
+        // unresolved claim must never fall through to ordinary live/cold setup.
+        if self.runtime_adapter.has_native_work_authorization_host()
+            && (primitive
+                .turn_metadata()
+                .and_then(|meta| meta.work_authorization.as_ref())
+                .is_none()
+                || !pre_admission
+                    .as_ref()
+                    .is_some_and(RpcRuntimePreAdmission::can_apply))
+        {
+            return Err(runtime_driver_error_to_rpc(
+                RuntimeDriverError::ControllerReadinessUnavailable {
+                    reason: meerkat_runtime::traits::ControllerReadinessFailure::UnsupportedScope,
+                },
+            ));
+        }
+        let pre_admission = match pre_admission {
+            Some(admission) => Some(admission.prepare().await?),
+            None => None,
+        };
         let mut pre_admission = pre_admission.map(RuntimePreAdmissionGuard::new);
         let workgraph_service = self.workgraph_service().ok();
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
@@ -19530,6 +19638,7 @@ mod tests {
     }
 
     /// set_mob_tools writes through to the builder, so sessions get mob tools.
+    #[cfg(feature = "mob")]
     #[tokio::test]
     async fn set_mob_tools_delivers_tools_to_created_sessions() {
         let temp = tempfile::tempdir().unwrap();
@@ -25665,6 +25774,7 @@ mod tests {
             .expect("rejected archived recovery must not leak active admission");
     }
 
+    #[cfg(feature = "mob")]
     #[tokio::test]
     async fn recovered_runtime_apply_create_authority_failure_discards_live_deferred_admission() {
         let temp = tempfile::tempdir().unwrap();

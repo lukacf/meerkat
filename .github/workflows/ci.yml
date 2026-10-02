@@ -23,6 +23,7 @@ name: CI
 #                     nextest --lib --bins --profile ci-pr (ci-pr = fast),
 #                     plus the feature-gated suites of those packages
 #                     (FEATURE_UNIT_SUITES in scripts/ci-cargo-lanes.mjs)
+#   governed-jsonl  - exact two non-MCP native-authorized JSONL tests on Rust changes
 #   integration     - (xN) the tests/*.rs binaries of each integration
 #                     suite whose trigger packages or paths changed
 #                     (INTEGRATION_SUITES in scripts/ci-cargo-lanes.mjs):
@@ -657,6 +658,129 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: sccache-log-unit-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /home/runner/work/_temp/sccache.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+  governed-jsonl:
+    name: Governed JSONL
+    needs: changes
+    # Default RPC features enable MCP and compile these two cases away.
+    # Native dependency changes must retain this positive non-MCP profile.
+    if: ${{ needs.changes.outputs.rust_changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      RUSTC_WRAPPER: sccache
+      RUST_MIN_STACK: "33554432"
+      CARGO_TERM_COLOR: never
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Registry index and crate sources only, one key for every lane.
+          # Compiled objects come from sccache: content-addressed, shared by
+          # every lane and readable from main by every pull request, and
+          # about 1.5 GB for the whole workspace. Per-lane target-directory
+          # caches were 300-480 MB each and filled the repository's 10 GB
+          # cache limit in one pull request, so they were evicted between
+          # PRs and every plan was cold in practice.
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Governed JSONL exact selection and execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import os
+          import re
+          import subprocess
+          import sys
+
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "governed-jsonl"
+          evidence.mkdir()
+          expected = sorted([
+              "governed_jsonl::tests::governed_jsonl_refusal_retains_actor_seed_and_context_then_same_run_read_finishes",
+              "governed_jsonl::tests::governed_jsonl_rejects_shared_bundle_and_unsupported_wire_before_setup",
+          ])
+          command = [
+              "./scripts/repo-cargo", "test", "--locked", "-p", "meerkat-rpc", "--lib",
+              "--no-default-features", "--features", "local-authorization",
+              "governed_jsonl::tests::", "--",
+          ]
+
+          def run(phase, arguments):
+              log_path = evidence / f"{phase}.log"
+              with log_path.open("w") as log:
+                  process = subprocess.Popen(
+                      command + arguments, stdout=subprocess.PIPE,
+                      stderr=subprocess.STDOUT, text=True,
+                  )
+                  for line in process.stdout:
+                      log.write(line)
+                      log.flush()
+                      print(line, end="", flush=True)
+                  code = process.wait()
+              (evidence / f"{phase}.exit").write_text(f"{code}\n")
+              if code != 0:
+                  sys.exit(f"{phase} Cargo process failed with exit {code}")
+              return log_path.read_text()
+
+          listing = run("list", ["--list", "--color", "never"])
+          names = re.findall(r"^(\S+): test$", listing, re.MULTILINE)
+          if sorted(names) != expected or re.findall(
+              r"^\d+ tests?, \d+ benchmarks?$", listing, re.MULTILINE
+          ) != ["2 tests, 0 benchmarks"]:
+              sys.exit(f"governed JSONL list must contain exactly the two required tests: {names!r}")
+
+          result = run("run", ["--nocapture", "--test-threads=1", "--color", "never"])
+          outcomes = re.findall(r"^test (\S+) \.\.\. (ok|FAILED|ignored)$", result, re.MULTILINE)
+          if sorted(outcomes) != [(name, "ok") for name in expected]:
+              sys.exit(f"governed JSONL must pass both exact names with zero ignored: {outcomes!r}")
+          summaries = re.findall(
+              r"^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; "
+              r"(\d+) measured; \d+ filtered out; finished in .+$", result, re.MULTILINE,
+          )
+          if summaries != [("ok", "2", "0", "0", "0")]:
+              sys.exit(f"governed JSONL requires exactly 2 passed, 0 failed, 0 ignored: {summaries!r}")
+          PYTHON
+
+      - name: Upload governed JSONL logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: governed-jsonl-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/governed-jsonl/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload sccache server log
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: sccache-log-governed-jsonl-${{ github.run_id }}-${{ github.run_attempt }}
           path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3
@@ -1397,6 +1521,7 @@ jobs:
       - clippy
       - unit
       - integration
+      - governed-jsonl
       - main-unit
       - main-unit-archive-build
       - main-unit-archive-run
@@ -1418,6 +1543,7 @@ jobs:
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
+          GOVERNED_JSONL_RESULT: ${{ needs.governed-jsonl.result }}
           INTEGRATION_COUNT: ${{ needs.changes.outputs.integration_count }}
           MAIN_UNIT_PACKED_RESULT: ${{ needs.main-unit.result }}
           MAIN_UNIT_ARCHIVE_BUILD_RESULT: ${{ needs.main-unit-archive-build.result }}
@@ -1463,7 +1589,7 @@ jobs:
             echo "::notice::unit tests deferred to the push-to-main run (meerkat-mob compile chain): ${UNIT_DEFERRED}"
           fi
           echo "changes=${CHANGES_RESULT} fmt-governance=${FMT_GOVERNANCE_RESULT} ratchets=${RATCHETS_RESULT}"
-          echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} integration=${INTEGRATION_RESULT} (${INTEGRATION_COUNT} suites) main-unit=${MAIN_UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT} example-web=${EXAMPLE_WEB_RESULT} wasm-timers=${WASM_TIMERS_RESULT} bazel-graph=${BAZEL_GRAPH_RESULT}"
+          echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} governed-jsonl=${GOVERNED_JSONL_RESULT} integration=${INTEGRATION_RESULT} (${INTEGRATION_COUNT} suites) main-unit=${MAIN_UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT} example-web=${EXAMPLE_WEB_RESULT} wasm-timers=${WASM_TIMERS_RESULT} bazel-graph=${BAZEL_GRAPH_RESULT}"
           failed=0
           require_success() {
             local lane="$1" result="$2"
@@ -1501,6 +1627,7 @@ jobs:
             fi
             require_ran "Clippy" "${CLIPPY_RESULT}"
             require_ran "Closure check" "${CLOSURE_CHECK_RESULT}"
+            require_ran "Governed JSONL" "${GOVERNED_JSONL_RESULT}"
             # Fail closed on the unit plan: every changed package is either in
             # a pull-request unit shard or named as deferred to main.
             if [[ "${UNIT_SHARD_COUNT}" =~ ^[0-9]+$ ]] && (( UNIT_SHARD_COUNT > 0 )); then
@@ -1513,7 +1640,7 @@ jobs:
               failed=1
             fi
           elif [[ "${CHANGES_RESULT}" == "success" ]]; then
-            for lane in Clippy:"${CLIPPY_RESULT}" "Unit tests":"${UNIT_RESULT}" "Closure check":"${CLOSURE_CHECK_RESULT}"; do
+            for lane in Clippy:"${CLIPPY_RESULT}" "Unit tests":"${UNIT_RESULT}" "Closure check":"${CLOSURE_CHECK_RESULT}" "Governed JSONL":"${GOVERNED_JSONL_RESULT}"; do
               forbid_failure "${lane%%:*}" "${lane##*:}"
             done
           fi
@@ -1807,6 +1934,7 @@ jobs:
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
+          GOVERNED_JSONL_RESULT: ${{ needs.governed-jsonl.result }}
           MAIN_UNIT_PACKED_RESULT: ${{ needs.main-unit.result }}
           MAIN_UNIT_ARCHIVE_BUILD_RESULT: ${{ needs.main-unit-archive-build.result }}
           MAIN_UNIT_ARCHIVE_RUN_RESULT: ${{ needs.main-unit-archive-run.result }}
@@ -1856,6 +1984,7 @@ jobs:
             --arg clippy "${CLIPPY_RESULT}" \
             --arg unit "${UNIT_RESULT}" \
             --arg integration "${INTEGRATION_RESULT}" \
+            --arg governed_jsonl "${GOVERNED_JSONL_RESULT}" \
             --arg main_unit "${MAIN_UNIT_RESULT}" \
             --arg closure_check "${CLOSURE_CHECK_RESULT}" \
             --arg wasm_check "${WASM_CHECK_RESULT}" \
@@ -1896,6 +2025,7 @@ jobs:
                 clippy: $clippy,
                 unit: $unit,
                 integration: $integration,
+                governed_jsonl: $governed_jsonl,
                 main_unit: $main_unit,
                 closure_check: $closure_check,
                 wasm_check: $wasm_check,

@@ -2440,3 +2440,73 @@ async fn bounded_submit_timeout_does_not_cancel_inflight_admission_but_skips_par
         "the in-flight first delivery executes exactly once; the parked second never executes"
     );
 }
+
+/// A member revival deferred by the mob's explicit resume
+/// (`LifecycleOperationPending { "explicit_resume member .." }`) settles on
+/// that operation's own typed completion: the member's explicit-resume work
+/// leaving the actor-published machine state. Nothing is timed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_revival_deferred_by_explicit_resume_settles_on_its_typed_completion() {
+    use crate::machines::mob_machine as mob_dsl;
+    let mob = reconstructed_isolation_mob_with_definition(2, turn_driven_definition()).await;
+    let construction = mob
+        .service
+        .park_session_creation(mob.session(0).clone())
+        .await;
+    let release_construction = ReleaseConstructionGate(Arc::clone(&construction));
+    let resume = tokio::spawn({
+        let handle = mob.handle.clone();
+        async move { handle.resume().await }
+    });
+    let member = mob.member(0).clone();
+    let dsl_member = mob_dsl::AgentIdentity::from_domain(&member);
+    let mut state = mob.handle.machine_state_watch_rx.clone();
+    state
+        .wait_for(|state| state.explicit_resume_member_work.contains_key(&dsl_member))
+        .await
+        .expect("the resume stages member zero's explicit-resume work");
+
+    // The held construction keeps the work pending: revival is deferred.
+    assert!(matches!(
+        mob.handle.ensure_member_live(&member).await,
+        Err(MobError::LifecycleOperationPending { intent })
+            if intent == format!("explicit_resume member {member}")
+    ));
+    let settled = tokio::spawn({
+        let handle = mob.handle.clone();
+        let member = member.clone();
+        async move { handle.explicit_resume_member_work_settled(&member).await }
+    });
+    assert!(
+        mob.handle
+            .machine_state_watch_rx
+            .borrow()
+            .explicit_resume_member_work
+            .contains_key(&dsl_member),
+        "the work is still pending while the construction is held"
+    );
+
+    drop(release_construction);
+    assert!(
+        settled.await.expect("settled waiter joins"),
+        "the waiter completes when the explicit-resume work ends"
+    );
+    assert!(
+        !mob.handle
+            .machine_state_watch_rx
+            .borrow()
+            .explicit_resume_member_work
+            .contains_key(&dsl_member)
+    );
+    resume
+        .await
+        .expect("resume task joins")
+        .expect("resume completes once the construction is released");
+    // Level-triggered: a waiter that arrives after the operation ended
+    // returns at once.
+    assert!(
+        mob.handle
+            .explicit_resume_member_work_settled(&member)
+            .await
+    );
+}

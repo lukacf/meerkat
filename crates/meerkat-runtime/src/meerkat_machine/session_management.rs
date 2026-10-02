@@ -2736,11 +2736,17 @@ impl MeerkatMachine {
                     return Err(error);
                 }
                 if existing.clear_dead_attachment() {
-                    existing.stage_generated_executor_exit_observation().map_err(|reason| {
+                    // The staged transition (~18 KiB) is discarded; stage it in
+                    // its own boxed frame (#1474).
+                    crate::stack_relief::box_in_own_frame(|| async move {
+                        existing.stage_generated_executor_exit_observation().map_err(|reason| {
                         RuntimeDriverError::Internal(format!(
                             "generated MeerkatMachine rejected executor-exit observation: {reason}"
                         ))
                     })?;
+                        Ok::<_, RuntimeDriverError>(())
+                    })
+                    .await?;
                 }
                 return Ok(RegisterSessionInnerOutcome::Existing);
             }
@@ -2761,8 +2767,13 @@ impl MeerkatMachine {
                     self.ops_state_for_registration(&session_id, &runtime_id)
                 })
                 .await?;
-                let recovery = crate::stack_relief::box_in_own_frame(|| {
+                // Large hand-off values (#1474): the recovered authority and the
+                // prepared entry stay boxed until the call that consumes them,
+                // instead of being copied through this frame and the caller's.
+                let recovery = crate::stack_relief::box_in_own_frame(|| async {
                     self.runtime_authority_for_registration(&runtime_id, &session_id, &ops_state.1)
+                        .await
+                        .map(Box::new)
                 })
                 .await?;
                 tracing::debug!(
@@ -2771,15 +2782,17 @@ impl MeerkatMachine {
                     "MeerkatMachine::register_session_inner loaded durable lifecycle"
                 );
                 let (session_entry, cold_recovered_generated_draining) =
-                    crate::stack_relief::box_in_own_frame(|| {
+                    crate::stack_relief::box_in_own_frame(|| async {
                         self.prepare_registered_session_entry(
                             &session_id,
                             &runtime_id,
-                            recovery,
+                            *recovery,
                             ops_state,
                             materialization_claim_state,
                             None,
                         )
+                        .await
+                        .map(|(session_entry, draining)| (Box::new(session_entry), draining))
                     })
                     .await?;
 
@@ -2803,17 +2816,21 @@ impl MeerkatMachine {
                     return Err(error);
                 }
                 if existing.clear_dead_attachment() {
-                    existing
+                    crate::stack_relief::box_in_own_frame(|| async move {
+                        existing
                     .stage_generated_executor_exit_observation()
                     .map_err(|reason| {
                         RuntimeDriverError::Internal(format!(
                             "generated MeerkatMachine rejected executor-exit observation: {reason}"
                         ))
                     })?;
+                        Ok::<_, RuntimeDriverError>(())
+                    })
+                    .await?;
                 }
                 Ok(RegisterSessionInnerOutcome::Existing)
             } else {
-                sessions.insert(session_id, session_entry);
+                sessions.insert(session_id, *session_entry);
                 tracing::debug!(
                     %runtime_id,
                     "MeerkatMachine::register_session_inner inserted session"

@@ -63,5 +63,19 @@ jobs:
           provider_overrides="ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY},OPENAI_API_KEY=${OPENAI_API_KEY},GEMINI_API_KEY=${GEMINI_API_KEY}"
           echo "::add-mask::${provider_overrides}"
           unset ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY
+          # One attempt per scenario (no Bazel retry); the typed verdict
+          # separates real failures from provider-degraded void runs.
+          set +e
           MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES="${provider_overrides}" \
-            scripts/buildbuddy-dev e2e-smoke-turbo-s
+            scripts/buildbuddy-dev e2e-smoke-turbo-s 2>&1 | tee turbo-s.log
+          bazel_exit=${PIPESTATUS[0]}
+          set -e
+          scripts/live-gate-verdict turbo-s.log "$bazel_exit" | tee turbo-s-verdict.txt
+          verdict_exit=${PIPESTATUS[0]}
+          {
+            echo "## Release Turbo S"
+            echo '```'
+            cat turbo-s-verdict.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$verdict_exit"

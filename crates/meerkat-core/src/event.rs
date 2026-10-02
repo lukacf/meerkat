@@ -2561,18 +2561,6 @@ pub enum AgentEvent {
         detail: String,
     },
 
-    /// The runtime closed one of this session's live channels for a typed
-    /// cause (a media fault on its first assistant output). Published on the
-    /// session event stream after the close commits, so every observer
-    /// learns the cause and whether the session may reopen the channel with
-    /// its retained context, without polling `live/status`.
-    LiveChannelClosed {
-        session_id: SessionId,
-        channel_id: String,
-        reason: LiveChannelCloseReason,
-        reopen_recommended: bool,
-    },
-
     /// Released 0.8.10 generation-zero full-body compatibility row.
     ///
     /// Current writers must never emit this variant. It is decoded only by the
@@ -2738,6 +2726,20 @@ pub enum AgentEvent {
     /// Existing durable-join authority resolved these applications as discarded.
     /// Published only after any required requeue persistence succeeds.
     BoundaryAppendsDiscarded(BoundaryAppendsDiscarded),
+    /// The runtime closed one of this session's live channels for a typed
+    /// cause (a media fault on its first assistant output). Published on the
+    /// session event stream after the close commits, so every observer
+    /// learns the cause and whether the session may reopen the channel with
+    /// its retained context, without polling `live/status`.
+    ///
+    /// Appended after every released variant: declaration order is the
+    /// implicit discriminant (the xtask `released_enum_ordinals` test).
+    LiveChannelClosed {
+        session_id: SessionId,
+        channel_id: String,
+        reason: LiveChannelCloseReason,
+        reopen_recommended: bool,
+    },
 }
 
 /// Exact negative application fact projected from durable boundary join resolution.

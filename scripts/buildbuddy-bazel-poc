@@ -363,11 +363,13 @@ case "${command}" in
       --color=no
       --curses=no
     )
-    # Turbo-S is a Bazel sh_test cohort, not a Nextest run. Retry a failed
-    # shard once at the Bazel boundary where aggregate-load flakes occur,
-    # while preserving Bazel/BuildBuddy parallelism across independent shards.
+    # Turbo-S is a Bazel sh_test cohort, not a Nextest run. Exactly one
+    # attempt per run: a scenario that passes only on a retry is a failure to
+    # classify (product bug, oracle/fixture brittleness, or a provider-degraded
+    # void verdict), never a pass. A retry here is what let failing scenarios
+    # report green.
     enforced_args+=(
-      --flaky_test_attempts=2
+      --flaky_test_attempts=1
     )
     ;;
   machine-authority-rbe)

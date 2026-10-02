@@ -106,6 +106,17 @@ pub mod thinking_capture {
             matched_owned: bool,
             accepted: bool,
         },
+        /// A `session.commentary.append` sent on the delegation lane (a
+        /// narration or result, `delegation` set) or the session lane (a
+        /// voiced canonical row). `text` is the first
+        /// [`Capture::MAX_TEXT_BYTES`] of the content on a char boundary;
+        /// `text_bytes` is the whole content's length.
+        CommentaryAppendAttempt {
+            client_event_id: String,
+            delegation: bool,
+            text: String,
+            text_bytes: usize,
+        },
         /// A provider `info` notice (for example a throttle notice): evidence
         /// only, never acted on.
         ProviderInfo {
@@ -217,6 +228,11 @@ pub mod thinking_capture {
                 | EventKind::InstructionsAppendAttempt {
                     client_event_id,
                     text,
+                }
+                | EventKind::CommentaryAppendAttempt {
+                    client_event_id,
+                    text,
+                    ..
                 } => {
                     client_event_id.len() <= Self::MAX_ID_BYTES
                         && text.len() <= Self::MAX_TEXT_BYTES
@@ -1384,6 +1400,28 @@ impl PublicLiveBrokerSession {
             capture.record(thinking_capture::EventKind::InstructionsAppendAttempt {
                 client_event_id: client_event_id.clone(),
                 text: content.clone(),
+            });
+        }
+        #[cfg(feature = "test-realtime-fixtures")]
+        if let Some(capture) = &self.thinking_capture
+            && let ClientEvent {
+                event_id: Field::Value(client_event_id),
+                command:
+                    Command::CommentaryAppend {
+                        content,
+                        delegation_id,
+                    },
+            } = &event
+        {
+            let mut end = content.len().min(thinking_capture::Capture::MAX_TEXT_BYTES);
+            while !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            capture.record(thinking_capture::EventKind::CommentaryAppendAttempt {
+                client_event_id: client_event_id.clone(),
+                delegation: delegation_id.0.is_some(),
+                text: content[..end].to_owned(),
+                text_bytes: content.len(),
             });
         }
         if self.sender.send(event).await.is_err() {

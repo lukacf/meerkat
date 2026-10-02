@@ -939,6 +939,9 @@ struct State {
     /// recorded when the create request is built, before `SessionAttached`).
     session_input_seeds: Vec<(u32, SessionInputSeed)>,
     session_input_texts: Vec<(u32, Vec<String>)>,
+    /// Session-lane (voiced canonical row) commentary appends per channel:
+    /// `(channel, text prefix, whole content bytes)`.
+    session_commentary_appends: Vec<(u32, String, usize)>,
     /// Owned instructions-lane attempts (one per wire fragment) and how many
     /// reassembled appends opened a framed summary.
     instructions_append_attempts: usize,
@@ -1095,6 +1098,7 @@ impl Journal {
                 thinking_appends: Vec::new(),
                 session_input_seeds: Vec::new(),
                 session_input_texts: Vec::new(),
+                session_commentary_appends: Vec::new(),
                 thinking_append_attempts: 0,
                 thinking_append_texts: Vec::new(),
                 instructions_append_attempts: 0,
@@ -1401,6 +1405,22 @@ impl Journal {
                     state.instructions_append_texts.push(text.clone());
                 }
             }
+            if let thinking_capture::EventKind::CommentaryAppendAttempt {
+                delegation: false,
+                text,
+                text_bytes,
+                ..
+            } = &event.event
+            {
+                let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+                if state.session_commentary_appends.len() < thinking_capture::Capture::MAX_EVENTS {
+                    state.session_commentary_appends.push((
+                        event.channel_ordinal,
+                        text.clone(),
+                        *text_bytes,
+                    ));
+                }
+            }
             if let thinking_capture::EventKind::InstructionsAppended {
                 matched_owned: true,
                 accepted: true,
@@ -1489,6 +1509,22 @@ impl Journal {
             .iter()
             .filter(|(c, _, _)| *c == channel)
             .map(|(_, _, text)| text.clone())
+            .collect())
+    }
+
+    /// Session-lane commentary appends on `channel`, in order: the voiced
+    /// canonical rows the provider had not heard (a typed row, or the
+    /// executor's reply to a later non-voice input such as a peer response).
+    /// Each is `(text prefix, whole content bytes)`; the prefix is the first
+    /// capture text limit of the content.
+    pub fn session_commentary_appends(&self, channel: u32) -> Result<Vec<(String, usize)>, Fault> {
+        self.flush_wire()?;
+        let state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+        Ok(state
+            .session_commentary_appends
+            .iter()
+            .filter(|(c, _, _)| *c == channel)
+            .map(|(_, text, bytes)| (text.clone(), *bytes))
             .collect())
     }
 

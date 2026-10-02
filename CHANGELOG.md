@@ -253,6 +253,14 @@ them.
   from 913,880 B to 530,824 B, and the canary now passes at 1024 KiB. The
   next bound is the `SetPeerIngressContext` drain arm (#1466). No behaviour
   change.
+- Debug worker-stack headroom (#1466): the comms-drain
+  `SetPeerIngressContext` arm runs each DSL staging statement and each
+  `recover_from_state` preview proof in its own boxed frame. Each of these
+  carries ~9 KiB authority snapshots by value, and the arm's poll frame held
+  about fifty such copies (465 KB). Bodies are unchanged. The comms-drain
+  chain went from 927,960 B to 550,984 B, and the stack canary (debug) now
+  passes at 896 KiB. The registration chain (702,184 B) is the next bound.
+  No behaviour change.
 
 ## [0.8.50] - 2026-10-01
 

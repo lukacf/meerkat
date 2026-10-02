@@ -24,7 +24,7 @@
 //! provider-side cause is unknown, so callers keep verbatim startup history to
 //! the recent-turns window.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use meerkat_core::model_profile::catalog::ModelReleaseStage;
 use meerkat_core::types::Message;
@@ -1542,7 +1542,7 @@ impl PublicLiveBrokerSession {
         delegation: &GptLiveDelegationRef,
         text: impl Into<String>,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
-        self.append_delegation_commentary(delegation, text, false)
+        self.append_delegation_commentary(delegation, text, None)
             .await
     }
 
@@ -1550,19 +1550,21 @@ impl PublicLiveBrokerSession {
     /// commentary exactly like [`Self::append_delegation_context`].
     ///
     /// Measured against gpt-live-1, the model occasionally acknowledges a
-    /// result commentary and never voices it. When the result's
-    /// acknowledgement (the Delivered transition) finds the session idle, so
-    /// no transcript delta from either speaker arrived since this
-    /// delegation's release began, the broker follows the result with one
-    /// short instructions-lane cue, the lane the provider documents for
-    /// prompting speech. The cue is broker-owned: its receipt is consumed
-    /// here and never surfaced.
+    /// result commentary and never voices it, and nothing the provider sends
+    /// tells the two apart: there is no assistant completion event, and
+    /// output audio streams continuously, silence included. So at the
+    /// result's acknowledgement (the Delivered transition) the broker always
+    /// follows the result with one short instructions-lane cue (the lane the
+    /// provider documents for prompting speech), bound to the result's
+    /// delegation and phrased so it is safe either way: tell the user the
+    /// result unless it was already told. The cue is broker-owned: its
+    /// receipt is consumed here and never surfaced.
     pub async fn append_delegation_result(
         &self,
         delegation: &GptLiveDelegationRef,
         text: impl Into<String>,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
-        self.append_delegation_commentary(delegation, text, true)
+        self.append_delegation_commentary(delegation, text, Some(delegation))
             .await
     }
 
@@ -1570,25 +1572,32 @@ impl PublicLiveBrokerSession {
         &self,
         delegation: &GptLiveDelegationRef,
         text: impl Into<String>,
-        result: bool,
+        result_of: Option<&GptLiveDelegationRef>,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
         let text = require_context(text)?;
         let token = self
             .state
             .lock()
             .await
-            .reserve_delegation_commentary(result)?;
+            .reserve_delegation_commentary(result_of.map(|delegation| delegation.0.clone()))?;
         let event = Self::commentary_event(token, text, Nullable(Some(delegation.0.clone())));
         self.deliver_append(token, event).await
     }
 
-    /// Send the result cues whose idle condition held at acknowledgement.
+    /// Send the cues of acknowledged results, each bound to its delegation.
     async fn send_due_result_cues(&self) -> Result<(), GptLiveBrokerError> {
         loop {
-            let Some(token) = self.state.lock().await.reserve_due_result_cue()? else {
+            let Some((token, delegation_id)) = self.state.lock().await.reserve_due_result_cue()?
+            else {
                 return Ok(());
             };
-            let event = Self::instructions_event(token, 0, LIVE_RESULT_CUE.to_owned());
+            let event = ClientEvent {
+                event_id: Field::Value(instructions_event_id(token, 0)),
+                command: Command::InstructionsAppend {
+                    content: LIVE_RESULT_CUE.to_owned(),
+                    delegation_id: Nullable(Some(delegation_id)),
+                },
+            };
             self.deliver_append(token, event).await?;
             tracing::info!("public Live result cue sent");
         }
@@ -1802,7 +1811,7 @@ impl PublicLiveBrokerSession {
                 Some((frame.client_event_id.clone(), matched_owned))
             });
             let applied = state.apply_frame(frame);
-            let cues_due = state.due_result_cues > 0 && !state.close_requested;
+            let cues_due = !state.due_result_cues.is_empty() && !state.close_requested;
             #[cfg(feature = "test-realtime-fixtures")]
             if let Some(capture) = &self.thinking_capture
                 && let Some((client_event_id, matched_owned)) = instructions_ack
@@ -2063,10 +2072,12 @@ struct SessionState {
     /// Session-timeline start of the commentary acknowledgement being
     /// applied (`session.commentary.appended.start_ms`).
     commentary_ack_start_ms: Option<f64>,
-    /// Result appends awaiting their acknowledgement.
-    result_cue_candidates: HashSet<GptLiveAppendToken>,
-    /// Result cues whose idle condition held at acknowledgement, not yet sent.
-    due_result_cues: usize,
+    /// Result appends awaiting their acknowledgement, with the delegation
+    /// each one answers.
+    result_cue_candidates: HashMap<GptLiveAppendToken, String>,
+    /// Delegations whose result was acknowledged and whose cue is not yet
+    /// sent, in acknowledgement order.
+    due_result_cues: VecDeque<String>,
     close_requested: bool,
     closed_observed: bool,
 }
@@ -2094,8 +2105,8 @@ impl Default for SessionState {
             last_output_end_ms: None,
             input_since_output: false,
             commentary_ack_start_ms: None,
-            result_cue_candidates: HashSet::new(),
-            due_result_cues: 0,
+            result_cue_candidates: HashMap::new(),
+            due_result_cues: VecDeque::new(),
             close_requested: false,
             closed_observed: false,
         }
@@ -2127,30 +2138,37 @@ impl SessionState {
         self.reserve_append_fragments(PendingAppendLane::Instructions, count)
     }
 
-    /// Reserve one delegation-lane commentary append; a result is also a
-    /// cue candidate decided at its acknowledgement.
+    /// Reserve one delegation-lane commentary append; a result (with the
+    /// delegation it answers) is also cued at its acknowledgement.
     fn reserve_delegation_commentary(
         &mut self,
-        result: bool,
+        result_of: Option<String>,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
         let token = self.reserve_append(PendingAppendLane::Delegation)?;
-        if result {
-            self.result_cue_candidates.insert(token);
+        if let Some(delegation_id) = result_of {
+            self.result_cue_candidates.insert(token, delegation_id);
         }
         Ok(token)
     }
 
     /// Reserve the next due result cue as a broker-owned instructions append.
-    fn reserve_due_result_cue(&mut self) -> Result<Option<GptLiveAppendToken>, GptLiveBrokerError> {
-        if self.due_result_cues == 0 {
+    fn reserve_due_result_cue(
+        &mut self,
+    ) -> Result<Option<(GptLiveAppendToken, String)>, GptLiveBrokerError> {
+        let Some(delegation_id) = self.due_result_cues.pop_front() else {
             return Ok(None);
-        }
-        self.due_result_cues -= 1;
-        let token = self.reserve_instructions_append(1)?;
+        };
+        let token = match self.reserve_instructions_append(1) {
+            Ok(token) => token,
+            Err(error) => {
+                self.due_result_cues.push_front(delegation_id);
+                return Err(error);
+            }
+        };
         if let Some(pending) = self.pending_appends.back_mut() {
             pending.internal = true;
         }
-        Ok(Some(token))
+        Ok(Some((token, delegation_id)))
     }
 
     fn outstanding_receipt_count(&self) -> usize {
@@ -2436,42 +2454,33 @@ impl SessionState {
                     .push_back(pending.lane.acknowledged(token));
             }
             self.pending_appends.remove(append_index.0);
-            if self.result_cue_candidates.remove(&token) && !rejected {
-                self.decide_result_cue();
+            if let Some(delegation_id) = self.result_cue_candidates.remove(&token)
+                && !rejected
+            {
+                self.cue_acknowledged_result(delegation_id);
             }
         }
         Ok(())
     }
 
-    /// The result's acknowledgement is the Delivered transition. Both the
-    /// acknowledgement and every transcript delta carry session-timeline
-    /// positions, so idleness is read from the provider's own ordering, not a
-    /// wait: the model is idle when no input followed its last output and its
-    /// last output word ended at least [`LIVE_RESULT_CUE_MIN_GAP_MS`] before
-    /// the result landed. Only then does the result get a speak cue; output in
-    /// progress (or just paused) means the model is already answering.
-    fn decide_result_cue(&mut self) {
-        let Some(ack_start_ms) = self.commentary_ack_start_ms else {
-            return;
+    /// The result's acknowledgement is the Delivered transition, and it
+    /// always makes the result's cue due. Nothing the provider sends
+    /// separates "the model is about to voice this result" from "it never
+    /// will": a result landing 400 ms after the model's last word was never
+    /// read out, while voiced results land from -200 to +400 ms after it. So
+    /// the cue is not decided by a gap; it is phrased so that it is safe in
+    /// both cases ([`LIVE_RESULT_CUE`]). The gap is logged as telemetry only.
+    fn cue_acknowledged_result(&mut self, delegation_id: String) {
+        let gap_ms = match (self.commentary_ack_start_ms, self.last_output_end_ms) {
+            (Some(ack_start_ms), Some(end)) => ack_start_ms - end,
+            _ => f64::INFINITY,
         };
-        // A channel whose model never spoke has no last output word.
-        let gap_ms = self
-            .last_output_end_ms
-            .map_or(f64::INFINITY, |end| ack_start_ms - end);
-        let idle = !self.input_since_output && gap_ms >= LIVE_RESULT_CUE_MIN_GAP_MS;
-        if idle {
-            tracing::info!(
-                gap_ms,
-                "public Live result delivered while idle; result cue due"
-            );
-            self.due_result_cues = self.due_result_cues.saturating_add(1);
-        } else {
-            tracing::info!(
-                gap_ms,
-                input_since_output = self.input_since_output,
-                "public Live result delivered with speech in progress; result cue suppressed"
-            );
-        }
+        tracing::info!(
+            gap_ms,
+            input_since_output = self.input_since_output,
+            "public Live result delivered; result cue due"
+        );
+        self.due_result_cues.push_back(delegation_id);
     }
 
     fn reflected_input_clock_ms(&self) -> u64 {
@@ -2821,20 +2830,12 @@ fn thinking_event_id(token: GptLiveAppendToken, index: usize) -> String {
     format!("meerkat-thinking-{}-{index}", token.0)
 }
 
-/// Minimum session-timeline gap between the model's last output word and a
-/// result's acknowledgement for the model to count as idle there. Measured on
-/// gpt-live-1 (S106, 71 result deliveries, positions quantized to 200 ms):
-/// every voiced delivery with no input since the model's last output had a
-/// gap of -200 to +400 ms (the model finished a phrase, paused, then read the
-/// result); the one captured result the model never voiced landed about
-/// 3 s after its last word. This compares provider timestamps; it is not a
-/// wait.
-const LIVE_RESULT_CUE_MIN_GAP_MS: f64 = 1000.0;
-
-/// The speak cue that follows a result delivered while the session is idle.
-/// Neutral and short: it names no content, so it cannot carry or alter the
-/// result it points at.
-const LIVE_RESULT_CUE: &str = "Tell the user this result now.";
+/// The speak cue that follows every acknowledged result, bound to the
+/// result's delegation by its `delegation_id`. It names no content, so it
+/// cannot carry or alter the result it points at. It is conditional, because
+/// the broker cannot know whether the model already voiced the result: the
+/// model reads the result if it has not, and stays quiet if it has.
+const LIVE_RESULT_CUE: &str = "If you have not yet told the user this delegation's result, tell them now. If you already have, do not repeat it.";
 
 fn instructions_event_id(token: GptLiveAppendToken, index: usize) -> String {
     format!("meerkat-instructions-{}-{index}", token.0)
@@ -4519,21 +4520,24 @@ mod tests {
     #[test]
     fn a_result_landing_well_after_the_last_word_gets_one_broker_owned_speak_cue() {
         let mut state = state_with_spoken_delegation();
-        let narration = state.reserve_delegation_commentary(false).unwrap();
-        let result = state.reserve_delegation_commentary(true).unwrap();
+        let narration = state.reserve_delegation_commentary(None).unwrap();
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
         state
             .apply_frame(frame(ack_at(&pending_event_id(narration), 5000.0)))
             .unwrap();
-        assert_eq!(state.due_result_cues, 0, "narration is never cued");
+        assert!(state.due_result_cues.is_empty(), "narration is never cued");
         state
             .apply_frame(frame(ack_at(&pending_event_id(result), 5000.0)))
             .unwrap();
-        assert_eq!(state.due_result_cues, 1);
+        assert_eq!(state.due_result_cues, ["dlg_cue"]);
         drain(&mut state);
-        let cue = state
+        let (cue, delegation_id) = state
             .reserve_due_result_cue()
             .unwrap()
             .expect("one cue due");
+        assert_eq!(delegation_id, "dlg_cue", "the cue is bound to its result");
         assert_eq!(state.reserve_due_result_cue().unwrap(), None, "exactly one");
         state
             .apply_frame(frame(instructions_ack(&instructions_event_id(cue, 0))))
@@ -4545,67 +4549,91 @@ mod tests {
         assert_eq!(state.outstanding_receipt_count(), 0);
     }
 
+    /// turbo-det S106: the model's last word ended 400 ms before the result
+    /// landed and the model never read the result out. A gap cannot tell
+    /// that apart from a result the model is about to voice (measured voiced
+    /// results land -200 to +400 ms after the last word), so every
+    /// acknowledged result is cued, whatever the gap or the input since.
     #[test]
-    fn speech_in_progress_or_just_paused_suppresses_the_cue() {
-        // Measured normal deliveries reach +400 ms after the last word: a
-        // result landing inside the margin is never cued, at the boundary it
-        // is.
-        for (ack_ms, cued) in [
-            (1800.0, 0),
-            (2000.0, 0),
-            (2400.0, 0),
-            (2999.0, 0),
-            (3000.0, 1),
-        ] {
+    fn every_acknowledged_result_is_cued_whatever_the_gap() {
+        for ack_ms in [1800.0, 2000.0, 2400.0, 2999.0, 3000.0, 9000.0] {
             let mut state = state_with_spoken_delegation();
-            let result = state.reserve_delegation_commentary(true).unwrap();
+            let result = state
+                .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+                .unwrap();
             state
                 .apply_frame(frame(ack_at(&pending_event_id(result), ack_ms)))
                 .unwrap();
-            assert_eq!(state.due_result_cues, cued, "ack at {ack_ms} ms");
+            assert_eq!(
+                state.due_result_cues,
+                ["dlg_cue"],
+                "ack at {ack_ms} ms (gap {} ms)",
+                ack_ms - 2000.0
+            );
         }
-        // The user speaking after the model's last word: never cued.
+        // The user speaking after the model's last word: still cued.
         let mut state = state_with_spoken_delegation();
-        let result = state.reserve_delegation_commentary(true).unwrap();
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
         state.apply_frame(frame(input_delta("and also"))).unwrap();
         state
             .apply_frame(frame(ack_at(&pending_event_id(result), 9000.0)))
             .unwrap();
-        assert_eq!(state.due_result_cues, 0);
-        // The model speaking again clears the input flag and moves the gap.
-        state
-            .apply_frame(frame(output_delta_span(" sure", 9000.0, 9200.0)))
-            .unwrap();
-        let result = state.reserve_delegation_commentary(true).unwrap();
-        state
-            .apply_frame(frame(ack_at(&pending_event_id(result), 9600.0)))
-            .unwrap();
-        assert_eq!(state.due_result_cues, 0);
+        assert_eq!(state.due_result_cues, ["dlg_cue"]);
     }
 
     #[test]
-    fn a_model_that_never_spoke_on_the_channel_is_idle() {
-        let mut state = SessionState::default();
-        let result = state.reserve_delegation_commentary(true).unwrap();
-        state
-            .apply_frame(frame(ack_at(&pending_event_id(result), 100.0)))
+    fn the_400_ms_gap_result_gets_a_cue_bound_to_its_delegation() {
+        // Last word ends at 2000 ms; the result lands at 2400 ms.
+        let mut state = state_with_spoken_delegation();
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
             .unwrap();
-        assert_eq!(state.due_result_cues, 1);
+        state
+            .apply_frame(frame(ack_at(&pending_event_id(result), 2400.0)))
+            .unwrap();
+        drain(&mut state);
+        let (_, delegation_id) = state
+            .reserve_due_result_cue()
+            .unwrap()
+            .expect("the 400 ms-gap result is cued, not suppressed");
+        assert_eq!(delegation_id, "dlg_cue");
+    }
+
+    #[test]
+    fn results_are_cued_in_acknowledgement_order() {
+        let mut state = state_with_spoken_delegation();
+        let first = state
+            .reserve_delegation_commentary(Some("dlg_a".to_owned()))
+            .unwrap();
+        let second = state
+            .reserve_delegation_commentary(Some("dlg_b".to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_at(&pending_event_id(second), 3000.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_at(&pending_event_id(first), 3200.0)))
+            .unwrap();
+        assert_eq!(state.due_result_cues, ["dlg_b", "dlg_a"]);
     }
 
     #[test]
     fn a_rejected_result_or_cue_surfaces_nothing_extra() {
         let mut state = state_with_spoken_delegation();
-        let result = state.reserve_delegation_commentary(true).unwrap();
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
         state
             .apply_frame(frame(append_rejected(Some(&pending_event_id(result)))))
             .unwrap();
-        assert_eq!(state.due_result_cues, 0);
+        assert!(state.due_result_cues.is_empty());
         assert!(state.result_cue_candidates.is_empty());
         drain(&mut state);
 
-        state.due_result_cues = 1;
-        let cue = state.reserve_due_result_cue().unwrap().unwrap();
+        state.due_result_cues.push_back("dlg_cue".to_owned());
+        let (cue, _) = state.reserve_due_result_cue().unwrap().unwrap();
         state
             .apply_frame(frame(append_rejected(Some(&instructions_event_id(cue, 0)))))
             .unwrap();

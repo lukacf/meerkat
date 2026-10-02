@@ -372,6 +372,30 @@ them.
   commit signal and re-checks after each committed transition. The release
   guards change only through committed transitions, so no timer is needed.
   New: `meerkat_runtime::MeerkatMachine::subscribe_session_machine_commits`.
+- Public GPT Live no longer drops a delegation result's speak cue when the
+  result lands soon after the model's last word. Previously a cue was
+  suppressed when the gap was under 1000 ms. A result that landed 400 ms
+  after the last word was never read out (S106), while voiced results land
+  from -200 to +400 ms after it, so no gap can separate the two cases.
+  Every acknowledged result now gets one instructions-lane cue, bound to the
+  result's `delegation_id`. It is phrased to be safe either way: tell the
+  user the result unless it was already told.
+
+- The runtime store test `contended_unregister_finalization_does_not_starve_runtime_worker`
+  no longer fails on a loaded host. Its two 1 s wall-clock waits are replaced
+  by typed handoffs. The heartbeat now fires on a test-only signal sent when
+  finalization starts waiting for the write lock, so the test still catches a
+  finalization that blocks the Tokio worker.
+- Three meerkat-mob actor tests no longer fail under high test parallelism
+  (#1546). `test_queued_steer_during_running_turn_does_not_block_actor_commands`,
+  `test_internal_turn_completed_reply_does_not_block_actor_operations` and
+  `test_late_kickoff_failure_outcome_after_retire_is_benign` held their busy
+  turn with a timed delay and checked 100 ms and 250 ms budgets. Now the
+  mock executor's typed hold keeps the turn running, and a typed held-turn
+  count replaces polling. The checks assert that operations complete while
+  the turn is still held. The late-kickoff test joins the retirement saga to
+  its terminal reply instead of failing when `retire` runs out of its wait
+  budget.
 
 - Three meerkat-mob-mcp tests no longer fail on a loaded host (#1509). They
   now assert ordering with events instead of wall-clock margins.

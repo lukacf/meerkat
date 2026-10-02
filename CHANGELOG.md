@@ -116,6 +116,11 @@ them.
   `meerkat_machine_schema::MachineSchemaError` gains the variant
   `InvalidInputFieldDomain { variant, field, reason }`, so exhaustive matches
   need an arm.
+
+- `meerkat::session_runtime::live_orchestration::LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS`
+  and `LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY` are removed. The deferred
+  close settlement no longer retries on a timer (see Fixed);
+  `LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND` remains as its single hang guard.
 - `meerkat_runtime::EphemeralRuntimeDriver` is no longer `UnwindSafe` or
   `RefUnwindSafe`: it now holds the runtime admission signal added with the
   typed admission wait (#1431). Callers that relied on these auto traits (for
@@ -638,6 +643,12 @@ them.
     `WorkItemAdmissionInsert::{Inserted, Existing}`. It defaults to
     unsupported; the memory and SQLite stores implement it.
   - `ExternalWorkRef` stays provenance only and is never a dedupe key.
+
+- `meerkat_session::PersistentSessionService::live_authority_advanced`: a
+  typed wakeup for callers refused with `SessionError::Busy` because the live
+  transcript is ahead of the store. It completes when a runtime turn's
+  boundary commit is acknowledged, a full persist lands, or the live actor is
+  synchronized from or discarded for durable authority.
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a
@@ -1007,6 +1018,19 @@ them.
     They now wait for the server with `wait_until_ready`, and wait for the
     drain with typed waits instead of fixed sleeps. Each passes 30/30 at 10
     copies on two pinned cores.
+
+- A deferred live close settlement no longer retries on a timer. When it won
+  the member turn's boundary while that turn's commit was still landing in
+  the store, it slept 250 ms and tried again, at most six times, then gave up
+  with the deferral recorded. It now waits for
+  `PersistentSessionService::live_authority_advanced`, which fires when the
+  commit is acknowledged, a persist lands, or the live actor is resynced or
+  discarded, and retries then. The whole settlement is bounded once by
+  `LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND`. When the member turn ended with an
+  error, so no boundary commit is coming, the settlement stops at once with
+  the deferral recorded instead of retrying. A deferred transcript projection
+  refused because a close released the channel from the held boundary
+  re-arms the boundary wait and waits on the boundary itself.
 - A delivery whose caller left while it was parked behind a member's
   in-flight admission no longer runs as a ghost turn. The admission lane
   skips such a delivery by checking its reply channel, but `SubmitWork` ran

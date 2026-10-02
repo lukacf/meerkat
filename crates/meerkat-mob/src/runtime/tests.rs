@@ -22797,7 +22797,7 @@ async fn test_concurrent_terminal_lifecycle_commands_observe_live_state_drift() 
 
     let stop = {
         let handle = handle.clone();
-        tokio::spawn(async move { ("stop", handle.stop().await) })
+        tokio::spawn(async move { ("stop", handle.stop().await.map(|_| ())) })
     };
     let complete = {
         let handle = handle.clone();
@@ -78869,7 +78869,7 @@ async fn mob_runtime_parity_execute_probe(
             .handle
             .stop()
             .await
-            .map(|()| summarize_mob_runtime_success(probe, "unit")),
+            .map(|_| summarize_mob_runtime_success(probe, "unit")),
         MobRuntimeParityProbeInput::Resume => fixture
             .handle
             .resume()
@@ -82763,25 +82763,52 @@ async fn test_stop_holds_an_admitted_member_input_until_resume() {
         .expect("the runtime loop reaches the queue gap")
         .expect("queue-authority hook armed");
 
-    handle.stop().await.expect("stop the mob");
+    let report = handle.stop().await.expect("stop the mob");
     assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+    assert_eq!(
+        report.members.get(&identity),
+        Some(&crate::MemberStopOutcome {
+            run: crate::MemberStopRun::NoRun,
+            starts: crate::MemberRunStarts::Held,
+        }),
+        "the report says the member had no run and is held: {report:?}"
+    );
 
-    // Release the loop. The queued input must not start a run while the mob
-    // is Stopped.
-    let started = service.runtime_turn_started.notified();
-    tokio::pin!(started);
-    started.as_mut().enable();
+    // Release the loop: it parks on the hold instead of starting a run.
+    let mut parks = service.runtime_adapter.run_start_held_parks();
     queue_gap_release
         .send(())
         .expect("release the runtime loop");
+    tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+        .await
+        .expect("the member's runtime loop parks on the hold")
+        .expect("park signal");
+    assert!(
+        service
+            .applied_runtime_contributing_input_ids(&session_id)
+            .await
+            .is_empty(),
+        "no run starts while the mob is Stopped"
+    );
+
+    // Resume releases the hold: the queued input runs now.
+    let started = service.runtime_turn_started.notified();
+    tokio::pin!(started);
+    started.as_mut().enable();
+    handle.resume().await.expect("resume the mob");
     tokio::time::timeout(Duration::from_secs(30), started)
         .await
-        .expect("hang guard");
-    assert_ne!(
-        handle.status().await.unwrap(),
-        MobState::Stopped,
-        "a queued member input started a run while the mob is Stopped"
+        .expect("the queued input runs after resume");
+    assert_eq!(
+        service
+            .applied_runtime_contributing_input_ids(&session_id)
+            .await
+            .len(),
+        1,
+        "exactly one run, for the input admitted before the stop"
     );
+    service.set_block_runtime_turns(false);
+    service.release_runtime_turns();
 }
 
 // Runtime-backed tracked-turn LLM identity and terminal-event regressions.

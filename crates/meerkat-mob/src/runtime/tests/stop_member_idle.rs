@@ -32,7 +32,9 @@ async fn spawn_winding_down_member(
     session_id
 }
 
-async fn enqueue_stop(handle: &MobHandle) -> oneshot::Receiver<Result<(), MobError>> {
+async fn enqueue_stop(
+    handle: &MobHandle,
+) -> oneshot::Receiver<Result<crate::MobStopReport, MobError>> {
     handle
         .enqueue_actor_command_for_test(|reply_tx| MobCommand::Stop { reply_tx })
         .await
@@ -46,7 +48,7 @@ type LifecycleTask = tokio::task::JoinHandle<Result<(), MobError>>;
 /// the members' end of turn.
 fn start_stop(handle: &MobHandle) -> LifecycleTask {
     let handle = handle.clone();
-    tokio::spawn(async move { handle.stop().await })
+    tokio::spawn(async move { handle.stop().await.map(|_| ()) })
 }
 
 /// Wait until a stop is parked on the end of turn of every listed session.
@@ -70,7 +72,7 @@ async fn actor_round_trip(handle: &MobHandle) -> MobState {
         .expect("phase query")
 }
 
-async fn expect_reply_ok(reply: oneshot::Receiver<Result<(), MobError>>, context: &str) {
+async fn expect_reply_ok<T>(reply: oneshot::Receiver<Result<T, MobError>>, context: &str) {
     tokio::time::timeout(STEP, reply)
         .await
         .unwrap_or_else(|_| panic!("{context}: completes once the turns end"))
@@ -86,7 +88,7 @@ async fn expect_task_ok(task: LifecycleTask, context: &str) {
         .unwrap_or_else(|error| panic!("{context}: failed: {error}"));
 }
 
-fn still_waiting(reply: &mut oneshot::Receiver<Result<(), MobError>>) -> bool {
+fn still_waiting<T>(reply: &mut oneshot::Receiver<Result<T, MobError>>) -> bool {
     matches!(
         reply.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)

@@ -352,7 +352,7 @@ async fn drive_recovered_placed_lifecycle_intent(
             return;
         }
         let result = match intent {
-            mob_dsl::PlacedCompletionLifecycleIntentKind::Stop => handle.stop().await,
+            mob_dsl::PlacedCompletionLifecycleIntentKind::Stop => handle.stop().await.map(|_| ()),
             mob_dsl::PlacedCompletionLifecycleIntentKind::Reset => handle.reset().await,
             mob_dsl::PlacedCompletionLifecycleIntentKind::Complete => handle.complete().await,
             mob_dsl::PlacedCompletionLifecycleIntentKind::RetireAll => handle.retire_all().await,
@@ -9909,6 +9909,7 @@ impl MobBuilder {
                 autonomous_initial_turns: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
                 autonomous_stop_interrupts: BTreeMap::new(),
                 autonomous_stop_interrupted: BTreeMap::new(),
+                stop_member_outcomes: BTreeMap::new(),
                 pending_autonomous_stop: None,
                 next_autonomous_stop_ticket: 0,
                 pending_autonomous_stop_controls: VecDeque::new(),

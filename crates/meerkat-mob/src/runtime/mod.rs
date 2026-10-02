@@ -319,6 +319,7 @@ mod spawn_policy;
 mod spawn_profile_authority;
 pub mod spec_compiler;
 pub mod state;
+pub mod stop_report;
 mod supervisor;
 mod supervisor_bridge;
 mod terminalization;

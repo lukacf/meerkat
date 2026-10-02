@@ -1461,7 +1461,7 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<super::event_pump::MemberEventTap, MobError>>,
     },
     Stop {
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
+        reply_tx: oneshot::Sender<Result<super::stop_report::MobStopReport, MobError>>,
     },
     ResumeLifecycle {
         deadline: meerkat_core::time_compat::Instant,

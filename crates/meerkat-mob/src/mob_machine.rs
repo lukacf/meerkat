@@ -237,6 +237,8 @@ pub(crate) struct SubmitWorkCommand {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum MobMachineCommandResult {
     Unit,
+    /// Result for `Stop` (#1500): what the stop did to each member.
+    Stopped(crate::runtime::stop_report::MobStopReport),
     WireMembersBatchReport(crate::runtime::MobWireMembersBatchReport),
     RunId(RunId),
     WorkReceipt {

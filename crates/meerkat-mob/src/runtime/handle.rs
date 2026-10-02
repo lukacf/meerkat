@@ -6936,9 +6936,10 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::Unit)
             }
             MobMachineCommand::Stop => {
-                self.send_actor_command(|reply_tx| MobCommand::Stop { reply_tx })
+                let report = self
+                    .send_actor_command(|reply_tx| MobCommand::Stop { reply_tx })
                     .await??;
-                Ok(MobMachineCommandResult::Unit)
+                Ok(MobMachineCommandResult::Stopped(report))
             }
             MobMachineCommand::Resume { deadline } => {
                 self.send_resume_actor_command_until(deadline).await?;
@@ -12869,13 +12870,20 @@ impl MobHandle {
         }
     }
 
-    /// Transition Running -> Stopped. Mutation commands are rejected while stopped.
-    pub async fn stop(&self) -> Result<(), MobError> {
+    /// Transition Running -> Stopped. Mutation commands are rejected while
+    /// stopped.
+    ///
+    /// Stop pauses the mob (#1500): every member's run starts are held, so
+    /// input admitted before the stop runs only after [`Self::resume`]. The
+    /// report says, per member, what happened to its run and whether its run
+    /// starts are held; a member that cannot be held is reported, never
+    /// hidden behind `Ok`.
+    pub async fn stop(&self) -> Result<super::stop_report::MobStopReport, MobError> {
         let deadline = Instant::now() + DEFAULT_KICKOFF_WAIT_TIMEOUT;
         let mut retry_delay = Duration::from_millis(25);
         loop {
             match self.execute_machine_command(MobMachineCommand::Stop).await {
-                Ok(MobMachineCommandResult::Unit) => return Ok(()),
+                Ok(MobMachineCommandResult::Stopped(report)) => return Ok(report),
                 Ok(_) => {
                     return Err(MobError::Internal(
                         "unexpected command result variant".into(),

@@ -1514,6 +1514,36 @@ pub trait MobProvisioner: Send + Sync {
         member_ref: &MemberRef,
         expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
     ) -> Result<(), MobError>;
+    /// Stop the member for a mob Stop (#1500): hold its run starts, so input
+    /// admitted before the stop stays queued until Resume, and when
+    /// `cancel_current_run`, cancel exactly the run the hold found current.
+    ///
+    /// The default cannot hold: it interrupts as before and reports the
+    /// member as not holdable, so the caller never mistakes it for paused.
+    async fn stop_member_runtime(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+        cancel_current_run: bool,
+    ) -> Result<super::stop_report::MemberStopOutcome, MobError> {
+        if cancel_current_run {
+            self.interrupt_member(member_ref, expected_member).await?;
+        }
+        Ok(super::stop_report::MemberStopOutcome {
+            run: super::stop_report::MemberStopRun::Interrupted,
+            starts: super::stop_report::MemberRunStarts::NotHoldable {
+                reason: super::stop_report::NotHoldableReason::ProvisionerLacksCapability,
+            },
+        })
+    }
+    /// Release a hold taken by [`Self::stop_member_runtime`] (Resume).
+    async fn release_member_run_starts(
+        &self,
+        _member_ref: &MemberRef,
+        _expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+    ) -> Result<(), MobError> {
+        Ok(())
+    }
     async fn hard_cancel_member(
         &self,
         member_ref: &MemberRef,
@@ -12559,6 +12589,91 @@ impl MobProvisioner for SessionBackend {
         Ok(())
     }
 
+    async fn stop_member_runtime(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+        cancel_current_run: bool,
+    ) -> Result<super::stop_report::MemberStopOutcome, MobError> {
+        use super::stop_report::{MemberRunStarts, MemberStopOutcome, MemberStopRun};
+        let session_id = Self::require_session(member_ref, "stop")?;
+        let Some(adapter) = &self.runtime_adapter else {
+            // No runtime authority to hold: interrupt as before, and say so.
+            if cancel_current_run {
+                self.interrupt_member(member_ref, expected_member).await?;
+            }
+            return Ok(MemberStopOutcome {
+                run: MemberStopRun::Interrupted,
+                starts: MemberRunStarts::NotHoldable {
+                    reason: super::stop_report::NotHoldableReason::ProvisionerLacksCapability,
+                },
+            });
+        };
+        if !adapter.contains_session(&session_id).await {
+            // An unregistered runtime has no queue and no run.
+            return Ok(MemberStopOutcome {
+                run: MemberStopRun::NoRun,
+                starts: MemberRunStarts::Held,
+            });
+        }
+        let hold = adapter
+            .hold_run_starts(&session_id)
+            .await
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "holding run starts for '{session_id}' failed: {error}"
+                ))
+            })?;
+        let run = match hold.current_run {
+            None => MemberStopRun::NoRun,
+            Some(run_id) if !cancel_current_run => MemberStopRun::LeftRunning { run_id },
+            Some(run_id) => match adapter
+                .cancel_after_boundary_run_if_current(&session_id, &run_id)
+                .await
+            {
+                Ok(true) => MemberStopRun::CancelledAtBoundary { run_id },
+                Ok(false) => MemberStopRun::RunEndedBeforeCancel { run_id },
+                // The run's attachment was replaced or the runtime left
+                // Running between the hold and the cancel: the run is over.
+                Err(
+                    meerkat_runtime::RuntimeDriverError::StaleAuthority { .. }
+                    | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+                ) => MemberStopRun::RunEndedBeforeCancel { run_id },
+                Err(error) => {
+                    return Err(MobError::Internal(format!(
+                        "cancelling run {run_id} of '{session_id}' failed: {error}"
+                    )));
+                }
+            },
+        };
+        Ok(MemberStopOutcome {
+            run,
+            starts: MemberRunStarts::Held,
+        })
+    }
+
+    async fn release_member_run_starts(
+        &self,
+        member_ref: &MemberRef,
+        _expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+    ) -> Result<(), MobError> {
+        let session_id = Self::require_session(member_ref, "resume")?;
+        let Some(adapter) = &self.runtime_adapter else {
+            return Ok(());
+        };
+        if !adapter.contains_session(&session_id).await {
+            return Ok(());
+        }
+        adapter
+            .release_run_starts(&session_id)
+            .await
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "releasing run starts for '{session_id}' failed: {error}"
+                ))
+            })
+    }
+
     async fn hard_cancel_member(
         &self,
         member_ref: &MemberRef,
@@ -15894,6 +16009,55 @@ impl MobProvisioner for MultiBackendProvisioner {
             _ => {
                 self.session
                     .interrupt_member(member_ref, expected_member)
+                    .await
+            }
+        }
+    }
+
+    async fn stop_member_runtime(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+        cancel_current_run: bool,
+    ) -> Result<super::stop_report::MemberStopOutcome, MobError> {
+        match member_ref {
+            MemberRef::BackendPeer { session_id, .. }
+                if expected_member.is_some() || session_id.is_none() =>
+            {
+                // A remote member: interrupt it as before and report that its
+                // run starts are not held.
+                if cancel_current_run {
+                    self.interrupt_member(member_ref, expected_member).await?;
+                }
+                Ok(super::stop_report::MemberStopOutcome {
+                    run: super::stop_report::MemberStopRun::Interrupted,
+                    starts: super::stop_report::MemberRunStarts::NotHoldable {
+                        reason: super::stop_report::NotHoldableReason::PeerLacksCapability,
+                    },
+                })
+            }
+            _ => {
+                self.session
+                    .stop_member_runtime(member_ref, expected_member, cancel_current_run)
+                    .await
+            }
+        }
+    }
+
+    async fn release_member_run_starts(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+    ) -> Result<(), MobError> {
+        match member_ref {
+            MemberRef::BackendPeer { session_id, .. }
+                if expected_member.is_some() || session_id.is_none() =>
+            {
+                Ok(())
+            }
+            _ => {
+                self.session
+                    .release_member_run_starts(member_ref, expected_member)
                     .await
             }
         }

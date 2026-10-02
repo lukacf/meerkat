@@ -388,7 +388,10 @@ impl MobCommand {
             Self::AdmitControlScope { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
-            Self::Stop { reply_tx } | Self::ResumeLifecycle { reply_tx, .. } => {
+            Self::Stop { reply_tx } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ResumeLifecycle { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::Complete { reply_tx } | Self::Reset { reply_tx } => {

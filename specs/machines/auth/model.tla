@@ -90,7 +90,7 @@ MarkExpiring ==
 
 ObserveCredentialFreshnessValid(now_ts, refresh_window_secs) ==
     /\ phase = "Valid"
-    /\ (IF (expires_at = None) THEN TRUE ELSE ((now_ts + refresh_window_secs) <= (IF "value" \in DOMAIN expires_at THEN expires_at["value"] ELSE None)))
+    /\ (IF (expires_at = None) THEN TRUE ELSE ((now_ts < (IF "value" \in DOMAIN expires_at THEN expires_at["value"] ELSE None)) /\ ((now_ts + refresh_window_secs) <= (IF "value" \in DOMAIN expires_at THEN expires_at["value"] ELSE None))))
     /\ phase' = "Valid"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f87ebf4401320955

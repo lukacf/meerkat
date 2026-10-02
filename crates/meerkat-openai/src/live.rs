@@ -3686,35 +3686,24 @@ impl RealtimeSession for OpenAiRealtimeSession {
     async fn submit_tool_result(&mut self, result: ToolResult) -> Result<(), LlmError> {
         let call_id = result.tool_use_id.clone();
         let output = result.text_content();
-        if result.is_error {
-            self.raw_mut()?
-                .send_raw(openai_live_function_call_error_result_event(
-                    call_id, output,
-                ))
-                .await?;
-        } else {
-            let predecessor_response_id = self.active_response_id.take();
-            let events = openai_live_function_call_success_events(
-                call_id,
-                &output,
-                &self.realtime_policy.voice,
-            );
-            for event in events {
-                self.raw_mut()?.send_raw(event).await?;
-            }
-            // The event batch ends with response.create. Transition before
-            // returning command acceptance so image admission cannot race the
-            // continuation's response.created acknowledgement. Keep the prior
-            // response identity until its late terminal arrives, preventing it
-            // from clearing a newer active continuation.
-            if let Some(predecessor_response_id) = predecessor_response_id {
-                self.retiring_response_ids.insert(predecessor_response_id);
-            }
-            self.clear_response_output_active();
-            self.response_interrupt_emitted = false;
-            self.response_tool_call_observed = false;
-            self.response_state = RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 };
+        let predecessor_response_id = self.active_response_id.take();
+        let events =
+            openai_live_function_call_success_events(call_id, &output, &self.realtime_policy.voice);
+        for event in events {
+            self.raw_mut()?.send_raw(event).await?;
         }
+        // The event batch ends with response.create. Transition before
+        // returning command acceptance so image admission cannot race the
+        // continuation's response.created acknowledgement. Keep the prior
+        // response identity until its late terminal arrives, preventing it
+        // from clearing a newer active continuation.
+        if let Some(predecessor_response_id) = predecessor_response_id {
+            self.retiring_response_ids.insert(predecessor_response_id);
+        }
+        self.clear_response_output_active();
+        self.response_interrupt_emitted = false;
+        self.response_tool_call_observed = false;
+        self.response_state = RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 };
         Ok(())
     }
 
@@ -11699,7 +11688,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_neutral_session_submits_terminal_tool_error_result_without_response_create() {
+    async fn provider_neutral_session_submits_completed_tool_error_result_with_continuation() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let mut session = OpenAiRealtimeSession::new(
             Box::new(FakeOpenAiLiveSession {
@@ -11725,8 +11714,8 @@ mod tests {
         let seen = seen.lock().await;
         assert_eq!(
             seen.len(),
-            1,
-            "terminal tool error results must not continue the provider response"
+            2,
+            "completed tool error results must continue the provider response"
         );
         match &seen[0] {
             ClientEvent::ConversationItemCreate { item, .. } => match item.as_ref() {
@@ -11740,6 +11729,11 @@ mod tests {
             },
             other => panic!("unexpected terminal tool error event: {other:?}"),
         }
+        assert_response_create_requests_audio(&seen[1]);
+        assert_eq!(
+            session.response_state,
+            RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 }
+        );
     }
 
     #[tokio::test]
@@ -14950,6 +14944,277 @@ mod tests {
             assert!(!output.contains("settlement_failures"));
             assert!(!output.contains("operation_observation_unavailable"));
             assert_response_create_requests_audio(&seen[index + 1]);
+        }
+    }
+
+    #[tokio::test]
+    async fn live_command_typed_tool_feedback_keeps_primary_and_secondary_separate() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        let first = serde_json::json!({
+            "admission_source": "configured_gate",
+            "effect_kind": "tool_dispatch",
+            "physical_outcome": "committed",
+            "failure_kind": "unavailable"
+        });
+        let second = serde_json::json!({
+            "admission_source": "authorization_audit",
+            "effect_kind": "tool_dispatch",
+            "physical_outcome": "committed",
+            "failure_kind": "operation_observation_unavailable"
+        });
+        let companions = serde_json::json!([first.clone(), second, first]);
+        let cases = [
+            (
+                "unavailable-call",
+                "operation_authorization_unavailable",
+                "operation authorization unavailable",
+            ),
+            (
+                "refused-call",
+                "operation_refused",
+                "operation unavailable under current authorization",
+            ),
+        ];
+        for (call_id, code, message) in cases {
+            let semantic = serde_json::json!({"error": code, "message": message}).to_string();
+            let command: LiveAdapterCommand = serde_json::from_value(serde_json::json!({
+                "command": "submit_tool_result",
+                "result": {
+                    "call_id": call_id,
+                    "content": [{"type": "text", "text": semantic}],
+                    "is_error": true,
+                    "settlement_failures": companions.clone()
+                }
+            }))
+            .expect("canonical typed-error command with secondary diagnostics");
+            assert_eq!(
+                serde_json::to_value(&command).unwrap()["result"]["settlement_failures"],
+                companions
+            );
+            execute_openai_live_command(&mut session, command)
+                .await
+                .unwrap();
+        }
+        let healthy: LiveAdapterCommand = serde_json::from_value(serde_json::json!({
+            "command": "submit_tool_result",
+            "result": {
+                "call_id": "healthy-after-feedback",
+                "content": [{"type": "text", "text": "healthy completed"}],
+                "is_error": false
+            }
+        }))
+        .expect("legacy result without settlement field stays valid");
+        execute_openai_live_command(&mut session, healthy)
+            .await
+            .unwrap();
+        let seen = seen.lock().await;
+        assert_eq!(
+            seen.len(),
+            6,
+            "each completed result continues once, no extra sends"
+        );
+        for (index, (expected_call, code, message)) in cases.into_iter().enumerate() {
+            let ClientEvent::ConversationItemCreate { item, .. } = &seen[index * 2] else {
+                panic!(
+                    "expected exact primary feedback output, got {:?}",
+                    seen[index * 2]
+                );
+            };
+            let Item::FunctionCallOutput {
+                call_id, output, ..
+            } = item.as_ref()
+            else {
+                panic!("expected function output, got {item:?}");
+            };
+            assert_eq!(call_id, expected_call);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(output).unwrap(),
+                serde_json::json!({"error": code, "message": message})
+            );
+            assert!(!output.contains("settlement_failures"));
+            assert!(!output.contains("operation_observation_unavailable"));
+            assert_response_create_requests_audio(&seen[index * 2 + 1]);
+        }
+        let ClientEvent::ConversationItemCreate { item, .. } = &seen[4] else {
+            panic!("expected subsequent healthy function output");
+        };
+        let Item::FunctionCallOutput {
+            call_id, output, ..
+        } = item.as_ref()
+        else {
+            panic!("expected subsequent healthy function output item");
+        };
+        assert_eq!(call_id, "healthy-after-feedback");
+        assert_eq!(output, "healthy completed");
+        assert_response_create_requests_audio(&seen[5]);
+    }
+
+    #[tokio::test]
+    async fn refused_tool_command_continues_and_ignores_old_terminal_in_both_orders() {
+        for old_terminal_first in [true, false] {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let next_events = Arc::new(Mutex::new(VecDeque::from(vec![
+                Ok(Some(ServerEvent::ResponseCreated {
+                    event_id: "evt-old-created".into(),
+                    response: fake_response("response-old", ResponseStatus::InProgress),
+                })),
+                Ok(Some(ServerEvent::ResponseFunctionCallArgumentsDone {
+                    event_id: "evt-refused-call".into(),
+                    response_id: "response-old".into(),
+                    item_id: "item-refused-call".into(),
+                    output_index: 0,
+                    call_id: "call-refused".into(),
+                    name: "delete_record".into(),
+                    arguments: "{\"record\":\"T\"}".into(),
+                })),
+            ])));
+            let mut session = OpenAiRealtimeSession::new(
+                Box::new(FakeOpenAiLiveSession {
+                    seen: seen.clone(),
+                    next_events: next_events.clone(),
+                }),
+                RealtimeTurningMode::ProviderManaged,
+            );
+            let request = tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .expect("recorded provider request is bounded")
+                .expect("provider tool request");
+            assert!(matches!(
+                request,
+                Some(RealtimeSessionEvent::ToolCallRequested { call_id, tool_name, arguments })
+                    if call_id == "call-refused" && tool_name == "delete_record"
+                        && arguments == serde_json::json!({"record": "T"})
+            ));
+            assert_eq!(session.active_response_id.as_deref(), Some("response-old"));
+            assert!(session.response_tool_call_observed);
+
+            let primary = meerkat_core::ToolError::AuthorizationRefused {
+                refusal: meerkat_core::OperationRefused::new(
+                    meerkat_core::OperationRefusalKind::Denied,
+                ),
+            };
+            let outcome =
+                meerkat_core::ops::terminal_tool_outcome_for_error("call-refused", primary);
+            let command = LiveAdapterCommand::SubmitToolResult {
+                result: meerkat_core::live_adapter::LiveToolResult {
+                    call_id: ToolCallId::new(outcome.result.tool_use_id),
+                    content: outcome.result.content,
+                    is_error: outcome.result.is_error,
+                    settlement_failures: outcome.result.settlement_failures,
+                },
+            };
+            execute_openai_live_command(&mut session, command)
+                .await
+                .expect("canonical completed refusal result is submitted");
+            {
+                let sent = seen.lock().await;
+                assert_eq!(sent.len(), 2, "one result and one continuation request");
+                let ClientEvent::ConversationItemCreate { item, .. } = &sent[0] else {
+                    panic!("first event must be the exact function result");
+                };
+                let Item::FunctionCallOutput {
+                    call_id, output, ..
+                } = item.as_ref()
+                else {
+                    panic!("first event must carry function output");
+                };
+                assert_eq!(call_id, "call-refused");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(output).unwrap(),
+                    serde_json::json!({
+                        "error": "operation_refused",
+                        "message": "operation unavailable under current authorization"
+                    })
+                );
+                assert_response_create_requests_audio(&sent[1]);
+            }
+            assert_eq!(session.active_response_id, None);
+            assert!(session.retiring_response_ids.contains("response-old"));
+            assert!(!session.response_tool_call_observed);
+            assert_eq!(
+                session.response_state,
+                RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 }
+            );
+
+            let old_done = ServerEvent::ResponseDone {
+                event_id: "evt-old-done".into(),
+                response: fake_response("response-old", ResponseStatus::Completed),
+            };
+            let new_created = ServerEvent::ResponseCreated {
+                event_id: "evt-new-created".into(),
+                response: fake_response("response-new", ResponseStatus::InProgress),
+            };
+            if old_terminal_first {
+                assert!(session.map_server_event(old_done).unwrap().is_none());
+                assert_eq!(session.active_response_id, None);
+                assert_eq!(
+                    session.response_state,
+                    RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 }
+                );
+                assert!(session.map_server_event(new_created).unwrap().is_none());
+            } else {
+                assert!(session.map_server_event(new_created).unwrap().is_none());
+                assert_eq!(session.active_response_id.as_deref(), Some("response-new"));
+                assert!(session.map_server_event(old_done).unwrap().is_none());
+            }
+            assert_eq!(session.active_response_id.as_deref(), Some("response-new"));
+            assert_eq!(
+                session.response_state,
+                RealtimeResponseState::Acknowledged { nudge_attempts: 0 }
+            );
+            next_events.lock().await.extend([
+                Ok(Some(ServerEvent::ResponseOutputTextDelta {
+                    event_id: "evt-after-refusal".into(),
+                    response_id: "response-new".into(),
+                    item_id: "item-after-refusal".into(),
+                    output_index: 0,
+                    content_index: 0,
+                    delta: "I can continue with permitted work.".into(),
+                })),
+                Ok(Some(ServerEvent::ResponseDone {
+                    event_id: "evt-new-done".into(),
+                    response: fake_response("response-new", ResponseStatus::Completed),
+                })),
+                Ok(None),
+            ]);
+            let continued = tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .expect("continuation output is bounded")
+                .expect("continuation output");
+            assert!(
+                matches!(
+                    continued,
+                    Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. })
+                        if delta == "I can continue with permitted work."
+                ),
+                "old terminal must not finish the new response"
+            );
+            assert_eq!(session.active_response_id.as_deref(), Some("response-new"));
+            assert!(!session.retiring_response_ids.contains("response-old"));
+            let completed = tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .expect("continuation terminal is bounded")
+                .expect("continuation terminal");
+            assert!(matches!(
+                completed,
+                Some(RealtimeSessionEvent::TurnCompleted { response_id, stop_reason, .. })
+                    if response_id == "response-new" && stop_reason == StopReason::EndTurn
+            ));
+            assert_eq!(session.active_response_id, None);
+            assert_eq!(session.response_state, RealtimeResponseState::Idle);
+            assert_eq!(session.next_event().await.unwrap(), None);
+            assert_eq!(
+                seen.lock().await.len(),
+                2,
+                "no retry or extra provider nudge"
+            );
         }
     }
 }

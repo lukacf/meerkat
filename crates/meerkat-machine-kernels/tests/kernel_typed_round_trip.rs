@@ -760,3 +760,108 @@ fn kernel_input_signal_effect_serde_round_trip_with_typed_ids() {
     let _: SignalVariantId = sig.variant.clone();
     let _: InputVariantId = input_msg.variant.clone();
 }
+
+// Canonical relation coverage complements the actual runtime owner tests:
+// this oracle rejects overlapping guards rather than picking the first one.
+mod auth_freshness_boundary {
+    use super::*;
+    use meerkat_machine_schema::catalog::dsl::dsl_auth_machine;
+
+    fn acquired_credential() -> (GeneratedMachineKernel, KernelState) {
+        let kernel = GeneratedMachineKernel::new(dsl_auth_machine());
+        let initial = kernel
+            .initial_state()
+            .expect("actual AuthMachine initial state");
+        let acquired = kernel
+            .transition(
+                &initial,
+                &KernelInput {
+                    variant: input("Acquire"),
+                    fields: BTreeMap::from([
+                        (field("expires_at_ts"), option_some(KernelValue::U64(1_000))),
+                        (field("credential_published_at_millis"), KernelValue::U64(1)),
+                    ]),
+                },
+            )
+            .expect("actual Acquire must publish the credential");
+        assert_eq!(acquired.transition, transition("Acquire"));
+        assert_eq!(acquired.next_state.phase, phase("Valid"));
+        assert_eq!(
+            acquired
+                .next_state
+                .fields
+                .get(&field("credential_generation")),
+            Some(&KernelValue::U64(1)),
+        );
+        (kernel, acquired.next_state)
+    }
+
+    fn observe(
+        kernel: &GeneratedMachineKernel,
+        state: &KernelState,
+        now_ts: u64,
+        refresh_window_secs: u64,
+    ) -> TransitionOutcome {
+        kernel
+            .transition(
+                state,
+                &KernelInput {
+                    variant: input("ObserveCredentialFreshness"),
+                    fields: BTreeMap::from([
+                        (field("now_ts"), KernelValue::U64(now_ts)),
+                        (
+                            field("refresh_window_secs"),
+                            KernelValue::U64(refresh_window_secs),
+                        ),
+                    ]),
+                },
+            )
+            .expect("freshness observation must have one unique canonical transition")
+    }
+
+    fn assert_expired(outcome: &TransitionOutcome) {
+        assert_eq!(
+            outcome.transition,
+            transition("ObserveCredentialFreshnessExpiredFromValid")
+        );
+        assert_eq!(outcome.next_state.phase, phase("Expired"));
+        assert_eq!(outcome.effects.len(), 1);
+        assert_eq!(outcome.effects[0].variant, effect("EmitLifecycleEvent"));
+        assert_eq!(
+            outcome.effects[0].fields.get(&field("expires_at")),
+            Some(&option_some(KernelValue::U64(1_000))),
+        );
+        assert_eq!(
+            outcome.effects[0]
+                .fields
+                .get(&field("credential_generation")),
+            Some(&KernelValue::U64(1)),
+        );
+    }
+
+    #[test]
+    fn zero_window_exact_expiry_has_one_expired_transition() {
+        let (kernel, acquired) = acquired_credential();
+        let before = observe(&kernel, &acquired, 999, 0);
+        assert_eq!(
+            before.transition,
+            transition("ObserveCredentialFreshnessValid")
+        );
+        assert_eq!(before.next_state.phase, phase("Valid"));
+        let at_expiry = observe(&kernel, &before.next_state, 1_000, 0);
+        assert_expired(&at_expiry);
+    }
+
+    #[test]
+    fn normal_window_boundary_remains_valid_until_expiry() {
+        let (kernel, acquired) = acquired_credential();
+        let at_window_boundary = observe(&kernel, &acquired, 940, 60);
+        assert_eq!(
+            at_window_boundary.transition,
+            transition("ObserveCredentialFreshnessValid")
+        );
+        assert_eq!(at_window_boundary.next_state.phase, phase("Valid"));
+        let at_expiry = observe(&kernel, &at_window_boundary.next_state, 1_000, 60);
+        assert_expired(&at_expiry);
+    }
+}

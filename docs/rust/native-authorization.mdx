@@ -1,20 +1,23 @@
 ---
 title: "Native governed embedding"
-description: "Wire the selected storeless Rust authorization path to real identity, grant, resource, and controller owners."
+description: "Wire native Rust authorization to real owners and choose the matching session persistence composition."
 icon: "shield-check"
 ---
 
-This checkpoint supports explicitly configured, storeless native Rust sessions.
+This guide starts with explicitly configured, storeless native Rust sessions
+and describes the staged in-memory persistence composition.
 The embedding application is trusted code: it authenticates callers, supplies
 current policy owners, and attaches the actual controller and executor. Merely
 enabling a Cargo feature or calling `agent.run(...)` does not establish this
 integration.
 
 <Note>
-The stock persistent CLI, REST, RPC and MCP paths do not acquire governed
-activation from this API. Persistent admission and restart, full surface
-coverage, human consent and OS confinement remain separate integration work.
-This page makes no performance or live-provider coverage claim.
+The in-memory persistence composition passed a bounded native validation gate
+on tested tree `f68f905ad37ddc2dca7af84ca7921c7d64bed04d`. This is evidence for
+that source snapshot, not a released support claim. Stock CLI, REST, RPC and
+MCP paths do not acquire governed activation from this API. SQLite, restart and
+recovery, full surface coverage, human consent and OS confinement remain separate
+integration work. This page makes no performance or live-provider coverage claim.
 </Note>
 
 ## Install the real owners before sharing the machine
@@ -45,11 +48,14 @@ fn install_governance(
 ```
 
 Install before wrapping the machine in `Arc`, cloning it, or registering sessions.
-The current installer refuses persistent stores and already shared or populated
-machines. Do not suppress that refusal or substitute a different machine after
-constructing a persistent service.
+Already shared or populated machines refuse installation. For in-memory
+persistence, configure the bundle below before sharing its runtime adapter;
+the backend must supply exclusive execution custody. Do not suppress a setup
+refusal or substitute a different machine after constructing the service.
 
 ## Attach and pin the controller before submitting work
+
+### Storeless sessions
 
 Use `FactoryAgentBuilder` and `EphemeralSessionService`, then
 `meerkat::surface::materialize_ephemeral_runtime_session` to attach the session to
@@ -57,11 +63,63 @@ that same machine. Start with `InitialTurnPolicy::Defer` and
 `DeferredPromptPolicy::Discard`; the first prompt will enter through native
 admission.
 
+### In-memory persistent sessions
+
+Enable the facade's `session-store`, `memory-store` and `local-authorization`
+features. The following excerpt assumes `owners` from above, a configured
+`FactoryAgentBuilder` named `builder`, a session capacity `max_sessions`, and
+an application-selected `PathBuf` for the existing reconfigure configuration.
+The configuration path is not the session storage location.
+
+```rust
+use std::sync::Arc;
+use meerkat::{MemoryBlobStore, MemoryStore, PersistenceBundle};
+use meerkat_runtime::InMemoryRuntimeStore;
+
+let bundle = PersistenceBundle::new(
+    Arc::new(MemoryStore::new()),
+    Arc::new(InMemoryRuntimeStore::new()),
+    Arc::new(MemoryBlobStore::new()),
+).with_local_grant_authorization(owners)?;
+
+let (service, machine) =
+    meerkat::surface::build_runtime_backed_service_with_default_reconfigure_host(
+        builder, max_sessions, bundle, reconfigure_config_path,
+    );
+```
+
+This returns the stock `PersistentSessionService` and the bundle's same
+`MeerkatMachine`. The service retains the actual session actor; the bundle's
+`RuntimeStore` holds the committed Session document and store-issued revision.
+The native runtime owns accepted inputs, original authority associations and
+attached audit, persisted in that same store. These memory stores retain records
+for the lifetime of the process; they do not provide restart durability.
+
+Reserve creation with `service.reserve_create_session_admission().await?`, then use
+`meerkat::surface::materialize_session_with_reserved_admission_and_actor_slot`
+with the same deferred/discard initial-turn options. Its executor factory must
+construct `meerkat::surface::PersistentRuntimeExecutor::new(service, machine, session_id)` and
+pass the supplied actor slot to `.with_publication_actor_slot(actor_slot)`.
+Clone the same service and machine into that factory and await materialization
+before pinning the controller. This executor forwards
+store-boundary acknowledgements to the actual persistent service owner.
+
+Do not combine `EphemeralSessionService` with a persistent machine. In the tested
+snapshot, `materialize_ephemeral_runtime_session` rejects that pairing with a wrapped
+`SessionError::Unsupported` before constructing an actor or registering native
+work. Migrating to persistence requires the stock service and executor above;
+an ephemeral executor cannot acknowledge the persistent owner's committed data.
+
+### Pin the selected controller
+
 When supplying a registry-selected client override, also set
 `SessionBuildOptions.auth_binding` from that client's actual
-`ControllerModelSelection::auth_binding()`. Obtain the actor with
-`live_session_actor_witness` and its real client with
-`pin_controller_client_for_actor`. A copied model name is not a pinned client.
+`ControllerModelSelection::auth_binding()`. For a storeless service, obtain the
+actor with `live_session_actor_witness` and its real client with
+`pin_controller_client_for_actor`. For a persistent service, acquire
+`acquire_live_session_actor_turn_boundary_lease`, pin that exact actor with
+`pin_controller_client_for_actor`, then drop the boundary lease before native
+submission. A copied model name is not a pinned client.
 The selected credential must be usable in this machine's generated auth owner;
 use the normal credential lifecycle, not a fabricated Ready flag.
 
@@ -107,7 +165,11 @@ denials. Admission readiness is reported separately through
 
 Retain `settlement_failures` alongside the physical result. A diagnostic after a
 successful effect does not authorize repeating it. Use native input audit
-records for this process-lifetime path; they do not prove crash-safe recovery.
+records for this process-lifetime path. With the persistent composition, the
+normal session/input commits retain the original association and ordered audit
+alongside the committed transcript. Keep authorization checks local and persist
+observations through these existing commit boundaries. This does not prove
+crash-safe recovery.
 Route controller grant/policy removal and credential maintenance through their
 custody-aware owners so unfinished work retains its controller.
 
@@ -117,8 +179,16 @@ shows the complete factory, native admission, loopback HTTP and tool path. Its
 E1/E3 cases distinguish refusal before body entry from diagnostics after an
 effect. The A2/A3/A8 children cover resource-specific permissions, queued work and
 requester revocation. These are deterministic fixtures, not live model or full
-ADR acceptance. For an application, require zero forbidden body entries, one
-permitted effect, the same admitted run's feedback and normal completion.
+ADR acceptance. The `e1_policy_control/stock_persistent.rs` child exercises the
+stock bundle/service/executor with a committed Session document, native input
+and audit readback. QJ r3 passed all 11 native cases, including six opt-in cases,
+on the tested tree above; candidate and adjacent-owner checks totalled 132
+distinct passing tests from 145 executions. This bounded gate includes the
+actual stock persistent turn and early rejection of the unsupported mixed
+composition. It does not establish release, SQLite, restart, stock transport
+activation, full ADR coverage or performance. For an application, require zero
+forbidden body entries, one permitted effect, the same admitted run's feedback
+and normal completion.
 
 Read the broader [integration contract](/guides/authorization-integration) and
 [authorization concepts](/concepts/authorization) before extending the protected

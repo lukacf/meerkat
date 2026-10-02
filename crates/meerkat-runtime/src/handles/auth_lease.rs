@@ -39,8 +39,10 @@ fn current_time_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// Emit a structured audit record for every accepted auth-lease DSL
-/// transition. REST/RPC surfaces (and any other `tracing::Subscriber`
+/// Emit a structured audit record for accepted auth-lease DSL mutations.
+/// Unchanged credential-freshness observations are omitted; observations that
+/// change lifecycle facts and all explicit mutations retain their records.
+/// REST/RPC surfaces (and any other `tracing::Subscriber`
 /// consumer) can filter on `target = "meerkat::auth::audit"` to build
 /// a persistent audit log without the shell inventing the fact set
 /// (dogma §17 — surfaces observe, they do not own lifecycle truth).
@@ -828,6 +830,10 @@ impl RuntimeAuthLeaseHandle {
         create_if_missing: bool,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
         let action = Self::audit_action_for(&input);
+        let freshness_observation = matches!(
+            &input,
+            auth_dsl::AuthMachineInput::ObserveCredentialFreshness { .. }
+        );
         let mut guard = self
             .machines
             .lock()
@@ -838,7 +844,7 @@ impl RuntimeAuthLeaseHandle {
                 format!("no auth lease registered for lease_key `{lease_key}`"),
             ));
         }
-        let (from_phase, to_phase, auth_transition) = {
+        let (from_phase, to_phase, auth_transition, changed_observation) = {
             let entry = if create_if_missing {
                 guard
                     .authorities
@@ -856,6 +862,18 @@ impl RuntimeAuthLeaseHandle {
                 }
             };
             let from_phase = map_phase(entry.state().lifecycle_phase);
+            let freshness_before = freshness_observation.then(|| {
+                let state = entry.state();
+                (
+                    state.lifecycle_phase,
+                    state.expires_at,
+                    state.last_refresh,
+                    state.refresh_attempt,
+                    state.credential_present,
+                    state.credential_generation,
+                    state.credential_published_at_millis,
+                )
+            });
             let transition = auth_dsl::AuthMachineMutator::apply(entry, input)
                 .map_err(|err| map_auth_machine_error(err, context))?;
             let auth_transition = auth_lease_transition_from_generated_publication(
@@ -865,9 +883,24 @@ impl RuntimeAuthLeaseHandle {
                 context,
             )?;
             let to_phase = map_phase(entry.state().lifecycle_phase);
-            (from_phase, to_phase, auth_transition)
+            let changed_observation = freshness_before.is_none_or(|before| {
+                let state = entry.state();
+                before
+                    != (
+                        state.lifecycle_phase,
+                        state.expires_at,
+                        state.last_refresh,
+                        state.refresh_attempt,
+                        state.credential_present,
+                        state.credential_generation,
+                        state.credential_published_at_millis,
+                    )
+            });
+            (from_phase, to_phase, auth_transition, changed_observation)
         };
-        emit_audit(lease_key, action, from_phase, to_phase);
+        if changed_observation {
+            emit_audit(lease_key, action, from_phase, to_phase);
+        }
         Ok(auth_transition)
     }
 
@@ -3206,5 +3239,221 @@ mod tests {
                 "including release_draining and all OAuth membership, no BeginRelease occurred"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod credential_freshness_audit_tests {
+    use super::*;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct AuditRecord {
+        action: String,
+        from_phase: String,
+        to_phase: String,
+    }
+
+    impl tracing::field::Visit for AuditRecord {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            match field.name() {
+                "action" => self.action = value.to_owned(),
+                "from_phase" => self.from_phase = value.to_owned(),
+                "to_phase" => self.to_phase = value.to_owned(),
+                _ => {}
+            }
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if matches!(field.name(), "action" | "from_phase" | "to_phase") {
+                self.record_str(field, &format!("{value:?}"));
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct AuditLayer(Arc<Mutex<Vec<AuditRecord>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AuditLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() == "meerkat::auth::audit" {
+                let mut record = AuditRecord::default();
+                event.record(&mut record);
+                self.0.lock().unwrap().push(record);
+            }
+        }
+    }
+
+    #[test]
+    fn unchanged_freshness_is_quiet_but_real_lifecycle_changes_remain_observable() {
+        use meerkat_core::handles::{CredentialUseDisposition, CredentialUseIntent};
+
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let subscriber =
+            tracing_subscriber::Registry::default().with(AuditLayer(Arc::clone(&records)));
+        tracing::subscriber::with_default(subscriber, || {
+            let owner = RuntimeAuthLeaseHandle::new();
+            let key = LeaseKey::new(
+                meerkat_core::RealmId::parse("managed-current-audit").unwrap(),
+                meerkat_core::BindingId::parse("counted-owner").unwrap(),
+                None,
+            );
+            owner.acquire_lease(&key, 1000).unwrap();
+            let current = owner.snapshot(&key);
+            for now in [100, 200, 300] {
+                owner.observe_credential_freshness(&key, now, 60).unwrap();
+                assert_eq!(owner.snapshot(&key), current);
+                assert_eq!(
+                    owner
+                        .resolve_credential_use_admission(&key, CredentialUseIntent::UseCredential,)
+                        .unwrap(),
+                    CredentialUseDisposition::Authorized,
+                );
+            }
+            owner.observe_credential_freshness(&key, 941, 60).unwrap();
+            assert_eq!(owner.snapshot(&key).phase, Some(AuthLeasePhase::Expiring));
+            owner.observe_credential_freshness(&key, 950, 60).unwrap();
+            owner.observe_credential_freshness(&key, 1001, 60).unwrap();
+            assert_eq!(owner.snapshot(&key).phase, Some(AuthLeasePhase::Expired));
+            owner.observe_credential_freshness(&key, 1002, 60).unwrap();
+            owner.begin_refresh(&key).unwrap();
+            owner.observe_credential_freshness(&key, 1100, 60).unwrap();
+            owner.complete_refresh(&key, 2000, 1100).unwrap();
+            owner.observe_credential_freshness(&key, 1200, 60).unwrap();
+            let generation = owner.snapshot(&key).generation;
+            // Same phase, new actual credential publication: this must still log.
+            owner.acquire_lease(&key, 3000).unwrap();
+            assert!(owner.snapshot(&key).generation > generation);
+            owner.begin_refresh(&key).unwrap();
+            owner
+                .refresh_failed(&key, RefreshFailureObservation::transient())
+                .unwrap();
+            owner.mark_reauth_required(&key).unwrap();
+            owner.observe_credential_freshness(&key, 1300, 60).unwrap();
+            assert_eq!(
+                owner
+                    .resolve_credential_use_admission(&key, CredentialUseIntent::UseCredential)
+                    .unwrap(),
+                CredentialUseDisposition::ReauthRequired,
+            );
+            owner.release_lease(&key).unwrap();
+            owner.observe_credential_freshness(&key, 1400, 60).unwrap();
+            assert_eq!(
+                owner
+                    .resolve_credential_use_admission(&key, CredentialUseIntent::UseCredential)
+                    .unwrap(),
+                CredentialUseDisposition::LeaseAbsent,
+            );
+        });
+        let records = records.lock().unwrap();
+        let actions = records
+            .iter()
+            .map(|record| record.action.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actions,
+            [
+                "acquire_lease",
+                "observe_credential_freshness",
+                "observe_credential_freshness",
+                "begin_refresh",
+                "complete_refresh",
+                "acquire_lease",
+                "begin_refresh",
+                "refresh_failed",
+                "mark_reauth_required",
+                "release_lease",
+            ],
+            "unchanged checks must be quiet; mutation/revocation logs must survive: {records:?}",
+        );
+        let observed_changes = records
+            .iter()
+            .filter(|record| record.action == "observe_credential_freshness")
+            .map(|record| (record.from_phase.as_str(), record.to_phase.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed_changes,
+            [("Valid", "Expiring"), ("Expiring", "Expired")]
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod credential_freshness_boundary_tests {
+    use super::*;
+    use meerkat_core::handles::{
+        AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, CredentialUseDisposition, CredentialUseIntent,
+    };
+
+    fn boundary_lease(binding: &str) -> LeaseKey {
+        LeaseKey::new(
+            meerkat_core::RealmId::parse("freshness-boundary-owner").unwrap(),
+            meerkat_core::BindingId::parse(binding).unwrap(),
+            None,
+        )
+    }
+
+    #[test]
+    fn zero_window_expires_at_exact_boundary() {
+        let owner = RuntimeAuthLeaseHandle::new();
+        let key = boundary_lease("zero-window");
+        owner.acquire_lease(&key, 1_000).unwrap();
+
+        owner.observe_credential_freshness(&key, 999, 0).unwrap();
+        assert_eq!(owner.snapshot(&key).phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(
+            owner
+                .resolve_credential_use_admission(&key, CredentialUseIntent::UseCredential)
+                .unwrap(),
+            CredentialUseDisposition::Authorized,
+        );
+
+        owner.observe_credential_freshness(&key, 1_000, 0).unwrap();
+        assert_eq!(
+            owner.snapshot(&key).phase,
+            Some(AuthLeasePhase::Expired),
+            "a zero refresh window cannot extend the actual credential expiry",
+        );
+        assert_eq!(
+            owner
+                .resolve_credential_use_admission(&key, CredentialUseIntent::UseCredential)
+                .unwrap(),
+            CredentialUseDisposition::RefreshRequired,
+        );
+    }
+
+    #[test]
+    fn normal_window_expires_at_exact_boundary() {
+        let owner = RuntimeAuthLeaseHandle::new();
+        let key = boundary_lease("normal-window");
+        owner.acquire_lease(&key, 1_000).unwrap();
+
+        owner
+            .observe_credential_freshness(&key, 940, AUTH_LEASE_TTL_REFRESH_WINDOW_SECS)
+            .unwrap();
+        assert_eq!(owner.snapshot(&key).phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(
+            owner
+                .resolve_credential_use_admission(&key, CredentialUseIntent::UseCredential)
+                .unwrap(),
+            CredentialUseDisposition::Authorized,
+        );
+
+        owner
+            .observe_credential_freshness(&key, 1_000, AUTH_LEASE_TTL_REFRESH_WINDOW_SECS)
+            .unwrap();
+        assert_eq!(owner.snapshot(&key).phase, Some(AuthLeasePhase::Expired));
+        assert_eq!(
+            owner
+                .resolve_credential_use_admission(&key, CredentialUseIntent::UseCredential)
+                .unwrap(),
+            CredentialUseDisposition::RefreshRequired,
+        );
     }
 }

@@ -3239,6 +3239,15 @@ impl LiveAdapterHost {
                     settlement_failures,
                 });
             }
+            Err(LiveToolDispatchError::Tool(error)) => {
+                let outcome = meerkat_core::ops::terminal_tool_outcome_for_error(
+                    provider_call_id.0.clone(),
+                    error,
+                );
+                let live_result =
+                    tool_result_from_dispatch(provider_call_id.clone(), outcome.result);
+                self.submit_tool_result(channel_id, live_result).await?;
+            }
             Err(err) => {
                 self.submit_tool_error(channel_id, provider_call_id.clone(), err.to_string())
                     .await?;
@@ -5887,6 +5896,13 @@ mod tests {
             payload,
             serde_json::json!({"error": "execution_failed", "message": "Tool execution failed: bang"})
         );
+        assert!(results[0].settlement_failures.is_empty());
+        assert!(
+            serde_json::to_value(&results[0])
+                .unwrap()
+                .get("settlement_failures")
+                .is_none()
+        );
         assert!(sink.terminal_errors.lock().unwrap().is_empty());
     }
 
@@ -7542,7 +7558,8 @@ mod tests {
     ) {
         let session_id = test_session_id();
         let sink = Arc::new(RecordingProjectionSink::default());
-        let companions = observation_failure_companions();
+        let mut companions = observation_failure_companions();
+        companions.push(companions[0].clone());
         let dispatcher = Arc::new(CustomTypedFeedbackDispatcher {
             session_id: session_id.clone(),
             failure: primary.with_settlement_failures(companions.clone()),
@@ -7612,6 +7629,7 @@ mod tests {
         for (index, call_id) in [(0, "healthy-before"), (2, "healthy-after")] {
             assert_eq!(submitted[index].call_id.0, call_id);
             assert!(!submitted[index].is_error);
+            assert!(submitted[index].settlement_failures.is_empty());
             assert_eq!(
                 submitted[index].content,
                 meerkat_core::types::ContentBlock::text_vec(format!("completed:{call_id}"))
@@ -7627,12 +7645,30 @@ mod tests {
             serde_json::json!({
                 "error": expected_code,
                 "message": expected_message,
-                "settlement_failures": companions,
             })
         );
-        let retained: Vec<meerkat_core::ToolDispatchSettlementFailure> =
-            serde_json::from_value(payload["settlement_failures"].clone()).unwrap();
-        assert_eq!(retained, companions, "preserve order and physical outcomes");
+        // Core separates primary semantic feedback from ordered settlement
+        // diagnostics. The accepted live carrier keeps the latter typed.
+        assert_eq!(
+            affected.settlement_failures, companions,
+            "preserve order, duplicates and physical outcomes"
+        );
+        let command = LiveAdapterCommand::SubmitToolResult {
+            result: affected.clone(),
+        };
+        let wire = serde_json::to_value(&command).unwrap();
+        assert_eq!(
+            wire["result"]["settlement_failures"],
+            serde_json::to_value(&companions).unwrap()
+        );
+        let restored: LiveAdapterCommand = serde_json::from_value(wire).unwrap();
+        let LiveAdapterCommand::SubmitToolResult { result: restored } = restored else {
+            panic!("actual command roundtrip must retain the submit-tool-result variant");
+        };
+        assert_eq!(
+            &restored, affected,
+            "actual command roundtrip retains the typed carrier"
+        );
     }
 
     #[tokio::test]

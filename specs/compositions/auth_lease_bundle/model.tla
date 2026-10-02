@@ -180,7 +180,7 @@ auth_machine_ObserveCredentialFreshnessValid(arg_now_ts, arg_refresh_window_secs
        /\ packet.payload.refresh_window_secs = arg_refresh_window_secs
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Valid"
-       /\ (IF (auth_machine_expires_at = None) THEN TRUE ELSE ((packet.payload.now_ts + packet.payload.refresh_window_secs) <= (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)))
+       /\ (IF (auth_machine_expires_at = None) THEN TRUE ELSE ((packet.payload.now_ts < (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)) /\ ((packet.payload.now_ts + packet.payload.refresh_window_secs) <= (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None))))
        /\ auth_machine_phase' = "Valid"
        /\ UnchangedFrame_b8305a9f03dbd4c5
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)

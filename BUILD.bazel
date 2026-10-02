@@ -562,6 +562,8 @@ test_suite(
         "//crates/meerkat-atif:meerkat_atif_unit_test",
         "//crates/meerkat-auth-core:aws_sts_authorizer_test",
         "//crates/meerkat-auth-core:azure_ad_authorizer_test",
+        "//crates/meerkat-auth-core:cloud_refresh_clock_test",
+        "//crates/meerkat-auth-core:cloud_refresh_readiness_test",
         "//crates/meerkat-auth-core:connector_oauth_commit_test",
         "//crates/meerkat-auth-core:google_auth_authorizer_test",
         "//crates/meerkat-auth-core:mcp_oauth_account_use_test",

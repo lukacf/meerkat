@@ -175,6 +175,15 @@ them.
 
 ### Fixed
 
+- The machine TLA generator parenthesizes a field's pending value when a
+  later expression in the same update block reads it. A conditionally
+  updated field was spliced bare as `IF c THEN a ELSE b`, so TLA+ precedence
+  captured the surrounding operator. The shipped `meerkat_mob_seam` model
+  unwrapped `TurnRunFailed.terminal_cause_kind` with `["value"]` bound to one
+  branch only, emitting the Option record on the other; a read in an
+  equality would have aborted TLC with a non-boolean IF condition. The Rust
+  kernels were unaffected, and every existing invariant, audit and witness
+  result is unchanged on the regenerated models.
 - A prompt admitted to a session while its executor attachment was still
   being prepared could stay queued forever. The attachment read its queue to
   decide whether to wake its runtime loop, then handed the session mutation

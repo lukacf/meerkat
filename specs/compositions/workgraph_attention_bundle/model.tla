@@ -7051,7 +7051,7 @@ attention_PauseActive(arg_expected_revision, arg_until_utc_ms) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionPaused", payload |-> [revision |-> (attention_revision) + 1], effect_id |-> (model_step_count + 1), source_transition |-> "PauseActive"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionPaused", payload |-> [revision |-> ((attention_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "PauseActive"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "PauseActive", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Paused"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -7073,7 +7073,7 @@ attention_PausePaused(arg_expected_revision, arg_until_utc_ms) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionPaused", payload |-> [revision |-> (attention_revision) + 1], effect_id |-> (model_step_count + 1), source_transition |-> "PausePaused"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionPaused", payload |-> [revision |-> ((attention_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "PausePaused"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "PausePaused", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Paused"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -7094,7 +7094,7 @@ attention_ResumePaused(arg_expected_revision) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionResumed", payload |-> [revision |-> (attention_revision) + 1], effect_id |-> (model_step_count + 1), source_transition |-> "ResumePaused"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionResumed", payload |-> [revision |-> ((attention_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "ResumePaused"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "ResumePaused", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Active"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -7119,7 +7119,7 @@ attention_SupersedeActive(arg_expected_revision, arg_superseded_by_binding_key, 
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionSuperseded", payload |-> [revision |-> (attention_revision) + 1], effect_id |-> (model_step_count + 1), source_transition |-> "SupersedeActive"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionSuperseded", payload |-> [revision |-> ((attention_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "SupersedeActive"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "SupersedeActive", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Superseded"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -7144,7 +7144,7 @@ attention_SupersedePaused(arg_expected_revision, arg_superseded_by_binding_key, 
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionSuperseded", payload |-> [revision |-> (attention_revision) + 1], effect_id |-> (model_step_count + 1), source_transition |-> "SupersedePaused"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionSuperseded", payload |-> [revision |-> ((attention_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "SupersedePaused"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "SupersedePaused", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Superseded"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -7167,7 +7167,7 @@ attention_StopActive(arg_expected_revision, arg_at_utc_ms) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionStopped", payload |-> [revision |-> (attention_revision) + 1], effect_id |-> (model_step_count + 1), source_transition |-> "StopActive"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionStopped", payload |-> [revision |-> ((attention_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "StopActive"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "StopActive", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Stopped"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -7190,7 +7190,7 @@ attention_StopPaused(arg_expected_revision, arg_at_utc_ms) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionStopped", payload |-> [revision |-> (attention_revision) + 1], effect_id |-> (model_step_count + 1), source_transition |-> "StopPaused"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionStopped", payload |-> [revision |-> ((attention_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "StopPaused"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "StopPaused", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Stopped"]}
        /\ model_step_count' = model_step_count + 1
 

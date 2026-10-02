@@ -1047,6 +1047,39 @@ impl<B: SessionAgentBuilder + 'static> ExperimentalGptLiveContextMirrorHost<B> {
     }
 }
 
+/// Type a failed pump-exit close by how it may be retried, from typed error
+/// variants and machine state, never from message text.
+///
+/// - Another close of the channel executing right now is `CloseInFlight`.
+/// - A terminal projection refused with `SessionBusy` is `SessionBusy`.
+/// - Everything else is `Permanent`, including the string-only
+///   `LifecycleAuthority` sources, which carry no typed retry kind.
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+fn classify_pump_retirement_failure(
+    runtime: &MeerkatMachine,
+    channel_id: &LiveChannelId,
+    error: ExperimentalLiveChannelCloseError,
+) -> crate::experimental_gpt_live::ExperimentalLivePumpRetirementError {
+    use crate::experimental_gpt_live::ExperimentalLivePumpRetirementError;
+    if runtime.live_channel_close_in_flight(channel_id) {
+        return ExperimentalLivePumpRetirementError::CloseInFlight(error.to_string());
+    }
+    match &error {
+        ExperimentalLiveChannelCloseError::TerminalProjection(
+            meerkat_live::LiveAdapterHostError::ProjectionError(
+                meerkat_live::LiveProjectionError::SessionBusy(_),
+            ),
+        ) => ExperimentalLivePumpRetirementError::SessionBusy(error.to_string()),
+        ExperimentalLiveChannelCloseError::BindingMismatch
+        | ExperimentalLiveChannelCloseError::LifecycleAuthority(_)
+        | ExperimentalLiveChannelCloseError::PhysicalAuthority(_)
+        | ExperimentalLiveChannelCloseError::TerminalProjection(_)
+        | ExperimentalLiveChannelCloseError::Semantic(_) => {
+            ExperimentalLivePumpRetirementError::Permanent(error.to_string())
+        }
+    }
+}
+
 #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 #[async_trait]
 impl<B: SessionAgentBuilder + 'static>
@@ -1182,16 +1215,55 @@ impl<B: SessionAgentBuilder + 'static>
                 // this channel. Pump retirement is idempotently complete.
             }
             Err(error) => {
-                return Err(
-                    crate::experimental_gpt_live::ExperimentalLivePumpRetirementError::SemanticUncommitted(
-                        error.to_string(),
-                    ),
-                );
+                return Err(classify_pump_retirement_failure(
+                    &self.runtime,
+                    binding.channel_id(),
+                    error,
+                ));
             }
         }
         self.runtime
             .retire_live_assistant_output_handles(binding.session_id(), binding.channel_id());
         Ok(())
+    }
+
+    async fn await_pump_retirement_retry(
+        &self,
+        binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        error: &crate::experimental_gpt_live::ExperimentalLivePumpRetirementError,
+    ) -> bool {
+        use crate::experimental_gpt_live::ExperimentalLivePumpRetirementError;
+        match error {
+            ExperimentalLivePumpRetirementError::CloseInFlight(_) => {
+                // Wait for the other close to end, committed or failed; the
+                // retry then finds the channel unbound or runs its own close.
+                loop {
+                    let ended = self.runtime.live_channel_close_ended();
+                    tokio::pin!(ended);
+                    ended.as_mut().enable();
+                    if !self
+                        .runtime
+                        .live_channel_close_in_flight(binding.channel_id())
+                    {
+                        return true;
+                    }
+                    ended.await;
+                }
+            }
+            ExperimentalLivePumpRetirementError::SessionBusy(_) => {
+                // The terminal projection was refused because the close
+                // released the channel from the turn boundary the member
+                // turn still holds: wait for that turn to free the boundary.
+                drop(
+                    self.member_host
+                        .service
+                        .acquire_runtime_turn_finalization_guard(binding.session_id())
+                        .await,
+                );
+                true
+            }
+            ExperimentalLivePumpRetirementError::Permanent(_) => false,
+        }
     }
 
     async fn pending_replacement_required(
@@ -3169,5 +3241,83 @@ impl meerkat_live::LiveToolDispatcher for ServiceLiveToolDispatcher {
             )
             .await
             .map_err(|err| meerkat_live::LiveToolDispatchError::from_session_error(session_id, err))
+    }
+}
+
+#[cfg(all(test, feature = "live-webrtc", feature = "openai-live"))]
+mod pump_retirement_classification_tests {
+    use super::*;
+    use crate::experimental_gpt_live::ExperimentalLivePumpRetirementError;
+
+    #[test]
+    fn a_close_executing_on_the_channel_makes_the_failure_in_flight() {
+        let runtime = MeerkatMachine::ephemeral();
+        let channel = LiveChannelId::new("pump-retirement-in-flight");
+        let outer = runtime.begin_live_channel_close(&channel);
+        let nested = runtime.begin_live_channel_close(&channel);
+        assert!(matches!(
+            classify_pump_retirement_failure(
+                &runtime,
+                &channel,
+                ExperimentalLiveChannelCloseError::BindingMismatch,
+            ),
+            ExperimentalLivePumpRetirementError::CloseInFlight(_)
+        ));
+        drop(nested);
+        assert!(
+            runtime.live_channel_close_in_flight(&channel),
+            "a nested close path ending does not end the outer close"
+        );
+        drop(outer);
+        assert!(!runtime.live_channel_close_in_flight(&channel));
+        assert!(matches!(
+            classify_pump_retirement_failure(
+                &runtime,
+                &channel,
+                ExperimentalLiveChannelCloseError::BindingMismatch,
+            ),
+            ExperimentalLivePumpRetirementError::Permanent(_)
+        ));
+    }
+
+    #[test]
+    fn a_busy_terminal_projection_is_session_busy_and_other_failures_are_permanent() {
+        let runtime = MeerkatMachine::ephemeral();
+        let channel = LiveChannelId::new("pump-retirement-kinds");
+        assert!(matches!(
+            classify_pump_retirement_failure(
+                &runtime,
+                &channel,
+                ExperimentalLiveChannelCloseError::TerminalProjection(
+                    meerkat_live::LiveAdapterHostError::ProjectionError(
+                        meerkat_live::LiveProjectionError::SessionBusy(SessionId::new()),
+                    ),
+                ),
+            ),
+            ExperimentalLivePumpRetirementError::SessionBusy(_)
+        ));
+        assert!(matches!(
+            classify_pump_retirement_failure(
+                &runtime,
+                &channel,
+                ExperimentalLiveChannelCloseError::LifecycleAuthority(
+                    "string-only lifecycle failure".to_string(),
+                ),
+            ),
+            ExperimentalLivePumpRetirementError::Permanent(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_close_ending_wakes_waiters_registered_before_it_ended() {
+        let runtime = MeerkatMachine::ephemeral();
+        let channel = LiveChannelId::new("pump-retirement-close-ended");
+        let close = runtime.begin_live_channel_close(&channel);
+        let ended = runtime.live_channel_close_ended();
+        tokio::pin!(ended);
+        ended.as_mut().enable();
+        assert!(futures::poll!(ended.as_mut()).is_pending());
+        drop(close);
+        assert!(futures::poll!(ended.as_mut()).is_ready());
     }
 }

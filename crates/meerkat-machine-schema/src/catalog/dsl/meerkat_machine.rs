@@ -4126,6 +4126,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             // with that reason. Each session may recommend one reopen on a
             // media fault; a second fault on the same session closes without
             // the recommendation, so a broken media path never loops.
+            //
+            // Lifetime: a channel close (committed close or abandoned open)
+            // clears the requested output and the judged mark, because a
+            // closed channel takes no further request or report. The verdict
+            // in live_media_fault_reopen_recommended_by_channel deliberately
+            // survives the close as a tombstone, like
+            // live_close_status_by_channel: live/status and the
+            // LiveChannelClosed media_fault reason read it after the channel
+            // is gone. It is not a leak: every UnregisterSession* transition
+            // and every resume from Stopped (RegisterSessionResumesStopped,
+            // RegisterSessionNewBindingFromStopped) clears all four maps, so
+            // growth is bounded by one session lifetime, and the reopen
+            // budget is earned again per session lifetime.
             live_media_health_requested_output_by_channel: Map<String, String>,
             live_media_health_judged_channels: Set<String>,
             live_media_fault_reopen_recommended_by_channel: Map<String, bool>,
@@ -8912,13 +8925,15 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // Live media health: each session recommends at most one media-fault
-        // reopen, a recorded verdict belongs to a judged channel, and a
-        // judged channel's first output was requested.
+        // reopen, a recorded verdict belongs to a judged open channel or to a
+        // closed channel (its close tombstone), and a judged channel's first
+        // output was requested.
         invariant live_media_health_budget_and_verdicts_are_consistent {
             for_all(budget_session in self.live_media_fault_reopens_by_session.keys(),
                 self.live_media_fault_reopens_by_session.get_copied(budget_session).get("value") <= 1)
             && for_all(verdict_channel in self.live_media_fault_reopen_recommended_by_channel.keys(),
-                self.live_media_health_judged_channels.contains(verdict_channel))
+                self.live_media_health_judged_channels.contains(verdict_channel)
+                || self.live_close_status_by_channel.contains_key(verdict_channel))
             && for_all(judged_channel in self.live_media_health_judged_channels,
                 self.live_media_health_requested_output_by_channel.contains_key(judged_channel))
         }
@@ -10574,6 +10589,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "same_session_binding" { self.session_id == Some(session_id) }
             guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             update {
+                // A resumed session starts a new lifetime: its media-health
+                // reopen is available again.
+                self.live_media_health_requested_output_by_channel = EmptyMap;
+                self.live_media_health_judged_channels = EmptySet;
+                self.live_media_fault_reopen_recommended_by_channel = EmptyMap;
+                self.live_media_fault_reopens_by_session = EmptyMap;
                 self.registration_phase = RegistrationPhase::Queuing;
                 self.runtime_stop_deferred = false;
                 self.active_runtime_id = None;
@@ -10600,6 +10621,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "new_session_binding" { self.session_id != Some(session_id) }
             guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             update {
+                // A resumed session starts a new lifetime: its media-health
+                // reopen is available again.
+                self.live_media_health_requested_output_by_channel = EmptyMap;
+                self.live_media_health_judged_channels = EmptySet;
+                self.live_media_fault_reopen_recommended_by_channel = EmptyMap;
+                self.live_media_fault_reopens_by_session = EmptyMap;
                 self.session_id = Some(session_id);
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
@@ -11150,6 +11177,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                         self.live_result_recovery_replacement_by_channel.get_cloned(source).get("value")))
             }
             update {
+                // Media health is per session lifetime: a re-registered or
+                // resumed session starts with its reopen and no verdicts.
+                self.live_media_health_requested_output_by_channel = EmptyMap;
+                self.live_media_health_judged_channels = EmptySet;
+                self.live_media_fault_reopen_recommended_by_channel = EmptyMap;
+                self.live_media_fault_reopens_by_session = EmptyMap;
                 self.session_id = None;
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
@@ -11301,6 +11334,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                         self.live_result_recovery_replacement_by_channel.get_cloned(source).get("value")))
             }
             update {
+                // Media health is per session lifetime: a re-registered or
+                // resumed session starts with its reopen and no verdicts.
+                self.live_media_health_requested_output_by_channel = EmptyMap;
+                self.live_media_health_judged_channels = EmptySet;
+                self.live_media_fault_reopen_recommended_by_channel = EmptyMap;
+                self.live_media_fault_reopens_by_session = EmptyMap;
                 self.session_id = None;
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
@@ -11450,6 +11489,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                         self.live_result_recovery_replacement_by_channel.get_cloned(source).get("value")))
             }
             update {
+                // Media health is per session lifetime: a re-registered or
+                // resumed session starts with its reopen and no verdicts.
+                self.live_media_health_requested_output_by_channel = EmptyMap;
+                self.live_media_health_judged_channels = EmptySet;
+                self.live_media_fault_reopen_recommended_by_channel = EmptyMap;
+                self.live_media_fault_reopens_by_session = EmptyMap;
                 self.input_live_boundary_join_run = EmptyMap;
                 self.input_live_boundary_join_phase = EmptyMap;
                 self.session_id = None;
@@ -11601,6 +11646,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                         self.live_result_recovery_replacement_by_channel.get_cloned(source).get("value")))
             }
             update {
+                // Media health is per session lifetime: a re-registered or
+                // resumed session starts with its reopen and no verdicts.
+                self.live_media_health_requested_output_by_channel = EmptyMap;
+                self.live_media_health_judged_channels = EmptySet;
+                self.live_media_fault_reopen_recommended_by_channel = EmptyMap;
+                self.live_media_fault_reopens_by_session = EmptyMap;
                 self.session_id = None;
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
@@ -11750,6 +11801,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                         self.live_result_recovery_replacement_by_channel.get_cloned(source).get("value")))
             }
             update {
+                // Media health is per session lifetime: a re-registered or
+                // resumed session starts with its reopen and no verdicts.
+                self.live_media_health_requested_output_by_channel = EmptyMap;
+                self.live_media_health_judged_channels = EmptySet;
+                self.live_media_fault_reopen_recommended_by_channel = EmptyMap;
+                self.live_media_fault_reopens_by_session = EmptyMap;
                 self.session_id = None;
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
@@ -25641,6 +25698,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_open_admission_sequence += 1;
                 self.live_active_channel_by_session.remove(session_id);
                 self.live_channel_session_by_channel.remove(channel_id);
+                // A closed channel takes no media-health request or report;
+                // its verdict stays as the close tombstone (status reads it).
+                self.live_media_health_requested_output_by_channel.remove(channel_id);
+                self.live_media_health_judged_channels.remove(channel_id);
                 self.live_channel_identity_by_channel.remove(channel_id);
                 self.live_execution_runtime_id_by_channel.remove(channel_id);
                 self.live_execution_fence_by_channel.remove(channel_id);
@@ -31375,6 +31436,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 }
                 self.live_active_channel_by_session.remove(session_id);
                 self.live_channel_session_by_channel.remove(channel_id);
+                // A closed channel takes no media-health request or report;
+                // its verdict stays as the close tombstone (status reads it).
+                self.live_media_health_requested_output_by_channel.remove(channel_id);
+                self.live_media_health_judged_channels.remove(channel_id);
                 self.live_channel_identity_by_channel.remove(channel_id);
                 self.live_execution_runtime_id_by_channel.remove(channel_id);
                 self.live_execution_fence_by_channel.remove(channel_id);

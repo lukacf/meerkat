@@ -382,7 +382,10 @@ them.
   `live_media_health_requested_output_by_channel`,
   `live_media_health_judged_channels`,
   `live_media_fault_reopen_recommended_by_channel` and
-  `live_media_fault_reopens_by_session`. New kernel transitions:
+  `live_media_fault_reopens_by_session` (media health is per session lifetime:
+  a channel's request and judgement clear when it closes, its verdict stays as
+  the close tombstone, and all four clear when the session unregisters or a
+  stopped session resumes). New kernel transitions:
   `RequestLiveMediaHealthAttached`, `RequestLiveMediaHealthRunning`,
   `ObserveLiveChannelMediaHealthAudibleAttached`,
   `ObserveLiveChannelMediaHealthAudibleRunning`,
@@ -1256,7 +1259,8 @@ them.
   channel's first assistant output from the client's decoded counters; a
   silent output with a non-empty transcript closes the channel on a typed
   media fault (ordinary close, retained summary custody included) and
-  recommends one reopen per session, so a broken media path never loops. The
+  recommends one reopen per session lifetime (a resumed session earns it
+  again), so a broken media path never loops. The
   Turbo S harness answers every request with real decoded counters (a media
   fault on an audible channel fails the run) and retries an exchange only
   after a journaled media-fault close and reopen.

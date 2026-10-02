@@ -54,6 +54,11 @@ slow-timeout = { period = "60s", terminate-after = 8 }
 # replaced the fixed peer-admission p99 bound with a budget derived from an
 # unwedged baseline on the same host, so that test runs here too.
 [profile.ci-pr]
+# nextest's `inherits` carries NEITHER `default-filter` NOR the parent
+# profile's own overrides (measured on 0.9.143); only the default profile's
+# overrides apply to every profile. So every fast override is mirrored in the
+# default profile; a fast-only override added later must be mirrored there too,
+# or this profile silently loses it.
 inherits = "fast"
 # CI safety net, not a correctness mechanism: `fast` only reports a test
 # still running each minute, so a hung test held its lane until the job
@@ -93,10 +98,12 @@ slow-timeout = { period = "60s", terminate-after = 8 }
 # each minute, so a hang there ran until the 3000 s GCP SLO watchdog killed the
 # batch and named nothing. Four slow periods (240 s), eight for the tests below.
 #
-# inherits carries neither default-filter (restated below; measured: without it
-# 30 e2e lane tests joined the run) nor fast's own overrides; every fast
-# override is mirrored in the default profile, whose overrides apply to all
-# profiles. With both, this profile selects exactly fast's 2849 tests.
+# nextest's `inherits` carries NEITHER `default-filter` (restated below;
+# measured: without it 30 e2e lane tests joined the run) NOR fast's own
+# overrides; only the default profile's overrides apply to every profile, so
+# every fast override is mirrored there, and a fast-only override added later
+# must be mirrored too. With both, this profile selects exactly fast's 2849
+# tests.
 #
 # Sizing (the lane's exact command, 30 threads, 2026-10-02): 9 slow tests, the
 # count the BuildBuddy lane reports. The four below take 132-159 s locally and

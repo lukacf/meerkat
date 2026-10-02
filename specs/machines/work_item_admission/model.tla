@@ -112,15 +112,15 @@ ClassifyAdmissionReplayKeyMismatchAdmitted(requested_admission_key, requested_re
 
 
 Next ==
-    \/ \E arg_admission_key \in OptionWorkAdmissionKeyRefValues : \E arg_request_digest \in OptionWorkAdmissionDigestRefValues : BindKeyed(arg_admission_key, arg_request_digest)
-    \/ \E arg_admission_key \in OptionWorkAdmissionKeyRefValues : \E arg_request_digest \in OptionWorkAdmissionDigestRefValues : BindUnkeyed(arg_admission_key, arg_request_digest)
-    \/ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayExactUnkeyed(requested_admission_key, requested_request_digest)
-    \/ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayExactAdmitted(requested_admission_key, requested_request_digest)
-    \/ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayConflictUnkeyed(requested_admission_key, requested_request_digest)
-    \/ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayConflictAdmitted(requested_admission_key, requested_request_digest)
-    \/ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayKeyMismatchAbsent(requested_admission_key, requested_request_digest)
-    \/ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayKeyMismatchUnkeyed(requested_admission_key, requested_request_digest)
-    \/ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayKeyMismatchAdmitted(requested_admission_key, requested_request_digest)
+    \/ (phase = "Absent") /\ \E arg_admission_key \in OptionWorkAdmissionKeyRefValues : \E arg_request_digest \in OptionWorkAdmissionDigestRefValues : BindKeyed(arg_admission_key, arg_request_digest)
+    \/ (phase = "Absent") /\ \E arg_admission_key \in OptionWorkAdmissionKeyRefValues : \E arg_request_digest \in OptionWorkAdmissionDigestRefValues : BindUnkeyed(arg_admission_key, arg_request_digest)
+    \/ (phase = "Unkeyed") /\ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayExactUnkeyed(requested_admission_key, requested_request_digest)
+    \/ (phase = "Admitted") /\ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayExactAdmitted(requested_admission_key, requested_request_digest)
+    \/ (phase = "Unkeyed") /\ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayConflictUnkeyed(requested_admission_key, requested_request_digest)
+    \/ (phase = "Admitted") /\ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayConflictAdmitted(requested_admission_key, requested_request_digest)
+    \/ (phase = "Absent") /\ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayKeyMismatchAbsent(requested_admission_key, requested_request_digest)
+    \/ (phase = "Unkeyed") /\ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayKeyMismatchUnkeyed(requested_admission_key, requested_request_digest)
+    \/ (phase = "Admitted") /\ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayKeyMismatchAdmitted(requested_admission_key, requested_request_digest)
 
 admitted_has_identity == (IF (phase # "Admitted") THEN TRUE ELSE ((admission_key # None) /\ (request_digest # None)))
 non_admitted_has_no_identity == (IF (phase = "Admitted") THEN TRUE ELSE ((admission_key = None) /\ (request_digest = None)))

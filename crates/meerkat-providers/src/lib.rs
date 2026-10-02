@@ -56,6 +56,10 @@ pub mod browser_login {
         save_oauth_tokens_and_consume_device_flow, save_tokens_and_publish_lifecycle,
     };
 }
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+pub mod mcp_oauth {
+    pub use meerkat_auth_core::mcp_oauth::*;
+}
 #[cfg(not(target_arch = "wasm32"))]
 pub mod authorizers {
     pub use meerkat_auth_core::authorizers::*;

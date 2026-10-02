@@ -716,11 +716,20 @@ pub struct AgentBuildConfig {
     /// factory-appended skill-inventory section so spec-built prompts are
     /// byte-pinned across placements. `Full` (default) is unchanged.
     pub host_prompt_sections: meerkat_core::service::HostPromptSections,
+    /// Credential source for OAuth-protected servers in `mcp_servers`
+    /// (typically [`crate::HostAuthService::mcp_oauth_authority`]). Agents
+    /// never open a browser: when no usable credential exists the server is
+    /// reported through the router's typed `AuthorizationRequired` host
+    /// status, and the host runs `mcp_login_start`/`mcp_login_complete`.
+    /// `None` connects without OAuth.
+    #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+    pub mcp_auth_resolver: Option<Arc<dyn meerkat_mcp::McpAuthResolver>>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AgentBuildConfig")
+        let mut debug = f.debug_struct("AgentBuildConfig");
+        debug
             .field("model", &self.model)
             .field("provider", &self.provider)
             .field("self_hosted_server_id", &self.self_hosted_server_id)
@@ -838,8 +847,10 @@ impl std::fmt::Debug for AgentBuildConfig {
                 "session_comms_runtime_override",
                 &self.session_comms_runtime_override.is_some(),
             )
-            .field("host_prompt_sections", &self.host_prompt_sections)
-            .finish()
+            .field("host_prompt_sections", &self.host_prompt_sections);
+        #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+        debug.field("mcp_auth_resolver", &self.mcp_auth_resolver.is_some());
+        debug.finish()
     }
 }
 
@@ -927,6 +938,8 @@ impl AgentBuildConfig {
             tool_consequence_policy_registry: None,
             session_comms_runtime_override: None,
             host_prompt_sections: meerkat_core::service::HostPromptSections::default(),
+            #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+            mcp_auth_resolver: None,
         }
     }
 
@@ -6450,7 +6463,14 @@ impl AgentFactory {
                         meerkat_runtime::handles::RuntimeExternalToolSurfaceHandle::ephemeral(),
                     ),
                 };
-            let mut router = meerkat_mcp::McpRouter::new_with_surface_handle(surface_handle);
+            // With a resolver, a missing credential is the typed
+            // human-authorization status (the native authority opens no
+            // browser); without one, servers connect without OAuth.
+            let mut router = meerkat_mcp::McpRouter::new_with_surface_handle(surface_handle)
+                .with_mcp_auth(
+                    meerkat_providers::mcp_oauth::McpAuthMode::Interactive,
+                    build_config.mcp_auth_resolver.clone(),
+                );
             for server in &build_config.mcp_servers {
                 router.stage_add(server.clone()).map_err(|error| {
                     BuildAgentError::McpSetup(format!(

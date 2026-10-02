@@ -575,6 +575,19 @@ impl McpRouterAdapter {
         }
     }
 
+    /// Host-channel status: MCP targets waiting for human OAuth authorization
+    /// through the host. See [`McpRouter::servers_awaiting_authorization`].
+    /// Not an agent event; it carries no authorize URL, state or code.
+    pub async fn servers_awaiting_authorization(
+        &self,
+    ) -> Vec<meerkat_auth_core::McpServerIdentity> {
+        let router = self.router.read().await;
+        match router.as_ref() {
+            Some(r) => r.servers_awaiting_authorization(),
+            None => Vec::new(),
+        }
+    }
+
     /// Stage an MCP server reload operation.
     pub async fn stage_reload<T: Into<McpReloadTarget>>(&self, target: T) -> Result<(), String> {
         let mut router = self.router.write().await;

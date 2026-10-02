@@ -4,6 +4,29 @@
 //! target/owner resolution, PKCE and one-time state, token exchange,
 //! coordinated persistence, AuthMachine lifecycle publication, status, and
 //! logout.
+//!
+//! The same split covers OAuth-protected MCP servers
+//! ([`HostAuthService::mcp_login_start`] / [`HostAuthService::mcp_login_complete`]).
+//! Agents never drive this flow: an MCP server that needs a human reports
+//! the typed `AuthorizationRequired` host status, and the host decides when
+//! to ask its user.
+//!
+//! # Host obligation: an unobservable browser context
+//!
+//! The authorize URL and `state` returned by a login start, and the `code`
+//! and `state` delivered to the loopback callback, are bearer material for
+//! one attempt: whoever holds them can complete it. The host must:
+//!
+//! - open the authorize URL only in a browser context that no agent-drivable
+//!   tool can observe or control (not a browser, shell, screenshot, MCP or
+//!   computer-use tool available to any agent of this host);
+//! - bind the loopback callback itself and deliver `state`/`code` only to the
+//!   matching login complete call;
+//! - never place the authorize URL, `state`, `code` or callback data in a
+//!   tool result, transcript, agent event, elicitation result or log.
+//!
+//! Login start, callback and completion types redact these values in `Debug`;
+//! completion projections are secret-free.
 
 use chrono::{DateTime, Utc};
 use meerkat_core::connection::{WriteOwnerError, resolve_write_owner};
@@ -20,10 +43,15 @@ use meerkat_providers::auth_store::{
     CredentialMutationError, PersistedTokens, ProviderAuthPersistence, TokenStoreError,
     credential_source_uses_persisted_store, persisted_auth_mode_is_oauth_login,
 };
+use meerkat_providers::mcp_oauth::{
+    McpOAuthAccountStrategy, McpOAuthAuthority, McpOAuthCallback, McpOAuthError,
+    McpOAuthLoginComplete, McpOAuthLoginStart, McpServerIdentity, OidcUserInfoAccountStrategy,
+};
 use meerkat_providers::oauth_flow::{
     OAuthFlowError, OAuthTargetValidationError, oauth_provider_resolution,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Exact provider binding a host wants to inspect or mutate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +121,30 @@ pub enum HostAuthDevicePoll {
     Ready(HostAuthLoginComplete),
 }
 
+/// Secret-free authorization phase of one MCP server target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostMcpAuthPhase {
+    /// A durable credential for the selected account is present and either
+    /// unexpired or refreshable.
+    Authorized,
+    /// The stored credential has expired and cannot be refreshed.
+    ReauthRequired,
+    /// No usable credential exists: the target is awaiting human
+    /// authorization through the host's browser channel.
+    AuthorizationRequired,
+}
+
+/// Secret-free MCP authorization status for host UI. This is a host-channel
+/// projection, never an agent event payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostMcpAuthStatus {
+    pub target: McpServerIdentity,
+    pub phase: HostMcpAuthPhase,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub account_id: Option<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HostAuthError {
     #[error(transparent)]
@@ -121,6 +173,8 @@ pub enum HostAuthError {
     BrowserFlowUnsupported(OAuthProviderIdentity),
     #[error("provider '{0}' does not support the device-code login flow")]
     DeviceFlowUnsupported(OAuthProviderIdentity),
+    #[error(transparent)]
+    McpOAuth(#[from] McpOAuthError),
 }
 
 /// Injectable native-host authentication facade.
@@ -129,6 +183,7 @@ pub struct HostAuthService {
     persistence: ProviderAuthPersistence,
     authority: meerkat_runtime::ProviderAuthRuntimeAuthority,
     http: reqwest::Client,
+    mcp_account_strategy: Arc<dyn McpOAuthAccountStrategy>,
 }
 
 impl HostAuthService {
@@ -140,12 +195,115 @@ impl HostAuthService {
             persistence,
             authority,
             http: reqwest::Client::new(),
+            mcp_account_strategy: Arc::new(OidcUserInfoAccountStrategy::new()),
         }
     }
 
     pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
         self.http = http;
         self
+    }
+
+    /// Replace the MCP account-evidence strategy. The default is
+    /// [`OidcUserInfoAccountStrategy`]; hosts whose MCP servers prove the
+    /// account another way supply their own.
+    pub fn with_mcp_account_strategy(mut self, strategy: Arc<dyn McpOAuthAccountStrategy>) -> Self {
+        self.mcp_account_strategy = strategy;
+        self
+    }
+
+    /// The native MCP OAuth authority bound to this service's persistence,
+    /// AuthMachine lease and flow owner. Use it as the factory's
+    /// `McpAuthResolver` so agent connections share the host's credentials.
+    pub fn mcp_oauth_authority(&self) -> Result<McpOAuthAuthority, HostAuthError> {
+        Ok(McpOAuthAuthority::with_http(
+            self.persistence.clone(),
+            self.http.clone(),
+            self.authority.generated_auth_lease_handle(),
+        )
+        .with_interactive_strategy(
+            self.authority.oauth_flow_authority(),
+            Arc::clone(&self.mcp_account_strategy),
+        )?)
+    }
+
+    /// Admit one host-driven MCP OAuth attempt. The returned projection is
+    /// host-only (see the module docs): open its authorize URL in an
+    /// unobservable browser context and deliver the loopback callback to
+    /// [`Self::mcp_login_complete`].
+    pub async fn mcp_login_start(
+        &self,
+        target: &McpServerIdentity,
+        redirect_uri: &str,
+        www_authenticate: Option<&str>,
+    ) -> Result<McpOAuthLoginStart, HostAuthError> {
+        Ok(self
+            .mcp_oauth_authority()?
+            .login_start(target, redirect_uri, www_authenticate)
+            .await?)
+    }
+
+    /// Complete an admitted MCP OAuth attempt from the host's loopback
+    /// callback. Returns a secret-free projection.
+    pub async fn mcp_login_complete(
+        &self,
+        target: &McpServerIdentity,
+        callback: McpOAuthCallback,
+    ) -> Result<McpOAuthLoginComplete, HostAuthError> {
+        Ok(self
+            .mcp_oauth_authority()?
+            .login_complete(target, callback)
+            .await?)
+    }
+
+    /// Retire an abandoned MCP OAuth attempt (timeout, cancellation or a
+    /// closed browser).
+    pub fn mcp_login_cancel(
+        &self,
+        target: &McpServerIdentity,
+        start: &McpOAuthLoginStart,
+    ) -> Result<(), HostAuthError> {
+        Ok(self.mcp_oauth_authority()?.login_cancel(target, start)?)
+    }
+
+    /// Secret-free authorization status of one MCP target, projected from
+    /// its durable credential. It performs no refresh and no network I/O.
+    pub async fn mcp_status(
+        &self,
+        target: &McpServerIdentity,
+    ) -> Result<HostMcpAuthStatus, HostAuthError> {
+        let stored = self
+            .persistence
+            .token_store()
+            .load(&target.token_key()?)
+            .await?
+            .filter(|tokens| {
+                tokens.auth_mode == meerkat_providers::auth_store::PersistedAuthMode::McpOauth
+                    && tokens.primary_secret.is_some()
+                    && target
+                        .expected_account()
+                        .is_none_or(|account| tokens.account_id.as_deref() == Some(account))
+            });
+        let Some(tokens) = stored else {
+            return Ok(HostMcpAuthStatus {
+                target: target.clone(),
+                phase: HostMcpAuthPhase::AuthorizationRequired,
+                expires_at: None,
+                account_id: None,
+            });
+        };
+        let expired = tokens.expires_at.is_some_and(|at| at <= Utc::now());
+        let phase = if expired && tokens.refresh_token.is_none() {
+            HostMcpAuthPhase::ReauthRequired
+        } else {
+            HostMcpAuthPhase::Authorized
+        };
+        Ok(HostMcpAuthStatus {
+            target: target.clone(),
+            phase,
+            expires_at: tokens.expires_at,
+            account_id: tokens.account_id,
+        })
     }
 
     /// Construct the service from the same persistence capability an

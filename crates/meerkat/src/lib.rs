@@ -333,10 +333,17 @@ pub use factory::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use host_auth::{
     HostAuthDevicePoll, HostAuthDeviceStart, HostAuthError, HostAuthLoginComplete,
-    HostAuthLoginStart, HostAuthService, HostAuthStatus, HostAuthTarget,
+    HostAuthLoginStart, HostAuthService, HostAuthStatus, HostAuthTarget, HostMcpAuthPhase,
+    HostMcpAuthStatus,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_providers::auth_store::{ProviderAuthPersistence, TokenStoreBackend};
+#[cfg(not(target_arch = "wasm32"))]
+pub use meerkat_providers::mcp_oauth::{
+    MCP_INTERACTIVE_LOGIN_TIMEOUT, MCP_OAUTH_CALLBACK_PATH, McpOAuthAccountStrategy,
+    McpOAuthAuthority, McpOAuthCallback, McpOAuthCeremonyContext, McpOAuthError,
+    McpOAuthLoginComplete, McpOAuthLoginStart, McpServerIdentity, OidcUserInfoAccountStrategy,
+};
 
 pub mod help;
 

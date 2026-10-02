@@ -1906,9 +1906,9 @@ impl McpRouter {
     /// channel (see `McpOAuthAuthority::login_start`). This is a host query,
     /// not an agent event: it carries only the typed target, never an
     /// authorize URL, state or code. A later successful attempt or removal
-    /// clears the entry.
-    pub fn servers_awaiting_authorization(&mut self) -> Vec<McpServerIdentity> {
-        self.drain_pending();
+    /// clears the entry. It reflects background results already drained by
+    /// the normal lifecycle polling; it drains nothing itself.
+    pub fn servers_awaiting_authorization(&self) -> Vec<McpServerIdentity> {
         self.awaiting_authorization.values().cloned().collect()
     }
 

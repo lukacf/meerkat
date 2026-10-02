@@ -9592,66 +9592,141 @@ fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScop
     }
 }
 
+/// CLI host resolver for OAuth-protected MCP servers.
+///
+/// Stored credentials come from the native authority. In interactive mode
+/// on a terminal, the CLI is the host: it owns the loopback listener and the
+/// user's desktop browser and drives `mcp_login_start`/`mcp_login_complete`.
+/// Elsewhere a missing credential is the typed human-authorization status.
 #[cfg(feature = "mcp")]
-struct CliMcpBrowserOpener {
+struct CliMcpHostAuthResolver {
+    service: meerkat::HostAuthService,
+    authority: meerkat::McpOAuthAuthority,
     mode: CliMcpAuthMode,
 }
 
 #[cfg(feature = "mcp")]
 #[async_trait::async_trait]
-impl meerkat_auth_core::BrowserOpener for CliMcpBrowserOpener {
-    async fn open(&self, url: &str) -> Result<(), meerkat_auth_core::McpOAuthError> {
-        if self.mode == CliMcpAuthMode::Interactive {
-            use std::io::IsTerminal;
-            if !std::io::stderr().is_terminal() {
-                return Err(meerkat_auth_core::McpOAuthError::InteractiveRequiresTty);
-            }
+impl meerkat_mcp::McpAuthResolver for CliMcpHostAuthResolver {
+    async fn stored_bearer_token(
+        &self,
+        target: &meerkat::McpServerIdentity,
+    ) -> Result<Option<String>, meerkat::McpOAuthError> {
+        self.authority.stored_bearer_token(target).await
+    }
+
+    async fn interactive_login(
+        &self,
+        target: &meerkat::McpServerIdentity,
+        www_authenticate: Option<&str>,
+    ) -> Result<String, meerkat::McpOAuthError> {
+        use std::io::IsTerminal;
+        if self.mode != CliMcpAuthMode::Interactive || !std::io::stderr().is_terminal() {
+            return Err(meerkat::McpOAuthError::HumanAuthorizationRequired {
+                server_name: target.server_name().to_owned(),
+            });
         }
-        webbrowser::open(url)
-            .map_err(|error| meerkat_auth_core::McpOAuthError::Browser(error.to_string()))?;
-        Ok(())
+        cli_mcp_browser_login(&self.service, target, www_authenticate, false)
+            .await
+            .map_err(|error| match error {
+                meerkat::HostAuthError::McpOAuth(error) => error,
+                other => meerkat::McpOAuthError::TokenExchangeFailed {
+                    server_name: target.server_name().to_owned(),
+                    reason: other.to_string(),
+                },
+            })?;
+        self.authority.require_stored_bearer_token(target).await
     }
 }
 
+/// The CLI's host role for one MCP OAuth attempt: bind the loopback
+/// callback, admit, open the user's browser, await the callback and
+/// complete. The authorize URL is shown on the terminal only when
+/// `show_url_fallback` is set (explicit `rkat mcp login`), never logged.
 #[cfg(feature = "mcp")]
-fn open_mcp_auth_resolver(
-    mode: CliMcpAuthMode,
-) -> anyhow::Result<Option<Arc<dyn meerkat_mcp::McpAuthResolver>>> {
-    Ok(Some(Arc::new(open_mcp_oauth_authority(mode)?)))
+async fn cli_mcp_browser_login(
+    service: &meerkat::HostAuthService,
+    target: &meerkat::McpServerIdentity,
+    www_authenticate: Option<&str>,
+    show_url_fallback: bool,
+) -> Result<meerkat::McpOAuthLoginComplete, meerkat::HostAuthError> {
+    use meerkat_providers::auth_oauth::bind_loopback_callback;
+
+    let binding = bind_loopback_callback(meerkat::MCP_OAUTH_CALLBACK_PATH).await?;
+    let start = match service
+        .mcp_login_start(target, &binding.redirect_url, www_authenticate)
+        .await
+    {
+        Ok(start) => start,
+        Err(error) => {
+            let _ = binding.cancel().await;
+            return Err(error);
+        }
+    };
+    let callback = binding.expect_state(start.state.clone());
+    eprintln!(
+        "Authorize MCP server '{}' in your browser. Waiting for the callback...",
+        target.server_name()
+    );
+    if webbrowser::open(&start.authorize_url).is_err() {
+        if show_url_fallback {
+            eprintln!("Open this URL to continue:\n  {}", start.authorize_url);
+        } else {
+            let _ = callback.cancel().await;
+            let _ = service.mcp_login_cancel(target, &start);
+            return Err(meerkat::McpOAuthError::HumanAuthorizationRequired {
+                server_name: target.server_name().to_owned(),
+            }
+            .into());
+        }
+    }
+    let outcome = match callback.wait(meerkat::MCP_INTERACTIVE_LOGIN_TIMEOUT).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = service.mcp_login_cancel(target, &start);
+            return Err(error.into());
+        }
+    };
+    service
+        .mcp_login_complete(
+            target,
+            meerkat::McpOAuthCallback {
+                redirect_uri: start.redirect_uri.clone(),
+                state: outcome.state,
+                code: outcome.code,
+                client_id: start.client_id.clone(),
+                resource_metadata_url: Some(start.resource_metadata_url.clone()),
+            },
+        )
+        .await
 }
 
-/// Mint a certified `AuthMachine` lease handle for the `mcp-oauth` realm.
-///
-/// `meerkat-auth-core` sits below `meerkat-runtime` in the dep graph, so the
-/// MCP-OAuth authority cannot mint its own generated lease — the CLI (which
-/// owns the runtime) injects one, exactly as the provider-auth path does via
-/// `new_cli_auth_lease`. The lease realm is independent of the LLM provider
-/// auth bindings.
 #[cfg(feature = "mcp")]
-fn new_cli_mcp_oauth_auth_lease() -> anyhow::Result<meerkat_core::handles::GeneratedAuthLeaseHandle>
-{
-    let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
-    meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
-        auth_lease,
-    )
-    .map_err(|reason| anyhow::anyhow!("MCP-OAuth auth lease certification failed: {reason}"))
-}
-
-#[cfg(feature = "mcp")]
-fn open_mcp_oauth_authority(
-    mode: CliMcpAuthMode,
-) -> anyhow::Result<meerkat_auth_core::McpOAuthAuthority> {
+fn open_cli_mcp_host_auth_service(
+    scope: &RuntimeScope,
+) -> anyhow::Result<meerkat::HostAuthService> {
     let persistence = meerkat_providers::auth_store::TokenStoreBackend::default_auto()
         .map_err(|error| anyhow::anyhow!("Cannot open MCP OAuth TokenStore: {error}"))?
         .open_with_refresh_authority()
         .map_err(|error| anyhow::anyhow!("Cannot open MCP OAuth TokenStore: {error}"))?;
-    let browser: Arc<dyn meerkat_auth_core::BrowserOpener> = Arc::new(CliMcpBrowserOpener { mode });
-    let auth_lease = new_cli_mcp_oauth_auth_lease()?;
-    Ok(meerkat_auth_core::McpOAuthAuthority::new(
+    Ok(meerkat::HostAuthService::new(
         persistence,
-        browser,
-        auth_lease,
+        scope.provider_auth_authority.clone(),
     ))
+}
+
+#[cfg(feature = "mcp")]
+fn open_mcp_auth_resolver(
+    scope: &RuntimeScope,
+    mode: CliMcpAuthMode,
+) -> anyhow::Result<Option<Arc<dyn meerkat_mcp::McpAuthResolver>>> {
+    let service = open_cli_mcp_host_auth_service(scope)?;
+    let authority = service.mcp_oauth_authority()?;
+    Ok(Some(Arc::new(CliMcpHostAuthResolver {
+        service,
+        authority,
+        mode,
+    })))
 }
 
 #[cfg(feature = "mcp")]
@@ -9739,7 +9814,7 @@ async fn create_mcp_tools(
         .iter()
         .any(|server| mcp_server_may_need_oauth(&server.server));
     let mcp_auth_resolver = if has_oauth_candidate {
-        open_mcp_auth_resolver(mcp_auth)?
+        open_mcp_auth_resolver(scope, mcp_auth)?
     } else {
         None
     };
@@ -16045,15 +16120,22 @@ async fn login_mcp_server(
         );
     }
 
-    let authority = open_mcp_oauth_authority(CliMcpAuthMode::Interactive)?;
-    let target = meerkat_auth_core::McpServerIdentity::from_config(&server)?;
-    authority.validate_interactive_selection(&target)?;
+    let service = open_cli_mcp_host_auth_service(cli_scope)?;
+    let target = meerkat::McpServerIdentity::from_config(&server)?;
+    service
+        .mcp_oauth_authority()?
+        .validate_interactive_selection(&target)?;
     let www_authenticate = preflight_mcp_auth_challenge(&http.url).await;
-    authority
-        .interactive_login(&target, www_authenticate.as_deref())
+    let completed = cli_mcp_browser_login(&service, &target, www_authenticate.as_deref(), true)
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    println!("Logged in MCP server '{}' ({})", server.name, http.url);
+    match completed.account_id.as_deref() {
+        Some(account) => println!(
+            "Logged in MCP server '{}' ({}) as {account}",
+            server.name, http.url
+        ),
+        None => println!("Logged in MCP server '{}' ({})", server.name, http.url),
+    }
     Ok(())
 }
 

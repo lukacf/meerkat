@@ -225,6 +225,8 @@ fn host_auth_error_response(error: meerkat::HostAuthError) -> axum::response::Re
         | meerkat::HostAuthError::PersistenceUnavailable
         | meerkat::HostAuthError::Lifecycle(_)
         | meerkat::HostAuthError::StatusRehydrate(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        meerkat::HostAuthError::McpOAuth(mcp) if mcp.is_refusal() => StatusCode::BAD_REQUEST,
+        meerkat::HostAuthError::McpOAuth(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (
         status,

@@ -497,6 +497,33 @@ pub enum McpOAuthError {
     AuthLifecycle { server_name: String, reason: String },
 }
 
+impl McpOAuthError {
+    /// Whether this is a refusal of the caller's request (selection,
+    /// verification, flow-owner or credential-state refusals) rather than an
+    /// infrastructure or upstream failure. Surfaces map it to their
+    /// invalid-request class.
+    pub fn is_refusal(&self) -> bool {
+        match self {
+            Self::InvalidAccountSelection
+            | Self::AccountSelectionRequired
+            | Self::UnsupportedAccountSelection
+            | Self::Verification(_)
+            | Self::Flow(_)
+            | Self::MissingStoredToken { .. }
+            | Self::HumanAuthorizationRequired { .. }
+            | Self::ReauthRequired { .. }
+            | Self::TokenKey { .. } => true,
+            Self::DiscoveryFailed { .. }
+            | Self::RegistrationFailed { .. }
+            | Self::TokenExchangeFailed { .. }
+            | Self::RefreshFailed { .. }
+            | Self::TokenStore(_)
+            | Self::MissingStoredMetadata { .. }
+            | Self::AuthLifecycle { .. } => false,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct McpOAuthAuthority {
     http: Client,

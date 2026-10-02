@@ -96,6 +96,8 @@ fn host_auth_error_response(id: Option<RpcId>, error_value: meerkat::HostAuthErr
         | meerkat::HostAuthError::PersistenceUnavailable
         | meerkat::HostAuthError::Lifecycle(_)
         | meerkat::HostAuthError::StatusRehydrate(_) => error::INTERNAL_ERROR,
+        meerkat::HostAuthError::McpOAuth(mcp) if mcp.is_refusal() => error::INVALID_PARAMS,
+        meerkat::HostAuthError::McpOAuth(_) => error::INTERNAL_ERROR,
     };
     RpcResponse::error(id, code, error_value.to_string())
 }

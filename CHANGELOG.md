@@ -175,6 +175,23 @@ them.
 
 ### Fixed
 
+- A prompt admitted to a session while its executor attachment was still
+  being prepared could stay queued forever. The attachment read its queue to
+  decide whether to wake its runtime loop, then handed the session mutation
+  gate to the loop for startup recovery and reacquired it afterwards. An input
+  admitted in that gap found no wake sender, so nothing ran it. This hit
+  detached council completions delivered while a mob resume was reviving the
+  convener (#1482). The attachment now re-reads the queue once it holds the
+  gate again through commit.
+- The post-restore temporary council sweep no longer ends with an outcome
+  still owed when its first pass runs before the host registers the
+  convener's mob (MobKit inserts restored mob handles after constructing the
+  state). The sweep now also waits for the managed-mob set to change and
+  delivers once the mob is registered and running.
+- A repeated `council` call that arrived just as the original run finished no
+  longer joins the finished execution and reports `replayed: false`. The
+  owned task now releases its in-flight reservation before publishing the
+  sealed outcome, so a late caller replays the durable record.
 - A delivery whose caller left while it was parked behind a member's
   in-flight admission no longer runs as a ghost turn. The admission lane
   skips such a delivery by checking its reply channel, but `SubmitWork` ran

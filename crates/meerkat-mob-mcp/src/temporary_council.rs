@@ -1478,8 +1478,12 @@ impl TemporaryCouncilCoordinator {
                     supervise_panicked_council(&state, &council_id, &claim, &detail).await
                 }
             });
-            let _ = tx.send(Some(published));
+            // Release the reservation BEFORE publishing. The outcome is
+            // durably sealed by now, so a caller that arrives after a joined
+            // caller has its answer must replay the record rather than join
+            // this finished execution and be told it ran it.
             drop(guard);
+            let _ = tx.send(Some(published));
         });
 
         Ok(Admission::Join(rx))

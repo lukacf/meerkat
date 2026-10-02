@@ -1,0 +1,91 @@
+name: Linux release container probe (throwaway)
+
+# Throwaway: runs the GitHub-hosted Linux release binary job's environment
+# steps in its container (new step order) and builds the cmake-dependent
+# audiopus_sys plus rkat in release mode. No secrets, nothing published.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/linux-release-container-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe (${{ matrix.target }})
+    runs-on: ${{ matrix.runs-on }}
+    container: docker.io/library/buildpack-deps:bullseye
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs-on: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runs-on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Trust the workspace in the Linux release container
+        if: runner.os == 'Linux'
+        shell: bash
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+      - uses: ./.github/actions/setup-rust-ci
+
+      - name: Add release target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Prepare Linux release container
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake_version_pin="3.31.12"
+          case "$(uname -m)" in
+            x86_64)
+              cmake_arch="linux-x86_64"
+              cmake_sha256="0dc2e9a6860f06bf10bd8fadc03e35d9eeb4df46e33763a7e480e987758f385c"
+              ;;
+            aarch64)
+              cmake_arch="linux-aarch64"
+              cmake_sha256="83f8fd91d2038a56556e1400390fcfe42f79602940c494f6c6f1cdae7f9e7f40"
+              ;;
+            *)
+              echo "Linux release container: unsupported architecture $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          cmake_tarball="cmake-${cmake_version_pin}-${cmake_arch}.tar.gz"
+          curl -fsSL --retry 3 --retry-all-errors -o "/tmp/${cmake_tarball}" \
+            "https://github.com/Kitware/CMake/releases/download/v${cmake_version_pin}/${cmake_tarball}"
+          echo "${cmake_sha256}  /tmp/${cmake_tarball}" | sha256sum --check --strict
+          mkdir -p /opt/cmake
+          tar -xzf "/tmp/${cmake_tarball}" -C /opt/cmake --strip-components=1
+          echo "/opt/cmake/bin" >> "${GITHUB_PATH}"
+          cmake_version="$(/opt/cmake/bin/cmake --version | awk 'NR == 1 { print $3 }')"
+          case "${cmake_version}" in
+            3.*) ;;
+            *)
+              echo "Linux release container requires CMake 3.x, found ${cmake_version}" >&2
+              exit 1
+              ;;
+          esac
+          echo "Linux release container: cmake ${cmake_version} from Kitware tarball"
+
+      - name: Toolchain check and release build (rkat, two jobs)
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: target
+        run: |
+          set -euo pipefail
+          expected_rust="$(awk -F '"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)"
+          active_rust="$(rustc --version | awk '{ print $2 }')"
+          echo "expected ${expected_rust} active ${active_rust}"
+          [[ "${active_rust}" == "${expected_rust}" ]]
+          export CARGO_BUILD_JOBS=2
+          cargo build --locked -p rkat --release --target ${{ matrix.target }}
+          ls -la target/${{ matrix.target }}/release/rkat

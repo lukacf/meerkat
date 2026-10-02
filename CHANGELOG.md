@@ -37,6 +37,11 @@ them.
 
 ### Breaking
 
+- `meerkat_mob_mcp::detached_delivery::OwnerRevivalDeferral::LifecycleOperationPending`
+  gains `member: meerkat_mob::AgentIdentity`, the member whose
+  explicit-resume work defers the revival, so the wait can observe that
+  operation's own completion.
+
 - `meerkat_runtime::EphemeralRuntimeDriver` is no longer `UnwindSafe` or
   `RefUnwindSafe`: it now holds the runtime admission signal added with the
   typed admission wait (#1431). Callers that relied on these auto traits (for
@@ -126,6 +131,10 @@ them.
   literal). It is a failure bound on the provider: every other settlement
   path (channel close, failed playback waiters, pump terminal) resolves it
   through a typed signal.
+- `meerkat_mob::MobHandle::explicit_resume_member_work_settled`, a
+  level-triggered wait for a member's explicit-resume lifecycle operation
+  (the operation a `LifecycleOperationPending { "explicit_resume member ..." }`
+  names) to end.
 
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
@@ -225,6 +234,13 @@ them.
   one, the temporary council's deadline waits re-arm when the coordinator
   clock offset changes, driven by its setter's notification. Without an
   offset change (production) each wait is the same single timer as before.
+- A detached completion whose owner member is still being revived by the
+  mob's resume no longer waits on an exponential timer (100 ms doubling to
+  5 s) before retrying delivery (#1495). It now waits for that member's
+  explicit-resume work to leave the actor-published machine state, and
+  retries the moment it does. This covers the live delivery
+  (`deliver_detached_completion_to_member_when_revivable`) and the
+  post-restore council and fork re-link sweeps.
 
 - The machine TLA generator parenthesizes a field's pending value when a
   later expression in the same update block reads it. A conditionally

@@ -7504,6 +7504,32 @@ impl MobHandle {
         }
     }
 
+    /// Wait until no explicit-resume lifecycle operation is pending for
+    /// `identity`: the operation a `MobError::LifecycleOperationPending`
+    /// naming `explicit_resume member <identity>` refers to (the mob's resume
+    /// still reviving that member). `true` once none is pending, at once when
+    /// none is pending now; `false` when the actor is gone first.
+    ///
+    /// Level-triggered on the actor-published machine state, which carries
+    /// the per-member explicit-resume work and changes when it ends, so a
+    /// waiter subscribed after the operation ended cannot miss it.
+    pub async fn explicit_resume_member_work_settled(&self, identity: &AgentIdentity) -> bool {
+        let identity = mob_dsl::AgentIdentity::from_domain(identity);
+        let mut state = self.machine_state_watch_rx.clone();
+        loop {
+            if !state
+                .borrow_and_update()
+                .explicit_resume_member_work
+                .contains_key(&identity)
+            {
+                return true;
+            }
+            if state.changed().await.is_err() {
+                return false;
+            }
+        }
+    }
+
     /// Snapshot of the current roster.
     pub async fn roster(&self) -> Roster {
         match self

@@ -109,7 +109,7 @@ pub struct CouncilRelinkReport {
 pub(crate) async fn restore_sweep(state: Weak<MobMcpState>) {
     // Latest observed lease expiry and renewal count per held record.
     let mut observed: BTreeMap<TemporaryCouncilId, (DateTime<Utc>, u32)> = BTreeMap::new();
-    for pass in 0..MAX_SWEEP_PASSES {
+    for _ in 0..MAX_SWEEP_PASSES {
         let Some(strong) = state.upgrade() else {
             return;
         };
@@ -220,7 +220,7 @@ pub(crate) async fn restore_sweep(state: Weak<MobMcpState>) {
             _ = mob_set.changed(), if awaiting_mob_set => {}
             // An awaited convener may be revivable, or none can be any
             // more (the next pass then settles them as gone).
-            _ = any_convener_revivable(awaited_conveners, pass) => {}
+            _ = any_convener_revivable(awaited_conveners) => {}
         }
     }
     tracing::warn!(
@@ -234,15 +234,13 @@ pub(crate) async fn restore_sweep(state: Weak<MobMcpState>) {
 /// destroyed or lost its actor), and never when `conveners` is empty.
 async fn any_convener_revivable(
     conveners: Vec<(meerkat_mob::MobHandle, OwnerRevivalDeferral)>,
-    attempt: usize,
 ) -> bool {
     if conveners.is_empty() {
         return std::future::pending().await;
     }
-    let attempt = u32::try_from(attempt).unwrap_or(u32::MAX);
     let mut waits: futures::stream::FuturesUnordered<_> = conveners
         .into_iter()
-        .map(|(handle, reason)| async move { reason.cleared(&handle, attempt).await })
+        .map(|(handle, reason)| async move { reason.cleared(&handle).await })
         .collect();
     use futures::StreamExt as _;
     while let Some(revivable) = waits.next().await {

@@ -676,11 +676,11 @@ mod tests {
                 13 => changed.represented_subject = Some(principal("represented")),
                 14 => {
                     changed.controller_grant_lineage =
-                        fixture_lineage_mut(&mut candidate()).to_vec()
+                        fixture_lineage_mut(&mut candidate()).to_vec();
                 }
                 15 => {
                     changed.controller_ceiling.actions =
-                        crate::constraints::ExactRestriction::exact([])
+                        crate::constraints::ExactRestriction::exact([]);
                 }
                 _ => changed.controller_model = Some(controller_selection("controller")),
             }

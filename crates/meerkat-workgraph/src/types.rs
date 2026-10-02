@@ -13,6 +13,7 @@ use crate::WorkGraphError;
 pub use crate::machines::work_attention_lifecycle::WorkAttentionLifecycleMachineState as WorkAttentionMachineState;
 pub use crate::machines::work_execution_lifecycle::WorkExecutionEvidenceKind;
 pub use crate::machines::work_execution_lifecycle::WorkExecutionLifecycleMachineState as WorkExecutionMachineState;
+pub use crate::machines::work_item_admission::WorkItemAdmissionMachineState as WorkItemAdmissionState;
 use crate::machines::workgraph_lifecycle as wg_dsl;
 pub use crate::machines::workgraph_lifecycle::WorkGraphLifecycleMachineState as WorkGraphMachineState;
 

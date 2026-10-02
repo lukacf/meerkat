@@ -108,6 +108,19 @@ them.
     Binding mob callback tools to the creating connection is tracked in #1459.
   - Stdio and embedded servers that pre-create the channel with
     `SessionRuntime::init_callback_channel` are unchanged.
+- Keyed WorkGraph admission (#1496, see Added) adds the create identity to the
+  generated `WorkGraphLifecycleMachine` vocabulary. Struct literals and
+  exhaustive matches must handle the new members:
+  - `meerkat_machine_schema` `WorkGraphLifecycleInput::CreateOpen` and
+    `WorkGraphLifecycleInput::CreateBlocked` gain
+    `admission_key: Option<WorkAdmissionKeyRef>` and
+    `admission_request_digest: Option<WorkAdmissionDigestRef>` (`None` for an
+    unkeyed create); the matching `meerkat_machine_kernels` `CreateOpen` and
+    `CreateBlocked` input structs gain the same fields.
+  - `WorkGraphLifecycleEffect::Created` changes from a unit variant to
+    `Created { admission_key, admission_request_digest }`; the
+    `meerkat_machine_kernels` `Created` effect struct gains `admission_key` and
+    `admission_request_digest`.
 - Typed tool choice (see Added). Struct literals and exhaustive matches must
   handle the new members:
   - `meerkat_llm_core::LlmRequest` gains `tool_choice: ToolChoice` (serde
@@ -287,13 +300,18 @@ them.
   - The same key with a different request is a typed conflict and writes
     nothing.
   - The owner computes a domain-separated SHA-256 digest of the exact request
-    (with scope resolved) and records key and digest in the item's machine
-    state. `WorkGraphLifecycleMachine` decides replay versus conflict
-    (`ClassifyAdmissionReplay`).
+    (with scope resolved). The new `WorkItemAdmissionMachine` owns the item's
+    admission identity and decides replay versus conflict
+    (`ClassifyAdmissionReplay`). It is bound to `WorkGraphLifecycleMachine` in
+    the `workgraph_attention_bundle` composition: every lifecycle `Created`
+    routes to the admission `Bind`, and `Bind` originates only from that
+    route, so no keyed item exists without its admission and no admission
+    without its item. The lifecycle machine's state space is unchanged.
+  - Item JSON is unchanged; existing items load as unkeyed.
   - SQLite indexes the key in the new `workgraph_item_admissions` table
     (workgraph schema version 4; version 3 files migrate on open), in the
-    same transaction as the item. Concurrent admissions of one key create
-    exactly once.
+    same transaction as the item and its event: a failure between the writes
+    leaves none of them. Concurrent admissions of one key create exactly once.
   - New store capability `WorkGraphStore::insert_item_admitted` returns
     `WorkItemAdmissionInsert::{Inserted, Existing}`. It defaults to
     unsupported; the memory and SQLite stores implement it.

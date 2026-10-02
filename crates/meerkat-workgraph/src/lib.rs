@@ -86,9 +86,9 @@ pub use types::{
     WorkExecutionBindingId, WorkExecutionEvidenceKind, WorkExecutionEvidenceProjection,
     WorkExecutionMachineState, WorkExecutionTarget, WorkGraphEvent, WorkGraphEventKind,
     WorkGraphEventsResponse, WorkGraphFact, WorkGraphIdParams, WorkGraphItemsResponse,
-    WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter,
-    WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority,
-    WorkStatus, mob_agent_owner_id_parts,
+    WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem,
+    WorkItemAdmissionState, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwner,
+    WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus, mob_agent_owner_id_parts,
 };
 
 pub const WORKGRAPH_CAPABILITY_DISABLED_DESCRIPTION: &str =
@@ -153,6 +153,12 @@ pub mod machine_schema_exports {
     pub fn workgraph_lifecycle_schema() -> meerkat_machine_schema::MachineSchema {
         meerkat_machine_schema::catalog::dsl::workgraph_lifecycle_schema_metadata().attach_to(
             crate::machines::workgraph_lifecycle::WorkGraphLifecycleMachineState::schema(),
+        )
+    }
+
+    pub fn work_item_admission_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::work_item_admission_schema_metadata().attach_to(
+            crate::machines::work_item_admission::WorkItemAdmissionMachineState::schema(),
         )
     }
 

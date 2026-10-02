@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::machines::workgraph_lifecycle as wg_dsl;
+use crate::machines::work_item_admission::{WorkAdmissionReplayKind, WorkItemAdmissionPhase};
 use crate::types::{ClaimWorkItemRequest, WorkItemFilter, WorkOwner, WorkOwnerKey, WorkOwnerKind};
 use crate::{
     CloseWorkItemRequest, CreateWorkItemRequest, ExternalWorkRef, MemoryWorkGraphStore,
@@ -79,7 +79,7 @@ fn admission_key_must_be_canonical() {
 }
 
 #[tokio::test]
-async fn new_key_creates_and_records_machine_owned_admission_identity() {
+async fn new_key_creates_once_without_touching_the_lifecycle_state() {
     let store = Arc::new(MemoryWorkGraphStore::new());
     let service = WorkGraphService::new(store.clone());
 
@@ -91,23 +91,49 @@ async fn new_key_creates_and_records_machine_owned_admission_identity() {
     );
 
     assert_eq!(item.status, WorkStatus::Open);
+    let unkeyed = service
+        .create(request("setup"))
+        .await
+        .expect("plain create");
     assert_eq!(
-        item.machine_state
-            .admission_key
-            .as_ref()
-            .map(|k| k.0.as_str()),
+        item.machine_state, unkeyed.machine_state,
+        "admission identity is not lifecycle state"
+    );
+    assert_eq!(item_count(&service).await, 2);
+    assert_eq!(event_count(store.as_ref()).await, 2);
+}
+
+#[test]
+fn created_route_binds_admitted_or_unkeyed_identity() {
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let (_, _, keyed) = WorkGraphMachine::create_item_with_admission(
+        request("setup"),
+        "default".into(),
+        WorkNamespace::default(),
+        chrono::Utc::now(),
+        Some((&key("setup-1"), digest.as_str())),
+    )
+    .expect("keyed create");
+    assert_eq!(keyed.lifecycle_phase, WorkItemAdmissionPhase::Admitted);
+    assert_eq!(
+        keyed.admission_key.as_ref().map(|k| k.0.as_str()),
         Some("setup-1")
     );
-    let digest = item
-        .machine_state
-        .admission_request_digest
-        .as_ref()
-        .expect("digest recorded")
-        .0
-        .clone();
-    assert!(digest.starts_with("sha256:") && digest.len() == "sha256:".len() + 64);
-    assert_eq!(item_count(&service).await, 1);
-    assert_eq!(event_count(store.as_ref()).await, 1);
+    assert_eq!(
+        keyed.request_digest.as_ref().map(|d| d.0.as_str()),
+        Some(digest.as_str())
+    );
+
+    let (_, _, unkeyed) = WorkGraphMachine::create_item_with_admission(
+        request("setup"),
+        "default".into(),
+        WorkNamespace::default(),
+        chrono::Utc::now(),
+        None,
+    )
+    .expect("unkeyed create");
+    assert_eq!(unkeyed.lifecycle_phase, WorkItemAdmissionPhase::Unkeyed);
+    assert!(unkeyed.admission_key.is_none() && unkeyed.request_digest.is_none());
 }
 
 #[tokio::test]
@@ -275,8 +301,6 @@ async fn unkeyed_items_and_keyed_items_coexist() {
         .create(request("setup"))
         .await
         .expect("plain create");
-    assert!(plain.machine_state.admission_key.is_none());
-    assert!(plain.machine_state.admission_request_digest.is_none());
     let keyed = created(
         service
             .create_idempotent(key("setup-1"), request("setup"))
@@ -284,20 +308,24 @@ async fn unkeyed_items_and_keyed_items_coexist() {
             .expect("keyed create"),
     );
     assert_ne!(plain.id, keyed.id);
-    // An ordinary create is never an admission replay of the plain item.
+    // An unkeyed item is never an admission replay or conflict.
+    let (_, _, unkeyed) = WorkGraphMachine::create_item_with_admission(
+        request("setup"),
+        "default".into(),
+        WorkNamespace::default(),
+        chrono::Utc::now(),
+        None,
+    )
+    .expect("unkeyed create");
     assert_eq!(
         WorkGraphMachine::classify_admission_replay(
-            &plain,
+            &plain.id,
+            &unkeyed,
             &key("setup-1"),
-            keyed
-                .machine_state
-                .admission_request_digest
-                .as_ref()
-                .map(|digest| digest.0.as_str())
-                .expect("digest"),
+            "sha256:digest",
         )
         .expect("classify"),
-        wg_dsl::WorkAdmissionReplayKind::KeyMismatch
+        WorkAdmissionReplayKind::KeyMismatch
     );
 }
 
@@ -408,6 +436,72 @@ mod sqlite {
         assert!(replay_ids.iter().all(|id| id == &created_ids[0]));
         let (_store, service) = open_service(&path);
         assert_eq!(item_count(&service).await, 1);
+    }
+
+    fn row_count(path: &std::path::Path, table: &str) -> i64 {
+        let conn =
+            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("inspect");
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .expect("count")
+    }
+
+    /// A crash between writing the item and writing its admission identity
+    /// (simulated by aborting either insert inside the store transaction)
+    /// leaves neither: no item without its identity, no identity without its
+    /// item, no event. After the fault clears, the same admission succeeds.
+    #[tokio::test]
+    async fn crash_between_item_and_identity_writes_leaves_neither() {
+        for (table, trigger) in [
+            ("workgraph_item_admissions", "abort_identity_insert"),
+            ("workgraph_items", "abort_item_insert"),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("workgraph.sqlite3");
+            drop(open_service(&path));
+            rusqlite::Connection::open(&path)
+                .expect("fault injector")
+                .execute_batch(&format!(
+                    "CREATE TRIGGER {trigger} BEFORE INSERT ON {table}
+                     BEGIN SELECT RAISE(ABORT, 'injected crash'); END;"
+                ))
+                .expect("install fault");
+
+            let (_store, service) = open_service(&path);
+            let failed = service
+                .create_idempotent(key("setup-1"), request("setup"))
+                .await;
+            assert!(
+                failed.is_err(),
+                "the injected fault on {table} must fail the admission"
+            );
+            assert_eq!(
+                row_count(&path, "workgraph_items"),
+                0,
+                "no item without identity"
+            );
+            assert_eq!(
+                row_count(&path, "workgraph_item_admissions"),
+                0,
+                "no identity without item"
+            );
+            assert_eq!(row_count(&path, "workgraph_events"), 0, "no Created event");
+
+            rusqlite::Connection::open(&path)
+                .expect("fault remover")
+                .execute_batch(&format!("DROP TRIGGER {trigger};"))
+                .expect("remove fault");
+            created(
+                service
+                    .create_idempotent(key("setup-1"), request("setup"))
+                    .await
+                    .expect("admission after the fault clears"),
+            );
+            assert_eq!(row_count(&path, "workgraph_items"), 1);
+            assert_eq!(row_count(&path, "workgraph_item_admissions"), 1);
+        }
     }
 
     #[tokio::test]

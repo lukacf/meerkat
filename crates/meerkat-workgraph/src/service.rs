@@ -8,6 +8,7 @@ use meerkat_core::service::WorkGraphNamespaceGrant;
 use serde_json::json;
 
 use crate::machine::{WorkAttentionMachine, WorkGraphMachine, completion_policy_name};
+use crate::machines::work_item_admission as admission_dsl;
 use crate::machines::workgraph_lifecycle as wg_dsl;
 use crate::store::{WorkGraphEventFilter, WorkGraphStore, WorkItemAdmissionInsert};
 use crate::types::{
@@ -246,8 +247,9 @@ impl WorkGraphService {
     ///
     /// Within the resolved realm and namespace the key admits one item. The
     /// owner computes a canonical digest of the exact request (with scope
-    /// resolved), records key and digest in the item's machine state, and
-    /// indexes the key durably in the same store transaction as the item.
+    /// resolved), binds key and digest in `WorkItemAdmissionMachine` (the
+    /// lifecycle `Created` route), and records that identity durably in the
+    /// same store transaction as the item.
     ///
     /// - A new key creates the item: [`WorkAdmissionOutcome::Created`].
     /// - The same key with an identical request returns the existing item
@@ -255,7 +257,7 @@ impl WorkGraphService {
     /// - The same key with a different request writes nothing:
     ///   [`WorkAdmissionOutcome::Conflict`].
     ///
-    /// Replay versus conflict is decided by `WorkGraphLifecycleMachine` over
+    /// Replay versus conflict is decided by `WorkItemAdmissionMachine` over
     /// the existing item's recorded admission identity, not by the store or
     /// this shell. The key is admission identity only; `external_refs` remain
     /// provenance and never participate in deduplication.
@@ -283,38 +285,44 @@ impl WorkGraphService {
         scoped.realm_id = Some(realm_id.clone());
         scoped.namespace = Some(namespace.clone());
         let request_digest = item_admission_request_digest(&scoped)?;
-        let (item, event) = WorkGraphMachine::create_item_with_admission(
+        let (item, event, admission) = WorkGraphMachine::create_item_with_admission(
             scoped,
             realm_id,
             namespace,
             now,
             Some((&admission_key, request_digest.as_str())),
         )?;
-        match self.store.insert_item_admitted(item, event).await? {
+        match self
+            .store
+            .insert_item_admitted(item, event, admission)
+            .await?
+        {
             WorkItemAdmissionInsert::Inserted(item) => Ok(WorkAdmissionOutcome::Created(item)),
-            WorkItemAdmissionInsert::Existing(existing) => {
-                match WorkGraphMachine::classify_admission_replay(
-                    &existing,
-                    &admission_key,
-                    &request_digest,
-                )? {
-                    wg_dsl::WorkAdmissionReplayKind::Replayed => {
-                        Ok(WorkAdmissionOutcome::Replayed(existing))
-                    }
-                    wg_dsl::WorkAdmissionReplayKind::Conflict => {
-                        Ok(WorkAdmissionOutcome::Conflict {
-                            admission_key,
-                            existing_item_id: existing.id,
-                        })
-                    }
-                    wg_dsl::WorkAdmissionReplayKind::KeyMismatch => {
-                        Err(WorkGraphError::Store(format!(
-                            "work item admission index returned item {} whose machine-owned admission key differs from `{admission_key}`",
-                            existing.id
-                        )))
-                    }
+            WorkItemAdmissionInsert::Existing {
+                item: existing,
+                admission: existing_admission,
+            } => match WorkGraphMachine::classify_admission_replay(
+                &existing.id,
+                &existing_admission,
+                &admission_key,
+                &request_digest,
+            )? {
+                admission_dsl::WorkAdmissionReplayKind::Replayed => {
+                    Ok(WorkAdmissionOutcome::Replayed(existing))
                 }
-            }
+                admission_dsl::WorkAdmissionReplayKind::Conflict => {
+                    Ok(WorkAdmissionOutcome::Conflict {
+                        admission_key,
+                        existing_item_id: existing.id,
+                    })
+                }
+                admission_dsl::WorkAdmissionReplayKind::KeyMismatch => {
+                    Err(WorkGraphError::Store(format!(
+                        "work item admission index returned item {} whose recorded admission key differs from `{admission_key}`",
+                        existing.id
+                    )))
+                }
+            },
         }
     }
 

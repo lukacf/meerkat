@@ -249,60 +249,6 @@ impl std::fmt::Display for WorkAdmissionKeyRef {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub enum WorkAdmissionReplayKind {
-    #[default]
-    #[serde(rename = "KeyMismatch")]
-    KeyMismatch,
-    #[serde(rename = "Replayed")]
-    Replayed,
-    #[serde(rename = "Conflict")]
-    Conflict,
-}
-impl WorkAdmissionReplayKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::KeyMismatch => "KeyMismatch",
-            Self::Replayed => "Replayed",
-            Self::Conflict => "Conflict",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for WorkAdmissionReplayKind {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "KeyMismatch" => Ok(Self::KeyMismatch),
-            "Replayed" => Ok(Self::Replayed),
-            "Conflict" => Ok(Self::Conflict),
-            other => Err(format!("invalid WorkAdmissionReplayKind value `{other}`")),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for WorkAdmissionReplayKind {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for WorkAdmissionReplayKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
 pub enum WorkCloseStatusAdmissionKind {
     #[default]
     #[serde(rename = "DeniedNonTerminal")]
@@ -1298,8 +1244,6 @@ pub struct State {
     pub reviewer_confirmation_owner_keys: std::collections::BTreeSet<WorkOwnerKey>,
     pub failed_child_join_policy: FailedChildJoinPolicy,
     pub cancelled_child_join_policy: CancelledChildJoinPolicy,
-    pub admission_key: Option<WorkAdmissionKeyRef>,
-    pub admission_request_digest: Option<WorkAdmissionDigestRef>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -1468,11 +1412,6 @@ pub mod inputs {
         pub now_utc_ms: u64,
         pub child_join_satisfied: bool,
     }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ClassifyAdmissionReplay {
-        pub requested_admission_key: Option<WorkAdmissionKeyRef>,
-        pub requested_request_digest: Option<WorkAdmissionDigestRef>,
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1503,7 +1442,6 @@ pub enum Input {
     ClassifyCompletionPolicyMutationAdmission(inputs::ClassifyCompletionPolicyMutationAdmission),
     ClassifyConfirmationAdmission(inputs::ClassifyConfirmationAdmission),
     ClassifyReadiness(inputs::ClassifyReadiness),
-    ClassifyAdmissionReplay(inputs::ClassifyAdmissionReplay),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -1540,7 +1478,6 @@ impl Input {
             }
             Self::ClassifyConfirmationAdmission(_) => InputKind::ClassifyConfirmationAdmission,
             Self::ClassifyReadiness(_) => InputKind::ClassifyReadiness,
-            Self::ClassifyAdmissionReplay(_) => InputKind::ClassifyAdmissionReplay,
         }
     }
 }
@@ -1572,14 +1509,16 @@ pub enum InputKind {
     ClassifyCompletionPolicyMutationAdmission,
     ClassifyConfirmationAdmission,
     ClassifyReadiness,
-    ClassifyAdmissionReplay,
 }
 
 pub mod effects {
     #[allow(unused_imports)]
     use super::*;
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct Created {}
+    pub struct Created {
+        pub admission_key: Option<WorkAdmissionKeyRef>,
+        pub admission_request_digest: Option<WorkAdmissionDigestRef>,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Updated {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1652,10 +1591,6 @@ pub mod effects {
     pub struct ChildJoinClassified {
         pub disposition: ChildJoinDisposition,
     }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct AdmissionReplayClassified {
-        pub admission: WorkAdmissionReplayKind,
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1684,7 +1619,6 @@ pub enum Effect {
     ConfirmationAdmissionClassified(effects::ConfirmationAdmissionClassified),
     WorkItemReadinessClassified(effects::WorkItemReadinessClassified),
     ChildJoinClassified(effects::ChildJoinClassified),
-    AdmissionReplayClassified(effects::AdmissionReplayClassified),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -1710,7 +1644,6 @@ pub enum EffectKind {
     ConfirmationAdmissionClassified,
     WorkItemReadinessClassified,
     ChildJoinClassified,
-    AdmissionReplayClassified,
 }
 
 #[allow(non_camel_case_types)]
@@ -2006,27 +1939,6 @@ pub enum TransitionId {
     ClassifyCompletionPolicyMutationAdmissionChangedCompleted,
     ClassifyCompletionPolicyMutationAdmissionChangedCancelled,
     ClassifyCompletionPolicyMutationAdmissionChangedFailed,
-    ClassifyAdmissionReplayExactAbsent,
-    ClassifyAdmissionReplayExactOpen,
-    ClassifyAdmissionReplayExactInProgress,
-    ClassifyAdmissionReplayExactBlocked,
-    ClassifyAdmissionReplayExactCompleted,
-    ClassifyAdmissionReplayExactCancelled,
-    ClassifyAdmissionReplayExactFailed,
-    ClassifyAdmissionReplayConflictAbsent,
-    ClassifyAdmissionReplayConflictOpen,
-    ClassifyAdmissionReplayConflictInProgress,
-    ClassifyAdmissionReplayConflictBlocked,
-    ClassifyAdmissionReplayConflictCompleted,
-    ClassifyAdmissionReplayConflictCancelled,
-    ClassifyAdmissionReplayConflictFailed,
-    ClassifyAdmissionReplayKeyMismatchAbsent,
-    ClassifyAdmissionReplayKeyMismatchOpen,
-    ClassifyAdmissionReplayKeyMismatchInProgress,
-    ClassifyAdmissionReplayKeyMismatchBlocked,
-    ClassifyAdmissionReplayKeyMismatchCompleted,
-    ClassifyAdmissionReplayKeyMismatchCancelled,
-    ClassifyAdmissionReplayKeyMismatchFailed,
     ClassifyConfirmationAdmissionPrincipalRequiredAbsent,
     ClassifyConfirmationAdmissionPrincipalRequiredOpen,
     ClassifyConfirmationAdmissionPrincipalRequiredInProgress,
@@ -2164,7 +2076,5 @@ pub fn initial_state() -> State {
         reviewer_confirmation_owner_keys: Default::default(),
         failed_child_join_policy: FailedChildJoinPolicy::RequireSuccess,
         cancelled_child_join_policy: CancelledChildJoinPolicy::RequireSuccess,
-        admission_key: None,
-        admission_request_digest: None,
     }
 }

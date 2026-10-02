@@ -48,6 +48,7 @@ pub mod session_turn_admission;
 pub mod temporary_council_lifecycle;
 pub mod work_attention_lifecycle;
 pub mod work_execution_lifecycle;
+pub mod work_item_admission;
 pub mod workgraph_lifecycle;
 
 use crate::identity::{EffectVariantId, InputVariantId, SignalVariantId, TransitionId};
@@ -189,6 +190,8 @@ pub const SESSION_PERSISTENCE_VERSION_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
     "generated::session_persistence_version_authority";
 pub const WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-workgraph";
 pub const WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::workgraph_lifecycle";
+pub const WORK_ITEM_ADMISSION_PRODUCTION_RUST_CRATE: &str = "meerkat-workgraph";
+pub const WORK_ITEM_ADMISSION_PRODUCTION_RUST_MODULE: &str = "machines::work_item_admission";
 pub const WORK_ATTENTION_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-workgraph";
 pub const WORK_ATTENTION_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::work_attention_lifecycle";
@@ -4702,6 +4705,37 @@ pub fn dsl_workgraph_lifecycle_machine() -> MachineSchema {
         .attach_to(workgraph_lifecycle::WorkGraphLifecycleMachineState::schema())
 }
 
+pub fn dsl_work_item_admission_machine() -> MachineSchema {
+    work_item_admission_schema_metadata()
+        .attach_to(work_item_admission::WorkItemAdmissionMachineState::schema())
+}
+
+pub fn dsl_work_item_admission_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_work_item_admission_machine(),
+        WORK_ITEM_ADMISSION_PRODUCTION_RUST_CRATE,
+        WORK_ITEM_ADMISSION_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn work_item_admission_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "WorkItemAdmissionPhase",
+                &["Absent", "Unkeyed", "Admitted"],
+            ),
+            NamedTypeBinding::string("WorkAdmissionKeyRef"),
+            NamedTypeBinding::string("WorkAdmissionDigestRef"),
+            NamedTypeBinding::string_enum(
+                "WorkAdmissionReplayKind",
+                &["KeyMismatch", "Replayed", "Conflict"],
+            ),
+        ],
+        vec![],
+    )
+}
+
 pub fn dsl_work_attention_lifecycle_machine() -> MachineSchema {
     work_attention_lifecycle_schema_metadata()
         .with_state_bound_input_field(
@@ -5051,10 +5085,6 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "WorkCreateStatusAdmissionKind",
                 &["Denied", "AdmittedOpen", "AdmittedBlocked"],
-            ),
-            NamedTypeBinding::string_enum(
-                "WorkAdmissionReplayKind",
-                &["KeyMismatch", "Replayed", "Conflict"],
             ),
             NamedTypeBinding::string_enum(
                 "WorkCreateCompletionPolicyAdmissionKind",

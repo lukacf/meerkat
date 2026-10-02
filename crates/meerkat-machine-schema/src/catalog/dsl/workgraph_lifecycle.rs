@@ -61,9 +61,9 @@ impl<T: Into<String>> From<T> for WorkDependencyPathKey {
     }
 }
 
-/// Caller-owned exact admission key recorded on a keyed work item. The
-/// WorkGraph store indexes it per realm/namespace; this machine owns the
-/// replay-versus-conflict verdict over the recorded value.
+/// Caller-owned exact admission key of a keyed work item create. The
+/// lifecycle machine carries it through `Created` to `WorkItemAdmissionMachine`,
+/// which records it and owns the replay-versus-conflict verdict.
 #[derive(
     Debug,
     Clone,
@@ -370,34 +370,6 @@ pub enum WorkCreateStatusAdmissionKind {
     AdmittedBlocked,
 }
 
-/// Machine-owned verdict for a keyed create that found an existing item under
-/// the same realm/namespace admission key. The shell extracts the requested
-/// key and the owner-computed request digest, drives `ClassifyAdmissionReplay`
-/// over the existing item's recovered state, and mirrors the verdict:
-/// `Replayed` -> return the existing item unchanged, `Conflict` -> typed
-/// conflict carrying the existing item id, `KeyMismatch` -> the store index
-/// disagrees with machine-owned state; fail closed as a store error.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkAdmissionReplayKind {
-    #[default]
-    KeyMismatch,
-    Replayed,
-    Conflict,
-}
-
 /// Machine-owned admission verdict for the requested `completion_policy` of a
 /// newly created NON-GOAL work item. This machine — not the shell — owns the
 /// creation policy "non-goal work items must use the self-attest completion
@@ -641,10 +613,6 @@ machine! {
             reviewer_confirmation_owner_keys: Set<WorkOwnerKey>,
             failed_child_join_policy: Enum<FailedChildJoinPolicy>,
             cancelled_child_join_policy: Enum<CancelledChildJoinPolicy>,
-            // Exact keyed admission identity, fixed at creation. Both are
-            // present for a keyed create and both absent otherwise.
-            admission_key: Option<WorkAdmissionKeyRef>,
-            admission_request_digest: Option<WorkAdmissionDigestRef>,
         }
 
         init(Absent) {
@@ -671,8 +639,6 @@ machine! {
             reviewer_confirmation_owner_keys = EmptySet,
             failed_child_join_policy = FailedChildJoinPolicy::RequireSuccess,
             cancelled_child_join_policy = CancelledChildJoinPolicy::RequireSuccess,
-            admission_key = None,
-            admission_request_digest = None,
         }
 
         terminal [Completed, Cancelled, Failed]
@@ -698,6 +664,8 @@ machine! {
                 unresolved_blocker_count: u64,
                 failed_child_join_policy: Enum<FailedChildJoinPolicy>,
                 cancelled_child_join_policy: Enum<CancelledChildJoinPolicy>,
+                // Keyed admission identity of this create. Not lifecycle
+                // state: it rides `Created` to WorkItemAdmissionMachine.
                 admission_key: Option<WorkAdmissionKeyRef>,
                 admission_request_digest: Option<WorkAdmissionDigestRef>,
             },
@@ -711,6 +679,8 @@ machine! {
                 unresolved_blocker_count: u64,
                 failed_child_join_policy: Enum<FailedChildJoinPolicy>,
                 cancelled_child_join_policy: Enum<CancelledChildJoinPolicy>,
+                // Keyed admission identity of this create. Not lifecycle
+                // state: it rides `Created` to WorkItemAdmissionMachine.
                 admission_key: Option<WorkAdmissionKeyRef>,
                 admission_request_digest: Option<WorkAdmissionDigestRef>,
             },
@@ -877,24 +847,13 @@ machine! {
             // WorkItemReadinessClassified.ready, failing closed. Each transition
             // self-loops in its phase (classification never mutates state).
             ClassifyReadiness { now_utc_ms: u64, child_join_satisfied: bool },
-            // Keyed admission replay classification. The store returns an
-            // existing item when a keyed create finds its realm/namespace
-            // admission key already recorded; it never decides whether the
-            // replay is exact. The shell extracts the requested key and the
-            // owner-computed digest of the exact request as pure typed
-            // observations and drives this input over the EXISTING item's
-            // recovered state; this machine compares them against its own
-            // machine-owned admission identity and emits
-            // AdmissionReplayClassified. Phase-independent: a terminal item is
-            // still an exact historical replay, never a fresh admission.
-            ClassifyAdmissionReplay {
-                requested_admission_key: Option<WorkAdmissionKeyRef>,
-                requested_request_digest: Option<WorkAdmissionDigestRef>,
-            },
         }
 
         effect WorkGraphLifecycleEffect {
-            Created,
+            Created {
+                admission_key: Option<WorkAdmissionKeyRef>,
+                admission_request_digest: Option<WorkAdmissionDigestRef>,
+            },
             Updated,
             Claimed { owner_key: WorkOwnerKey },
             Released,
@@ -929,7 +888,6 @@ machine! {
             },
             WorkItemReadinessClassified { ready: bool },
             ChildJoinClassified { disposition: Enum<ChildJoinDisposition> },
-            AdmissionReplayClassified { admission: Enum<WorkAdmissionReplayKind> },
         }
 
         invariant absent_has_zero_revision {
@@ -957,15 +915,6 @@ machine! {
 
         invariant blocked_has_no_claim {
             self.lifecycle_phase != Phase::Blocked || self.claim_owner_key == None
-        }
-
-        invariant admission_identity_paired {
-            (self.admission_key == None && self.admission_request_digest == None)
-                || (self.admission_key != None && self.admission_request_digest != None)
-        }
-
-        invariant absent_has_no_admission_identity {
-            self.lifecycle_phase != Phase::Absent || self.admission_key == None
         }
 
         invariant terminal_has_no_claim {
@@ -1200,7 +1149,7 @@ machine! {
                 || self.completion_reviewer_quorum_threshold == None
         }
 
-        disposition Created => local seam NoOwnerRealization,
+        disposition Created => routed [WorkItemAdmissionMachine] seam NoOwnerRealization,
         disposition Updated => local seam NoOwnerRealization,
         disposition Claimed => local seam NoOwnerRealization,
         disposition Released => local seam NoOwnerRealization,
@@ -1222,7 +1171,6 @@ machine! {
         disposition ConfirmationAdmissionClassified => local seam SurfaceResultAlignment,
         disposition WorkItemReadinessClassified => local seam SurfaceResultAlignment,
         disposition ChildJoinClassified => local seam SurfaceResultAlignment,
-        disposition AdmissionReplayClassified => local seam SurfaceResultAlignment,
 
         transition CreateOpen {
             on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count, failed_child_join_policy, cancelled_child_join_policy, admission_key, admission_request_digest }
@@ -1245,11 +1193,12 @@ machine! {
                 self.completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold;
                 self.failed_child_join_policy = failed_child_join_policy;
                 self.cancelled_child_join_policy = cancelled_child_join_policy;
-                self.admission_key = admission_key;
-                self.admission_request_digest = admission_request_digest;
             }
             to Open
-            emit Created
+            emit Created {
+                admission_key: admission_key,
+                admission_request_digest: admission_request_digest
+            }
         }
 
         transition CreateBlocked {
@@ -1273,11 +1222,12 @@ machine! {
                 self.completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold;
                 self.failed_child_join_policy = failed_child_join_policy;
                 self.cancelled_child_join_policy = cancelled_child_join_policy;
-                self.admission_key = admission_key;
-                self.admission_request_digest = admission_request_digest;
             }
             to Blocked
-            emit Created
+            emit Created {
+                admission_key: admission_key,
+                admission_request_digest: admission_request_digest
+            }
         }
 
         transition UpdateOpen {
@@ -2498,51 +2448,6 @@ machine! {
             emit CompletionPolicyMutationAdmissionClassified { admission: WorkCompletionPolicyMutationAdmissionKind::Denied }
         }
 
-        // --- Keyed admission replay classification ---
-        //
-        // This machine owns the exact-replay verdict for a keyed create. The
-        // three guards are mutually exclusive and total: the recorded key must
-        // equal the requested key (and be present) for any replay verdict, and
-        // only an identical recorded request digest is an exact replay.
-
-        transition ClassifyAdmissionReplayExact {
-            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
-            on input ClassifyAdmissionReplay { requested_admission_key, requested_request_digest }
-            guard "admission_replay_exact" {
-                requested_admission_key != None
-                    && requested_admission_key == self.admission_key
-                    && requested_request_digest == self.admission_request_digest
-            }
-            update {}
-            to Absent
-            emit AdmissionReplayClassified { admission: WorkAdmissionReplayKind::Replayed }
-        }
-
-        transition ClassifyAdmissionReplayConflict {
-            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
-            on input ClassifyAdmissionReplay { requested_admission_key, requested_request_digest }
-            guard "admission_replay_conflict" {
-                requested_admission_key != None
-                    && requested_admission_key == self.admission_key
-                    && requested_request_digest != self.admission_request_digest
-            }
-            update {}
-            to Absent
-            emit AdmissionReplayClassified { admission: WorkAdmissionReplayKind::Conflict }
-        }
-
-        transition ClassifyAdmissionReplayKeyMismatch {
-            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
-            on input ClassifyAdmissionReplay { requested_admission_key, requested_request_digest }
-            guard "admission_replay_key_mismatch" {
-                requested_admission_key == None
-                    || requested_admission_key != self.admission_key
-            }
-            update {}
-            to Absent
-            emit AdmissionReplayClassified { admission: WorkAdmissionReplayKind::KeyMismatch }
-        }
-
         // --- Trusted-path confirmation-admission classification ---
         //
         // This machine owns the eligibility "is this confirming principal +
@@ -2736,11 +2641,6 @@ struct WorkGraphLifecycleMachineStateWire {
     failed_child_join_policy: FailedChildJoinPolicy,
     #[serde(default)]
     cancelled_child_join_policy: CancelledChildJoinPolicy,
-    // Absent on unkeyed items, so their persisted form is unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    admission_key: Option<WorkAdmissionKeyRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    admission_request_digest: Option<WorkAdmissionDigestRef>,
 }
 
 impl From<&WorkGraphLifecycleMachineState> for WorkGraphLifecycleMachineStateWire {
@@ -2770,8 +2670,6 @@ impl From<&WorkGraphLifecycleMachineState> for WorkGraphLifecycleMachineStateWir
             reviewer_confirmation_owner_keys: state.reviewer_confirmation_owner_keys.clone(),
             failed_child_join_policy: state.failed_child_join_policy,
             cancelled_child_join_policy: state.cancelled_child_join_policy,
-            admission_key: state.admission_key.clone(),
-            admission_request_digest: state.admission_request_digest.clone(),
         }
     }
 }
@@ -2803,8 +2701,6 @@ impl From<WorkGraphLifecycleMachineStateWire> for WorkGraphLifecycleMachineState
             reviewer_confirmation_owner_keys: wire.reviewer_confirmation_owner_keys,
             failed_child_join_policy: wire.failed_child_join_policy,
             cancelled_child_join_policy: wire.cancelled_child_join_policy,
-            admission_key: wire.admission_key,
-            admission_request_digest: wire.admission_request_digest,
         }
     }
 }

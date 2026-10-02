@@ -1103,14 +1103,33 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
                 machine_name: mach_id("WorkAttentionLifecycleMachine"),
                 actor: act_id("attention_authority"),
             },
+            MachineInstance {
+                instance_id: mi_id("admission"),
+                machine_name: mach_id("WorkItemAdmissionMachine"),
+                actor: act_id("admission_authority"),
+            },
         ],
         actors: vec![
             machine_actor("workgraph_authority"),
             machine_actor("attention_authority"),
+            machine_actor("admission_authority"),
         ],
         handoff_protocols: vec![],
         entry_inputs: vec![],
-        routes: vec![Route {
+        routes: vec![
+            Route {
+                name: route_id("work_item_create_binds_admission"),
+                from_machine: mi_id("workgraph"),
+                effect_variant: ev_id("Created"),
+                to: RouteTarget::new(mi_id("admission"), rv(RouteTargetKind::Input, "Bind")),
+                bindings: vec![
+                    bind("admission_key", "admission_key"),
+                    bind("request_digest", "admission_request_digest"),
+                ],
+                delivery: RouteDelivery::Immediate,
+                teardown: None,
+            },
+            Route {
             name: route_id("work_item_close_stops_attention"),
             from_machine: mi_id("workgraph"),
             effect_variant: ev_id("Closed"),
@@ -1127,7 +1146,15 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
         }],
         route_target_selectors: vec![],
         driver: None,
-        transaction_plans: vec![transaction_plan(
+        transaction_plans: vec![
+            transaction_plan(
+                "transactional_create_binds_admission",
+                "create_work_item",
+                "a work item create and its admission identity commit together: the item row, its Created event and (for a keyed create) the realm/namespace key index are written in one store transaction, so no item exists without its identity and no identity without its item",
+                "WorkGraphStore::insert_item_admitted",
+                &["work_item_create_binds_admission"],
+            ),
+            transaction_plan(
             "transactional_close_stops_attention",
             "close_work_item",
             "terminal work item close atomically stops one co-resident live attention binding; production fan-out applies this transaction per binding",
@@ -1137,6 +1164,31 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![
+            CompositionInvariant {
+                name: "work_item_create_routes_to_admission_bind".into(),
+                kind: CompositionInvariantKind::RoutePresent {
+                    from_machine: mi_id("workgraph"),
+                    effect_variant: ev_id("Created"),
+                    to_machine: mi_id("admission"),
+                    input_variant: rv(RouteTargetKind::Input, "Bind"),
+                },
+                statement: "every work item create obligates the admission bind for that create's identity, so a keyed item never exists without its Admitted identity".into(),
+                references_machines: vec![mi_id("workgraph"), mi_id("admission")],
+                references_actors: vec![act_id("workgraph_authority"), act_id("admission_authority")],
+            },
+            CompositionInvariant {
+                name: "admission_bind_originates_from_work_item_create".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: route_id("work_item_create_binds_admission"),
+                    to_machine: mi_id("admission"),
+                    input_variant: rv(RouteTargetKind::Input, "Bind"),
+                    from_machine: mi_id("workgraph"),
+                    effect_variant: ev_id("Created"),
+                },
+                statement: "an admission identity is bound only by a work item create, so there is no orphan admission".into(),
+                references_machines: vec![mi_id("workgraph"), mi_id("admission")],
+                references_actors: vec![act_id("workgraph_authority"), act_id("admission_authority")],
+            },
             CompositionInvariant {
                 name: "closed_work_item_routes_to_attention_stop".into(),
                 kind: CompositionInvariantKind::RoutePresent {
@@ -1176,11 +1228,15 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
                     ],
                 ),
             ],
-            expected_routes: vec![route_id("work_item_close_stops_attention")],
+            expected_routes: vec![
+                route_id("work_item_create_binds_admission"),
+                route_id("work_item_close_stops_attention"),
+            ],
             expected_scheduler_rules: vec![],
             expected_states: vec![],
             expected_transitions: vec![
                 witness_transition("workgraph", "CreateOpen"),
+                witness_transition("admission", "BindUnkeyed"),
                 witness_transition("workgraph", "CloseOpenCompleted"),
                 witness_transition("attention", "StopActive"),
             ],
@@ -1243,7 +1299,7 @@ fn workgraph_create_open_witness_input(
 
 fn workgraph_classify_admission_witness_input(key: Expr, digest: Expr) -> CompositionWitnessInput {
     witness_input(
-        "workgraph",
+        "admission",
         "ClassifyAdmissionReplay",
         vec![
             witness_field("requested_admission_key", key),
@@ -1256,9 +1312,9 @@ fn workgraph_admission_witness_limits() -> CompositionStateLimits {
     CompositionStateLimits {
         step_limit: 8,
         pending_input_limit: 8,
-        pending_route_limit: 0,
-        delivered_route_limit: 0,
-        emitted_effect_limit: 5,
+        pending_route_limit: 2,
+        delivered_route_limit: 1,
+        emitted_effect_limit: 6,
         seq_limit: 0,
         set_limit: 0,
         map_limit: 0,
@@ -1276,37 +1332,45 @@ fn workgraph_keyed_admission_replay_witness() -> CompositionWitness {
         name: witness_id("keyed_admission_replay_classification"),
         preload_inputs: vec![
             workgraph_create_open_witness_input(some_string(key), some_string(digest)),
-            workgraph_classify_admission_witness_input(some_string(key), some_string(digest)),
+            workgraph_classify_admission_witness_input(plain_string(key), plain_string(digest)),
             workgraph_classify_admission_witness_input(
-                some_string(key),
-                some_string("workadmissiondigestref_2"),
+                plain_string(key),
+                plain_string("workadmissiondigestref_2"),
             ),
             workgraph_classify_admission_witness_input(
-                some_string("workadmissionkeyref_2"),
-                some_string(digest),
+                plain_string("workadmissionkeyref_2"),
+                plain_string(digest),
             ),
         ],
-        expected_routes: vec![],
+        expected_routes: vec![route_id("work_item_create_binds_admission")],
         expected_scheduler_rules: vec![],
         expected_states: vec![],
         expected_transitions: vec![
             witness_transition("workgraph", "CreateOpen"),
-            witness_transition("workgraph", "ClassifyAdmissionReplayExactOpen"),
-            witness_transition("workgraph", "ClassifyAdmissionReplayConflictOpen"),
-            witness_transition("workgraph", "ClassifyAdmissionReplayKeyMismatchOpen"),
+            witness_transition("admission", "BindKeyed"),
+            witness_transition("admission", "ClassifyAdmissionReplayExactAdmitted"),
+            witness_transition("admission", "ClassifyAdmissionReplayConflictAdmitted"),
+            witness_transition("admission", "ClassifyAdmissionReplayKeyMismatchAdmitted"),
         ],
         expected_transition_order: vec![
             CompositionWitnessTransitionOrder {
                 earlier: witness_transition("workgraph", "CreateOpen"),
-                later: witness_transition("workgraph", "ClassifyAdmissionReplayExactOpen"),
+                later: witness_transition("admission", "BindKeyed"),
             },
             CompositionWitnessTransitionOrder {
-                earlier: witness_transition("workgraph", "ClassifyAdmissionReplayExactOpen"),
-                later: witness_transition("workgraph", "ClassifyAdmissionReplayConflictOpen"),
+                earlier: witness_transition("admission", "BindKeyed"),
+                later: witness_transition("admission", "ClassifyAdmissionReplayExactAdmitted"),
             },
             CompositionWitnessTransitionOrder {
-                earlier: witness_transition("workgraph", "ClassifyAdmissionReplayConflictOpen"),
-                later: witness_transition("workgraph", "ClassifyAdmissionReplayKeyMismatchOpen"),
+                earlier: witness_transition("admission", "ClassifyAdmissionReplayExactAdmitted"),
+                later: witness_transition("admission", "ClassifyAdmissionReplayConflictAdmitted"),
+            },
+            CompositionWitnessTransitionOrder {
+                earlier: witness_transition("admission", "ClassifyAdmissionReplayConflictAdmitted"),
+                later: witness_transition(
+                    "admission",
+                    "ClassifyAdmissionReplayKeyMismatchAdmitted",
+                ),
             },
         ],
         state_limits: workgraph_admission_witness_limits(),
@@ -1321,21 +1385,28 @@ fn workgraph_unkeyed_admission_replay_witness() -> CompositionWitness {
         preload_inputs: vec![
             workgraph_create_open_witness_input(Expr::None, Expr::None),
             workgraph_classify_admission_witness_input(
-                some_string("workadmissionkeyref_1"),
-                some_string("workadmissiondigestref_1"),
+                plain_string("workadmissionkeyref_1"),
+                plain_string("workadmissiondigestref_1"),
             ),
         ],
-        expected_routes: vec![],
+        expected_routes: vec![route_id("work_item_create_binds_admission")],
         expected_scheduler_rules: vec![],
         expected_states: vec![],
         expected_transitions: vec![
             witness_transition("workgraph", "CreateOpen"),
-            witness_transition("workgraph", "ClassifyAdmissionReplayKeyMismatchOpen"),
+            witness_transition("admission", "BindUnkeyed"),
+            witness_transition("admission", "ClassifyAdmissionReplayKeyMismatchUnkeyed"),
         ],
-        expected_transition_order: vec![CompositionWitnessTransitionOrder {
-            earlier: witness_transition("workgraph", "CreateOpen"),
-            later: witness_transition("workgraph", "ClassifyAdmissionReplayKeyMismatchOpen"),
-        }],
+        expected_transition_order: vec![
+            CompositionWitnessTransitionOrder {
+                earlier: witness_transition("workgraph", "CreateOpen"),
+                later: witness_transition("admission", "BindUnkeyed"),
+            },
+            CompositionWitnessTransitionOrder {
+                earlier: witness_transition("admission", "BindUnkeyed"),
+                later: witness_transition("admission", "ClassifyAdmissionReplayKeyMismatchUnkeyed"),
+            },
+        ],
         state_limits: workgraph_admission_witness_limits(),
     }
 }
@@ -2105,6 +2176,10 @@ fn named_variant(enum_name: &str, variant: &str) -> Expr {
 
 fn some_string(value: &str) -> Expr {
     Expr::Some(Box::new(Expr::String(value.into())))
+}
+
+fn plain_string(value: &str) -> Expr {
+    Expr::String(value.into())
 }
 
 // The seam route owns no runtime epoch (MobMachine holds no such fact), so the

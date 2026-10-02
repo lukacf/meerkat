@@ -12,6 +12,9 @@ use rusqlite::{
 };
 
 use crate::WorkGraphError;
+use crate::machines::work_item_admission::WorkItemAdmissionPhase;
+use crate::machines::workgraph_lifecycle::{WorkAdmissionDigestRef, WorkAdmissionKeyRef};
+use crate::types::WorkItemAdmissionState;
 use crate::types::{
     AttentionListRequest, AttentionPruneRequest, ClaimWorkItemRequest, ObserveReadinessRequest,
     WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionStatus, WorkEdge,
@@ -86,19 +89,20 @@ pub trait WorkGraphStore: Send + Sync {
 
     /// Atomically admit one keyed work item.
     ///
-    /// `item` must carry a machine-owned admission identity
-    /// (`machine_state.admission_key` and `admission_request_digest`). When
-    /// its key is not yet admitted in the item's realm/namespace, the item and
-    /// `event` are written together with the key index entry. When the key is
-    /// already admitted, nothing is written and the existing item is returned
-    /// as recorded: the store never judges replay versus conflict; the caller
-    /// classifies that through the machine over the returned item's state.
-    /// Concurrent admissions of one key serialize to one `Inserted` and
-    /// `Existing` for the rest.
+    /// `admission` must be the `Admitted` state `WorkItemAdmissionMachine`
+    /// bound for this create. When its key is not yet admitted in the item's
+    /// realm/namespace, the item, `event` and the recorded admission identity
+    /// are written in ONE transaction, so no item exists without its identity
+    /// and no identity without its item. When the key is already admitted,
+    /// nothing is written and the existing item is returned with its recorded
+    /// identity: the store never judges replay versus conflict; the caller
+    /// classifies that through the admission machine. Concurrent admissions of
+    /// one key serialize to one `Inserted` and `Existing` for the rest.
     async fn insert_item_admitted(
         &self,
         _item: WorkItem,
         _event: WorkGraphEvent,
+        _admission: WorkItemAdmissionState,
     ) -> Result<WorkItemAdmissionInsert, WorkGraphError> {
         Err(unsupported(self.kind()))
     }
@@ -575,25 +579,45 @@ fn unsupported(kind: WorkGraphStoreKind) -> WorkGraphError {
 /// Store-level result of [`WorkGraphStore::insert_item_admitted`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkItemAdmissionInsert {
-    /// The key was new; the item and its event were written.
+    /// The key was new; the item, its event and its identity were written.
     Inserted(WorkItem),
-    /// The key was already admitted; this is the item that owns it, unchanged.
-    Existing(WorkItem),
+    /// The key was already admitted; the item that owns it and the identity
+    /// recorded for it, both unchanged.
+    Existing {
+        item: WorkItem,
+        admission: WorkItemAdmissionState,
+    },
 }
 
-/// The machine-owned admission key of an item handed to
-/// [`WorkGraphStore::insert_item_admitted`]. An unkeyed item is refused rather
-/// than inserted without an index entry.
-fn admitted_item_key(item: &WorkItem) -> Result<&str, WorkGraphError> {
+/// Key and digest of the `Admitted` identity handed to
+/// [`WorkGraphStore::insert_item_admitted`]. Any other admission state is
+/// refused rather than written without an index entry.
+fn admitted_identity(
+    item: &WorkItem,
+    admission: &WorkItemAdmissionState,
+) -> Result<(String, String), WorkGraphError> {
     match (
-        item.machine_state.admission_key.as_ref(),
-        item.machine_state.admission_request_digest.as_ref(),
+        admission.lifecycle_phase,
+        admission.admission_key.as_ref(),
+        admission.request_digest.as_ref(),
     ) {
-        (Some(key), Some(_)) => Ok(key.0.as_str()),
+        (WorkItemAdmissionPhase::Admitted, Some(key), Some(digest)) => {
+            Ok((key.0.clone(), digest.0.clone()))
+        }
         _ => Err(WorkGraphError::InvalidInput(format!(
-            "keyed admission of work item {} requires a machine-owned admission key and request digest",
+            "keyed admission of work item {} requires an Admitted identity with key and digest",
             item.id
         ))),
+    }
+}
+
+/// The admission state recorded for an admitted key: what
+/// `WorkItemAdmissionMachine` reached when it bound that identity.
+fn recorded_admission_state(key: String, digest: String) -> WorkItemAdmissionState {
+    WorkItemAdmissionState {
+        lifecycle_phase: WorkItemAdmissionPhase::Admitted,
+        admission_key: Some(WorkAdmissionKeyRef(key)),
+        request_digest: Some(WorkAdmissionDigestRef(digest)),
     }
 }
 
@@ -609,8 +633,9 @@ struct MemoryWorkGraphState {
     execution_bindings:
         BTreeMap<(String, WorkNamespace, WorkExecutionBindingId), WorkExecutionBinding>,
     execution_recovery: std::collections::BTreeSet<(String, WorkNamespace, WorkExecutionBindingId)>,
-    // (realm, namespace, admission key) -> the one item admitted under it.
-    item_admissions: BTreeMap<(String, WorkNamespace, String), WorkItemId>,
+    // (realm, namespace, admission key) -> the one item admitted under it and
+    // its recorded request digest.
+    item_admissions: BTreeMap<(String, WorkNamespace, String), (WorkItemId, String)>,
     edges: Vec<WorkEdge>,
     events: Vec<WorkGraphEvent>,
     next_event_seq: i64,
@@ -663,12 +688,17 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         &self,
         mut item: WorkItem,
         mut event: WorkGraphEvent,
+        admission: WorkItemAdmissionState,
     ) -> Result<WorkItemAdmissionInsert, WorkGraphError> {
         WorkGraphMachine::validate_item_projection(&item)?;
-        let admission_key = admitted_item_key(&item)?.to_owned();
+        let (admission_key, request_digest) = admitted_identity(&item, &admission)?;
         let mut guard = self.inner.write().await;
-        let admission_index = (item.realm_id.clone(), item.namespace.clone(), admission_key);
-        if let Some(existing_id) = guard.item_admissions.get(&admission_index) {
+        let admission_index = (
+            item.realm_id.clone(),
+            item.namespace.clone(),
+            admission_key.clone(),
+        );
+        if let Some((existing_id, existing_digest)) = guard.item_admissions.get(&admission_index) {
             let existing = guard
                 .items
                 .get(&item_key(&item.realm_id, &item.namespace, existing_id))
@@ -677,7 +707,10 @@ impl WorkGraphStore for MemoryWorkGraphStore {
                         "work item admission index points to missing work item {existing_id}"
                     ))
                 })?;
-            return Ok(WorkItemAdmissionInsert::Existing(existing.clone()));
+            return Ok(WorkItemAdmissionInsert::Existing {
+                item: existing.clone(),
+                admission: recorded_admission_state(admission_key, existing_digest.clone()),
+            });
         }
         let key = item_key(&item.realm_id, &item.namespace, &item.id);
         if guard.items.contains_key(&key) {
@@ -695,7 +728,7 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         )?;
         guard
             .item_admissions
-            .insert(admission_index, item.id.clone());
+            .insert(admission_index, (item.id.clone(), request_digest));
         guard.items.insert(key, item.clone());
         guard.append_event(event);
         Ok(WorkItemAdmissionInsert::Inserted(item))
@@ -2574,9 +2607,10 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         &self,
         mut item: WorkItem,
         mut event: WorkGraphEvent,
+        admission: WorkItemAdmissionState,
     ) -> Result<WorkItemAdmissionInsert, WorkGraphError> {
         WorkGraphMachine::validate_item_projection(&item)?;
-        let admission_key = admitted_item_key(&item)?.to_owned();
+        let (admission_key, request_digest) = admitted_identity(&item, &admission)?;
         self.with_connection(|conn| {
             // IMMEDIATE takes the write lock before the index read, so two
             // connections admitting one key serialize: the second observes
@@ -2584,7 +2618,7 @@ impl WorkGraphStore for SqliteWorkGraphStore {
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-            if let Some(existing_id) =
+            if let Some((existing_id, existing_digest)) =
                 select_item_admission(&tx, &item.realm_id, &item.namespace, &admission_key)?
             {
                 let existing = select_item(&tx, &item.realm_id, &item.namespace, &existing_id)?
@@ -2595,7 +2629,10 @@ impl WorkGraphStore for SqliteWorkGraphStore {
                     })?;
                 tx.commit()
                     .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-                return Ok(WorkItemAdmissionInsert::Existing(existing));
+                return Ok(WorkItemAdmissionInsert::Existing {
+                    item: existing,
+                    admission: recorded_admission_state(admission_key, existing_digest),
+                });
             }
             let items = list_sqlite_items(
                 &tx,
@@ -2609,7 +2646,7 @@ impl WorkGraphStore for SqliteWorkGraphStore {
             let edges = list_sqlite_edges(&tx, &item.realm_id, &item.namespace, None)?;
             enrich_item_transition_facts(None, &mut item, items.iter(), edges.iter(), &mut event)?;
             insert_item_tx(&tx, &item)?;
-            insert_item_admission_tx(&tx, &item, &admission_key)?;
+            insert_item_admission_tx(&tx, &item, &admission_key, &request_digest)?;
             insert_event_tx(&tx, &event)?;
             tx.commit()
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
@@ -4684,17 +4721,18 @@ fn select_item_admission(
     realm_id: &str,
     namespace: &WorkNamespace,
     admission_key: &str,
-) -> Result<Option<WorkItemId>, WorkGraphError> {
-    let item_id: Option<String> = conn
+) -> Result<Option<(WorkItemId, String)>, WorkGraphError> {
+    let row: Option<(String, String)> = conn
         .query_row(
-            "SELECT item_id FROM workgraph_item_admissions
+            "SELECT item_id, request_digest FROM workgraph_item_admissions
               WHERE realm_id = ?1 AND namespace = ?2 AND admission_key = ?3",
             params![realm_id, namespace.as_str(), admission_key],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-    item_id.map(WorkItemId::new).transpose()
+    row.map(|(item_id, digest)| WorkItemId::new(item_id).map(|id| (id, digest)))
+        .transpose()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -4702,18 +4740,8 @@ fn insert_item_admission_tx(
     tx: &Transaction<'_>,
     item: &WorkItem,
     admission_key: &str,
+    request_digest: &str,
 ) -> Result<(), WorkGraphError> {
-    let request_digest = item
-        .machine_state
-        .admission_request_digest
-        .as_ref()
-        .map(|digest| digest.0.as_str())
-        .ok_or_else(|| {
-            WorkGraphError::InvalidInput(format!(
-                "keyed admission of work item {} requires a request digest",
-                item.id
-            ))
-        })?;
     tx.execute(
         "INSERT INTO workgraph_item_admissions
             (realm_id, namespace, admission_key, item_id, request_digest, admitted_at_utc)

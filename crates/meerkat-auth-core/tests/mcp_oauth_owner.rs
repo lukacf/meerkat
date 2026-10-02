@@ -205,6 +205,9 @@ struct TestState {
     authorize_outcome: Mutex<AuthorizeOutcome>,
     token_fails: Mutex<bool>,
     token_transiently_fails: Mutex<bool>,
+    /// The refresh is refused with a body that echoes secrets (a
+    /// non-conforming authorization server).
+    token_refresh_echoes_secrets: Mutex<bool>,
     pause_refresh: AtomicBool,
     refresh_started: Notify,
     refresh_release: Notify,
@@ -506,6 +509,7 @@ async fn authorize(
 }
 
 const TOKEN_EXCHANGE_ERROR_CANARY: &str = "synthetic-provider-error-secret-canary";
+const REFRESH_ERROR_BODY_CANARY: &str = "synthetic-refresh-error-body-secret-canary";
 
 async fn token(
     State(state): State<Arc<TestState>>,
@@ -534,6 +538,19 @@ async fn token(
             "body": body,
         }));
         return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+    }
+    if *state.token_refresh_echoes_secrets.lock() {
+        let body = serde_json::json!({
+            // Not a well-formed RFC 6749 code: never rendered either.
+            "error": format!("server_error {REFRESH_ERROR_BODY_CANARY}"),
+            "error_description": REFRESH_ERROR_BODY_CANARY,
+            "echoed_grant": body.get("refresh_token"),
+        });
+        state.token_error_responses.lock().push(serde_json::json!({
+            "status": StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            "body": body,
+        }));
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
     }
     if *state.token_transiently_fails.lock() {
         return (
@@ -1466,6 +1483,57 @@ async fn transient_refresh_failure_closes_machine_back_to_expiring() {
         Some(meerkat_core::handles::AuthLeasePhase::Expiring),
         "transient boundary evidence must close Refreshing through AuthRefreshFailed"
     );
+}
+
+/// A refresh refused with a body that echoes secrets (the grant itself and a
+/// canary, including inside a malformed `error` code) yields a typed
+/// `RefreshFailed` whose text and Debug never carry that body. That text is
+/// what becomes the agent-visible MCP connection failure and its notice.
+#[tokio::test]
+async fn refused_refresh_never_renders_the_token_endpoint_body() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = FixtureAuthority::with_test_http(
+        store.clone(),
+        recording_browser(Arc::clone(&state)),
+        Client::new(),
+        test_auth_lease(),
+    );
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
+    authority.interactive_login(&target, None).await.unwrap();
+    republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+        tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+    })
+    .await;
+    *state.token_refresh_echoes_secrets.lock() = true;
+
+    let error = authority
+        .stored_bearer_token(&target)
+        .await
+        .expect_err("a refused refresh must surface");
+    // Positive control: the endpoint really answered with the secrets.
+    let responses = state.token_error_responses.lock().clone();
+    let echoed = responses.last().expect("the refresh reached the endpoint");
+    assert_eq!(
+        echoed["body"]["error_description"],
+        REFRESH_ERROR_BODY_CANARY
+    );
+    assert_eq!(echoed["body"]["echoed_grant"], "refresh-token");
+
+    assert!(
+        matches!(error, McpOAuthError::RefreshFailed { .. }),
+        "{error}"
+    );
+    let rendered = format!("{error} {error:?}");
+    for secret in [REFRESH_ERROR_BODY_CANARY, "refresh-token", "echoed_grant"] {
+        assert!(
+            !rendered.contains(secret),
+            "refresh failure text carries `{secret}`: {rendered}"
+        );
+    }
+    assert!(rendered.contains("status=500"), "{rendered}");
 }
 
 #[tokio::test]

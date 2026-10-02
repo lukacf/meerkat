@@ -253,6 +253,17 @@ them.
   retries the moment it does. This covers the live delivery
   (`deliver_detached_completion_to_member_when_revivable`) and the
   post-restore council and fork re-link sweeps.
+- A refused OAuth token refresh no longer copies the token endpoint's
+  response body into error text. `OAuthError::TokenEndpoint` used to render
+  `status=.. body=..`, and on the MCP refresh path that text became
+  `McpError::ConnectionFailed` and the agent-visible connection notice
+  (`ExternalToolDelta` detail), so a non-conforming authorization server that
+  echoed the refresh grant in its error body leaked it to the agent. Its
+  `Display` now shows only the status and a well-formed RFC 6749 `error` code,
+  and its `Debug` reports the body by length. The raw body stays in the field
+  for host code that reads it deliberately. The MCP refresh path logs status
+  and body size at debug level, never the body. This also covers the
+  authorization-code and device-code grants, which share the error type.
 
 - The machine TLA generator parenthesizes a field's pending value when a
   later expression in the same update block reads it. A conditionally

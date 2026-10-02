@@ -8980,11 +8980,22 @@ async fn spawn_live_external_peer_with_transport(
                                     .expect("run starts held")
                                 }
                                 super::bridge_protocol::BridgeCommand::ReleaseRunStarts(_) => {
-                                    responder_run_start_releases.fetch_add(1, Ordering::Relaxed);
-                                    serde_json::to_value(super::bridge_protocol::BridgeReply::Ack(
-                                        super::bridge_protocol::BridgeAck { ok: true },
-                                    ))
-                                    .expect("release ack")
+                                    // Like a real host: an unbound member refuses.
+                                    if responder_supervisor_state.read().await.is_none() {
+                                        serde_json::to_value(
+                                            super::bridge_protocol::BridgeReply::Rejected {
+                                                cause: super::bridge_protocol::BridgeRejectionCause::NotBound,
+                                                reason: "release run starts failed: not bound".to_string(),
+                                            },
+                                        )
+                                        .expect("release rejection")
+                                    } else {
+                                        responder_run_start_releases.fetch_add(1, Ordering::Relaxed);
+                                        serde_json::to_value(super::bridge_protocol::BridgeReply::Ack(
+                                            super::bridge_protocol::BridgeAck { ok: true },
+                                        ))
+                                        .expect("release ack")
+                                    }
                                 }
                                 super::bridge_protocol::BridgeCommand::InterruptMember(_) => {
                                     responder_interrupt_count.fetch_add(1, Ordering::Relaxed);
@@ -34773,6 +34784,13 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
         external.delivered_input_ids().await.len(),
         1,
         "peer-only direct turn should use request/ack delivery with one logical input admission"
+    );
+    // The peer was not bound at resume commit, so the run-start release the
+    // Resume owed it (#1500) was sent when it bound again, exactly once.
+    assert_eq!(
+        external.run_start_releases(),
+        1,
+        "the release owed to the unbound peer is sent on its rebind"
     );
 
     let peer_member = resumed

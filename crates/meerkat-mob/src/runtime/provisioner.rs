@@ -13565,6 +13565,57 @@ type PeerOnlyBindingParts<'a> = (&'a str, &'a str, Option<&'a str>, [u8; 32]);
 
 #[cfg(feature = "runtime-adapter")]
 impl MultiBackendProvisioner {
+    /// Whether a remote command failed because the peer is not bound to this
+    /// supervisor right now (it rebinds later).
+    fn peer_not_bound(error: &MobError) -> bool {
+        matches!(
+            error,
+            MobError::BridgeCommandRejected {
+                cause: super::bridge_protocol::BridgeRejectionCause::NotBound
+                    | super::bridge_protocol::BridgeRejectionCause::StaleSupervisor
+                    | super::bridge_protocol::BridgeRejectionCause::SenderMismatch,
+                ..
+            }
+        )
+    }
+
+    /// Send a run-start release owed from a Resume to a peer that has just
+    /// bound again (#1500). A failure leaves the release owed to its next bind.
+    async fn release_run_starts_on_bound_peer(
+        &self,
+        peer: &TrustedPeerDescriptor,
+        peer_id: &str,
+        expected_member: Option<super::bridge_protocol::BridgeMemberIncarnation>,
+        timeout: Duration,
+    ) {
+        let released = async {
+            let supervisor = self.bridge_supervisor_payload_for_recipient(peer).await?;
+            let command = super::bridge_protocol::BridgeCommand::ReleaseRunStarts(
+                super::bridge_protocol::BridgeRunStartReleasePayload {
+                    supervisor: supervisor.supervisor,
+                    epoch: supervisor.epoch,
+                    protocol_version: supervisor.protocol_version,
+                    expected_member: expected_member.clone(),
+                },
+            );
+            self.send_bridge_command_typed::<super::bridge_protocol::BridgeAck>(
+                peer, &command, timeout,
+            )
+            .await
+            .map(|_| ())
+        }
+        .await;
+        if let Err(error) = released {
+            tracing::warn!(
+                peer_id,
+                error = %error,
+                "releasing a rebound member's run-start hold failed; still owed"
+            );
+            self.supervisor_bridge
+                .mark_run_start_release_pending(peer_id, expected_member);
+        }
+    }
+
     /// Authorize the supervisor at a remote member host and return the peer
     /// and the supervisor payload for a member-addressed command.
     async fn authorized_remote_member_peer(
@@ -14587,6 +14638,21 @@ impl MultiBackendProvisioner {
                     &payload.peer_id,
                     payload.capabilities.run_start_hold,
                 );
+                // A Resume that could not reach this peer while it was unbound
+                // owes it a run-start release (#1500): send it now that the
+                // peer is bound again, so it starts runs again.
+                if let Some(expected_member) = self
+                    .supervisor_bridge
+                    .take_run_start_release_pending(&payload.peer_id)
+                {
+                    self.release_run_starts_on_bound_peer(
+                        peer,
+                        &payload.peer_id,
+                        expected_member,
+                        timeout,
+                    )
+                    .await;
+                }
                 Ok((payload, install))
             }
             Err(error) => Err(MobError::ExternalMemberCleanupUncertain {
@@ -16090,7 +16156,11 @@ impl MobProvisioner for MultiBackendProvisioner {
             } if expected_member.is_some() || session_id.is_none() => {
                 // A remote member is held through its host when the host
                 // supports it (#1500); otherwise it is interrupted as before
-                // and reported as not holdable.
+                // and reported as not holdable. A new hold supersedes a
+                // release still owed from an earlier Resume.
+                let _ = self
+                    .supervisor_bridge
+                    .take_run_start_release_pending(peer_id);
                 if self.supervisor_bridge.peer_run_start_hold(peer_id) != Some(false) {
                     let (peer, supervisor) = self
                         .authorized_remote_member_peer(
@@ -16188,7 +16258,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                     // Never held.
                     return Ok(());
                 }
-                let (peer, supervisor) = self
+                let (peer, supervisor) = match self
                     .authorized_remote_member_peer(
                         peer_id,
                         address,
@@ -16196,7 +16266,18 @@ impl MobProvisioner for MultiBackendProvisioner {
                         bootstrap_token.as_ref(),
                         "run-start release",
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(authorized) => authorized,
+                    Err(error) if Self::peer_not_bound(&error) => {
+                        // The peer is not bound to this supervisor right now:
+                        // its next bind sends the release.
+                        self.supervisor_bridge
+                            .mark_run_start_release_pending(peer_id, expected_member.cloned());
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
                 let command = super::bridge_protocol::BridgeCommand::ReleaseRunStarts(
                     super::bridge_protocol::BridgeRunStartReleasePayload {
                         supervisor: supervisor.supervisor,
@@ -16220,6 +16301,11 @@ impl MobProvisioner for MultiBackendProvisioner {
                     }) => {
                         self.supervisor_bridge
                             .record_peer_run_start_hold(peer_id, false);
+                        Ok(())
+                    }
+                    Err(error) if Self::peer_not_bound(&error) => {
+                        self.supervisor_bridge
+                            .mark_run_start_release_pending(peer_id, expected_member.cloned());
                         Ok(())
                     }
                     Err(error) => Err(error),

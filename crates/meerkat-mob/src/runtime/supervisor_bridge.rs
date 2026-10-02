@@ -155,6 +155,11 @@ pub(crate) struct MobSupervisorBridge {
     rotation_observe_hold: StdMutex<HashMap<String, bool>>,
     /// Peers' advertised run-start hold support (#1500), by peer id.
     run_start_hold: StdMutex<HashMap<String, bool>>,
+    /// Run-start releases a Resume owes peers it could not reach because they
+    /// were not bound (#1500), by peer id; the peer's next successful bind
+    /// sends the release.
+    pending_run_start_releases:
+        StdMutex<HashMap<String, Option<super::bridge_protocol::BridgeMemberIncarnation>>>,
 }
 
 /// Linear owner for one bridge request correlation.
@@ -553,6 +558,7 @@ impl MobSupervisorBridge {
             shutdown_complete: std::sync::atomic::AtomicBool::new(false),
             rotation_observe_hold: StdMutex::new(HashMap::new()),
             run_start_hold: StdMutex::new(HashMap::new()),
+            pending_run_start_releases: StdMutex::new(HashMap::new()),
         })
     }
 
@@ -571,6 +577,30 @@ impl MobSupervisorBridge {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(peer_id.to_string(), supported);
+    }
+
+    /// Owe `peer_id` a run-start release on its next bind (#1500).
+    pub(crate) fn mark_run_start_release_pending(
+        &self,
+        peer_id: &str,
+        expected_member: Option<super::bridge_protocol::BridgeMemberIncarnation>,
+    ) {
+        self.pending_run_start_releases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(peer_id.to_string(), expected_member);
+    }
+
+    /// Take the run-start release owed to `peer_id`, if any. A new hold
+    /// takes it too: the release it owed is superseded.
+    pub(crate) fn take_run_start_release_pending(
+        &self,
+        peer_id: &str,
+    ) -> Option<Option<super::bridge_protocol::BridgeMemberIncarnation>> {
+        self.pending_run_start_releases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(peer_id)
     }
 
     /// Whether `peer_id` supports the run-start hold; `None` when it has not

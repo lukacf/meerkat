@@ -2753,3 +2753,71 @@ fn recoverable_failure_transition_revalidates_recoverability_and_exhaustion() {
          found guards: {guard_names:?}"
     );
 }
+
+#[test]
+fn obligation_member_feedback_binding_must_name_a_set_obligation_field_of_the_input_type() {
+    use meerkat_machine_schema::FeedbackFieldSource;
+    use meerkat_machine_schema::catalog::auth_lease_bundle_composition;
+    use meerkat_machine_schema::catalog::dsl::dsl_auth_machine;
+
+    let auth = dsl_auth_machine();
+    let shipped = auth_lease_bundle_composition();
+    assert!(
+        shipped.validate_against(&[&auth]).is_ok(),
+        "the shipped ObligationMember drain bindings validate"
+    );
+
+    // The browser-flow expiry binding of the OAuth drain protocol.
+    let with_browser_binding = |source: FeedbackFieldSource| {
+        let mut composition = auth_lease_bundle_composition();
+        let binding = composition
+            .handoff_protocols
+            .iter_mut()
+            .find(|protocol| protocol.name.as_str() == "auth_release_oauth_flow_drain")
+            .and_then(|protocol| {
+                protocol
+                    .allowed_feedback_inputs
+                    .iter_mut()
+                    .find(|feedback| feedback.input_variant.as_str() == "ExpireOAuthBrowserFlow")
+            })
+            .and_then(|feedback| feedback.field_bindings.first_mut())
+            .expect("drain protocol browser-flow binding");
+        binding.source = source;
+        composition
+    };
+
+    // A member of a field the obligation does not carry is rejected.
+    let unknown = with_browser_binding(FeedbackFieldSource::ObligationMember(
+        FieldId::parse("not_an_obligation_field").expect("valid field slug"),
+    ));
+    assert!(matches!(
+        unknown.validate_against(&[&auth]),
+        Err(CompositionSchemaError::UnknownHandoffBindingObligationField { .. })
+    ));
+
+    // The set's element type must be the feedback input field's type: with
+    // `flow_id` retyped to u64, a `Set<String>` obligation field no longer fits.
+    let mut retyped = auth;
+    let flow_id = retyped
+        .inputs
+        .variants
+        .iter_mut()
+        .find(|variant| variant.name.as_str() == "ExpireOAuthBrowserFlow")
+        .and_then(|variant| {
+            variant
+                .fields
+                .iter_mut()
+                .find(|field| field.name.as_str() == "flow_id")
+        })
+        .expect("ExpireOAuthBrowserFlow.flow_id");
+    flow_id.ty = TypeRef::U64;
+    let result = auth_lease_bundle_composition().validate_against(&[&retyped]);
+    assert!(
+        matches!(
+            &result,
+            Err(CompositionSchemaError::HandoffFeedbackBindingTypeMismatch { target_ty, .. })
+                if *target_ty == TypeRef::Set(Box::new(TypeRef::U64))
+        ),
+        "{result:?}"
+    );
+}

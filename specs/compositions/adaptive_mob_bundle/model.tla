@@ -78597,21 +78597,7 @@ layer_terminal_feedback_route_present == \E route_name \in RouteNames : /\ Route
 control_mob_destroying_session_ingress_protocol_covered == TRUE
 layer_mob_destroying_session_ingress_protocol_covered == TRUE
 
-NoOpenObligationsOnTerminal_control_mob_mob_member_trust_wiring == (control_mob_phase = "Destroyed") => obligation_control_mob_mob_member_trust_wiring = {}
-NoOpenObligationsOnTerminal_control_mob_mob_member_trust_unwiring == (control_mob_phase = "Destroyed") => obligation_control_mob_mob_member_trust_unwiring = {}
-NoOpenObligationsOnTerminal_control_mob_mob_member_peer_overlay == (control_mob_phase = "Destroyed") => obligation_control_mob_mob_member_peer_overlay = {}
-NoOpenObligationsOnTerminal_control_mob_mob_external_peer_trust_wiring == (control_mob_phase = "Destroyed") => obligation_control_mob_mob_external_peer_trust_wiring = {}
-NoOpenObligationsOnTerminal_control_mob_mob_external_peer_trust_unwiring == (control_mob_phase = "Destroyed") => obligation_control_mob_mob_external_peer_trust_unwiring = {}
-NoOpenObligationsOnTerminal_control_mob_mob_external_peer_trust_repair == (control_mob_phase = "Destroyed") => obligation_control_mob_mob_external_peer_trust_repair = {}
-NoOpenObligationsOnTerminal_control_mob_mob_external_peer_reciprocal_trust == (control_mob_phase = "Destroyed") => obligation_control_mob_mob_external_peer_reciprocal_trust = {}
 NoOpenObligationsOnTerminal_control_mob_mob_destroying_session_ingress == (control_mob_phase = "Destroyed") => obligation_control_mob_mob_destroying_session_ingress = {}
-NoOpenObligationsOnTerminal_layer_mob_mob_member_trust_wiring == (layer_mob_phase = "Destroyed") => obligation_layer_mob_mob_member_trust_wiring = {}
-NoOpenObligationsOnTerminal_layer_mob_mob_member_trust_unwiring == (layer_mob_phase = "Destroyed") => obligation_layer_mob_mob_member_trust_unwiring = {}
-NoOpenObligationsOnTerminal_layer_mob_mob_member_peer_overlay == (layer_mob_phase = "Destroyed") => obligation_layer_mob_mob_member_peer_overlay = {}
-NoOpenObligationsOnTerminal_layer_mob_mob_external_peer_trust_wiring == (layer_mob_phase = "Destroyed") => obligation_layer_mob_mob_external_peer_trust_wiring = {}
-NoOpenObligationsOnTerminal_layer_mob_mob_external_peer_trust_unwiring == (layer_mob_phase = "Destroyed") => obligation_layer_mob_mob_external_peer_trust_unwiring = {}
-NoOpenObligationsOnTerminal_layer_mob_mob_external_peer_trust_repair == (layer_mob_phase = "Destroyed") => obligation_layer_mob_mob_external_peer_trust_repair = {}
-NoOpenObligationsOnTerminal_layer_mob_mob_external_peer_reciprocal_trust == (layer_mob_phase = "Destroyed") => obligation_layer_mob_mob_external_peer_reciprocal_trust = {}
 NoOpenObligationsOnTerminal_layer_mob_mob_destroying_session_ingress == (layer_mob_phase = "Destroyed") => obligation_layer_mob_mob_destroying_session_ingress = {}
 OwnerFeedbackHasProtocolProvenance ==
     \A input_packet \in observed_inputs :
@@ -78744,21 +78730,7 @@ THEOREM Spec => []layer_mob_placed_kickoff_custody_requires_exact_current_placem
 THEOREM Spec => []layer_mob_remote_turn_custody_sequences_are_bounded_and_injective
 THEOREM Spec => []layer_mob_placed_completion_sequences_are_bounded
 THEOREM Spec => []layer_mob_failed_or_canceled_runs_have_only_terminal_steps
-THEOREM Spec => []NoOpenObligationsOnTerminal_control_mob_mob_member_trust_wiring
-THEOREM Spec => []NoOpenObligationsOnTerminal_control_mob_mob_member_trust_unwiring
-THEOREM Spec => []NoOpenObligationsOnTerminal_control_mob_mob_member_peer_overlay
-THEOREM Spec => []NoOpenObligationsOnTerminal_control_mob_mob_external_peer_trust_wiring
-THEOREM Spec => []NoOpenObligationsOnTerminal_control_mob_mob_external_peer_trust_unwiring
-THEOREM Spec => []NoOpenObligationsOnTerminal_control_mob_mob_external_peer_trust_repair
-THEOREM Spec => []NoOpenObligationsOnTerminal_control_mob_mob_external_peer_reciprocal_trust
 THEOREM Spec => []NoOpenObligationsOnTerminal_control_mob_mob_destroying_session_ingress
-THEOREM Spec => []NoOpenObligationsOnTerminal_layer_mob_mob_member_trust_wiring
-THEOREM Spec => []NoOpenObligationsOnTerminal_layer_mob_mob_member_trust_unwiring
-THEOREM Spec => []NoOpenObligationsOnTerminal_layer_mob_mob_member_peer_overlay
-THEOREM Spec => []NoOpenObligationsOnTerminal_layer_mob_mob_external_peer_trust_wiring
-THEOREM Spec => []NoOpenObligationsOnTerminal_layer_mob_mob_external_peer_trust_unwiring
-THEOREM Spec => []NoOpenObligationsOnTerminal_layer_mob_mob_external_peer_trust_repair
-THEOREM Spec => []NoOpenObligationsOnTerminal_layer_mob_mob_external_peer_reciprocal_trust
 THEOREM Spec => []NoOpenObligationsOnTerminal_layer_mob_mob_destroying_session_ingress
 THEOREM Spec => []OwnerFeedbackHasProtocolProvenance
 

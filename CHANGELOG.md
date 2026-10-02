@@ -417,6 +417,23 @@ them.
   `opt-level = 1` in release (6.3 GB; it is not on a hot path) and the
   Linux build runs two jobs.
 
+- Composition owner feedback can no longer discharge a handoff obligation by
+  naming a value the obligation does not carry. The OAuth release drain bound
+  each expired flow id with an owner-context source drawn from the whole string
+  domain, and one feedback cleared the entire obligation, so a feedback naming
+  an unrelated flow "discharged" the drain while the flow stayed outstanding and
+  Release could never commit. The new `FeedbackFieldSource::ObligationMember`
+  source names one member of a set-valued obligation field: the generated
+  model quantifies it over that set and removes only that member (the
+  obligation stays open while any member-bearing field is non-empty), and the
+  generated Rust submitter rejects a non-member with
+  `ObligationMemberFeedbackError::NotObligationMember`. The drain's browser and
+  device flow bindings use it, and two new `auth_lease_bundle` witnesses prove
+  a release drains its flow and reaches Released under every owner choice.
+  `NoOpenObligationsOnTerminal_*` is now generated only for `AckRequired`
+  protocols: a `PublicationOnly` protocol has no feedback to close its
+  obligations, so the invariant could only fail once its producer reached a
+  terminal phase (25 such invariants are dropped; state counts are unchanged).
 - The canonical TLC lane no longer lets a composition pass with zero TLC
   coverage. `auth_lease_bundle` had no witness and its main sweep reaches only
   its initial state (compositions move only on queued inputs), so TLC checked

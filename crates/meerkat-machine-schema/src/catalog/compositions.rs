@@ -2632,6 +2632,90 @@ fn auth_expiring_refresh_witness() -> CompositionWitness {
     }
 }
 
+#[derive(Clone, Copy)]
+enum OAuthFlowKind {
+    Browser,
+    Device,
+}
+
+/// Release with one outstanding OAuth flow drains it through the
+/// `auth_release_oauth_flow_drain` handoff. BeginRelease emits the cancellation
+/// obligation carrying the flow id; the auth-lease owner's expire feedback must
+/// name a member of that obligation (`ObligationMember`), discharges only that
+/// member, and only then does Release commit. Every owner choice completes:
+/// the owner can only name the flow the obligation carries.
+fn auth_release_drains_oauth_flow_witness(kind: OAuthFlowKind) -> CompositionWitness {
+    let (name, admit_input, admit_transition, expire_transition, mut admit_fields) = match kind {
+        OAuthFlowKind::Browser => (
+            "release_drains_oauth_flow",
+            "AdmitOAuthBrowserFlow",
+            "AdmitOAuthBrowserFlowValid",
+            "ExpireOAuthBrowserFlowValid",
+            vec![witness_field("redirect_uri", Expr::String("uri_1".into()))],
+        ),
+        OAuthFlowKind::Device => (
+            "release_drains_oauth_device_flow",
+            "AdmitOAuthDeviceFlow",
+            "AdmitOAuthDeviceFlowValid",
+            "ExpireOAuthDeviceFlowValid",
+            vec![],
+        ),
+    };
+    admit_fields.extend([
+        witness_field("flow_id", Expr::String("flow_1".into())),
+        witness_field("provider", Expr::String("provider_1".into())),
+        witness_field("expires_at_millis", Expr::U64(2)),
+        witness_field("max_outstanding_flows", Expr::U64(1)),
+        witness_field("observed_global_outstanding_flows", Expr::U64(0)),
+    ]);
+    CompositionWitness {
+        name: witness_id(name),
+        preload_inputs: vec![
+            witness_input(
+                "auth_machine",
+                "Acquire",
+                vec![
+                    witness_field("expires_at_ts", some_u64(2)),
+                    witness_field("credential_published_at_millis", Expr::U64(1)),
+                ],
+            ),
+            witness_input("auth_machine", admit_input, admit_fields),
+            witness_input("auth_machine", "BeginRelease", vec![]),
+            witness_input("auth_machine", "Release", vec![]),
+        ],
+        expected_routes: vec![],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![CompositionWitnessState {
+            machine: mi_id("auth_machine"),
+            phase: Some(phase_id("Released")),
+            fields: vec![],
+        }],
+        expected_transitions: vec![
+            witness_transition("auth_machine", "Acquire"),
+            witness_transition("auth_machine", admit_transition),
+            witness_transition("auth_machine", "BeginReleaseDrainingOAuthFlowsValid"),
+            witness_transition("auth_machine", expire_transition),
+            witness_transition("auth_machine", "Release"),
+        ],
+        expected_transition_order: vec![
+            witness_transition_order(
+                "auth_machine",
+                "BeginReleaseDrainingOAuthFlowsValid",
+                "auth_machine",
+                expire_transition,
+            ),
+            witness_transition_order("auth_machine", expire_transition, "auth_machine", "Release"),
+        ],
+        // The admitted flow lives in the OAuth membership set and maps until
+        // the drain feedback removes it.
+        state_limits: CompositionStateLimits {
+            set_limit: 2,
+            map_limit: 2,
+            ..auth_witness_limits(7, 4)
+        },
+    }
+}
+
 fn default_ci_limits() -> CompositionStateLimits {
     CompositionStateLimits {
         step_limit: 8,
@@ -3934,11 +4018,9 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
                     input_variant: iv_id("ExpireOAuthBrowserFlow"),
                     field_bindings: vec![FeedbackFieldBinding {
                         input_field: fld_id("flow_id"),
-                        // Distinct owner-context labels per feedback input: the
-                        // codegen derives the TLA bound-variable name from this
-                        // string, so two `flow_id` labels in the same handoff
-                        // collide as duplicate `\E owner_ctx_flow_id` binders.
-                        source: FeedbackFieldSource::OwnerContext("browser_flow_id".into()),
+                        // The expired flow must be one the drain obligation
+                        // carries; the feedback discharges only that member.
+                        source: FeedbackFieldSource::ObligationMember(fld_id("browser_flow_ids")),
                     }],
                 },
                 FeedbackInputRef {
@@ -3946,7 +4028,7 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
                     input_variant: iv_id("ExpireOAuthDeviceFlow"),
                     field_bindings: vec![FeedbackFieldBinding {
                         input_field: fld_id("flow_id"),
-                        source: FeedbackFieldSource::OwnerContext("device_flow_id".into()),
+                        source: FeedbackFieldSource::ObligationMember(fld_id("device_flow_ids")),
                     }],
                 },
             ],
@@ -4103,6 +4185,8 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
         witnesses: vec![
             auth_freshness_expiry_witness(),
             auth_expiring_refresh_witness(),
+            auth_release_drains_oauth_flow_witness(OAuthFlowKind::Browser),
+            auth_release_drains_oauth_flow_witness(OAuthFlowKind::Device),
         ],
         deep_domain_cardinality: 2,
         deep_domain_overrides: std::collections::BTreeMap::new(),

@@ -824,6 +824,13 @@ jobs:
             fi
             echo "Linux release toolchain: rustc ${active_rust}"
             cargo_cmd=(cargo)
+            # The hosted Linux runners have 16 GB. meerkat-mob (9.0 GB peak
+            # RSS) and meerkat-machine-schema (6.3 GB at its release
+            # opt-level 1, see Cargo.toml) cannot both fit beside two more
+            # rustc processes: at four jobs the aarch64 build was OOM-killed
+            # (SIGKILL) in meerkat-machine-schema. Two jobs bound the worst
+            # case to that pair.
+            export CARGO_BUILD_JOBS=2
           fi
 
           # Package names (for cargo build -p) — binary names differ via [[bin]]

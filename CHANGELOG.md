@@ -183,6 +183,11 @@ them.
   workspace safe for Git before setup-rust-ci asks Git for the repository
   root (it did so only afterwards since 2026-08-28), so the GitHub-hosted
   release path builds Linux binaries without a BuildBuddy assets dispatch.
+  The same jobs also ran out of memory on the 16 GB runners: the release
+  build of `meerkat-machine-schema` (8.7 GB peak) overlapped `meerkat-mob`
+  (9.0 GB) and was SIGKILLed on aarch64. The catalog crate now builds at
+  `opt-level = 1` in release (6.3 GB; it is not on a hot path) and the
+  Linux build runs two jobs.
 
 - Tests that need the `mcp-test-server` fixture binary no longer pass
   without running when it is missing. Each test hand-rolled a

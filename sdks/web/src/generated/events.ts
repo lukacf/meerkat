@@ -1219,14 +1219,6 @@ export interface BackgroundJobCompletedEvent {
   type: "background_job_completed";
 }
 
-export interface LiveChannelClosedEvent {
-  channel_id: string;
-  reason: LiveChannelCloseReason;
-  reopen_recommended: boolean;
-  session_id: SessionId;
-  type: "live_channel_closed";
-}
-
 export interface TranscriptRewriteCommittedEvent {
   record: TranscriptRewriteRecord;
   session_id: SessionId;
@@ -1309,6 +1301,14 @@ export interface BoundaryAppendsDiscardedEvent {
   run_id: RunId;
   session_id: SessionId;
   type: "boundary_appends_discarded";
+}
+
+export interface LiveChannelClosedEvent {
+  channel_id: string;
+  reason: LiveChannelCloseReason;
+  reopen_recommended: boolean;
+  session_id: SessionId;
+  type: "live_channel_closed";
 }
 
 export const KNOWN_AGENT_EVENT_TYPES = [
@@ -1399,7 +1399,6 @@ export type AgentEvent =
   StreamTruncatedEvent |
   ToolConfigChangedEvent |
   BackgroundJobCompletedEvent |
-  LiveChannelClosedEvent |
   TranscriptRewriteCommittedEvent |
   TranscriptRewriteAuditReceiptCommittedEvent |
   ProviderCacheBreakpointsDiscardedEvent |
@@ -1411,4 +1410,5 @@ export type AgentEvent =
   ModelFallbackCommittedEvent |
   ModelFallbackTargetFailedEvent |
   BoundaryAppendAppliedEvent |
-  BoundaryAppendsDiscardedEvent;
+  BoundaryAppendsDiscardedEvent |
+  LiveChannelClosedEvent;

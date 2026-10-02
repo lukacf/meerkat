@@ -13,11 +13,11 @@ pub use types::{CommsRuntimeId, McpServerId, MobId, PeerCorrelationId};
 
 pub use catalog::{
     CompositionCoverageManifest, CoverageAnchor, CoverageClaims, CoverageSchemaTarget,
-    MachineCoverageManifest, MachineProductionOwnerRelation, ScenarioCoverage,
-    SemanticCoverageEntry, SymbolRef, canonical_composition_coverage_manifests,
-    canonical_composition_schemas, canonical_machine_coverage_manifests,
-    canonical_machine_production_owner_relations, canonical_machine_schemas,
-    meerkat_mob_seam_composition, scheduler_rule_coverage_name,
+    MachineCoverageManifest, MachineProductionOwnerRelation, NonPortableComponentKind,
+    ScenarioCoverage, SemanticCoverageEntry, SymbolRef, SymbolRefError,
+    canonical_composition_coverage_manifests, canonical_composition_schemas,
+    canonical_machine_coverage_manifests, canonical_machine_production_owner_relations,
+    canonical_machine_schemas, meerkat_mob_seam_composition, scheduler_rule_coverage_name,
 };
 pub use composition::{
     ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CommsTrustAuthorityOperation,

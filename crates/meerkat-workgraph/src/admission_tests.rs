@@ -69,7 +69,7 @@ fn admission_key_must_be_canonical() {
             "accepted non-canonical key {bad:?}"
         );
     }
-    assert_eq!(key("toolkit-setup:abc").as_str(), "toolkit-setup:abc");
+    assert_eq!(key("host-setup:abc").as_str(), "host-setup:abc");
     assert!(WorkAdmissionKey::new("k".repeat(512)).is_ok());
     let decoded: Result<WorkAdmissionKey, _> = serde_json::from_str("\" padded \"");
     assert!(
@@ -176,7 +176,7 @@ async fn same_key_different_request_is_typed_conflict() {
 
     let mut changed_refs = request("setup");
     changed_refs.external_refs.push(ExternalWorkRef {
-        kind: "toolkit".into(),
+        kind: "host".into(),
         id: "provenance".into(),
         url: None,
     });

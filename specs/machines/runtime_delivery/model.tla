@@ -131,13 +131,13 @@ AdvanceAcknowledgedPrefixNothingParked ==
 
 
 Next ==
-    \/ \E delivery_id \in StringValues : \E source_sequence \in 0..2 : CommitNewDelivery(delivery_id, source_sequence)
-    \/ \E delivery_id \in StringValues : \E source_sequence \in 0..2 : ReuseCommittedDelivery(delivery_id, source_sequence)
-    \/ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : ApplyNextDelivery(delivery_id, delivery_sequence)
-    \/ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : ObserveAlreadyAppliedDelivery(delivery_id, delivery_sequence)
-    \/ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : AcknowledgeNextDelivery(delivery_id, delivery_sequence)
-    \/ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : AcknowledgeAheadOfCursor(delivery_id, delivery_sequence)
-    \/ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : ObserveAlreadyAppliedAcknowledgement(delivery_id, delivery_sequence)
+    \/ (phase = "Active") /\ \E delivery_id \in StringValues : \E source_sequence \in 0..2 : CommitNewDelivery(delivery_id, source_sequence)
+    \/ (phase = "Active") /\ \E delivery_id \in StringValues : \E source_sequence \in 0..2 : ReuseCommittedDelivery(delivery_id, source_sequence)
+    \/ (phase = "Active") /\ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : ApplyNextDelivery(delivery_id, delivery_sequence)
+    \/ (phase = "Active") /\ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : ObserveAlreadyAppliedDelivery(delivery_id, delivery_sequence)
+    \/ (phase = "Active") /\ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : AcknowledgeNextDelivery(delivery_id, delivery_sequence)
+    \/ (phase = "Active") /\ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : AcknowledgeAheadOfCursor(delivery_id, delivery_sequence)
+    \/ (phase = "Active") /\ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : ObserveAlreadyAppliedAcknowledgement(delivery_id, delivery_sequence)
     \/ AdvanceOverAcknowledgedDelivery
     \/ AdvanceAcknowledgedPrefixNothingParked
 

@@ -18,7 +18,7 @@ use crate::generated::{
 };
 use crate::{McpAuthResolver, McpConnection, McpError};
 use async_trait::async_trait;
-use meerkat_auth_core::McpAuthMode;
+use meerkat_auth_core::{McpAuthMode, McpServerIdentity};
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ExternalToolUpdate;
 use meerkat_core::McpServerConfig;
@@ -1051,6 +1051,9 @@ pub struct McpRouter {
     pending_snapshot_alignment: Option<SurfaceSnapshotAlignmentObligation>,
     /// Queued canonical lifecycle deltas for async completions.
     completed_updates: VecDeque<CompletedLifecycleUpdate>,
+    /// Host-channel status: servers whose latest connection attempt ended in
+    /// [`McpError::AuthorizationRequired`]. Never projected to the agent.
+    awaiting_authorization: BTreeMap<String, McpServerIdentity>,
     /// Optional session-scoped MCP server lifecycle handle
     /// (Phase 5G / T5g). When bound, every handshake event mirrors into
     /// the session's MeerkatMachine DSL `mcp_server_states`. Standalone
@@ -1137,6 +1140,7 @@ impl McpRouter {
             closing: tokio::task::JoinSet::new(),
             pending_snapshot_alignment: None,
             completed_updates: VecDeque::new(),
+            awaiting_authorization: BTreeMap::new(),
             mcp_lifecycle_handle: Arc::new(StdRwLock::new(None)),
             mcp_auth_mode: McpAuthMode::Stored,
             mcp_auth_resolver: None,
@@ -1386,6 +1390,8 @@ impl McpRouter {
             return Err(error.into());
         }
         self.staged_payloads.remove(&server_name);
+        // An accepted removal withdraws any pending human-authorization ask.
+        self.awaiting_authorization.remove(&server_name);
         Ok(())
     }
 
@@ -1611,6 +1617,7 @@ impl McpRouter {
                             .with_detail(Some(error.to_string())),
                         });
                     }
+                    self.awaiting_authorization.remove(&surface_id.0);
                     delta.removed_servers.push(surface_id.0.clone());
                 }
                 ExternalToolSurfaceEffect::RejectSurfaceCall { .. } => {
@@ -1712,6 +1719,15 @@ impl McpRouter {
         // carries the process; the attempt's custody entry is done.
         self.pending_child_custody
             .remove(&(server_name.clone(), obligation.pending_task_sequence));
+        match &result {
+            Err(McpError::AuthorizationRequired { target }) => {
+                self.awaiting_authorization
+                    .insert(server_name.clone(), (**target).clone());
+            }
+            _ => {
+                self.awaiting_authorization.remove(&server_name);
+            }
+        }
 
         match result {
             Ok((conn, tools)) => {
@@ -1883,6 +1899,17 @@ impl McpRouter {
                 snapshot_alignment
             }
         }
+    }
+
+    /// Host-channel status: the MCP targets whose latest connection attempt is
+    /// waiting for a human to authorize them through the host's browser
+    /// channel (see `McpOAuthAuthority::login_start`). This is a host query,
+    /// not an agent event: it carries only the typed target, never an
+    /// authorize URL, state or code. A later successful attempt or removal
+    /// clears the entry.
+    pub fn servers_awaiting_authorization(&mut self) -> Vec<McpServerIdentity> {
+        self.drain_pending();
+        self.awaiting_authorization.values().cloned().collect()
     }
 
     /// Drain pending results and return queued canonical lifecycle actions.
@@ -4210,6 +4237,46 @@ mod tests {
                 && action.operation == ToolConfigChangeOperation::Remove
                 && action.phase == McpLifecyclePhase::Forced
         }));
+    }
+
+    #[tokio::test]
+    async fn awaiting_authorization_is_host_status_not_an_agent_notice_payload() {
+        use crate::connection::tests::{FakeMcpAuthResolver, spawn_http_mcp_server};
+
+        let (url, _state) = spawn_http_mcp_server("interactive-token").await;
+        let config = McpServerConfig::streamable_http("guarded", url, HashMap::new());
+        let target = McpServerIdentity::from_config(&config).unwrap();
+        let resolver =
+            Arc::new(FakeMcpAuthResolver::new(None, "unused").with_human_authorization_required());
+        let mut router =
+            generated_handle_owner_router().with_mcp_auth(McpAuthMode::Interactive, Some(resolver));
+        router.stage_add(config).expect("stage add");
+        router.apply_staged().await.expect("apply staged add");
+
+        let deadline = Instant::now() + async_connect_test_timeout();
+        let mut failed_detail = None;
+        while failed_detail.is_none() {
+            let ext = router.take_external_updates();
+            failed_detail = ext
+                .notices
+                .into_iter()
+                .find(|n| n.target == "guarded" && n.phase == McpLifecyclePhase::Failed)
+                .map(|n| format!("{n:?}"));
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for background MCP connect"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(router.servers_awaiting_authorization(), vec![target]);
+        let detail = failed_detail.unwrap_or_default();
+        for secret in ["authorize", "state=", "code=", "code_challenge"] {
+            assert!(!detail.contains(secret), "{secret:?} leaked: {detail}");
+        }
+
+        router.stage_remove("guarded").expect("stage remove");
+        router.apply_staged().await.expect("apply staged remove");
+        assert!(router.servers_awaiting_authorization().is_empty());
     }
 
     #[tokio::test]

@@ -1256,7 +1256,27 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
             },
         },
         workgraph_keyed_admission_replay_witness(),
-        workgraph_unkeyed_admission_replay_witness()],
+        workgraph_unkeyed_admission_replay_witness(),
+        workgraph_unpaired_admission_rejected_witness(
+            "unpaired_create_open_admission_rejected",
+            "CreateOpen",
+            workgraph_create_witness_input(
+                "CreateOpen",
+                some_string("workadmissionkeyref_1"),
+                Expr::None,
+            ),
+            true,
+        ),
+        workgraph_unpaired_admission_rejected_witness(
+            "unpaired_create_blocked_admission_rejected",
+            "CreateBlocked",
+            workgraph_create_witness_input(
+                "CreateBlocked",
+                Expr::None,
+                some_string("workadmissiondigestref_1"),
+            ),
+            false,
+        )],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
         witness_domain_cardinality: 2,
@@ -1269,9 +1289,17 @@ fn workgraph_create_open_witness_input(
     admission_key: Expr,
     admission_request_digest: Expr,
 ) -> CompositionWitnessInput {
+    workgraph_create_witness_input("CreateOpen", admission_key, admission_request_digest)
+}
+
+fn workgraph_create_witness_input(
+    input: &str,
+    admission_key: Expr,
+    admission_request_digest: Expr,
+) -> CompositionWitnessInput {
     witness_input(
         "workgraph",
-        "CreateOpen",
+        input,
         vec![
             witness_field("due_at_utc_ms", Expr::None),
             witness_field("not_before_utc_ms", Expr::None),
@@ -1408,6 +1436,71 @@ fn workgraph_unkeyed_admission_replay_witness() -> CompositionWitness {
             },
         ],
         state_limits: workgraph_admission_witness_limits(),
+    }
+}
+
+/// A half-present admission identity is refused on a create input, and the
+/// item stays creatable through that same input. A witness only admits its
+/// expected transitions, so each create input gets its own script ending in
+/// a successful create of that kind: dropping the paired guard on that input
+/// lets its create arm take the half-present request, the rejection goes
+/// unobserved, and the witness cannot complete.
+fn workgraph_unpaired_admission_rejected_witness(
+    name: &str,
+    create_input: &str,
+    half_present: CompositionWitnessInput,
+    classify_first: bool,
+) -> CompositionWitness {
+    let order = |earlier: (&str, &str), later: (&str, &str)| CompositionWitnessTransitionOrder {
+        earlier: witness_transition(earlier.0, earlier.1),
+        later: witness_transition(later.0, later.1),
+    };
+    let rejected_name = format!("{create_input}RejectedUnpairedAdmission");
+    let classify_absent = ("admission", "ClassifyAdmissionReplayKeyMismatchAbsent");
+    let rejected = ("workgraph", rejected_name.as_str());
+    let create = ("workgraph", create_input);
+    let bind = ("admission", "BindUnkeyed");
+    let mut preload_inputs = Vec::new();
+    let mut steps = Vec::new();
+    if classify_first {
+        // Nothing is bound yet: a classify is a key mismatch in Absent.
+        preload_inputs.push(workgraph_classify_admission_witness_input(
+            plain_string("workadmissionkeyref_1"),
+            plain_string("workadmissiondigestref_1"),
+        ));
+        steps.push(classify_absent);
+    }
+    preload_inputs.push(half_present);
+    preload_inputs.push(workgraph_create_witness_input(
+        create_input,
+        Expr::None,
+        Expr::None,
+    ));
+    steps.extend([rejected, create, bind]);
+    CompositionWitness {
+        name: witness_id(name),
+        preload_inputs,
+        expected_routes: vec![route_id("work_item_create_binds_admission")],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: steps
+            .iter()
+            .map(|(machine, transition)| witness_transition(machine, transition))
+            .collect(),
+        expected_transition_order: steps
+            .windows(2)
+            .map(|pair| order(pair[0], pair[1]))
+            .collect(),
+        state_limits: CompositionStateLimits {
+            step_limit: 16,
+            pending_input_limit: 8,
+            pending_route_limit: 2,
+            delivered_route_limit: 1,
+            emitted_effect_limit: 8,
+            seq_limit: 0,
+            set_limit: 0,
+            map_limit: 0,
+        },
     }
 }
 

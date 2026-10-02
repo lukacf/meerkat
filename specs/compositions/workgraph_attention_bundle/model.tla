@@ -43,6 +43,20 @@ WorkDependencyPathKeyValuesWitnessunkeyed_admission_replay_is_key_mismatch == {[
 WorkEdgeKeyValuesWitnessunkeyed_admission_replay_is_key_mismatch == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
 WorkOwnerKeyValuesWitnessunkeyed_admission_replay_is_key_mismatch == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}
 
+SetOfWorkDependencyPathKeyValuesWitnessunpaired_create_open_admission_rejected == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkEdgeKeyValuesWitnessunpaired_create_open_admission_rejected == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkOwnerKeyValuesWitnessunpaired_create_open_admission_rejected == {{}, {[kind |-> "Principal", id |-> "alpha"]}, {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}}
+WorkDependencyPathKeyValuesWitnessunpaired_create_open_admission_rejected == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
+WorkEdgeKeyValuesWitnessunpaired_create_open_admission_rejected == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
+WorkOwnerKeyValuesWitnessunpaired_create_open_admission_rejected == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}
+
+SetOfWorkDependencyPathKeyValuesWitnessunpaired_create_blocked_admission_rejected == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkEdgeKeyValuesWitnessunpaired_create_blocked_admission_rejected == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkOwnerKeyValuesWitnessunpaired_create_blocked_admission_rejected == {{}, {[kind |-> "Principal", id |-> "alpha"]}, {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}}
+WorkDependencyPathKeyValuesWitnessunpaired_create_blocked_admission_rejected == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
+WorkEdgeKeyValuesWitnessunpaired_create_blocked_admission_rejected == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
+WorkOwnerKeyValuesWitnessunpaired_create_blocked_admission_rejected == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}
+
 OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
 OptionWorkAdmissionDigestRefValues == {None} \cup {Some(x) : x \in WorkAdmissionDigestRefValues}
 OptionWorkAdmissionKeyRefValues == {None} \cup {Some(x) : x \in WorkAdmissionKeyRefValues}
@@ -212,6 +226,20 @@ WitnessInit_unkeyed_admission_replay_is_key_mismatch ==
     /\ observed_inputs = {[machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [admission_key |-> None, admission_request_digest |-> None, cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unkeyed_admission_replay_is_key_mismatch:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]}
     /\ witness_current_script_input = [machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [admission_key |-> None, admission_request_digest |-> None, cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unkeyed_admission_replay_is_key_mismatch:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]
     /\ witness_remaining_script_inputs = <<[machine |-> "admission", variant |-> "ClassifyAdmissionReplay", payload |-> [requested_admission_key |-> "workadmissionkeyref_1", requested_request_digest |-> "workadmissiondigestref_1"], source_kind |-> "entry", source_route |-> "witness:unkeyed_admission_replay_is_key_mismatch:2", source_machine |-> "external_entry", source_effect |-> "ClassifyAdmissionReplay", effect_id |-> 0]>>
+
+WitnessInit_unpaired_create_open_admission_rejected ==
+    /\ BaseInit
+    /\ pending_inputs = <<[machine |-> "admission", variant |-> "ClassifyAdmissionReplay", payload |-> [requested_admission_key |-> "workadmissionkeyref_1", requested_request_digest |-> "workadmissiondigestref_1"], source_kind |-> "entry", source_route |-> "witness:unpaired_create_open_admission_rejected:1", source_machine |-> "external_entry", source_effect |-> "ClassifyAdmissionReplay", effect_id |-> 0]>>
+    /\ observed_inputs = {[machine |-> "admission", variant |-> "ClassifyAdmissionReplay", payload |-> [requested_admission_key |-> "workadmissionkeyref_1", requested_request_digest |-> "workadmissiondigestref_1"], source_kind |-> "entry", source_route |-> "witness:unpaired_create_open_admission_rejected:1", source_machine |-> "external_entry", source_effect |-> "ClassifyAdmissionReplay", effect_id |-> 0]}
+    /\ witness_current_script_input = [machine |-> "admission", variant |-> "ClassifyAdmissionReplay", payload |-> [requested_admission_key |-> "workadmissionkeyref_1", requested_request_digest |-> "workadmissiondigestref_1"], source_kind |-> "entry", source_route |-> "witness:unpaired_create_open_admission_rejected:1", source_machine |-> "external_entry", source_effect |-> "ClassifyAdmissionReplay", effect_id |-> 0]
+    /\ witness_remaining_script_inputs = <<[machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [admission_key |-> Some("workadmissionkeyref_1"), admission_request_digest |-> None, cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unpaired_create_open_admission_rejected:2", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0], [machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [admission_key |-> None, admission_request_digest |-> None, cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unpaired_create_open_admission_rejected:3", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]>>
+
+WitnessInit_unpaired_create_blocked_admission_rejected ==
+    /\ BaseInit
+    /\ pending_inputs = <<[machine |-> "workgraph", variant |-> "CreateBlocked", payload |-> [admission_key |-> None, admission_request_digest |-> Some("workadmissiondigestref_1"), cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unpaired_create_blocked_admission_rejected:1", source_machine |-> "external_entry", source_effect |-> "CreateBlocked", effect_id |-> 0]>>
+    /\ observed_inputs = {[machine |-> "workgraph", variant |-> "CreateBlocked", payload |-> [admission_key |-> None, admission_request_digest |-> Some("workadmissiondigestref_1"), cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unpaired_create_blocked_admission_rejected:1", source_machine |-> "external_entry", source_effect |-> "CreateBlocked", effect_id |-> 0]}
+    /\ witness_current_script_input = [machine |-> "workgraph", variant |-> "CreateBlocked", payload |-> [admission_key |-> None, admission_request_digest |-> Some("workadmissiondigestref_1"), cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unpaired_create_blocked_admission_rejected:1", source_machine |-> "external_entry", source_effect |-> "CreateBlocked", effect_id |-> 0]
+    /\ witness_remaining_script_inputs = <<[machine |-> "workgraph", variant |-> "CreateBlocked", payload |-> [admission_key |-> None, admission_request_digest |-> None, cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unpaired_create_blocked_admission_rejected:2", source_machine |-> "external_entry", source_effect |-> "CreateBlocked", effect_id |-> 0]>>
 
 workgraph__claim_time_window_eligible(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, now_utc_ms) == ((IF (arg_due_at_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN arg_due_at_utc_ms THEN arg_due_at_utc_ms["value"] ELSE None) <= now_utc_ms)) /\ (IF (arg_not_before_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN arg_not_before_utc_ms THEN arg_not_before_utc_ms["value"] ELSE None) <= now_utc_ms)) /\ (IF (arg_snoozed_until_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN arg_snoozed_until_utc_ms THEN arg_snoozed_until_utc_ms["value"] ELSE None) <= now_utc_ms)))
 
@@ -8147,6 +8175,40 @@ WitnessInjectNext_unkeyed_admission_replay_is_key_mismatch ==
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f4be6c91654670cd
 
+WitnessInjectNext_unpaired_create_open_admission_rejected ==
+    LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input
+        next_remaining_script_inputs == IF Len(witness_remaining_script_inputs) > 0 THEN Tail(witness_remaining_script_inputs) ELSE <<>>
+    IN
+    /\ witness_current_script_input # None
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ EntryPacketAdmissible(next_script_input)
+    /\ Len(pending_inputs) = 0
+    /\ Len(pending_routes) = 0
+    /\ Len(witness_remaining_script_inputs) > 0
+    /\ pending_inputs' = Append(pending_inputs, next_script_input)
+    /\ observed_inputs' = observed_inputs \cup {next_script_input}
+    /\ witness_current_script_input' = next_script_input
+    /\ witness_remaining_script_inputs' = next_remaining_script_inputs
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_f4be6c91654670cd
+
+WitnessInjectNext_unpaired_create_blocked_admission_rejected ==
+    LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input
+        next_remaining_script_inputs == IF Len(witness_remaining_script_inputs) > 0 THEN Tail(witness_remaining_script_inputs) ELSE <<>>
+    IN
+    /\ witness_current_script_input # None
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ EntryPacketAdmissible(next_script_input)
+    /\ Len(pending_inputs) = 0
+    /\ Len(pending_routes) = 0
+    /\ Len(witness_remaining_script_inputs) > 0
+    /\ pending_inputs' = Append(pending_inputs, next_script_input)
+    /\ observed_inputs' = observed_inputs \cup {next_script_input}
+    /\ witness_current_script_input' = next_script_input
+    /\ witness_remaining_script_inputs' = next_remaining_script_inputs
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_f4be6c91654670cd
+
 WitnessScriptComplete_close_stops_attention_route ==
     /\ Len(witness_remaining_script_inputs) = 0
     /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
@@ -8185,6 +8247,30 @@ WitnessScriptComplete_unkeyed_admission_replay_is_key_mismatch ==
     /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpen" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
     /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "BindUnkeyed" /\ later.machine = "admission" /\ later.transition = "ClassifyAdmissionReplayKeyMismatchUnkeyed" /\ earlier.step < later.step)
 
+WitnessScriptComplete_unpaired_create_open_admission_rejected ==
+    /\ Len(witness_remaining_script_inputs) = 0
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ Len(pending_routes) = 0
+    /\ \E packet \in delivered_routes : packet.route = "work_item_create_binds_admission"
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayKeyMismatchAbsent")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpenRejectedUnpairedAdmission")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "ClassifyAdmissionReplayKeyMismatchAbsent" /\ later.machine = "workgraph" /\ later.transition = "CreateOpenRejectedUnpairedAdmission" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpenRejectedUnpairedAdmission" /\ later.machine = "workgraph" /\ later.transition = "CreateOpen" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpen" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
+
+WitnessScriptComplete_unpaired_create_blocked_admission_rejected ==
+    /\ Len(witness_remaining_script_inputs) = 0
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ Len(pending_routes) = 0
+    /\ \E packet \in delivered_routes : packet.route = "work_item_create_binds_admission"
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateBlockedRejectedUnpairedAdmission")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateBlocked")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateBlockedRejectedUnpairedAdmission" /\ later.machine = "workgraph" /\ later.transition = "CreateBlocked" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateBlocked" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
+
 WitnessNoPrematureStutter_close_stops_attention_route ==
     \/ WitnessScriptComplete_close_stops_attention_route
     \/ model_step_count' # model_step_count
@@ -8195,6 +8281,14 @@ WitnessNoPrematureStutter_keyed_admission_replay_classification ==
 
 WitnessNoPrematureStutter_unkeyed_admission_replay_is_key_mismatch ==
     \/ WitnessScriptComplete_unkeyed_admission_replay_is_key_mismatch
+    \/ model_step_count' # model_step_count
+
+WitnessNoPrematureStutter_unpaired_create_open_admission_rejected ==
+    \/ WitnessScriptComplete_unpaired_create_open_admission_rejected
+    \/ model_step_count' # model_step_count
+
+WitnessNoPrematureStutter_unpaired_create_blocked_admission_rejected ==
+    \/ WitnessScriptComplete_unpaired_create_blocked_admission_rejected
     \/ model_step_count' # model_step_count
 
 WitnessSatisfiedStutter_close_stops_attention_route ==
@@ -8230,6 +8324,28 @@ WitnessSatisfiedStutter_unkeyed_admission_replay_is_key_mismatch ==
     /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayKeyMismatchUnkeyed")
     /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpen" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
     /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "BindUnkeyed" /\ later.machine = "admission" /\ later.transition = "ClassifyAdmissionReplayKeyMismatchUnkeyed" /\ earlier.step < later.step)
+    /\ UNCHANGED vars
+
+WitnessSatisfiedStutter_unpaired_create_open_admission_rejected ==
+    /\ WitnessScriptComplete_unpaired_create_open_admission_rejected
+    /\ \E packet \in delivered_routes : packet.route = "work_item_create_binds_admission"
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayKeyMismatchAbsent")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpenRejectedUnpairedAdmission")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "ClassifyAdmissionReplayKeyMismatchAbsent" /\ later.machine = "workgraph" /\ later.transition = "CreateOpenRejectedUnpairedAdmission" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpenRejectedUnpairedAdmission" /\ later.machine = "workgraph" /\ later.transition = "CreateOpen" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpen" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
+    /\ UNCHANGED vars
+
+WitnessSatisfiedStutter_unpaired_create_blocked_admission_rejected ==
+    /\ WitnessScriptComplete_unpaired_create_blocked_admission_rejected
+    /\ \E packet \in delivered_routes : packet.route = "work_item_create_binds_admission"
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateBlockedRejectedUnpairedAdmission")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateBlocked")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateBlockedRejectedUnpairedAdmission" /\ later.machine = "workgraph" /\ later.transition = "CreateBlocked" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateBlocked" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
     /\ UNCHANGED vars
 
 CoreNext ==
@@ -8628,6 +8744,23 @@ WitnessNext_unkeyed_admission_replay_is_key_mismatch ==
     \/ WitnessSatisfiedStutter_unkeyed_admission_replay_is_key_mismatch
     \/ WitnessInjectNext_unkeyed_admission_replay_is_key_mismatch
 
+WitnessNext_unpaired_create_open_admission_rejected ==
+    \/ DeliverQueuedRoute
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "admission" /\ witness_packet.variant = "ClassifyAdmissionReplay" /\ admission_ClassifyAdmissionReplayKeyMismatchAbsent(witness_packet.payload.requested_admission_key, witness_packet.payload.requested_request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "workgraph" /\ witness_packet.variant = "CreateOpen" /\ workgraph_CreateOpenRejectedUnpairedAdmission(witness_packet.payload.due_at_utc_ms, witness_packet.payload.not_before_utc_ms, witness_packet.payload.snoozed_until_utc_ms, witness_packet.payload.completion_policy, witness_packet.payload.completion_supervisor_owner_key, witness_packet.payload.completion_reviewer_quorum_threshold, witness_packet.payload.unresolved_blocker_count, witness_packet.payload.failed_child_join_policy, witness_packet.payload.cancelled_child_join_policy, witness_packet.payload.admission_key, witness_packet.payload.admission_request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "workgraph" /\ witness_packet.variant = "CreateOpen" /\ workgraph_CreateOpen(witness_packet.payload.due_at_utc_ms, witness_packet.payload.not_before_utc_ms, witness_packet.payload.snoozed_until_utc_ms, witness_packet.payload.completion_policy, witness_packet.payload.completion_supervisor_owner_key, witness_packet.payload.completion_reviewer_quorum_threshold, witness_packet.payload.unresolved_blocker_count, witness_packet.payload.failed_child_join_policy, witness_packet.payload.cancelled_child_join_policy, witness_packet.payload.admission_key, witness_packet.payload.admission_request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "admission" /\ witness_packet.variant = "Bind" /\ admission_BindUnkeyed(witness_packet.payload.admission_key, witness_packet.payload.request_digest)
+    \/ WitnessSatisfiedStutter_unpaired_create_open_admission_rejected
+    \/ WitnessInjectNext_unpaired_create_open_admission_rejected
+
+WitnessNext_unpaired_create_blocked_admission_rejected ==
+    \/ DeliverQueuedRoute
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "workgraph" /\ witness_packet.variant = "CreateBlocked" /\ workgraph_CreateBlockedRejectedUnpairedAdmission(witness_packet.payload.due_at_utc_ms, witness_packet.payload.not_before_utc_ms, witness_packet.payload.snoozed_until_utc_ms, witness_packet.payload.completion_policy, witness_packet.payload.completion_supervisor_owner_key, witness_packet.payload.completion_reviewer_quorum_threshold, witness_packet.payload.unresolved_blocker_count, witness_packet.payload.failed_child_join_policy, witness_packet.payload.cancelled_child_join_policy, witness_packet.payload.admission_key, witness_packet.payload.admission_request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "workgraph" /\ witness_packet.variant = "CreateBlocked" /\ workgraph_CreateBlocked(witness_packet.payload.due_at_utc_ms, witness_packet.payload.not_before_utc_ms, witness_packet.payload.snoozed_until_utc_ms, witness_packet.payload.completion_policy, witness_packet.payload.completion_supervisor_owner_key, witness_packet.payload.completion_reviewer_quorum_threshold, witness_packet.payload.unresolved_blocker_count, witness_packet.payload.failed_child_join_policy, witness_packet.payload.cancelled_child_join_policy, witness_packet.payload.admission_key, witness_packet.payload.admission_request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "admission" /\ witness_packet.variant = "Bind" /\ admission_BindUnkeyed(witness_packet.payload.admission_key, witness_packet.payload.request_digest)
+    \/ WitnessSatisfiedStutter_unpaired_create_blocked_admission_rejected
+    \/ WitnessInjectNext_unpaired_create_blocked_admission_rejected
+
 
 work_item_create_routes_to_admission_bind == \E route_name \in RouteNames : /\ RouteSource(route_name) = "workgraph" /\ RouteEffect(route_name) = "Created" /\ RouteTargetMachine(route_name) = "admission" /\ RouteTargetInput(route_name) = "Bind"
 admission_bind_originates_from_work_item_create == \A input_packet \in observed_inputs : ((input_packet.machine = "admission" /\ input_packet.variant = "Bind" /\ input_packet.source_route = "work_item_create_binds_admission") => (/\ input_packet.source_kind = "route" /\ input_packet.source_machine = "workgraph" /\ input_packet.source_effect = "Created" /\ \E effect_packet \in emitted_effects : /\ effect_packet.machine = "workgraph" /\ effect_packet.variant = "Created" /\ effect_packet.effect_id = input_packet.effect_id /\ \E route_packet \in RoutePackets : /\ route_packet.route = "work_item_create_binds_admission" /\ route_packet.source_machine = "workgraph" /\ route_packet.effect = "Created" /\ route_packet.target_machine = "admission" /\ route_packet.target_input = "Bind" /\ route_packet.effect_id = input_packet.effect_id /\ route_packet.payload = input_packet.payload))
@@ -8645,6 +8778,8 @@ DeepStateConstraint == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ C
 WitnessStateConstraint_close_stops_attention_route == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 12 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 2 /\ Cardinality(emitted_effects) <= 4 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 0 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 0
 WitnessStateConstraint_keyed_admission_replay_classification == /\ model_step_count <= 9 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 11 /\ Len(pending_routes) <= 2 /\ Cardinality(delivered_routes) <= 1 /\ Cardinality(emitted_effects) <= 6 /\ Cardinality(observed_transitions) <= 9 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 0 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 0
 WitnessStateConstraint_unkeyed_admission_replay_is_key_mismatch == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 11 /\ Len(pending_routes) <= 2 /\ Cardinality(delivered_routes) <= 1 /\ Cardinality(emitted_effects) <= 6 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 0 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 0
+WitnessStateConstraint_unpaired_create_open_admission_rejected == /\ model_step_count <= 16 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 11 /\ Len(pending_routes) <= 2 /\ Cardinality(delivered_routes) <= 1 /\ Cardinality(emitted_effects) <= 8 /\ Cardinality(observed_transitions) <= 16 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 0 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 0
+WitnessStateConstraint_unpaired_create_blocked_admission_rejected == /\ model_step_count <= 16 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 11 /\ Len(pending_routes) <= 2 /\ Cardinality(delivered_routes) <= 1 /\ Cardinality(emitted_effects) <= 8 /\ Cardinality(observed_transitions) <= 16 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 0 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 0
 
 Spec ==
     /\ Init
@@ -8661,6 +8796,14 @@ WitnessSpec_keyed_admission_replay_classification ==
 WitnessSpec_unkeyed_admission_replay_is_key_mismatch ==
     /\ WitnessInit_unkeyed_admission_replay_is_key_mismatch
     /\ [] [WitnessNext_unkeyed_admission_replay_is_key_mismatch]_vars
+
+WitnessSpec_unpaired_create_open_admission_rejected ==
+    /\ WitnessInit_unpaired_create_open_admission_rejected
+    /\ [] [WitnessNext_unpaired_create_open_admission_rejected]_vars
+
+WitnessSpec_unpaired_create_blocked_admission_rejected ==
+    /\ WitnessInit_unpaired_create_blocked_admission_rejected
+    /\ [] [WitnessNext_unpaired_create_blocked_admission_rejected]_vars
 
 WitnessRouteObserved_close_stops_attention_route_work_item_create_binds_admission == WitnessScriptComplete_close_stops_attention_route => (RouteObserved_work_item_create_binds_admission)
 WitnessRouteObserved_close_stops_attention_route_work_item_close_stops_attention == WitnessScriptComplete_close_stops_attention_route => (RouteObserved_work_item_close_stops_attention)
@@ -8685,6 +8828,20 @@ WitnessTransitionObserved_unkeyed_admission_replay_is_key_mismatch_admission_Bin
 WitnessTransitionObserved_unkeyed_admission_replay_is_key_mismatch_admission_ClassifyAdmissionReplayKeyMismatchUnkeyed == WitnessScriptComplete_unkeyed_admission_replay_is_key_mismatch => (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayKeyMismatchUnkeyed")
 WitnessTransitionOrder_unkeyed_admission_replay_is_key_mismatch_1 == WitnessScriptComplete_unkeyed_admission_replay_is_key_mismatch => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpen" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
 WitnessTransitionOrder_unkeyed_admission_replay_is_key_mismatch_2 == WitnessScriptComplete_unkeyed_admission_replay_is_key_mismatch => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "BindUnkeyed" /\ later.machine = "admission" /\ later.transition = "ClassifyAdmissionReplayKeyMismatchUnkeyed" /\ earlier.step < later.step)
+WitnessRouteObserved_unpaired_create_open_admission_rejected_work_item_create_binds_admission == WitnessScriptComplete_unpaired_create_open_admission_rejected => (RouteObserved_work_item_create_binds_admission)
+WitnessTransitionObserved_unpaired_create_open_admission_rejected_admission_ClassifyAdmissionReplayKeyMismatchAbsent == WitnessScriptComplete_unpaired_create_open_admission_rejected => (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayKeyMismatchAbsent")
+WitnessTransitionObserved_unpaired_create_open_admission_rejected_workgraph_CreateOpenRejectedUnpairedAdmission == WitnessScriptComplete_unpaired_create_open_admission_rejected => (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpenRejectedUnpairedAdmission")
+WitnessTransitionObserved_unpaired_create_open_admission_rejected_workgraph_CreateOpen == WitnessScriptComplete_unpaired_create_open_admission_rejected => (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+WitnessTransitionObserved_unpaired_create_open_admission_rejected_admission_BindUnkeyed == WitnessScriptComplete_unpaired_create_open_admission_rejected => (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
+WitnessTransitionOrder_unpaired_create_open_admission_rejected_1 == WitnessScriptComplete_unpaired_create_open_admission_rejected => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "ClassifyAdmissionReplayKeyMismatchAbsent" /\ later.machine = "workgraph" /\ later.transition = "CreateOpenRejectedUnpairedAdmission" /\ earlier.step < later.step)
+WitnessTransitionOrder_unpaired_create_open_admission_rejected_2 == WitnessScriptComplete_unpaired_create_open_admission_rejected => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpenRejectedUnpairedAdmission" /\ later.machine = "workgraph" /\ later.transition = "CreateOpen" /\ earlier.step < later.step)
+WitnessTransitionOrder_unpaired_create_open_admission_rejected_3 == WitnessScriptComplete_unpaired_create_open_admission_rejected => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpen" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
+WitnessRouteObserved_unpaired_create_blocked_admission_rejected_work_item_create_binds_admission == WitnessScriptComplete_unpaired_create_blocked_admission_rejected => (RouteObserved_work_item_create_binds_admission)
+WitnessTransitionObserved_unpaired_create_blocked_admission_rejected_workgraph_CreateBlockedRejectedUnpairedAdmission == WitnessScriptComplete_unpaired_create_blocked_admission_rejected => (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateBlockedRejectedUnpairedAdmission")
+WitnessTransitionObserved_unpaired_create_blocked_admission_rejected_workgraph_CreateBlocked == WitnessScriptComplete_unpaired_create_blocked_admission_rejected => (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateBlocked")
+WitnessTransitionObserved_unpaired_create_blocked_admission_rejected_admission_BindUnkeyed == WitnessScriptComplete_unpaired_create_blocked_admission_rejected => (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
+WitnessTransitionOrder_unpaired_create_blocked_admission_rejected_1 == WitnessScriptComplete_unpaired_create_blocked_admission_rejected => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateBlockedRejectedUnpairedAdmission" /\ later.machine = "workgraph" /\ later.transition = "CreateBlocked" /\ earlier.step < later.step)
+WitnessTransitionOrder_unpaired_create_blocked_admission_rejected_2 == WitnessScriptComplete_unpaired_create_blocked_admission_rejected => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateBlocked" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
 
 THEOREM Spec => []work_item_create_routes_to_admission_bind
 THEOREM Spec => []admission_bind_originates_from_work_item_create

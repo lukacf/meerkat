@@ -823,14 +823,17 @@ jobs:
               exit 1
             fi
             echo "Linux release toolchain: rustc ${active_rust}"
-            cargo_cmd=(cargo)
-            # The hosted Linux runners have 16 GB. meerkat-mob (9.0 GB peak
-            # RSS) and meerkat-machine-schema (6.3 GB at its release
-            # opt-level 1, see Cargo.toml) cannot both fit beside two more
-            # rustc processes: at four jobs the aarch64 build was OOM-killed
-            # (SIGKILL) in meerkat-machine-schema. Two jobs bound the worst
-            # case to that pair.
+            # The hosted Linux runners have 16 GB. The release build of
+            # meerkat-machine-schema peaks at 8.7 GB at opt-level 3 (6.3 GB at
+            # opt-level 1; codegen-units does not help) and meerkat-mob at
+            # 9.0 GB; pipelining overlaps the two, and at four jobs the
+            # aarch64 build was OOM-killed (SIGKILL) in the schema crate. Two
+            # jobs bound the worst case to that pair, and the schema crate
+            # builds at opt-level 1 through --config so the bound also holds
+            # for tags whose Cargo.toml predates that profile override
+            # (asset recovery dispatches build the tag with this workflow).
             export CARGO_BUILD_JOBS=2
+            cargo_cmd=(cargo --config 'profile.release.package.meerkat-machine-schema.opt-level=1')
           fi
 
           # Package names (for cargo build -p) — binary names differ via [[bin]]

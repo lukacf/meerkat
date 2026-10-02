@@ -75,6 +75,18 @@ pub enum SqliteStoreError {
     #[error("sqlite store io error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// The database path names a file SQLite cannot safely address by that
+    /// one name: not a regular file, a file with more than one hard link, or
+    /// a file replaced between validation and open. SQLite derives journal,
+    /// WAL and SHM names from the opened path, so a second name for the same
+    /// database breaks coordinated access and crash recovery. Refused before
+    /// any connection or profile mutation.
+    #[error("unsupported database file {}: {detail}", path.display())]
+    UnsupportedDatabaseFile {
+        path: std::path::PathBuf,
+        detail: String,
+    },
+
     /// Underlying SQLite failure.
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),

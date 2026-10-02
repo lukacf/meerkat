@@ -57,6 +57,16 @@ pub enum StoreError {
     #[error("Internal error: {0}")]
     Internal(String),
 
+    /// The database path names a file SQLite cannot safely address by one
+    /// name (not a regular file, multiply hard-linked, or replaced while
+    /// opening). Refused before any connection or profile mutation (#1551).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("unsupported database file {}: {detail}", path.display())]
+    UnsupportedDatabaseFile {
+        path: std::path::PathBuf,
+        detail: String,
+    },
+
     #[error("schedule executor lease is stale or expired")]
     ScheduleExecutorLeaseStale,
 
@@ -206,6 +216,9 @@ impl From<meerkat_sqlite::SqliteStoreError> for StoreError {
                 supported,
             },
             E::MaintenanceFenceHeld { path } => StoreError::MaintenanceFenceHeld { path },
+            E::UnsupportedDatabaseFile { path, detail } => {
+                StoreError::UnsupportedDatabaseFile { path, detail }
+            }
             E::UnledgeredDomainObjects {
                 domain,
                 objects,

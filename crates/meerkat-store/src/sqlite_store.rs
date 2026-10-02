@@ -9482,6 +9482,28 @@ mod tests {
     use meerkat_core::{StopReason, TranscriptRewriteReason, TranscriptRewriteSelection};
     use tempfile::TempDir;
 
+    /// #1551: the session store shares the hard-link refusal: a second name
+    /// for an existing session database is refused typed, never opened.
+    #[cfg(unix)]
+    #[test]
+    fn hard_linked_session_database_is_refused_typed() {
+        let dir = TempDir::new().unwrap();
+        let original = dir.path().join("sessions.sqlite3");
+        drop(SqliteSessionStore::open(&original).unwrap());
+        let linked = dir.path().join("linked-sessions.sqlite3");
+        std::fs::hard_link(&original, &linked).unwrap();
+        for name in [&original, &linked] {
+            assert!(
+                matches!(
+                    SqliteSessionStore::open(name),
+                    Err(StoreError::UnsupportedDatabaseFile { .. })
+                ),
+                "{}",
+                name.display()
+            );
+        }
+    }
+
     fn temp_store() -> (TempDir, SqliteSessionStore) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("sessions.sqlite3");

@@ -911,12 +911,11 @@ pub enum Record {
         to_channel: u32,
         exchange: String,
     },
-    /// A tolerant (model-dependent) check: recorded with its outcome, never
-    /// a gate on its own. The deterministic checks assert.
-    Tolerant {
+    /// A measurement journaled for diagnosis. It carries no verdict: a
+    /// scenario's verdict comes only from its deterministic contract checks.
+    Metric {
         channel: u32,
-        check: String,
-        passed: bool,
+        metric: String,
         detail: String,
     },
 }

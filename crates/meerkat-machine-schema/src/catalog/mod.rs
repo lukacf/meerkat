@@ -1,5 +1,6 @@
 mod compositions;
 mod coverage;
+mod coverage_validation;
 pub mod dsl;
 
 use crate::{CompositionSchema, MachineSchema};
@@ -17,6 +18,11 @@ pub use coverage::{
     MachineCoverageManifest, NonPortableComponentKind, ScenarioCoverage, SemanticCoverageEntry,
     SymbolRef, SymbolRefError, canonical_composition_coverage_manifests,
     canonical_machine_coverage_manifests, scheduler_rule_coverage_name,
+};
+pub use coverage_validation::{
+    CoverageValidationError, CoverageValidationMode, validate_composition_anchor_target,
+    validate_composition_coverage, validate_coverage_catalog, validate_machine_anchor_target,
+    validate_machine_coverage, validate_semantic_entries,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

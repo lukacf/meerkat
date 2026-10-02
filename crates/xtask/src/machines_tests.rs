@@ -68,10 +68,10 @@ fn owner_tests_are_registered_only_for_remaining_canonical_surfaces() {
 fn semantic_coverage_rejects_all_anchor_all_scenario_entries() {
     let anchors = BTreeSet::from(["runtime", "schema"]);
     let scenarios = BTreeSet::from(["happy", "failure"]);
-    let err = validate_semantic_entries(
+    let err = meerkat_machine_schema::validate_semantic_entries(
         "machine TestMachine",
         "transition",
-        &["Apply".to_string()],
+        &BTreeSet::from(["Apply"]),
         &[SemanticCoverageEntry {
             name: "Apply".to_string(),
             anchor_ids: vec!["runtime".to_string(), "schema".to_string()],
@@ -79,6 +79,7 @@ fn semantic_coverage_rejects_all_anchor_all_scenario_entries() {
         }],
         &anchors,
         &scenarios,
+        meerkat_machine_schema::CoverageValidationMode::RequireEntries,
     )
     .expect_err("all-anchor/all-scenario coverage should be rejected");
 

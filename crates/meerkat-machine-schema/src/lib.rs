@@ -19,6 +19,11 @@ pub use catalog::{
     canonical_machine_coverage_manifests, canonical_machine_production_owner_relations,
     canonical_machine_schemas, meerkat_mob_seam_composition, scheduler_rule_coverage_name,
 };
+pub use catalog::{
+    CoverageValidationError, CoverageValidationMode, validate_composition_anchor_target,
+    validate_composition_coverage, validate_coverage_catalog, validate_machine_anchor_target,
+    validate_machine_coverage, validate_semantic_entries,
+};
 pub use composition::{
     ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CommsTrustAuthorityOperation,
     CommsTrustAuthorityProtocol, CommsTrustAuthoritySourceKind, CompositionDriver,

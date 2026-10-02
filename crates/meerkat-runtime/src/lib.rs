@@ -579,7 +579,7 @@ pub use meerkat_machine::{
     PendingExecutorAttachmentAbortCompletion, PendingRuntimeExecutorAttachment,
     PreparedArchivedResumeCommitLease, PreparedAttachedSessionActorRecovery,
     PreparedRuntimeExecutorAttachmentRetirement, PreparedSessionMaterialization,
-    ReloadRequiredRegistrationDisposition, ReloadRequiredRegistrationSettlement,
+    ReloadRequiredRegistrationDisposition, ReloadRequiredRegistrationSettlement, RunStartsHold,
     RuntimeBindingsError, RuntimeCleanupTaskSpawner, RuntimeDetachedUnregister,
     RuntimeExecutorAttachmentRetirementCompletion, RuntimeExecutorAttachmentWitness,
     RuntimeLifecycleFacts, RuntimeLoopQueueAdmissionPlan, RuntimeOwnerlessRegistrationAdmission,

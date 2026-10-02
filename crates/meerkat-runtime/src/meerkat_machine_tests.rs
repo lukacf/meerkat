@@ -14458,6 +14458,152 @@ async fn hard_cancel_current_run_uses_prepared_session_interrupt_handle_before_e
     );
 }
 
+/// Executor that counts applies and reports each one, for the #1500 hold tests.
+struct CountingApplyExecutor {
+    applies: Arc<AtomicUsize>,
+    applied: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutor for CountingApplyExecutor {
+    async fn apply(
+        &mut self,
+        run_id: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        self.applies.fetch_add(1, Ordering::SeqCst);
+        self.applied.notify_one();
+        Ok(CoreApplyOutput::with_untyped_snapshot(
+            RunBoundaryReceiptDraft {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+            },
+            None,
+            None,
+        ))
+    }
+
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+}
+
+async fn counting_executor_session(
+    machine: &Arc<MeerkatMachine>,
+) -> (SessionId, Arc<AtomicUsize>, Arc<Notify>) {
+    let session_id = SessionId::new();
+    let applies = Arc::new(AtomicUsize::new(0));
+    let applied = Arc::new(Notify::new());
+    machine
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(CountingApplyExecutor {
+                applies: Arc::clone(&applies),
+                applied: Arc::clone(&applied),
+            }),
+        )
+        .await
+        .expect("register the counting executor");
+    (session_id, applies, applied)
+}
+
+/// #1500: while run starts are held, admitted input stays queued and the
+/// runtime loop parks instead of starting a run; releasing the hold runs it
+/// exactly once.
+#[tokio::test]
+async fn held_run_starts_park_the_loop_and_release_runs_the_input_once() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let (session_id, applies, applied) = counting_executor_session(&machine).await;
+
+    let hold = machine
+        .hold_run_starts(&session_id)
+        .await
+        .expect("hold run starts");
+    assert_eq!(hold.current_run, None, "an attached member has no run");
+
+    let mut parks = machine.run_start_held_parks();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("held until resume"))
+        .await
+        .expect("admit while held");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    // Hang guard only: the park is the positive event.
+    tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+        .await
+        .expect("the runtime loop parks on the hold")
+        .expect("park signal");
+    assert_eq!(
+        applies.load(Ordering::SeqCst),
+        0,
+        "no run starts while held"
+    );
+    let held = machine
+        .session_dsl_state(&session_id)
+        .await
+        .expect("machine state");
+    assert!(held.run_starts_held);
+    assert_eq!(held.current_run_id, None);
+
+    let ran = applied.notified();
+    machine
+        .release_run_starts(&session_id)
+        .await
+        .expect("release run starts");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("the queued input runs after the release");
+    assert_eq!(applies.load(Ordering::SeqCst), 1, "it runs exactly once");
+}
+
+/// #1500: a hold that lands after the runtime loop woke for an input but
+/// before it took the input into a run parks the loop; it is not an error.
+#[tokio::test]
+async fn a_hold_landing_after_the_loop_woke_parks_it() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let (session_id, applies, applied) = counting_executor_session(&machine).await;
+    let (gap_entered, gap_release) =
+        machine.arm_runtime_loop_before_queue_authority_test_hook(session_id.clone());
+
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("admitted before the hold"))
+        .await
+        .expect("admit");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    tokio::time::timeout(Duration::from_secs(30), gap_entered)
+        .await
+        .expect("the loop wakes for the input")
+        .expect("queue-authority hook armed");
+
+    machine
+        .hold_run_starts(&session_id)
+        .await
+        .expect("hold while the loop is between wake and batch start");
+    let mut parks = machine.run_start_held_parks();
+    gap_release.send(()).expect("release the loop");
+    tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+        .await
+        .expect("the loop parks on the hold")
+        .expect("park signal");
+    assert_eq!(applies.load(Ordering::SeqCst), 0);
+
+    let ran = applied.notified();
+    machine
+        .release_run_starts(&session_id)
+        .await
+        .expect("release run starts");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("the input runs after the release");
+    assert_eq!(applies.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn hard_cancel_current_run_on_attached_runtime_uses_live_handle_during_apply() {
     struct BlockingExecutor {

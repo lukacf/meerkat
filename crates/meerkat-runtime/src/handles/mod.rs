@@ -257,8 +257,22 @@ impl HandleDslAuthority {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.ensure_durability_ready(context)?;
         self.teardown_gate.ensure_open(context)?;
-        mm_dsl::MeerkatMachineMutator::apply(&mut *guard, input)
-            .map_err(|err| map_kernel_error(err, context))
+        let transition = mm_dsl::MeerkatMachineMutator::apply(&mut *guard, input)
+            .map_err(|err| map_kernel_error(err, context))?;
+        // A run-establishing input on a held member takes its no-op Held arm
+        // (#1500). Through a handle that is a refusal: the caller must not
+        // proceed as if a run started.
+        if transition
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, mm_dsl::MeerkatMachineEffect::RunStartHeld))
+        {
+            return Err(DslTransitionError::guard_rejected(
+                context,
+                "run starts are held: the member's mob is stopped",
+            ));
+        }
+        Ok(transition)
     }
 
     /// Apply a DSL input, run `sample` on the emitted effects *while still

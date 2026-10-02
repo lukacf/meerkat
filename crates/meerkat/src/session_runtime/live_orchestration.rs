@@ -4144,6 +4144,8 @@ mod orchestrator {
             use crate::experimental_gpt_live::ExperimentalLivePhysicalClose;
             use crate::surface::ExperimentalLiveChannelCloseError;
 
+            // In flight from the first step to the last, committed or failed.
+            let _close_in_flight = self.runtime_adapter.begin_live_channel_close(channel);
             let session = self
                 .runtime_adapter
                 .live_session_for_status_channel(channel)
@@ -4363,6 +4365,10 @@ mod orchestrator {
             expected_session: Option<&SessionId>,
             reason: meerkat_core::LiveChannelCloseReason,
         ) -> Result<LiveCloseResult, LiveChannelVerbError> {
+            // In flight from the first step to the last, committed or failed:
+            // another owner waits on this close instead of colliding with it.
+            #[cfg(feature = "live")]
+            let _close_in_flight = self.runtime_adapter.begin_live_channel_close(channel_id);
             let request = LiveChannelRequestPublicKind::Close;
             let Some(session_id) = self
                 .runtime_adapter

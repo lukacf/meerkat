@@ -1735,7 +1735,20 @@ pub trait ExperimentalLiveBoundChannelActivator: Send + Sync {
     ) -> Result<(), ExperimentalLivePumpRetirementError> {
         self.deactivate_bound_channel(binding)
             .await
-            .map_err(ExperimentalLivePumpRetirementError::SemanticUncommitted)
+            .map_err(ExperimentalLivePumpRetirementError::Permanent)
+    }
+
+    /// Wait until a pump-exit retirement refused with `error` may succeed:
+    /// the in-flight close committed, or the session advanced. Returns
+    /// `false` when no signal will come, and the retirement then stops with
+    /// the failure recorded. The default never retries: a nonshipping
+    /// composition has no close or session signal to wait on.
+    async fn await_pump_retirement_retry(
+        &self,
+        _binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        _error: &ExperimentalLivePumpRetirementError,
+    ) -> bool {
+        false
     }
 
     /// Idempotent provider-neutral replacement bootstrap. It remains visible
@@ -1749,10 +1762,32 @@ pub trait ExperimentalLiveBoundChannelActivator: Send + Sync {
     }
 }
 
+/// Why a pump-exit retirement did not commit, typed by how it may be retried.
+/// The kind is decided where the close error is produced, from typed error
+/// variants and machine state, never from message text.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExperimentalLivePumpRetirementError {
-    #[error("experimental live pump exit remains semantically uncommitted: {0}")]
-    SemanticUncommitted(String),
+    /// Another close of this channel owns it and has not committed yet. The
+    /// retirement retries once that close commits.
+    #[error("another close of the experimental live channel is in flight: {0}")]
+    CloseInFlight(String),
+    /// The close was refused because the session is busy: the member turn
+    /// holds the boundary, or its commit is still landing. The retirement
+    /// retries once the session advances.
+    #[error("the session is busy for the experimental live channel close: {0}")]
+    SessionBusy(String),
+    /// Retrying cannot make the close succeed. The retirement stops and the
+    /// failure is recorded for the channel.
+    #[error("experimental live pump exit cannot commit: {0}")]
+    Permanent(String),
+}
+
+impl ExperimentalLivePumpRetirementError {
+    /// Whether a typed signal can make a retry succeed.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self, Self::CloseInFlight(_) | Self::SessionBusy(_))
+    }
 }
 
 /// One public-safe ephemeral observation emitted by the bound provider pump.
@@ -2963,7 +2998,147 @@ struct PreparedExperimentalGptLiveActivation {
 
 struct ExperimentalGptLivePumpRetirement {
     activation: Arc<PreparedExperimentalGptLiveActivation>,
-    attempt: u32,
+}
+
+/// Shared custody the pump-retirement actor and its retry tasks complete,
+/// hold or fail a pump-exit retirement against.
+#[derive(Clone)]
+struct PumpRetirementCustody {
+    active_by_session:
+        Arc<Mutex<HashMap<meerkat_core::SessionId, ActiveExperimentalGptLiveBinding>>>,
+    registered_by_channel:
+        Arc<Mutex<HashMap<meerkat_live::LiveChannelId, RegisteredExperimentalGptLiveChannel>>>,
+    pending_deliveries:
+        Arc<Mutex<HashMap<LiveSidebandAppendAttempt, PendingExperimentalGptLiveDelivery>>>,
+    pending_pump_retirements: Arc<
+        Mutex<
+            HashMap<
+                (meerkat_core::SessionId, meerkat_live::LiveChannelId),
+                Arc<PreparedExperimentalGptLiveActivation>,
+            >,
+        >,
+    >,
+    failed_pump_retirements: Arc<
+        Mutex<
+            HashMap<
+                (meerkat_core::SessionId, meerkat_live::LiveChannelId),
+                ExperimentalLivePumpRetirementError,
+            >,
+        >,
+    >,
+}
+
+impl PumpRetirementCustody {
+    fn key(
+        binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+    ) -> (meerkat_core::SessionId, meerkat_live::LiveChannelId) {
+        (binding.session_id().clone(), binding.channel_id().clone())
+    }
+
+    /// The retirement did not commit: keep the exact activation as
+    /// semantically uncommitted custody.
+    async fn hold_uncommitted(
+        &self,
+        activation: &Arc<PreparedExperimentalGptLiveActivation>,
+        binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+    ) {
+        self.pending_pump_retirements
+            .lock()
+            .await
+            .insert(Self::key(binding), Arc::clone(activation));
+    }
+
+    /// The retirement stopped on a failure retrying cannot fix.
+    async fn record_failure(
+        &self,
+        binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        error: ExperimentalLivePumpRetirementError,
+    ) {
+        tracing::error!(
+            session_id = %binding.session_id(),
+            channel_id = %binding.channel_id(),
+            %error,
+            "experimental live pump-exit retirement stopped; the binding stays uncommitted until an explicit close or rollback retires it"
+        );
+        self.failed_pump_retirements
+            .lock()
+            .await
+            .insert(Self::key(binding), error);
+    }
+
+    /// Retry a retryable refusal each time its typed signal arrives, until
+    /// the retirement commits or the failure becomes permanent.
+    async fn retry_after_signal(
+        &self,
+        activation: Arc<PreparedExperimentalGptLiveActivation>,
+        binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        mut error: ExperimentalLivePumpRetirementError,
+    ) {
+        loop {
+            if !activation
+                .activator
+                .await_pump_retirement_retry(&binding, &error)
+                .await
+            {
+                self.record_failure(&binding, error).await;
+                return;
+            }
+            match activation
+                .activator
+                .retire_bound_channel_after_pump_exit(&binding)
+                .await
+            {
+                Ok(()) => {
+                    self.complete(&activation, &binding).await;
+                    return;
+                }
+                Err(next) if next.is_retryable() => error = next,
+                Err(next) => {
+                    self.record_failure(&binding, next).await;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// The retirement committed: release every transport custody it held.
+    async fn complete(
+        &self,
+        activation: &Arc<PreparedExperimentalGptLiveActivation>,
+        binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+    ) {
+        activation
+            .runtime
+            .retire_live_assistant_output_handles(binding.session_id(), binding.channel_id());
+        let active = {
+            let mut active = self.active_by_session.lock().await;
+            active
+                .get(binding.session_id())
+                .is_some_and(|current| {
+                    current.binding.channel_id() == binding.channel_id()
+                        && current.binding.runtime_generation().get() == binding.generation()
+                        && current.binding.runtime_fence().get() == binding.fence_token()
+                })
+                .then(|| active.remove(binding.session_id()))
+                .flatten()
+        };
+        if let Some(active) = active {
+            let _ = active.sideband.close().await;
+            retire_sideband_actors(active, SidebandActorRetirement::Graceful).await;
+        }
+        let mut registrations = self.registered_by_channel.lock().await;
+        if registrations
+            .get(binding.channel_id())
+            .is_some_and(|registration| registration.session_id == *binding.session_id())
+        {
+            registrations.remove(binding.channel_id());
+        }
+        drop(registrations);
+        retire_pending_deliveries(self.pending_deliveries.as_ref(), binding.channel_id()).await;
+        let key = Self::key(binding);
+        self.pending_pump_retirements.lock().await.remove(&key);
+        self.failed_pump_retirements.lock().await.remove(&key);
+    }
 }
 
 struct ExperimentalGptLiveActivationGate {
@@ -5369,6 +5544,18 @@ pub struct ExperimentalGptLiveWebrtcTransport {
             >,
         >,
     >,
+    /// Pump-exit retirements that stopped on a permanent close failure, with
+    /// that typed failure. The binding stays in `pending_pump_retirements`
+    /// (semantically uncommitted) until an explicit close or rollback retires
+    /// it.
+    failed_pump_retirements: Arc<
+        Mutex<
+            HashMap<
+                (meerkat_core::SessionId, meerkat_live::LiveChannelId),
+                ExperimentalLivePumpRetirementError,
+            >,
+        >,
+    >,
 }
 
 impl fmt::Debug for ExperimentalGptLiveWebrtcTransport {
@@ -5407,6 +5594,7 @@ impl ExperimentalGptLiveWebrtcTransport {
             pump_retirement_tx: Mutex::new(None),
             pump_retirement_actor: Mutex::new(None),
             pending_pump_retirements: Arc::new(Mutex::new(HashMap::new())),
+            failed_pump_retirements: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -5495,10 +5683,9 @@ impl ExperimentalGptLiveWebrtcTransport {
             retire_sideband_actors(active, SidebandActorRetirement::Graceful).await;
         }
         retire_pending_deliveries(self.pending_deliveries.as_ref(), channel_id).await;
-        self.pending_pump_retirements
-            .lock()
-            .await
-            .remove(&(session_id.clone(), channel_id.clone()));
+        let key = (session_id.clone(), channel_id.clone());
+        self.pending_pump_retirements.lock().await.remove(&key);
+        self.failed_pump_retirements.lock().await.remove(&key);
         self.unbind_channel_locked(channel_id, session_id).await
     }
 
@@ -6215,114 +6402,37 @@ impl ExperimentalGptLiveWebrtcTransport {
         }
         let (retirement_tx, mut retirement_rx) =
             mpsc::channel::<ExperimentalGptLivePumpRetirement>(8);
-        let active_by_session = Arc::clone(&self.active_by_session);
-        let registered_by_channel = Arc::clone(&self.registered_by_channel);
-        let pending_deliveries = Arc::clone(&self.pending_deliveries);
-        let pending_pump_retirements = Arc::clone(&self.pending_pump_retirements);
+        let custody = PumpRetirementCustody {
+            active_by_session: Arc::clone(&self.active_by_session),
+            registered_by_channel: Arc::clone(&self.registered_by_channel),
+            pending_deliveries: Arc::clone(&self.pending_deliveries),
+            pending_pump_retirements: Arc::clone(&self.pending_pump_retirements),
+            failed_pump_retirements: Arc::clone(&self.failed_pump_retirements),
+        };
         let actor = tokio::spawn(async move {
-            let mut retries =
-                Vec::<(tokio::time::Instant, ExperimentalGptLivePumpRetirement)>::new();
-            let mut retirement_rx_open = true;
-            loop {
-                let retirement = if retries.is_empty() {
-                    if !retirement_rx_open {
-                        break;
-                    }
-                    retirement_rx.recv().await
-                } else {
-                    let Some((retry_index, retry_at)) = retries
-                        .iter()
-                        .enumerate()
-                        .min_by_key(|(_, (retry_at, _))| *retry_at)
-                        .map(|(index, (retry_at, _))| (index, *retry_at))
-                    else {
-                        continue;
-                    };
-                    if retirement_rx_open {
-                        tokio::select! {
-                            incoming = retirement_rx.recv() => {
-                                if incoming.is_none() {
-                                    retirement_rx_open = false;
-                                }
-                                incoming
-                            },
-                            () = tokio::time::sleep_until(retry_at) => {
-                                Some(retries.swap_remove(retry_index).1)
-                            }
-                        }
-                    } else {
-                        tokio::time::sleep_until(retry_at).await;
-                        Some(retries.swap_remove(retry_index).1)
-                    }
-                };
-                let Some(retirement) = retirement else {
-                    if retries.is_empty() && !retirement_rx_open {
-                        break;
-                    }
-                    continue;
-                };
-                let binding = &retirement.activation.runtime_binding;
-                let semantic_retirement = retirement
-                    .activation
+            while let Some(retirement) = retirement_rx.recv().await {
+                let activation = retirement.activation;
+                let binding = activation.runtime_binding.clone();
+                match activation
                     .activator
-                    .retire_bound_channel_after_pump_exit(binding)
-                    .await;
-                if let Err(ExperimentalLivePumpRetirementError::SemanticUncommitted(_)) =
-                    semantic_retirement
-                {
-                    pending_pump_retirements.lock().await.insert(
-                        (binding.session_id().clone(), binding.channel_id().clone()),
-                        Arc::clone(&retirement.activation),
-                    );
-                    let backoff_ms = 25_u64
-                        .saturating_mul(1_u64 << retirement.attempt.min(7))
-                        .min(2_000);
-                    retries.push((
-                        tokio::time::Instant::now() + std::time::Duration::from_millis(backoff_ms),
-                        ExperimentalGptLivePumpRetirement {
-                            activation: retirement.activation,
-                            attempt: retirement.attempt.saturating_add(1),
-                        },
-                    ));
-                    continue;
-                }
-                retirement
-                    .activation
-                    .runtime
-                    .retire_live_assistant_output_handles(
-                        binding.session_id(),
-                        binding.channel_id(),
-                    );
-                let active = {
-                    let mut active = active_by_session.lock().await;
-                    active
-                        .get(binding.session_id())
-                        .is_some_and(|current| {
-                            current.binding.channel_id() == binding.channel_id()
-                                && current.binding.runtime_generation().get()
-                                    == binding.generation()
-                                && current.binding.runtime_fence().get() == binding.fence_token()
-                        })
-                        .then(|| active.remove(binding.session_id()))
-                        .flatten()
-                };
-                if let Some(active) = active {
-                    let _ = active.sideband.close().await;
-                    retire_sideband_actors(active, SidebandActorRetirement::Graceful).await;
-                }
-                let mut registrations = registered_by_channel.lock().await;
-                if registrations
-                    .get(binding.channel_id())
-                    .is_some_and(|registration| registration.session_id == *binding.session_id())
-                {
-                    registrations.remove(binding.channel_id());
-                }
-                drop(registrations);
-                retire_pending_deliveries(pending_deliveries.as_ref(), binding.channel_id()).await;
-                pending_pump_retirements
-                    .lock()
+                    .retire_bound_channel_after_pump_exit(&binding)
                     .await
-                    .remove(&(binding.session_id().clone(), binding.channel_id().clone()));
+                {
+                    Ok(()) => custody.complete(&activation, &binding).await,
+                    Err(error) => {
+                        custody.hold_uncommitted(&activation, &binding).await;
+                        if error.is_retryable() {
+                            // Wait on the typed signal off the actor, so other
+                            // channels' retirements are not held behind it.
+                            let custody = custody.clone();
+                            tokio::spawn(async move {
+                                custody.retry_after_signal(activation, binding, error).await;
+                            });
+                        } else {
+                            custody.record_failure(&binding, error).await;
+                        }
+                    }
+                }
             }
         });
         *self.pump_retirement_actor.lock().await = Some(actor);
@@ -7683,10 +7793,7 @@ fn spawn_sideband_actors(
             return;
         }
         let _ = pump_retirement_tx
-            .send(ExperimentalGptLivePumpRetirement {
-                activation,
-                attempt: 0,
-            })
+            .send(ExperimentalGptLivePumpRetirement { activation })
             .await;
     });
 
@@ -10229,11 +10336,20 @@ mod tests {
             if binding.channel_id() == &self.retry_channel && call == 1 {
                 self.first_entered.notify_waiters();
                 self.release_first.notified().await;
-                return Err(ExperimentalLivePumpRetirementError::SemanticUncommitted(
+                return Err(ExperimentalLivePumpRetirementError::SessionBusy(
                     "transient saturated fixture failure".to_string(),
                 ));
             }
             Ok(())
+        }
+
+        /// The fixture's busy refusal clears as soon as it is reported.
+        async fn await_pump_retirement_retry(
+            &self,
+            _binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+            error: &ExperimentalLivePumpRetirementError,
+        ) -> bool {
+            error.is_retryable()
         }
     }
 
@@ -13566,6 +13682,229 @@ mod tests {
         retire_sideband_actors(active, SidebandActorRetirement::Graceful).await;
     }
 
+    /// A pump-exit retirement activator whose refusals are scripted and whose
+    /// retry signal is released by the test.
+    struct ScriptedRetirementActivator {
+        script: std::sync::Mutex<VecDeque<Result<(), ExperimentalLivePumpRetirementError>>>,
+        calls: AtomicUsize,
+        retry_signal: Option<Arc<Notify>>,
+        awaiting_retry: Notify,
+    }
+
+    impl ScriptedRetirementActivator {
+        fn new(
+            script: Vec<Result<(), ExperimentalLivePumpRetirementError>>,
+            retry_signal: Option<Arc<Notify>>,
+        ) -> Self {
+            Self {
+                script: std::sync::Mutex::new(script.into()),
+                calls: AtomicUsize::new(0),
+                retry_signal,
+                awaiting_retry: Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ExperimentalLiveBoundChannelActivator for ScriptedRetirementActivator {
+        async fn prepare_bound_channel(
+            &self,
+            _binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+            _control: Arc<dyn ExperimentalGptLiveControlPlane>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn run_bound_channel(
+            &self,
+            _binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+            _control: Arc<dyn ExperimentalGptLiveControlPlane>,
+        ) {
+        }
+
+        async fn observe_provider_lifecycle(
+            &self,
+            _observation: &LiveSidebandObservation,
+        ) -> Result<(), ExperimentalLiveLifecycleObservationError> {
+            Ok(())
+        }
+
+        async fn deactivate_bound_channel(
+            &self,
+            _binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn retire_bound_channel_after_pump_exit(
+            &self,
+            _binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        ) -> Result<(), ExperimentalLivePumpRetirementError> {
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            self.script
+                .lock()
+                .expect("retirement script")
+                .pop_front()
+                .unwrap_or(Ok(()))
+        }
+
+        async fn await_pump_retirement_retry(
+            &self,
+            _binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+            error: &ExperimentalLivePumpRetirementError,
+        ) -> bool {
+            let Some(signal) = self.retry_signal.as_ref() else {
+                return false;
+            };
+            let released = signal.notified();
+            self.awaiting_retry.notify_one();
+            released.await;
+            error.is_retryable()
+        }
+    }
+
+    async fn send_scripted_retirement(
+        transport: &Arc<ExperimentalGptLiveWebrtcTransport>,
+        activator: &Arc<ScriptedRetirementActivator>,
+        name: &str,
+    ) -> (meerkat_core::SessionId, meerkat_live::LiveChannelId) {
+        let session_id = meerkat_core::SessionId::new();
+        let channel_id = meerkat_live::LiveChannelId::new(name);
+        let runtime_binding =
+            meerkat_runtime::live_execution::LiveDelegationRuntimeBinding::__test_new(
+                session_id.clone(),
+                channel_id.clone(),
+                meerkat_runtime::identifiers::LogicalRuntimeId::new("fixture-runtime"),
+                3,
+                2,
+            );
+        transport
+            .pump_retirement_sender()
+            .await
+            .send(ExperimentalGptLivePumpRetirement {
+                activation: Arc::new(PreparedExperimentalGptLiveActivation {
+                    runtime: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+                    runtime_binding,
+                    activator: Arc::clone(activator)
+                        as Arc<dyn ExperimentalLiveBoundChannelActivator>,
+                    control: Arc::clone(transport) as Arc<dyn ExperimentalGptLiveControlPlane>,
+                    live_adapter_host: Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+                        meerkat_live::NoOpProjectionSink,
+                    ))),
+                    public_observation_publisher: Arc::new(NoopPublicObservationPublisher),
+                }),
+            })
+            .await
+            .expect("queue pump retirement");
+        (session_id, channel_id)
+    }
+
+    async fn recorded_pump_retirement_failure(
+        transport: &ExperimentalGptLiveWebrtcTransport,
+        key: &(meerkat_core::SessionId, meerkat_live::LiveChannelId),
+    ) -> ExperimentalLivePumpRetirementError {
+        loop {
+            if let Some(error) = transport.failed_pump_retirements.lock().await.get(key) {
+                return error.clone();
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_permanent_pump_retirement_failure_is_recorded_and_never_retried() {
+        let transport = Arc::new(ExperimentalGptLiveWebrtcTransport::new());
+        let signal = Arc::new(Notify::new());
+        let activator = Arc::new(ScriptedRetirementActivator::new(
+            vec![Err(ExperimentalLivePumpRetirementError::Permanent(
+                "fixture permanent close failure".to_string(),
+            ))],
+            Some(Arc::clone(&signal)),
+        ));
+        let key = send_scripted_retirement(&transport, &activator, "permanent-retirement").await;
+
+        assert_eq!(
+            recorded_pump_retirement_failure(&transport, &key).await,
+            ExperimentalLivePumpRetirementError::Permanent(
+                "fixture permanent close failure".to_string()
+            )
+        );
+        assert!(
+            transport
+                .pending_pump_retirements
+                .lock()
+                .await
+                .contains_key(&key),
+            "the uncommitted binding stays held for an explicit close or rollback"
+        );
+        assert_eq!(
+            activator.calls.load(AtomicOrdering::SeqCst),
+            1,
+            "a permanent failure is never retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_in_flight_close_refusal_retries_only_after_its_signal() {
+        let transport = Arc::new(ExperimentalGptLiveWebrtcTransport::new());
+        let signal = Arc::new(Notify::new());
+        let activator = Arc::new(ScriptedRetirementActivator::new(
+            vec![Err(ExperimentalLivePumpRetirementError::CloseInFlight(
+                "another close owns the channel".to_string(),
+            ))],
+            Some(Arc::clone(&signal)),
+        ));
+        let key = send_scripted_retirement(&transport, &activator, "in-flight-retirement").await;
+
+        // The refusal parks on the typed signal: no retry happens without it.
+        activator.awaiting_retry.notified().await;
+        assert_eq!(activator.calls.load(AtomicOrdering::SeqCst), 1);
+        assert!(
+            transport
+                .pending_pump_retirements
+                .lock()
+                .await
+                .contains_key(&key)
+        );
+
+        signal.notify_one();
+        loop {
+            if !transport
+                .pending_pump_retirements
+                .lock()
+                .await
+                .contains_key(&key)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            activator.calls.load(AtomicOrdering::SeqCst),
+            2,
+            "the signal drives exactly one retry, which commits"
+        );
+        assert!(transport.failed_pump_retirements.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_retryable_refusal_with_no_signal_source_is_recorded_as_failed() {
+        let transport = Arc::new(ExperimentalGptLiveWebrtcTransport::new());
+        let activator = Arc::new(ScriptedRetirementActivator::new(
+            vec![Err(ExperimentalLivePumpRetirementError::SessionBusy(
+                "busy with nothing to wait on".to_string(),
+            ))],
+            None,
+        ));
+        let key = send_scripted_retirement(&transport, &activator, "unsignalled-retirement").await;
+
+        assert!(matches!(
+            recorded_pump_retirement_failure(&transport, &key).await,
+            ExperimentalLivePumpRetirementError::SessionBusy(_)
+        ));
+        assert_eq!(activator.calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn pump_retirement_retry_survives_saturated_and_closed_input_queue() {
         let session_id = meerkat_core::SessionId::new();
@@ -13597,10 +13936,7 @@ mod tests {
             public_observation_publisher: Arc::new(NoopPublicObservationPublisher),
         });
         retirement_tx
-            .send(ExperimentalGptLivePumpRetirement {
-                activation,
-                attempt: 0,
-            })
+            .send(ExperimentalGptLivePumpRetirement { activation })
             .await
             .expect("queue exact pump retirement");
         activator.first_entered.notified().await;
@@ -13633,7 +13969,6 @@ mod tests {
                         ))),
                         public_observation_publisher: Arc::new(NoopPublicObservationPublisher),
                     }),
-                    attempt: 0,
                 })
                 .await
                 .expect("fill bounded retirement input queue");

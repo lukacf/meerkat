@@ -65,6 +65,8 @@ them.
   - `meerkat_core::service::TurnToolOverlayComposeError` and
     `meerkat::surface::WorkGraphAttentionTurnOverlayError` gain
     `ConflictingToolChoicePlan`.
+  - `meerkat_core::model_fallback::ModelFallbackSkipReason` gains
+    `ToolChoiceUnsupported` (wire value `tool_choice_unsupported`).
 
 ### Added
 
@@ -117,8 +119,12 @@ them.
   `Auto`, so a script can force several steps and then let the model
   complete. The plan is run-local: it is set and cleared with the overlay,
   never written into session defaults or later turns, and stripped from the
-  model-fallback switch policy. Structured-output extraction carries no
-  choice. Composing two different non-empty plans is a typed conflict. The
+  model-fallback switch policy. Model-fallback admission probes each target
+  with the failed request's own tool choice through that target's adapter
+  lowering, so a target that cannot honour a forced choice (Claude Opus 5.5,
+  or explicit thinking) is skipped before any provider call. The
+  `ModelFallbackSkipped` event carries the reason `tool_choice_unsupported`.
+  Structured-output extraction carries no choice. Composing two different non-empty plans is a typed conflict. The
   generated schemas and SDK types gain the `ToolChoice` union and the
   `tool_choice_plan` field. The TypeScript SDK's public `TurnToolOverlay`
   gains `toolChoicePlan` (typed with the generated `ToolChoice`, also

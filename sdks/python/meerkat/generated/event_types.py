@@ -75,7 +75,7 @@ LlmProviderErrorKind = Literal['invalid_request', 'content_filtered', 'server_er
 LlmProviderErrorRetryability = Literal['retryable', 'non_retryable']
 
 
-ModelFallbackSkipReason = Literal['provider_boundary', 'auth_unavailable', 'context_fit', 'context_unknown', 'output_budget', 'tool_parity', 'modality_parity', 'request_unsupported', 'admission_unavailable']
+ModelFallbackSkipReason = Literal['provider_boundary', 'auth_unavailable', 'context_fit', 'context_unknown', 'output_budget', 'tool_parity', 'modality_parity', 'request_unsupported', 'admission_unavailable'] | Literal['tool_choice_unsupported']
 
 
 # Closed machine-owned classifier for why a turn reached a terminal failure.

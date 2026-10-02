@@ -27017,22 +27017,6 @@ RecordLiveChannelStatusStopped(channel_id, status, status_observation_sequence, 
     /\ UnchangedFrame_02177c32c584b684
 
 
-RequestLiveMediaHealthIdle(arg_session_id, channel_id, runtime_id, fence_token, generation, output_id, assistant_transcript_nonempty) ==
-    /\ phase = "Idle"
-    /\ (output_id # "")
-    /\ (assistant_transcript_nonempty = TRUE)
-    /\ ((IF (channel_id \in DOMAIN live_channel_session_by_channel) THEN Some((IF channel_id \in DOMAIN live_channel_session_by_channel THEN live_channel_session_by_channel[channel_id] ELSE "None")) ELSE None) = Some(arg_session_id))
-    /\ ((IF (channel_id \in DOMAIN live_execution_phase_by_channel) THEN Some((IF channel_id \in DOMAIN live_execution_phase_by_channel THEN live_execution_phase_by_channel[channel_id] ELSE "None")) ELSE None) = Some("Active"))
-    /\ ((IF (channel_id \in DOMAIN live_execution_runtime_id_by_channel) THEN Some((IF channel_id \in DOMAIN live_execution_runtime_id_by_channel THEN live_execution_runtime_id_by_channel[channel_id] ELSE "None")) ELSE None) = Some(runtime_id))
-    /\ ((IF (channel_id \in DOMAIN live_execution_fence_by_channel) THEN Some((IF channel_id \in DOMAIN live_execution_fence_by_channel THEN live_execution_fence_by_channel[channel_id] ELSE "None")) ELSE None) = Some(fence_token))
-    /\ ((IF (channel_id \in DOMAIN live_execution_generation_by_channel) THEN Some((IF channel_id \in DOMAIN live_execution_generation_by_channel THEN live_execution_generation_by_channel[channel_id] ELSE "None")) ELSE None) = Some(generation))
-    /\ ~((channel_id \in DOMAIN live_media_health_requested_output_by_channel))
-    /\ phase' = "Idle"
-    /\ model_step_count' = model_step_count + 1
-    /\ live_media_health_requested_output_by_channel' = MapSet(live_media_health_requested_output_by_channel, channel_id, output_id)
-    /\ UnchangedFrame_7436d90ef008a5d3
-
-
 RequestLiveMediaHealthAttached(arg_session_id, channel_id, runtime_id, fence_token, generation, output_id, assistant_transcript_nonempty) ==
     /\ phase = "Attached"
     /\ (output_id # "")
@@ -27065,18 +27049,6 @@ RequestLiveMediaHealthRunning(arg_session_id, channel_id, runtime_id, fence_toke
     /\ UnchangedFrame_7436d90ef008a5d3
 
 
-ObserveLiveChannelMediaHealthAudibleIdle(arg_session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros) ==
-    /\ phase = "Idle"
-    /\ (IF (audible_frames > 0) THEN TRUE ELSE (max_rms_micros >= 2000))
-    /\ ((IF (channel_id \in DOMAIN live_channel_session_by_channel) THEN Some((IF channel_id \in DOMAIN live_channel_session_by_channel THEN live_channel_session_by_channel[channel_id] ELSE "None")) ELSE None) = Some(arg_session_id))
-    /\ ((IF (channel_id \in DOMAIN live_execution_phase_by_channel) THEN Some((IF channel_id \in DOMAIN live_execution_phase_by_channel THEN live_execution_phase_by_channel[channel_id] ELSE "None")) ELSE None) = Some("Active"))
-    /\ (((IF (channel_id \in DOMAIN live_media_health_requested_output_by_channel) THEN Some((IF channel_id \in DOMAIN live_media_health_requested_output_by_channel THEN live_media_health_requested_output_by_channel[channel_id] ELSE "None")) ELSE None) = Some(output_id)) /\ ~((channel_id \in live_media_health_judged_channels)))
-    /\ phase' = "Idle"
-    /\ model_step_count' = model_step_count + 1
-    /\ live_media_health_judged_channels' = (live_media_health_judged_channels \cup {channel_id})
-    /\ UnchangedFrame_182c9dbc714be34d
-
-
 ObserveLiveChannelMediaHealthAudibleAttached(arg_session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros) ==
     /\ phase = "Attached"
     /\ (IF (audible_frames > 0) THEN TRUE ELSE (max_rms_micros >= 2000))
@@ -27099,21 +27071,6 @@ ObserveLiveChannelMediaHealthAudibleRunning(arg_session_id, channel_id, output_i
     /\ model_step_count' = model_step_count + 1
     /\ live_media_health_judged_channels' = (live_media_health_judged_channels \cup {channel_id})
     /\ UnchangedFrame_182c9dbc714be34d
-
-
-ObserveLiveChannelMediaHealthSilentReopenIdle(arg_session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros) ==
-    /\ phase = "Idle"
-    /\ ((audible_frames = 0) /\ (max_rms_micros < 2000))
-    /\ ~((arg_session_id \in DOMAIN live_media_fault_reopens_by_session))
-    /\ ((IF (channel_id \in DOMAIN live_channel_session_by_channel) THEN Some((IF channel_id \in DOMAIN live_channel_session_by_channel THEN live_channel_session_by_channel[channel_id] ELSE "None")) ELSE None) = Some(arg_session_id))
-    /\ ((IF (channel_id \in DOMAIN live_execution_phase_by_channel) THEN Some((IF channel_id \in DOMAIN live_execution_phase_by_channel THEN live_execution_phase_by_channel[channel_id] ELSE "None")) ELSE None) = Some("Active"))
-    /\ (((IF (channel_id \in DOMAIN live_media_health_requested_output_by_channel) THEN Some((IF channel_id \in DOMAIN live_media_health_requested_output_by_channel THEN live_media_health_requested_output_by_channel[channel_id] ELSE "None")) ELSE None) = Some(output_id)) /\ ~((channel_id \in live_media_health_judged_channels)))
-    /\ phase' = "Idle"
-    /\ model_step_count' = model_step_count + 1
-    /\ live_media_health_judged_channels' = (live_media_health_judged_channels \cup {channel_id})
-    /\ live_media_fault_reopen_recommended_by_channel' = MapSet(live_media_fault_reopen_recommended_by_channel, channel_id, TRUE)
-    /\ live_media_fault_reopens_by_session' = MapSet(live_media_fault_reopens_by_session, arg_session_id, 1)
-    /\ UnchangedFrame_d8f8affcd8fa5881
 
 
 ObserveLiveChannelMediaHealthSilentReopenAttached(arg_session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros) ==
@@ -27144,20 +27101,6 @@ ObserveLiveChannelMediaHealthSilentReopenRunning(arg_session_id, channel_id, out
     /\ live_media_fault_reopen_recommended_by_channel' = MapSet(live_media_fault_reopen_recommended_by_channel, channel_id, TRUE)
     /\ live_media_fault_reopens_by_session' = MapSet(live_media_fault_reopens_by_session, arg_session_id, 1)
     /\ UnchangedFrame_d8f8affcd8fa5881
-
-
-ObserveLiveChannelMediaHealthSilentExhaustedIdle(arg_session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros) ==
-    /\ phase = "Idle"
-    /\ ((audible_frames = 0) /\ (max_rms_micros < 2000))
-    /\ (arg_session_id \in DOMAIN live_media_fault_reopens_by_session)
-    /\ ((IF (channel_id \in DOMAIN live_channel_session_by_channel) THEN Some((IF channel_id \in DOMAIN live_channel_session_by_channel THEN live_channel_session_by_channel[channel_id] ELSE "None")) ELSE None) = Some(arg_session_id))
-    /\ ((IF (channel_id \in DOMAIN live_execution_phase_by_channel) THEN Some((IF channel_id \in DOMAIN live_execution_phase_by_channel THEN live_execution_phase_by_channel[channel_id] ELSE "None")) ELSE None) = Some("Active"))
-    /\ (((IF (channel_id \in DOMAIN live_media_health_requested_output_by_channel) THEN Some((IF channel_id \in DOMAIN live_media_health_requested_output_by_channel THEN live_media_health_requested_output_by_channel[channel_id] ELSE "None")) ELSE None) = Some(output_id)) /\ ~((channel_id \in live_media_health_judged_channels)))
-    /\ phase' = "Idle"
-    /\ model_step_count' = model_step_count + 1
-    /\ live_media_health_judged_channels' = (live_media_health_judged_channels \cup {channel_id})
-    /\ live_media_fault_reopen_recommended_by_channel' = MapSet(live_media_fault_reopen_recommended_by_channel, channel_id, FALSE)
-    /\ UnchangedFrame_83e9848d3207e85f
 
 
 ObserveLiveChannelMediaHealthSilentExhaustedAttached(arg_session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros) ==
@@ -36944,16 +36887,12 @@ Next ==
     \/ \E channel_id \in StringValues : \E status \in LiveChannelPublicStatusValues : \E status_observation_sequence \in 0..2 : \E degradation_reason \in OptionLiveChannelDegradationReasonValues : \E degradation_detail \in OptionStringValues : RecordLiveChannelStatusRunning(channel_id, status, status_observation_sequence, degradation_reason, degradation_detail)
     \/ \E channel_id \in StringValues : \E status \in LiveChannelPublicStatusValues : \E status_observation_sequence \in 0..2 : \E degradation_reason \in OptionLiveChannelDegradationReasonValues : \E degradation_detail \in OptionStringValues : RecordLiveChannelStatusRetired(channel_id, status, status_observation_sequence, degradation_reason, degradation_detail)
     \/ \E channel_id \in StringValues : \E status \in LiveChannelPublicStatusValues : \E status_observation_sequence \in 0..2 : \E degradation_reason \in OptionLiveChannelDegradationReasonValues : \E degradation_detail \in OptionStringValues : RecordLiveChannelStatusStopped(channel_id, status, status_observation_sequence, degradation_reason, degradation_detail)
-    \/ \E arg_session_id \in StringValues : \E channel_id \in StringValues : \E runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E output_id \in StringValues : RequestLiveMediaHealthIdle(arg_session_id, channel_id, runtime_id, fence_token, generation, output_id, TRUE)
     \/ \E arg_session_id \in StringValues : \E channel_id \in StringValues : \E runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E output_id \in StringValues : RequestLiveMediaHealthAttached(arg_session_id, channel_id, runtime_id, fence_token, generation, output_id, TRUE)
     \/ \E arg_session_id \in StringValues : \E channel_id \in StringValues : \E runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E output_id \in StringValues : RequestLiveMediaHealthRunning(arg_session_id, channel_id, runtime_id, fence_token, generation, output_id, TRUE)
-    \/ \E arg_session_id \in StringValues : \E channel_id \in StringValues : \E output_id \in StringValues : \E decoded_frames \in 0..2 : \E audible_frames \in 0..2 : \E max_rms_micros \in 0..2 : ObserveLiveChannelMediaHealthAudibleIdle(arg_session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
     \/ \E arg_session_id \in StringValues : \E channel_id \in StringValues : \E output_id \in StringValues : \E decoded_frames \in 0..2 : \E audible_frames \in 0..2 : \E max_rms_micros \in 0..2 : ObserveLiveChannelMediaHealthAudibleAttached(arg_session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
     \/ \E arg_session_id \in StringValues : \E channel_id \in StringValues : \E output_id \in StringValues : \E decoded_frames \in 0..2 : \E audible_frames \in 0..2 : \E max_rms_micros \in 0..2 : ObserveLiveChannelMediaHealthAudibleRunning(arg_session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
-    \/ \E arg_session_id \in StringValues : \E channel_id \in StringValues : \E output_id \in StringValues : \E decoded_frames \in 0..2 : \E audible_frames \in 0..2 : \E max_rms_micros \in 0..2 : ObserveLiveChannelMediaHealthSilentReopenIdle(arg_session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
     \/ \E arg_session_id \in StringValues : \E channel_id \in StringValues : \E output_id \in StringValues : \E decoded_frames \in 0..2 : \E audible_frames \in 0..2 : \E max_rms_micros \in 0..2 : ObserveLiveChannelMediaHealthSilentReopenAttached(arg_session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
     \/ \E arg_session_id \in StringValues : \E channel_id \in StringValues : \E output_id \in StringValues : \E decoded_frames \in 0..2 : \E audible_frames \in 0..2 : \E max_rms_micros \in 0..2 : ObserveLiveChannelMediaHealthSilentReopenRunning(arg_session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
-    \/ \E arg_session_id \in StringValues : \E channel_id \in StringValues : \E output_id \in StringValues : \E decoded_frames \in 0..2 : \E audible_frames \in 0..2 : \E max_rms_micros \in 0..2 : ObserveLiveChannelMediaHealthSilentExhaustedIdle(arg_session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
     \/ \E arg_session_id \in StringValues : \E channel_id \in StringValues : \E output_id \in StringValues : \E decoded_frames \in 0..2 : \E audible_frames \in 0..2 : \E max_rms_micros \in 0..2 : ObserveLiveChannelMediaHealthSilentExhaustedAttached(arg_session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
     \/ \E arg_session_id \in StringValues : \E channel_id \in StringValues : \E output_id \in StringValues : \E decoded_frames \in 0..2 : \E audible_frames \in 0..2 : \E max_rms_micros \in 0..2 : ObserveLiveChannelMediaHealthSilentExhaustedRunning(arg_session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
     \/ \E arg_wait_request_id \in WaitRequestIdValues : \E operation_id_sequence \in SeqOfStringValues : \E operation_ids \in SetOfStringValues : \E operation_id_tokens \in SetOfOperationIdValues : \E operation_token_by_id \in MapStringOperationIdValues : \E operation_id_by_token \in MapOperationIdStringValues : \E duplicate_operation_id \in OptionStringValues : \E not_found_operation_id \in OptionStringValues : ResolveWaitAllAdmissionDuplicateRejectedIdle(arg_wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)

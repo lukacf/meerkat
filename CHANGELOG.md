@@ -145,17 +145,14 @@ them.
   `live_media_health_judged_channels`,
   `live_media_fault_reopen_recommended_by_channel` and
   `live_media_fault_reopens_by_session`. New kernel transitions:
-  `RequestLiveMediaHealthIdle`, `RequestLiveMediaHealthAttached`,
-  `RequestLiveMediaHealthRunning`,
-  `ObserveLiveChannelMediaHealthAudibleIdle`,
+  `RequestLiveMediaHealthAttached`, `RequestLiveMediaHealthRunning`,
   `ObserveLiveChannelMediaHealthAudibleAttached`,
   `ObserveLiveChannelMediaHealthAudibleRunning`,
-  `ObserveLiveChannelMediaHealthSilentReopenIdle`,
   `ObserveLiveChannelMediaHealthSilentReopenAttached`,
   `ObserveLiveChannelMediaHealthSilentReopenRunning`,
-  `ObserveLiveChannelMediaHealthSilentExhaustedIdle`,
   `ObserveLiveChannelMediaHealthSilentExhaustedAttached` and
-  `ObserveLiveChannelMediaHealthSilentExhaustedRunning`; later discriminants
+  `ObserveLiveChannelMediaHealthSilentExhaustedRunning` (a live channel serves
+  an attached runtime, so these edges have no Idle variant); later discriminants
   and ordering move in the generated `MeerkatMachineInput::*`,
   `MeerkatMachineInputVariant::*`, `MeerkatMachineEffect::*`,
   `MeerkatMachineEffectVariant::*` and kernel `Input::*`, `InputKind::*`,

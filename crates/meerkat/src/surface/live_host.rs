@@ -470,19 +470,32 @@ impl<B: SessionAgentBuilder + 'static>
         let Some(service) = self.service.upgrade() else {
             return;
         };
-        match service
-            .publish_live_channel_closed(session_id, channel_id.clone(), reason, reopen_recommended)
-            .await
-        {
-            Ok(()) | Err(meerkat_core::service::SessionError::NotFound { .. }) => {}
-            Err(error) => tracing::warn!(
-                %session_id,
-                channel = %channel_id,
-                ?reason,
-                %error,
-                "a committed live channel close was not published on the session event stream"
-            ),
-        }
+        // The runtime calls this inside the committed close. The session
+        // publishes through its own command loop, which a running member
+        // turn can hold for that turn's whole duration, so the close must
+        // never wait on it: hand the event to the session and return.
+        let session_id = session_id.clone();
+        let channel_id = channel_id.clone();
+        tokio::spawn(async move {
+            match service
+                .publish_live_channel_closed(
+                    &session_id,
+                    channel_id.clone(),
+                    reason,
+                    reopen_recommended,
+                )
+                .await
+            {
+                Ok(()) | Err(meerkat_core::service::SessionError::NotFound { .. }) => {}
+                Err(error) => tracing::warn!(
+                    %session_id,
+                    channel = %channel_id,
+                    ?reason,
+                    %error,
+                    "a committed live channel close was not published on the session event stream"
+                ),
+            }
+        });
     }
 
     async fn retire_live_session_close_tombstones(&self, session_id: &SessionId) {

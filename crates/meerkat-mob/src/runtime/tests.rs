@@ -84945,6 +84945,10 @@ fn placement_fixture_uses_local_mob_authority_types() {
 }
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod host_outage_recovery;
+/// Member-level safe-boundary instruction activation on real persistent
+/// stores (restored member, keyed duplicate, mid-turn refusal).
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod member_instruction_gates;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod resume_bind_custody;
 mod retirement_isolation;

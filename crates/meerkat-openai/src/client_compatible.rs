@@ -1204,6 +1204,14 @@ impl OpenAiCompatibleClient {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for OpenAiCompatibleClient {
+    async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
+        let authorizer = self
+            .authorizer
+            .as_ref()
+            .ok_or(meerkat_core::auth::AuthError::HostOwnedUnavailable)?;
+        authorizer.prepare_request().await
+    }
+
     fn plain_model_route(
         &self,
         _logical_model: &str,

@@ -985,3 +985,6 @@ async fn ce_native_two_existing_sessions_same_account_positive() {
 async fn ce_native_other_existing_session_progresses_during_oauth_http() {
     exercise(true).await;
 }
+
+#[path = "ce_native_progress/n1_expired_admission.rs"]
+mod n1_expired_admission;

@@ -4476,6 +4476,18 @@ impl DriverEntry {
         }
     }
 
+    /// Reuse the current admission owner before cold credential maintenance.
+    /// The caller holds the actual current session mutation gate and lease.
+    pub(crate) fn authenticate_work(&self, input: &Input) -> Result<(), RuntimeDriverError> {
+        match self {
+            Self::Ephemeral(driver) => driver.authenticate_work(input),
+            Self::Persistent(driver) => {
+                driver.require_durability_ready()?;
+                driver.inner_ref().authenticate_work(input)
+            }
+        }
+    }
+
     pub(crate) fn authenticate_work_with_credential(
         &self,
         input: &Input,

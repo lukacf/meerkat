@@ -37,6 +37,12 @@ pub enum ControllerReadinessFailure {
     CredentialUnusable {
         disposition: meerkat_core::handles::CredentialUseDisposition,
     },
+    /// Provider-neutral failure from existing-credential preparation. Provider
+    /// diagnostics and secrets never cross this admission error boundary.
+    #[error("controller credential preparation failed: {kind:?}")]
+    CredentialPreparationFailed {
+        kind: meerkat_core::auth::AuthErrorKind,
+    },
     #[error("controller policy observation must be refreshed")]
     PolicyChanged,
     #[error("replacement controller authority must be an empty owner")]

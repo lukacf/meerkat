@@ -598,6 +598,12 @@ mod tests {
         }
         impl Fixture {
             async fn start(reply: Reply) -> Self {
+                Self::start_with_persistence(reply, None).await
+            }
+            async fn start_with_persistence(
+                reply: Reply,
+                persistence: Option<ProviderAuthPersistence>,
+            ) -> Self {
                 let endpoint = Arc::new(Endpoint {
                     arrived: Notify::new(),
                     release: Semaphore::new(0),
@@ -616,10 +622,16 @@ mod tests {
                 let key = TokenKey::from_credential_identity(binding.credential_identity());
                 let lease = LeaseKey::from_credential_identity(binding.credential_identity());
                 let fail_next_save = Arc::new(AtomicBool::new(false));
-                let store: Arc<dyn TokenStore> = Arc::new(FaultStore {
-                    inner: EphemeralTokenStore::new(),
-                    fail_next_save: fail_next_save.clone(),
+                let persistence = persistence.unwrap_or_else(|| {
+                    ProviderAuthPersistence::new(
+                        Arc::new(FaultStore {
+                            inner: EphemeralTokenStore::new(),
+                            fail_next_save: fail_next_save.clone(),
+                        }),
+                        Arc::new(InMemoryCoordinator::new()),
+                    )
                 });
+                let store = persistence.token_store();
                 let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
                 let auth = meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(handle).unwrap();
                 let raw = PersistedTokens {
@@ -646,10 +658,6 @@ mod tests {
                 )
                 .unwrap();
                 store.save(&key, &original).await.unwrap();
-                let persistence = ProviderAuthPersistence::new(
-                    store.clone(),
-                    Arc::new(InMemoryCoordinator::new()),
-                );
                 let env = ResolverEnvironment::testing()
                     .with_provider_auth_persistence(persistence.clone())
                     .with_auth_lease_handle(auth.clone())
@@ -1168,6 +1176,114 @@ mod tests {
                 Some(legacy)
             );
             assert_eq!(fixture.endpoint.requests.lock().unwrap().len(), 1);
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn ce_provider_file_lock_owned_refresh_survives_waiter_abort() {
+            use fs4::fs_std::FileExt;
+            use meerkat_auth_core::{FileLockCoordinator, FileTokenStore};
+            use meerkat_core::auth::RefreshCoordinator;
+            use meerkat_core::generated::auth_lease_durable_lifecycle_marker as durable_marker;
+
+            let directory = tempfile::tempdir().unwrap();
+            let token_root = directory.path().join("tokens");
+            let lock_root = directory.path().join("locks");
+            let persistence = ProviderAuthPersistence::new(
+                Arc::new(FileTokenStore::new(&token_root)),
+                Arc::new(FileLockCoordinator::new(&lock_root)),
+            );
+            // start returns only after the real refresh request enters /token.
+            let mut fixture =
+                Fixture::start_with_persistence(Reply::Success, Some(persistence)).await;
+            let lock_path = lock_root.join(format!(
+                "{}--{}.lock",
+                fixture.key.realm(),
+                fixture.key.storage_stem()
+            ));
+            let lock_probe = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .unwrap();
+            let acquired_during_http = FileExt::try_lock_exclusive(&lock_probe).unwrap();
+            if acquired_during_http {
+                FileExt::unlock(&lock_probe).unwrap();
+            }
+
+            let guard = meerkat_core::try_acquire_auth_login_lifecycle_guard(&fixture.lease)
+                .expect("the real HTTP request must not retain the lifecycle guard");
+            fixture.endpoint.release.add_permits(1);
+            let waiter = fixture.refresh.take().unwrap();
+            waiter.abort();
+            let cancelled = waiter.await;
+            // The lifecycle guard prevents commit/exit while we inspect the
+            // actual OS lock after cancelling its only original waiter.
+            let acquired_after_abort = FileExt::try_lock_exclusive(&lock_probe);
+            if matches!(acquired_after_abort, Ok(true)) {
+                FileExt::unlock(&lock_probe).unwrap();
+            }
+            drop(guard);
+
+            // A separate coordinator has no shared in-memory gate with the
+            // refresh. This fence must cross the same actual OS file lock.
+            let fence_coordinator = FileLockCoordinator::new(&lock_root);
+            let fresh_store = FileTokenStore::new(&token_root);
+            let key = fixture.key.clone();
+            let fenced = tokio::time::timeout(
+                BOUND,
+                fence_coordinator.with_exclusive_mutation(
+                    fixture.key.clone(),
+                    Box::new(move || {
+                        Box::pin(async move {
+                            Ok(meerkat_core::auth::CredentialMutationOutcome::Persisted(
+                                fresh_store
+                                    .load(&key)
+                                    .await
+                                    .unwrap()
+                                    .expect("committed file tokens"),
+                            ))
+                        })
+                    }),
+                ),
+            )
+            .await
+            .expect("file-lock refresh settles after waiter cancellation")
+            .unwrap();
+            let meerkat_core::auth::CredentialMutationOutcome::Persisted(stored) = fenced else {
+                panic!("fence returns the actual saved tokens");
+            };
+            let acquired_after_fence = FileExt::try_lock_exclusive(&lock_probe).unwrap();
+            if acquired_after_fence {
+                FileExt::unlock(&lock_probe).unwrap();
+            }
+
+            assert!(cancelled.unwrap_err().is_cancelled());
+            assert!(!acquired_during_http, "actual HTTP must own the file lock");
+            assert!(
+                !acquired_after_abort.unwrap(),
+                "waiter cancellation must not release the owned file lock"
+            );
+            assert!(
+                acquired_after_fence,
+                "completed refresh and fence release the file lock"
+            );
+            fixture.assert_one_original_exchange();
+            assert_eq!(stored.primary_secret.as_deref(), Some("ce-access-b"));
+            assert_eq!(stored.refresh_token.as_deref(), Some("ce-refresh-b"));
+            assert_ne!(stored, fixture.original);
+            let snapshot = fixture.auth.snapshot(&fixture.lease);
+            assert!(snapshot.credential_present);
+            assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+            assert_ne!(snapshot.phase, Some(AuthLeasePhase::ReauthRequired));
+            assert_eq!(
+                durable_marker::marker_relation_for_tokens_and_snapshot(
+                    &stored,
+                    &snapshot,
+                    &fixture.key
+                ),
+                durable_marker::AuthLeaseDurableMarkerRelation::Matches
+            );
         }
 
         #[tokio::test]

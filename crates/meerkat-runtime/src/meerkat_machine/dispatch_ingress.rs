@@ -1390,8 +1390,8 @@ impl MeerkatMachine {
         Ok(resolved.requires_active_runtime_pre_admission())
     }
 
-    /// Wait for credential custody in the caller, before any owned admission.
-    /// Dropping this wait creates no accepted work. Once custody is acquired,
+    /// Prepare existing credentials and obtain final custody in the caller.
+    /// Dropping this wait creates no accepted work. Once final custody is acquired,
     /// driver admission, completion registration, generated DSL publication,
     /// effect convergence, and wake finish as one process-owned transaction;
     /// dropping the caller then discards only its acknowledgement.
@@ -1400,7 +1400,7 @@ impl MeerkatMachine {
         command: MeerkatMachineCommand,
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
         let spawner = MachineCleanupTaskSpawner::acquire()?;
-        let input = match &command {
+        let (session_id, input) = match &command {
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id,
                 input,
@@ -1417,21 +1417,20 @@ impl MeerkatMachine {
                         ),
                     });
                 }
-                input
+                (session_id, input)
             }
-            MeerkatMachineCommand::AcceptWithoutWake { input, .. } => input,
+            MeerkatMachineCommand::AcceptWithoutWake {
+                session_id, input, ..
+            } => (session_id, input),
             _ => {
                 return Err(RuntimeDriverError::Internal(
                     "non-ingress command reached credential admission".into(),
                 ));
             }
         };
-        let credential_custody = super::credential_custody::NativeCredentialCustody::acquire(
-            &self.native_work_authorization_host,
-            input,
-            self.store.is_some(),
-        )
-        .await?;
+        let credential_custody = self
+            .acquire_prepared_input_credential(session_id, input, &spawner)
+            .await?;
         // There is no suspension between acquiring custody and transferring it
         // into the existing process-owned transaction.
         let machine = self.clone();

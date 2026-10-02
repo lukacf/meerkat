@@ -142,6 +142,10 @@ impl GeminiCopilotChatClient {
 #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
 #[async_trait]
 impl LlmClient for GeminiCopilotChatClient {
+    async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
+        self.inner.prepare_controller_credential().await
+    }
+
     fn stream_prepared<'a>(
         &'a self,
         request: &'a meerkat_llm_core::PreparedLlmRequest,

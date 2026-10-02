@@ -177,6 +177,20 @@ impl ControllerModelClient {
         &self.client
     }
 
+    /// Run existing-credential maintenance on this exact retained child.
+    /// Selection is checked on both sides of the await; maintenance cannot
+    /// silently select a fallback or replace the admitted controller identity.
+    pub async fn prepare_controller_credential(&self) -> Result<(), crate::auth::AuthError> {
+        if self.client.controller_model_selection().as_ref() != Some(&self.selection) {
+            return Err(crate::auth::AuthError::StaleCredential);
+        }
+        self.client.prepare_controller_credential().await?;
+        if self.client.controller_model_selection().as_ref() != Some(&self.selection) {
+            return Err(crate::auth::AuthError::StaleCredential);
+        }
+        Ok(())
+    }
+
     /// Read the pinned child's route without constructing or sending a request.
     /// Custom clients must uphold the immutable selection contract.
     pub fn plain_facts(&self) -> Result<ControllerModelFacts, ControllerFactsUnavailable> {

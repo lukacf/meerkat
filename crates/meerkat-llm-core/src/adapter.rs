@@ -535,6 +535,17 @@ impl AgentLlmRequestAttempt for LlmClientAdapterAttempt {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentLlmClient for LlmClientAdapter {
+    async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
+        let selected = self
+            .controller_model_selection()
+            .ok_or(meerkat_core::auth::AuthError::StaleCredential)?;
+        self.client.prepare_controller_credential().await?;
+        if self.controller_model_selection().as_ref() != Some(&selected) {
+            return Err(meerkat_core::auth::AuthError::StaleCredential);
+        }
+        Ok(())
+    }
+
     fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
         let selection = self.client.controller_model_selection()?;
         (selection.model() == self.model && selection.provider() == self.provider)

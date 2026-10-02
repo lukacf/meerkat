@@ -57,8 +57,12 @@ meerkat-authorization-contracts.workspace = true
 meerkat-runtime = { workspace = true, features = ["local-authorization", "test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = { workspace = true }
-meerkat-auth-core = { workspace = true, features = ["oauth"] }
+meerkat-auth-core = { workspace = true, features = ["oauth", "azure-ad"] }
 axum = { workspace = true, features = ["ws"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+meerkat-auth-core = { workspace = true, features = ["file-lock"] }
+fs4 = "0.13"
 
 [features]
 default = ["oauth", "copilot"]

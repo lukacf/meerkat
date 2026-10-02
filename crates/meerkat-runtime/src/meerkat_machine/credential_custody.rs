@@ -212,6 +212,105 @@ impl NativeCredentialCustody {
     }
 }
 
+impl super::MeerkatMachine {
+    /// Ordinary Ready admission keeps the existing no-await custody handoff.
+    /// Only RefreshRequired enters this separate, caller-authenticated cold path.
+    pub(super) async fn acquire_prepared_input_credential(
+        &self,
+        session_id: &meerkat_core::SessionId,
+        input: &Input,
+        spawner: &super::MachineCleanupTaskSpawner,
+    ) -> Result<NativeCredentialCustody, RuntimeDriverError> {
+        let custody = NativeCredentialCustody::acquire(
+            &self.native_work_authorization_host,
+            input,
+            self.store.is_some(),
+        )
+        .await?;
+        let readiness = custody.validate(&self.native_work_authorization_host, input);
+        #[cfg(not(target_arch = "wasm32"))]
+        if matches!(
+            &readiness,
+            Err(RuntimeDriverError::ControllerReadinessUnavailable {
+                reason: ControllerReadinessFailure::CredentialUnusable {
+                    disposition: CredentialUseDisposition::RefreshRequired,
+                },
+            })
+        ) {
+            // Existing lock order: lease, current session mutation gate, driver.
+            // Direct driver callers only try the lease and cannot wait on it.
+            let controller = {
+                let driver = {
+                    let sessions = self.sessions.read().await;
+                    sessions
+                        .get(session_id)
+                        .ok_or(RuntimeDriverError::NotReady {
+                            state: crate::runtime_state::RuntimeState::Destroyed,
+                        })?
+                        .driver
+                        .clone()
+                };
+                let _gate = self
+                    .lock_current_session_driver_gate(session_id, &driver)
+                    .await?;
+                let driver = driver.lock().await;
+                driver.authenticate_work(input)?;
+                // Recheck the actual slot/classifier after waiting for native
+                // custody. Only this exact refreshable owner may cause I/O.
+                match custody.validate(&self.native_work_authorization_host, input) {
+                    Ok(()) => return Ok(custody),
+                    Err(RuntimeDriverError::ControllerReadinessUnavailable {
+                        reason:
+                            ControllerReadinessFailure::CredentialUnusable {
+                                disposition: CredentialUseDisposition::RefreshRequired,
+                            },
+                    }) => {}
+                    Err(error) => return Err(error),
+                }
+                input
+                    .header()
+                    .ingress_context
+                    .as_ref()
+                    .and_then(|ingress| ingress.controller_client())
+                    .cloned()
+                    .ok_or_else(crate::input_authority::unavailable)?
+            };
+            // No native or lease guard crosses HTTP. Retain the actual owner
+            // through maintenance even if its waiting caller goes away. Input
+            // admission remains in that caller until final custody is handed off.
+            drop(custody);
+            let owner = self.clone();
+            spawner
+                .spawn(async move {
+                    let _owner = owner;
+                    controller
+                        .prepare_controller_credential()
+                        .await
+                        .map_err(|error| {
+                            unavailable(ControllerReadinessFailure::CredentialPreparationFailed {
+                                kind: error.kind(),
+                            })
+                        })
+                })
+                .await
+                .map_err(|_| unavailable(ControllerReadinessFailure::AuthorityUnavailable))??;
+            // The unchanged owned admission authenticates current policy and
+            // validates this owner again before any generated accept or row write.
+            // There is no suspension after this final acquisition returns.
+            return NativeCredentialCustody::acquire(
+                &self.native_work_authorization_host,
+                input,
+                self.store.is_some(),
+            )
+            .await;
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (session_id, spawner);
+        readiness?;
+        Ok(custody)
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::super::{MeerkatMachine, MeerkatMachineShared};

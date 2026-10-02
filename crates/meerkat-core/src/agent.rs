@@ -226,6 +226,14 @@ pub trait AgentLlmClient: Send + Sync {
         Err(crate::ControllerFactsUnavailable)
     }
 
+    /// Prepare an existing controller credential without sending a model request.
+    /// Native admission authenticates the caller before invoking this cold path
+    /// and rechecks current authority afterward. This is not an operation permit
+    /// or an initial credential acquisition. Unsupported clients refuse.
+    async fn prepare_controller_credential(&self) -> Result<(), crate::auth::AuthError> {
+        Err(crate::auth::AuthError::HostOwnedUnavailable)
+    }
+
     /// Retain an actual immutable selected client for controller feedback.
     /// Mutable selectors must delegate to the selected child once. Unsupported
     /// clients return none; a retained selection DTO alone cannot replace this

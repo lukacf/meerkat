@@ -260,16 +260,14 @@ impl MeerkatMachine {
         &self,
         command: MeerkatMachineCommand,
     ) -> Result<MeerkatMachineCommandResult, RuntimeControlPlaneError> {
-        if let MeerkatMachineCommand::Ingest { input, .. } = &command {
+        if let MeerkatMachineCommand::Ingest { runtime_id, input } = &command {
             let spawner = MachineCleanupTaskSpawner::acquire()
                 .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
-            let credential_custody = super::credential_custody::NativeCredentialCustody::acquire(
-                &self.native_work_authorization_host,
-                input,
-                self.store.is_some(),
-            )
-            .await
-            .map_err(Self::control_plane_error_from_driver_error)?;
+            let (session_id, _, _, _) = self.lookup_entry(runtime_id).await?;
+            let credential_custody = self
+                .acquire_prepared_input_credential(&session_id, input, &spawner)
+                .await
+                .map_err(Self::control_plane_error_from_driver_error)?;
             // Pre-custody cancellation creates no owned transaction. Once held,
             // move custody into the existing task without an intervening await.
             let machine = self.clone();

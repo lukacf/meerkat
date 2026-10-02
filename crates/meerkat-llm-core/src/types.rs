@@ -85,6 +85,13 @@ fn authorization_endpoint(
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait LlmClient: Send + Sync {
+    /// Request-free maintenance of an existing selected credential. This cold
+    /// native-admission hook must not acquire a new credential or select a
+    /// different model/account. Final use still requires current native custody.
+    async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
+        Err(meerkat_core::auth::AuthError::HostOwnedUnavailable)
+    }
+
     /// Non-authoritative projection of this exact factory-selected target.
     /// The registry decorator supplies it; unsupported raw clients return none.
     fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {

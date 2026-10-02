@@ -766,6 +766,14 @@ impl CopilotRoutedClient {
 
 #[async_trait]
 impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
+    async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
+        self.connection
+            .resolved_authorizer()
+            .ok_or(AuthError::HostOwnedUnavailable)?
+            .prepare_request()
+            .await
+    }
+
     fn project_replay_request(
         &self,
         messages: &[meerkat_core::Message],
@@ -1037,6 +1045,10 @@ impl CopilotCapabilityGatedClient {
 
 #[async_trait]
 impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
+    async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
+        self.inner.prepare_controller_credential().await
+    }
+
     fn project_replay_messages(
         &self,
         messages: &[meerkat_core::Message],
@@ -3329,6 +3341,270 @@ mod tests {
                 .is_some_and(|snapshot| snapshot.models().next().is_some()),
             "live Copilot model discovery returned no usable model snapshot"
         );
+    }
+    // The N1 common trait is the predecessor of these regression tests. The
+    // actual Copilot runtime and authorizer remain the credential/route owners;
+    // ScriptedTransport replaces only the external token/model HTTP transport.
+    mod controller_maintenance {
+        use super::*;
+
+        struct Fixture {
+            client: Arc<dyn meerkat_llm_core::LlmClient>,
+            authorizer: Arc<CopilotAuthorizer>,
+            auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
+            transport: Arc<ScriptedTransport>,
+            factory_routes: Arc<Mutex<Vec<String>>>,
+            dispatches: Arc<AtomicU64>,
+        }
+
+        impl Fixture {
+            async fn new(capability_wrapper: bool) -> Self {
+                let (auth_binding, binding) = validated_binding();
+                let (env, auth_lease) = resolver_environment(&auth_binding).await;
+                let transport = Arc::new(ScriptedTransport::new([
+                    token_response("maintenance-derived-one"),
+                    models_response(),
+                    token_response("maintenance-derived-two"),
+                    models_response(),
+                ]));
+                let runtime = Arc::new(CopilotRuntime {
+                    accounts: Mutex::new(BTreeMap::new()),
+                    transport: transport.clone(),
+                });
+                let resolved = runtime.resolve(&binding, &env).await.unwrap();
+                let authorizer = resolved.concrete_authorizer();
+                let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+                    provider: Provider::OpenAI,
+                    backend: binding.backend(),
+                    backend_profile: binding.backend_profile().clone(),
+                    credential_identity: binding.credential_identity().clone(),
+                    auth_lease: Arc::new(
+                        meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                            resolved.authorizer(),
+                            resolved.metadata().clone(),
+                            crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                        ),
+                    ),
+                };
+                let factory_routes = Arc::new(Mutex::new(Vec::new()));
+                let routes = Arc::clone(&factory_routes);
+                let dispatches = Arc::new(AtomicU64::new(0));
+                let child_dispatches = Arc::clone(&dispatches);
+                let factory: CopilotRouteClientFactory = Arc::new(move |route, _| {
+                    routes.lock().push(route.api_base.clone());
+                    Ok(Arc::new(DispatchCountingClient {
+                        dispatches: Arc::clone(&child_dispatches),
+                    }))
+                });
+                let routed = routed_client(
+                    runtime,
+                    connection,
+                    Provider::OpenAI,
+                    "gpt-test".to_string(),
+                    factory,
+                )
+                .unwrap();
+                // Exercise the capability wrapper against a real maintained
+                // inner route, independently of its position in a provider stack.
+                let client = if capability_wrapper {
+                    capability_gated_client(
+                        routed,
+                        Some(crate::CopilotModelCapabilities::default()),
+                    )
+                } else {
+                    routed
+                };
+                Self {
+                    client,
+                    authorizer,
+                    auth_lease,
+                    transport,
+                    factory_routes,
+                    dispatches,
+                }
+            }
+
+            fn source_snapshot(&self) -> meerkat_core::handles::AuthLeaseSnapshot {
+                self.auth_lease.snapshot(
+                    &meerkat_core::handles::LeaseKey::from_credential_identity(&account_identity()),
+                )
+            }
+
+            fn assert_route_untouched(&self) {
+                assert_eq!(self.client.provider(), Provider::OpenAI);
+                assert_eq!(
+                    self.factory_routes.lock().as_slice(),
+                    ["https://copilot.example.test"],
+                    "request-free maintenance must not reconstruct/reselect a route"
+                );
+                assert_eq!(self.dispatches.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    self.authorizer.api_base().as_deref(),
+                    Some("https://copilot.example.test")
+                );
+                assert!(
+                    self.authorizer
+                        .model_snapshot()
+                        .unwrap()
+                        .model("gpt-test")
+                        .unwrap()
+                        .route_for(Provider::OpenAI)
+                        == Some(CopilotEndpoint::Responses)
+                );
+            }
+        }
+
+        async fn remint(capability_wrapper: bool) {
+            let fixture = Fixture::new(capability_wrapper).await;
+            let source = fixture.source_snapshot();
+            assert_eq!(
+                source.phase,
+                Some(meerkat_core::handles::AuthLeasePhase::Valid)
+            );
+            assert_eq!(fixture.transport.request_count(), 2);
+            fixture
+                .client
+                .prepare_controller_credential()
+                .await
+                .unwrap();
+            assert_eq!(
+                fixture.transport.request_count(),
+                2,
+                "fresh maintenance is cached"
+            );
+
+            let mut headers = Vec::new();
+            let first = fixture
+                .authorizer
+                .authorize_with_receipt(&mut HttpAuthorizationRequest {
+                    method: "POST",
+                    url: "https://copilot.example.test/responses",
+                    headers: &mut headers,
+                })
+                .await
+                .unwrap();
+            assert!(
+                headers
+                    .iter()
+                    .any(|(name, value)| name.eq_ignore_ascii_case("authorization")
+                        && value == "Bearer maintenance-derived-one")
+            );
+            assert_eq!(
+                fixture
+                    .authorizer
+                    .observe_response_with_receipt(
+                        first,
+                        &HttpAuthorizationResponse {
+                            method: "POST",
+                            url: "https://copilot.example.test/responses",
+                            status: 401,
+                        },
+                    )
+                    .await
+                    .unwrap(),
+                HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+            );
+            assert!(
+                fixture.authorizer.api_base().is_none(),
+                "actual receipt observation invalidates the derived cache"
+            );
+
+            fixture
+                .client
+                .prepare_controller_credential()
+                .await
+                .unwrap();
+            assert_eq!(
+                fixture.transport.request_count(),
+                4,
+                "the real authorizer must remint and discover before any model request"
+            );
+            let mut headers = Vec::new();
+            let second = fixture
+                .authorizer
+                .authorize_with_receipt(&mut HttpAuthorizationRequest {
+                    method: "POST",
+                    url: "https://copilot.example.test/responses",
+                    headers: &mut headers,
+                })
+                .await
+                .unwrap();
+            assert_ne!(first, second);
+            assert!(
+                headers
+                    .iter()
+                    .any(|(name, value)| name.eq_ignore_ascii_case("authorization")
+                        && value == "Bearer maintenance-derived-two")
+            );
+            assert_eq!(
+                fixture.transport.request_count(),
+                4,
+                "the positive readback cannot rescue missing preparation"
+            );
+            assert_eq!(
+                fixture.source_snapshot(),
+                source,
+                "derived Copilot maintenance cannot invent a source credential generation"
+            );
+            fixture.assert_route_untouched();
+            let requests = fixture.transport.requests.lock();
+            for index in [0, 2] {
+                assert_eq!(
+                    requests[index].1.get("authorization").unwrap(),
+                    "token github-source-token"
+                );
+            }
+            for index in [1, 3] {
+                assert_eq!(
+                    requests[index].1.get("openai-intent").unwrap(),
+                    "model-access"
+                );
+            }
+        }
+
+        async fn reauth(capability_wrapper: bool) {
+            let fixture = Fixture::new(capability_wrapper).await;
+            let key =
+                meerkat_core::handles::LeaseKey::from_credential_identity(&account_identity());
+            fixture.auth_lease.mark_reauth_required(&key).unwrap();
+            let refused = fixture.source_snapshot();
+            assert_eq!(
+                refused.phase,
+                Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
+            );
+            let result = fixture.client.prepare_controller_credential().await;
+            assert!(
+                matches!(result, Err(AuthError::UserReauthRequired)),
+                "{result:?}"
+            );
+            assert_eq!(fixture.source_snapshot(), refused);
+            assert_eq!(
+                fixture.transport.request_count(),
+                2,
+                "the generated reauth decision must arrive without extra token/model transport"
+            );
+            fixture.assert_route_untouched();
+        }
+
+        #[tokio::test]
+        async fn routed_maintenance_uses_retained_real_authorizer() {
+            remint(false).await;
+        }
+
+        #[tokio::test]
+        async fn capability_maintenance_forwards_to_real_inner_route() {
+            remint(true).await;
+        }
+
+        #[tokio::test]
+        async fn routed_maintenance_preserves_typed_reauth() {
+            reauth(false).await;
+        }
+
+        #[tokio::test]
+        async fn capability_maintenance_preserves_typed_reauth() {
+            reauth(true).await;
+        }
     }
 }
 

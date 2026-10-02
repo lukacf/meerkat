@@ -22,9 +22,16 @@ One JSON line per adapter crossing:
 | `client_event`    | A client event Meerkat sent on the sideband              |
 | `server_frame`    | A server frame as the provider sent it (lossless `raw`) |
 | `receiver_end`    | The sideband ended (`error` set when it failed)          |
+| `marker`          | A test-driven step: `play_at:<fixture>`, `queue:<a,b>`,  |
+|                   | `disconnect:<graceful\|hard>`, recorded before it runs  |
 
 Each line also carries `seq` (global order), `channel_ordinal` (the journal's
 channel) and `elapsed_ms` (informational only; replay never keys on time).
+
+Markers make replay causal without a clock: a frame recorded after a client
+event is served only once Meerkat sent that event (matched on event type and
+deterministic `event_id`), and a frame recorded after a marker only once the
+replaying test reached that step.
 
 A raw recording that lost a line is renamed `provider-stream.jsonl.incomplete`
 at journal finish and is never a fixture.

@@ -1184,6 +1184,13 @@ impl Journal {
         self.0.provider_stream.for_channel(channel)
     }
 
+    /// Mark a test-driven step (a scheduled utterance, a peer disconnect) in
+    /// the provider stream: a replay holds every later server frame of the
+    /// channel until the replaying test reaches the same step.
+    pub fn provider_step(&self, channel: u32, step: &str) {
+        self.0.provider_stream.for_channel(channel).mark(step);
+    }
+
     /// A recording that lost a line is not a fixture: rename it so the
     /// re-capture procedure cannot pick it up. The run's verdict is unchanged.
     fn seal_provider_stream(&self) {

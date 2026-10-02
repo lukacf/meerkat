@@ -261,6 +261,13 @@ them.
   chain went from 927,960 B to 550,984 B, and the stack canary (debug) now
   passes at 896 KiB. The registration chain (702,184 B) is the next bound.
   No behaviour change.
+- Debug worker-stack headroom (#1474): session registration
+  (`register_session_inner_impl`) stages its discarded existing-session
+  executor-exit transitions (~18 KiB each) in boxed frames, and keeps the
+  recovered authority and the prepared session entry boxed until the call
+  that consumes them, instead of copying them through two poll frames. The
+  registration chain went from 702,184 B to 410,600 B, and the stack canary
+  (debug) now passes at 768 KiB. No behaviour change.
 
 ## [0.8.50] - 2026-10-01
 

@@ -3625,6 +3625,19 @@ impl AgentFactory {
         }
     }
 
+    #[cfg(all(test, feature = "mcp", not(target_arch = "wasm32")))]
+    pub(crate) fn mcp_auth_resolver_for_test(
+        &self,
+    ) -> Option<&Arc<dyn meerkat_mcp::McpAuthResolver>> {
+        self.mcp_auth_resolver.as_ref()
+    }
+
+    /// Whether a default MCP credential source is installed.
+    #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+    pub fn has_mcp_auth_resolver(&self) -> bool {
+        self.mcp_auth_resolver.is_some()
+    }
+
     /// Install the default credential source for OAuth-protected MCP
     /// servers (typically [`crate::HostAuthService::mcp_oauth_authority`]).
     /// A missing credential surfaces as the typed `AuthorizationRequired`

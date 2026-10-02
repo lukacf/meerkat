@@ -1209,6 +1209,17 @@ impl FactoryAgentBuilder {
         self
     }
 
+    /// Install the factory's default MCP credential source
+    /// (see [`AgentFactory::mcp_auth_resolver`]).
+    #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+    pub fn with_mcp_auth_resolver(
+        mut self,
+        resolver: Arc<dyn meerkat_mcp::McpAuthResolver>,
+    ) -> Self {
+        self.factory = self.factory.mcp_auth_resolver(resolver);
+        self
+    }
+
     pub fn with_image_generation_machine(
         mut self,
         machine: Arc<dyn meerkat_tools::builtin::image_generation::ImageGenerationMachine>,

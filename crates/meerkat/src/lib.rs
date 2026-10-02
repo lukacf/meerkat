@@ -330,6 +330,8 @@ pub use factory::{
     encode_llm_client_override_for_service, provider_key, resolve_create_session_default_model,
     resolve_create_session_model, resolve_provider_catalog_default_model,
 };
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+pub use host_auth::default_mcp_auth_resolver;
 #[cfg(not(target_arch = "wasm32"))]
 pub use host_auth::{
     HostAuthDevicePoll, HostAuthDeviceStart, HostAuthError, HostAuthLoginComplete,

@@ -356,7 +356,17 @@ them.
   The `host_auth` docs state the host obligation: the browser context must be
   unobservable by agent tools.
 - `meerkat::AgentFactory::mcp_auth_resolver` installs the default MCP
-  credential source for factory builds. The facade re-exports `McpAuthResolver` and
+  credential source for factory builds.
+- Runtime-backed hosts (RPC, REST, MCP server) get interactive MCP auth by
+  default. Once the runtime's AuthMachine flow owner exists,
+  `build_runtime_backed_service_with_capacities` installs the native MCP
+  OAuth authority as the factory's MCP credential source (a host-supplied
+  `AgentFactory::mcp_auth_resolver` wins), and RPC and REST live `mcp/add`
+  routers use it too. A missing credential is the typed
+  `AuthorizationRequired` host status, never a browser. New:
+  `meerkat::default_mcp_auth_resolver`, `AgentFactory::has_mcp_auth_resolver`,
+  `FactoryAgentBuilder::with_mcp_auth_resolver`,
+  `meerkat_rpc::session_runtime::SessionRuntime::default_mcp_auth_resolver`. The facade re-exports `McpAuthResolver` and
   `McpAuthMode`.
 - Typed host status for MCP servers awaiting human authorization:
   `McpRouter::servers_awaiting_authorization` and

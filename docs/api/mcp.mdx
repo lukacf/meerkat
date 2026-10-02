@@ -265,7 +265,8 @@ ask its user.
   it against the admitted attempt, exchanges the code and persists the
   credential. `AgentFactory::mcp_auth_resolver` (or
   `AgentBuildConfig::mcp_auth_resolver`) connects agents to those
-  credentials.
+  credentials. Runtime-backed RPC, REST and MCP-server hosts install this
+  resolver by default, including for live `mcp/add` servers.
 - **One attempt per server.** A start while an attempt is pending for the
   same server returns that attempt (`disposition: joined`) instead of a
   second one. `HostAuthService::mcp_begin_loopback_login` binds the loopback

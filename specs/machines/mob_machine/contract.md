@@ -598,6 +598,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CreateRun`
 
 ## Effects
+- `HoldMemberRunStarts`
+- `ReleaseMemberRunStarts`
 - `DefinitionEpochAdvanced`(previous_epoch: u64, epoch: u64)
 - `RequestRuntimeBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, session_id: SessionId)
 - `SpawnProfileAuthorized`(agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: Bool, resolved_spec_digest: Option<String>)
@@ -8103,7 +8105,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `explicit_resume_preparation_settled`
   - `explicit_resume_not_cancelled`
   - `placed_completion_stop_intent`
-- Emits: `PersistPlacedCompletionLifecycleIntent`, `AppendLifecycleJournal`, `EmitRunLifecycleNotice`
+- Emits: `PersistPlacedCompletionLifecycleIntent`, `AppendLifecycleJournal`, `EmitRunLifecycleNotice`, `ReleaseMemberRunStarts`
 - To: `Running`
 
 ### `CompleteRunning`
@@ -9816,9 +9818,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `BeginPlacedCompletionLifecycleQuiesce`(intent)
 - Guards:
   - `adaptive_lifecycle_drained`
+  - `intent_is_not_stop`
   - `lifecycle_intent_admissible`
   - `not_quiescing`
 - Emits: `PersistPlacedCompletionLifecycleIntent`
+- To: `Running`
+
+### `BeginPlacedCompletionLifecycleQuiesceFreshStop`
+- From: `Running`
+- On: `BeginPlacedCompletionLifecycleQuiesce`(intent)
+- Guards:
+  - `adaptive_lifecycle_drained`
+  - `intent_is_stop`
+  - `lifecycle_intent_admissible`
+  - `not_quiescing`
+- Emits: `PersistPlacedCompletionLifecycleIntent`, `HoldMemberRunStarts`
 - To: `Running`
 
 ### `BeginPlacedCompletionLifecycleQuiesceReplay`
@@ -9826,10 +9840,23 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `BeginPlacedCompletionLifecycleQuiesce`(intent)
 - Guards:
   - `adaptive_lifecycle_drained`
+  - `intent_is_not_stop`
   - `lifecycle_intent_admissible`
   - `already_quiescing`
   - `compatible_lifecycle_intent_takeover`
 - Emits: `PersistPlacedCompletionLifecycleIntent`
+- To: `Running`
+
+### `BeginPlacedCompletionLifecycleQuiesceReplayStop`
+- From: `Running`
+- On: `BeginPlacedCompletionLifecycleQuiesce`(intent)
+- Guards:
+  - `adaptive_lifecycle_drained`
+  - `intent_is_stop`
+  - `lifecycle_intent_admissible`
+  - `already_quiescing`
+  - `compatible_lifecycle_intent_takeover`
+- Emits: `PersistPlacedCompletionLifecycleIntent`, `HoldMemberRunStarts`
 - To: `Running`
 
 ### `BeginPlacedCompletionLifecycleQuiesceStoppedFresh`

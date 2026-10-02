@@ -2817,7 +2817,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BeginPlacedCompletionLifecycleQuiesceFresh`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `BeginPlacedCompletionLifecycleQuiesceFreshStop`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginPlacedCompletionLifecycleQuiesceReplay`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginPlacedCompletionLifecycleQuiesceReplayStop`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `BeginPlacedCompletionLifecycleQuiesceStoppedFresh`
@@ -3986,6 +3992,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 
 ### Effects
+- `HoldMemberRunStarts`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseMemberRunStarts`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DefinitionEpochAdvanced`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

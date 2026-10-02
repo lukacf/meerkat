@@ -1760,6 +1760,11 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         effect MobMachineEffect {
+            // #1500 run-start hold obligations, realized by the actor over the
+            // member bridge: a Stop pauses every member (no new run until
+            // Resume), and its Resume releases them.
+            HoldMemberRunStarts,
+            ReleaseMemberRunStarts,
             DefinitionEpochAdvanced { previous_epoch: u64, epoch: u64 },
             RequestRuntimeBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, session_id: SessionId },
             SpawnProfileAuthorized { agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: bool, resolved_spec_digest: Option<String> },
@@ -2683,6 +2688,8 @@ macro_rules! mob_catalog_machine_dsl {
         // the sibling kickoff persistence effects; cross-machine C-F3 pairing
         // is not required because no other machine participates.
         disposition RequestKickoffQuiesce => local seam NoOwnerRealization,
+        disposition HoldMemberRunStarts => external seam OwnerRealizationOnly,
+        disposition ReleaseMemberRunStarts => external seam OwnerRealizationOnly,
         disposition RequestPendingSpawnQuiesceForDestroy => local seam NoOwnerRealization,
         disposition MemberAdmissionProbed => local seam SurfaceResultAlignment,
         disposition RespawnGenerationComputed => local seam SurfaceResultAlignment,
@@ -12877,6 +12884,7 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: None
             }
             emit EmitRunLifecycleNotice
+            emit ReleaseMemberRunStarts
         }
 
         transition CompleteRunning {
@@ -14921,6 +14929,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
 
             guard { self.lifecycle_phase == Phase::Running }
+            guard "intent_is_not_stop" { intent != PlacedCompletionLifecycleIntentKind::Stop }
             guard "lifecycle_intent_admissible" {
                 intent != PlacedCompletionLifecycleIntentKind::Stop
                 || self.active_run_count == 0
@@ -14932,6 +14941,35 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit PersistPlacedCompletionLifecycleIntent { intent: intent, active: true }
+        }
+
+        transition BeginPlacedCompletionLifecycleQuiesceFreshStop {
+            on input BeginPlacedCompletionLifecycleQuiesce { intent }
+            guard "adaptive_lifecycle_drained" {
+                mob_machine_adaptive_lifecycle_drained(
+                    self.adaptive_active_run,
+                    self.adaptive_active_layer,
+                    self.adaptive_active_members,
+                    self.adaptive_layer_phase,
+                    self.adaptive_layer_disposition)
+            }
+
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "intent_is_stop" { intent == PlacedCompletionLifecycleIntentKind::Stop }
+            guard "lifecycle_intent_admissible" {
+                intent != PlacedCompletionLifecycleIntentKind::Stop
+                || self.active_run_count == 0
+            }
+            guard "not_quiescing" { self.placed_completion_lifecycle_quiescing == false }
+            update {
+                self.placed_completion_lifecycle_quiescing = true;
+                self.placed_completion_lifecycle_intent = Some(intent);
+            }
+            to Running
+            emit PersistPlacedCompletionLifecycleIntent { intent: intent, active: true }
+            // A Stop pauses every member (#1500): RetireAll, Reset, Complete and
+            // Destroy never hold, so retirement drains are never parked.
+            emit HoldMemberRunStarts
         }
 
         transition BeginPlacedCompletionLifecycleQuiesceReplay {
@@ -14946,6 +14984,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
 
             guard { self.lifecycle_phase == Phase::Running }
+            guard "intent_is_not_stop" { intent != PlacedCompletionLifecycleIntentKind::Stop }
             guard "lifecycle_intent_admissible" {
                 intent != PlacedCompletionLifecycleIntentKind::Stop
                 || self.active_run_count == 0
@@ -14968,6 +15007,46 @@ macro_rules! mob_catalog_machine_dsl {
             update { self.placed_completion_lifecycle_intent = Some(intent); }
             to Running
             emit PersistPlacedCompletionLifecycleIntent { intent: intent, active: true }
+        }
+
+        transition BeginPlacedCompletionLifecycleQuiesceReplayStop {
+            on input BeginPlacedCompletionLifecycleQuiesce { intent }
+            guard "adaptive_lifecycle_drained" {
+                mob_machine_adaptive_lifecycle_drained(
+                    self.adaptive_active_run,
+                    self.adaptive_active_layer,
+                    self.adaptive_active_members,
+                    self.adaptive_layer_phase,
+                    self.adaptive_layer_disposition)
+            }
+
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "intent_is_stop" { intent == PlacedCompletionLifecycleIntentKind::Stop }
+            guard "lifecycle_intent_admissible" {
+                intent != PlacedCompletionLifecycleIntentKind::Stop
+                || self.active_run_count == 0
+            }
+            guard "already_quiescing" { self.placed_completion_lifecycle_quiescing == true }
+            guard "compatible_lifecycle_intent_takeover" {
+                self.placed_completion_lifecycle_intent == Some(intent)
+                || self.placed_completion_lifecycle_intent == Some(PlacedCompletionLifecycleIntentKind::RetireAll)
+                || (self.placed_completion_lifecycle_intent == Some(PlacedCompletionLifecycleIntentKind::Stop)
+                    && (intent == PlacedCompletionLifecycleIntentKind::Reset
+                        || intent == PlacedCompletionLifecycleIntentKind::Complete
+                        || intent == PlacedCompletionLifecycleIntentKind::Destroy))
+                || (self.placed_completion_lifecycle_intent == Some(PlacedCompletionLifecycleIntentKind::Reset)
+                    && (intent == PlacedCompletionLifecycleIntentKind::Stop
+                        || intent == PlacedCompletionLifecycleIntentKind::Complete
+                        || intent == PlacedCompletionLifecycleIntentKind::Destroy))
+                || (self.placed_completion_lifecycle_intent == Some(PlacedCompletionLifecycleIntentKind::Complete)
+                    && intent == PlacedCompletionLifecycleIntentKind::Destroy)
+            }
+            update { self.placed_completion_lifecycle_intent = Some(intent); }
+            to Running
+            emit PersistPlacedCompletionLifecycleIntent { intent: intent, active: true }
+            // A Stop pauses every member (#1500): RetireAll, Reset, Complete and
+            // Destroy never hold, so retirement drains are never parked.
+            emit HoldMemberRunStarts
         }
 
         transition BeginPlacedCompletionLifecycleQuiesceStoppedFresh {

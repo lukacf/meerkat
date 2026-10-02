@@ -11042,6 +11042,33 @@ impl MobActor {
         )
     }
 
+    /// The run-start hold obligations (#1500) are machine-owned: the actor
+    /// holds members for a Stop, and releases them on Resume, only as the
+    /// generated transition says. `hold` selects which effect must (and the
+    /// other must not) be present; `None` requires neither.
+    fn require_member_run_start_effect(
+        transition: &mob_dsl::MobMachineTransition,
+        hold: Option<bool>,
+        context: &str,
+    ) -> Result<(), MobError> {
+        let holds = transition
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, mob_dsl::MobMachineEffect::HoldMemberRunStarts));
+        let releases = transition
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, mob_dsl::MobMachineEffect::ReleaseMemberRunStarts));
+        let expected = (hold == Some(true), hold == Some(false));
+        if (holds, releases) == expected {
+            Ok(())
+        } else {
+            Err(MobError::Internal(format!(
+                "MobMachine {context} produced run-start hold effects (hold: {holds}, release: {releases}) other than expected {expected:?}"
+            )))
+        }
+    }
+
     fn require_lifecycle_journal_effect(
         transition: &mob_dsl::MobMachineTransition,
         kind: mob_dsl::MobLifecycleJournalKind,
@@ -20765,6 +20792,13 @@ impl MobActor {
             true,
             "begin_placed_completion_lifecycle_quiesce",
         )?;
+        // Only a Stop holds members (#1500); the Stop handler realizes it
+        // before any member interrupt.
+        Self::require_member_run_start_effect(
+            &prepared.transition,
+            (intent == mob_dsl::PlacedCompletionLifecycleIntentKind::Stop).then_some(true),
+            "begin_placed_completion_lifecycle_quiesce",
+        )?;
         // The actor has already accepted the lifecycle command and processes no
         // later public command until this handler returns. Drain every mutating
         // live effect admitted before it, then prove/close the one active
@@ -20865,6 +20899,8 @@ impl MobActor {
             mob_dsl::MobLifecycleJournalKind::Resumed,
             "resume_input",
         )?;
+        // Resume releases the members its Stop held (#1500), realized below.
+        Self::require_member_run_start_effect(&prepared.transition, Some(false), "resume_input")?;
         // Store-first: a crash after this marker but before machine commit is
         // still Stopped and cannot originate work; retry reuses the latest End
         // marker and commits the prepared Resume.

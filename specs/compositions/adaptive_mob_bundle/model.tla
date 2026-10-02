@@ -21791,7 +21791,7 @@ control_mob_ResumeStopped ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "PersistPlacedCompletionLifecycleIntent", payload |-> [active |-> FALSE, intent |-> "Stop"], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeStopped"], [machine |-> "control_mob", variant |-> "AppendLifecycleJournal", payload |-> [agent_identity |-> None, agent_runtime_id |-> None, fence_token |-> None, generation |-> None, kind |-> "Resumed", session_id |-> None], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeStopped"], [machine |-> "control_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeStopped"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "PersistPlacedCompletionLifecycleIntent", payload |-> [active |-> FALSE, intent |-> "Stop"], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeStopped"], [machine |-> "control_mob", variant |-> "AppendLifecycleJournal", payload |-> [agent_identity |-> None, agent_runtime_id |-> None, fence_token |-> None, generation |-> None, kind |-> "Resumed", session_id |-> None], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeStopped"], [machine |-> "control_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeStopped"], [machine |-> "control_mob", variant |-> "ReleaseMemberRunStarts", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeStopped"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResumeStopped", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
@@ -26662,6 +26662,7 @@ control_mob_BeginPlacedCompletionLifecycleQuiesceFresh(arg_intent) ==
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ control_mob__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition)
+       /\ (packet.payload.intent # "Stop")
        /\ (IF (packet.payload.intent # "Stop") THEN TRUE ELSE (control_mob_active_run_count = 0))
        /\ (control_mob_placed_completion_lifecycle_quiescing = FALSE)
        /\ control_mob_phase' = "Running"
@@ -26678,6 +26679,31 @@ control_mob_BeginPlacedCompletionLifecycleQuiesceFresh(arg_intent) ==
        /\ model_step_count' = model_step_count + 1
 
 
+control_mob_BeginPlacedCompletionLifecycleQuiesceFreshStop(arg_intent) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "BeginPlacedCompletionLifecycleQuiesce"
+       /\ packet.payload.intent = arg_intent
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Running"
+       /\ control_mob__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition)
+       /\ (packet.payload.intent = "Stop")
+       /\ (IF (packet.payload.intent # "Stop") THEN TRUE ELSE (control_mob_active_run_count = 0))
+       /\ (control_mob_placed_completion_lifecycle_quiescing = FALSE)
+       /\ control_mob_phase' = "Running"
+       /\ control_mob_placed_completion_lifecycle_quiescing' = TRUE
+       /\ control_mob_placed_completion_lifecycle_intent' = Some(packet.payload.intent)
+       /\ UnchangedFrame_d7a3f5fb31f6eaea
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "PersistPlacedCompletionLifecycleIntent", payload |-> [active |-> TRUE, intent |-> packet.payload.intent], effect_id |-> (model_step_count + 1), source_transition |-> "BeginPlacedCompletionLifecycleQuiesceFreshStop"], [machine |-> "control_mob", variant |-> "HoldMemberRunStarts", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "BeginPlacedCompletionLifecycleQuiesceFreshStop"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "BeginPlacedCompletionLifecycleQuiesceFreshStop", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
 control_mob_BeginPlacedCompletionLifecycleQuiesceReplay(arg_intent) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
@@ -26686,6 +26712,7 @@ control_mob_BeginPlacedCompletionLifecycleQuiesceReplay(arg_intent) ==
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ control_mob__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition)
+       /\ (packet.payload.intent # "Stop")
        /\ (IF (packet.payload.intent # "Stop") THEN TRUE ELSE (control_mob_active_run_count = 0))
        /\ (control_mob_placed_completion_lifecycle_quiescing = TRUE)
        /\ (IF (control_mob_placed_completion_lifecycle_intent = Some(packet.payload.intent)) THEN TRUE ELSE (IF (control_mob_placed_completion_lifecycle_intent = Some("RetireAll")) THEN TRUE ELSE (IF ((control_mob_placed_completion_lifecycle_intent = Some("Stop")) /\ (IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE (IF ((control_mob_placed_completion_lifecycle_intent = Some("Reset")) /\ (IF (packet.payload.intent = "Stop") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE ((control_mob_placed_completion_lifecycle_intent = Some("Complete")) /\ (packet.payload.intent = "Destroy"))))))
@@ -26698,6 +26725,31 @@ control_mob_BeginPlacedCompletionLifecycleQuiesceReplay(arg_intent) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "PersistPlacedCompletionLifecycleIntent", payload |-> [active |-> TRUE, intent |-> packet.payload.intent], effect_id |-> (model_step_count + 1), source_transition |-> "BeginPlacedCompletionLifecycleQuiesceReplay"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "BeginPlacedCompletionLifecycleQuiesceReplay", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_BeginPlacedCompletionLifecycleQuiesceReplayStop(arg_intent) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "BeginPlacedCompletionLifecycleQuiesce"
+       /\ packet.payload.intent = arg_intent
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Running"
+       /\ control_mob__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition)
+       /\ (packet.payload.intent = "Stop")
+       /\ (IF (packet.payload.intent # "Stop") THEN TRUE ELSE (control_mob_active_run_count = 0))
+       /\ (control_mob_placed_completion_lifecycle_quiescing = TRUE)
+       /\ (IF (control_mob_placed_completion_lifecycle_intent = Some(packet.payload.intent)) THEN TRUE ELSE (IF (control_mob_placed_completion_lifecycle_intent = Some("RetireAll")) THEN TRUE ELSE (IF ((control_mob_placed_completion_lifecycle_intent = Some("Stop")) /\ (IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE (IF ((control_mob_placed_completion_lifecycle_intent = Some("Reset")) /\ (IF (packet.payload.intent = "Stop") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE ((control_mob_placed_completion_lifecycle_intent = Some("Complete")) /\ (packet.payload.intent = "Destroy"))))))
+       /\ control_mob_phase' = "Running"
+       /\ control_mob_placed_completion_lifecycle_intent' = Some(packet.payload.intent)
+       /\ UnchangedFrame_2240d7b37c56cc85
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "PersistPlacedCompletionLifecycleIntent", payload |-> [active |-> TRUE, intent |-> packet.payload.intent], effect_id |-> (model_step_count + 1), source_transition |-> "BeginPlacedCompletionLifecycleQuiesceReplayStop"], [machine |-> "control_mob", variant |-> "HoldMemberRunStarts", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "BeginPlacedCompletionLifecycleQuiesceReplayStop"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "BeginPlacedCompletionLifecycleQuiesceReplayStop", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
 
@@ -57462,7 +57514,7 @@ layer_mob_ResumeStopped ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "PersistPlacedCompletionLifecycleIntent", payload |-> [active |-> FALSE, intent |-> "Stop"], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeStopped"], [machine |-> "layer_mob", variant |-> "AppendLifecycleJournal", payload |-> [agent_identity |-> None, agent_runtime_id |-> None, fence_token |-> None, generation |-> None, kind |-> "Resumed", session_id |-> None], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeStopped"], [machine |-> "layer_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeStopped"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "PersistPlacedCompletionLifecycleIntent", payload |-> [active |-> FALSE, intent |-> "Stop"], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeStopped"], [machine |-> "layer_mob", variant |-> "AppendLifecycleJournal", payload |-> [agent_identity |-> None, agent_runtime_id |-> None, fence_token |-> None, generation |-> None, kind |-> "Resumed", session_id |-> None], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeStopped"], [machine |-> "layer_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeStopped"], [machine |-> "layer_mob", variant |-> "ReleaseMemberRunStarts", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeStopped"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResumeStopped", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
@@ -62333,6 +62385,7 @@ layer_mob_BeginPlacedCompletionLifecycleQuiesceFresh(arg_intent) ==
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ layer_mob__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition)
+       /\ (packet.payload.intent # "Stop")
        /\ (IF (packet.payload.intent # "Stop") THEN TRUE ELSE (layer_mob_active_run_count = 0))
        /\ (layer_mob_placed_completion_lifecycle_quiescing = FALSE)
        /\ layer_mob_phase' = "Running"
@@ -62349,6 +62402,31 @@ layer_mob_BeginPlacedCompletionLifecycleQuiesceFresh(arg_intent) ==
        /\ model_step_count' = model_step_count + 1
 
 
+layer_mob_BeginPlacedCompletionLifecycleQuiesceFreshStop(arg_intent) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "BeginPlacedCompletionLifecycleQuiesce"
+       /\ packet.payload.intent = arg_intent
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Running"
+       /\ layer_mob__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition)
+       /\ (packet.payload.intent = "Stop")
+       /\ (IF (packet.payload.intent # "Stop") THEN TRUE ELSE (layer_mob_active_run_count = 0))
+       /\ (layer_mob_placed_completion_lifecycle_quiescing = FALSE)
+       /\ layer_mob_phase' = "Running"
+       /\ layer_mob_placed_completion_lifecycle_quiescing' = TRUE
+       /\ layer_mob_placed_completion_lifecycle_intent' = Some(packet.payload.intent)
+       /\ UnchangedFrame_fe8732d8ea2368d2
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "PersistPlacedCompletionLifecycleIntent", payload |-> [active |-> TRUE, intent |-> packet.payload.intent], effect_id |-> (model_step_count + 1), source_transition |-> "BeginPlacedCompletionLifecycleQuiesceFreshStop"], [machine |-> "layer_mob", variant |-> "HoldMemberRunStarts", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "BeginPlacedCompletionLifecycleQuiesceFreshStop"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "BeginPlacedCompletionLifecycleQuiesceFreshStop", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
 layer_mob_BeginPlacedCompletionLifecycleQuiesceReplay(arg_intent) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
@@ -62357,6 +62435,7 @@ layer_mob_BeginPlacedCompletionLifecycleQuiesceReplay(arg_intent) ==
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ layer_mob__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition)
+       /\ (packet.payload.intent # "Stop")
        /\ (IF (packet.payload.intent # "Stop") THEN TRUE ELSE (layer_mob_active_run_count = 0))
        /\ (layer_mob_placed_completion_lifecycle_quiescing = TRUE)
        /\ (IF (layer_mob_placed_completion_lifecycle_intent = Some(packet.payload.intent)) THEN TRUE ELSE (IF (layer_mob_placed_completion_lifecycle_intent = Some("RetireAll")) THEN TRUE ELSE (IF ((layer_mob_placed_completion_lifecycle_intent = Some("Stop")) /\ (IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE (IF ((layer_mob_placed_completion_lifecycle_intent = Some("Reset")) /\ (IF (packet.payload.intent = "Stop") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE ((layer_mob_placed_completion_lifecycle_intent = Some("Complete")) /\ (packet.payload.intent = "Destroy"))))))
@@ -62369,6 +62448,31 @@ layer_mob_BeginPlacedCompletionLifecycleQuiesceReplay(arg_intent) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "PersistPlacedCompletionLifecycleIntent", payload |-> [active |-> TRUE, intent |-> packet.payload.intent], effect_id |-> (model_step_count + 1), source_transition |-> "BeginPlacedCompletionLifecycleQuiesceReplay"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "BeginPlacedCompletionLifecycleQuiesceReplay", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_BeginPlacedCompletionLifecycleQuiesceReplayStop(arg_intent) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "BeginPlacedCompletionLifecycleQuiesce"
+       /\ packet.payload.intent = arg_intent
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Running"
+       /\ layer_mob__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition)
+       /\ (packet.payload.intent = "Stop")
+       /\ (IF (packet.payload.intent # "Stop") THEN TRUE ELSE (layer_mob_active_run_count = 0))
+       /\ (layer_mob_placed_completion_lifecycle_quiescing = TRUE)
+       /\ (IF (layer_mob_placed_completion_lifecycle_intent = Some(packet.payload.intent)) THEN TRUE ELSE (IF (layer_mob_placed_completion_lifecycle_intent = Some("RetireAll")) THEN TRUE ELSE (IF ((layer_mob_placed_completion_lifecycle_intent = Some("Stop")) /\ (IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE (IF ((layer_mob_placed_completion_lifecycle_intent = Some("Reset")) /\ (IF (packet.payload.intent = "Stop") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE ((layer_mob_placed_completion_lifecycle_intent = Some("Complete")) /\ (packet.payload.intent = "Destroy"))))))
+       /\ layer_mob_phase' = "Running"
+       /\ layer_mob_placed_completion_lifecycle_intent' = Some(packet.payload.intent)
+       /\ UnchangedFrame_b970c7817af4fd19
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "PersistPlacedCompletionLifecycleIntent", payload |-> [active |-> TRUE, intent |-> packet.payload.intent], effect_id |-> (model_step_count + 1), source_transition |-> "BeginPlacedCompletionLifecycleQuiesceReplayStop"], [machine |-> "layer_mob", variant |-> "HoldMemberRunStarts", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "BeginPlacedCompletionLifecycleQuiesceReplayStop"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "BeginPlacedCompletionLifecycleQuiesceReplayStop", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
 
@@ -73868,8 +73972,10 @@ EntryPacketAdmissible_control_mob(packet) ==
     \/ /\ (packet.variant = "DisposeRemoteTurnObligation") /\ (control_mob_phase = "Stopped")
     \/ /\ (packet.variant = "DisposeRemoteTurnObligation") /\ (control_mob_phase = "Completed")
     \/ /\ (packet.variant = "DisposeRemoteTurnObligation") /\ (control_mob_phase = "Destroyed")
-    \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (control_mob_phase = "Running") /\ (control_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition)) /\ ((IF (packet.payload.intent # "Stop") THEN TRUE ELSE (control_mob_active_run_count = 0))) /\ ((control_mob_placed_completion_lifecycle_quiescing = FALSE))
-    \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (control_mob_phase = "Running") /\ (control_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition)) /\ ((IF (packet.payload.intent # "Stop") THEN TRUE ELSE (control_mob_active_run_count = 0))) /\ ((control_mob_placed_completion_lifecycle_quiescing = TRUE)) /\ ((IF (control_mob_placed_completion_lifecycle_intent = Some(packet.payload.intent)) THEN TRUE ELSE (IF (control_mob_placed_completion_lifecycle_intent = Some("RetireAll")) THEN TRUE ELSE (IF ((control_mob_placed_completion_lifecycle_intent = Some("Stop")) /\ (IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE (IF ((control_mob_placed_completion_lifecycle_intent = Some("Reset")) /\ (IF (packet.payload.intent = "Stop") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE ((control_mob_placed_completion_lifecycle_intent = Some("Complete")) /\ (packet.payload.intent = "Destroy")))))))
+    \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (control_mob_phase = "Running") /\ (control_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition)) /\ ((packet.payload.intent # "Stop")) /\ ((IF (packet.payload.intent # "Stop") THEN TRUE ELSE (control_mob_active_run_count = 0))) /\ ((control_mob_placed_completion_lifecycle_quiescing = FALSE))
+    \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (control_mob_phase = "Running") /\ (control_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition)) /\ ((packet.payload.intent = "Stop")) /\ ((IF (packet.payload.intent # "Stop") THEN TRUE ELSE (control_mob_active_run_count = 0))) /\ ((control_mob_placed_completion_lifecycle_quiescing = FALSE))
+    \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (control_mob_phase = "Running") /\ (control_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition)) /\ ((packet.payload.intent # "Stop")) /\ ((IF (packet.payload.intent # "Stop") THEN TRUE ELSE (control_mob_active_run_count = 0))) /\ ((control_mob_placed_completion_lifecycle_quiescing = TRUE)) /\ ((IF (control_mob_placed_completion_lifecycle_intent = Some(packet.payload.intent)) THEN TRUE ELSE (IF (control_mob_placed_completion_lifecycle_intent = Some("RetireAll")) THEN TRUE ELSE (IF ((control_mob_placed_completion_lifecycle_intent = Some("Stop")) /\ (IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE (IF ((control_mob_placed_completion_lifecycle_intent = Some("Reset")) /\ (IF (packet.payload.intent = "Stop") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE ((control_mob_placed_completion_lifecycle_intent = Some("Complete")) /\ (packet.payload.intent = "Destroy")))))))
+    \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (control_mob_phase = "Running") /\ (control_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition)) /\ ((packet.payload.intent = "Stop")) /\ ((IF (packet.payload.intent # "Stop") THEN TRUE ELSE (control_mob_active_run_count = 0))) /\ ((control_mob_placed_completion_lifecycle_quiescing = TRUE)) /\ ((IF (control_mob_placed_completion_lifecycle_intent = Some(packet.payload.intent)) THEN TRUE ELSE (IF (control_mob_placed_completion_lifecycle_intent = Some("RetireAll")) THEN TRUE ELSE (IF ((control_mob_placed_completion_lifecycle_intent = Some("Stop")) /\ (IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE (IF ((control_mob_placed_completion_lifecycle_intent = Some("Reset")) /\ (IF (packet.payload.intent = "Stop") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE ((control_mob_placed_completion_lifecycle_intent = Some("Complete")) /\ (packet.payload.intent = "Destroy")))))))
     \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (control_mob_phase = "Stopped") /\ (control_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition)) /\ ((IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "RetireAll") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) /\ ((control_mob_placed_completion_lifecycle_quiescing = FALSE))
     \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (control_mob_phase = "Stopped") /\ (control_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition)) /\ ((IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "RetireAll") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) /\ ((control_mob_placed_completion_lifecycle_quiescing = TRUE)) /\ ((IF (control_mob_placed_completion_lifecycle_intent = Some(packet.payload.intent)) THEN TRUE ELSE (IF ((IF (control_mob_placed_completion_lifecycle_intent = Some("Stop")) THEN TRUE ELSE (control_mob_placed_completion_lifecycle_intent = Some("RetireAll"))) /\ (IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "RetireAll") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE ((control_mob_placed_completion_lifecycle_intent = Some("Reset")) /\ (packet.payload.intent = "Destroy")))))
     \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (control_mob_phase = "Completed") /\ (control_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(control_mob_adaptive_active_run, control_mob_adaptive_active_layer, control_mob_adaptive_active_members, control_mob_adaptive_layer_phase, control_mob_adaptive_layer_disposition)) /\ ((IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "RetireAll") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) /\ ((control_mob_placed_completion_lifecycle_quiescing = FALSE))
@@ -75478,8 +75584,10 @@ EntryPacketAdmissible_layer_mob(packet) ==
     \/ /\ (packet.variant = "DisposeRemoteTurnObligation") /\ (layer_mob_phase = "Stopped")
     \/ /\ (packet.variant = "DisposeRemoteTurnObligation") /\ (layer_mob_phase = "Completed")
     \/ /\ (packet.variant = "DisposeRemoteTurnObligation") /\ (layer_mob_phase = "Destroyed")
-    \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (layer_mob_phase = "Running") /\ (layer_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition)) /\ ((IF (packet.payload.intent # "Stop") THEN TRUE ELSE (layer_mob_active_run_count = 0))) /\ ((layer_mob_placed_completion_lifecycle_quiescing = FALSE))
-    \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (layer_mob_phase = "Running") /\ (layer_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition)) /\ ((IF (packet.payload.intent # "Stop") THEN TRUE ELSE (layer_mob_active_run_count = 0))) /\ ((layer_mob_placed_completion_lifecycle_quiescing = TRUE)) /\ ((IF (layer_mob_placed_completion_lifecycle_intent = Some(packet.payload.intent)) THEN TRUE ELSE (IF (layer_mob_placed_completion_lifecycle_intent = Some("RetireAll")) THEN TRUE ELSE (IF ((layer_mob_placed_completion_lifecycle_intent = Some("Stop")) /\ (IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE (IF ((layer_mob_placed_completion_lifecycle_intent = Some("Reset")) /\ (IF (packet.payload.intent = "Stop") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE ((layer_mob_placed_completion_lifecycle_intent = Some("Complete")) /\ (packet.payload.intent = "Destroy")))))))
+    \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (layer_mob_phase = "Running") /\ (layer_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition)) /\ ((packet.payload.intent # "Stop")) /\ ((IF (packet.payload.intent # "Stop") THEN TRUE ELSE (layer_mob_active_run_count = 0))) /\ ((layer_mob_placed_completion_lifecycle_quiescing = FALSE))
+    \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (layer_mob_phase = "Running") /\ (layer_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition)) /\ ((packet.payload.intent = "Stop")) /\ ((IF (packet.payload.intent # "Stop") THEN TRUE ELSE (layer_mob_active_run_count = 0))) /\ ((layer_mob_placed_completion_lifecycle_quiescing = FALSE))
+    \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (layer_mob_phase = "Running") /\ (layer_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition)) /\ ((packet.payload.intent # "Stop")) /\ ((IF (packet.payload.intent # "Stop") THEN TRUE ELSE (layer_mob_active_run_count = 0))) /\ ((layer_mob_placed_completion_lifecycle_quiescing = TRUE)) /\ ((IF (layer_mob_placed_completion_lifecycle_intent = Some(packet.payload.intent)) THEN TRUE ELSE (IF (layer_mob_placed_completion_lifecycle_intent = Some("RetireAll")) THEN TRUE ELSE (IF ((layer_mob_placed_completion_lifecycle_intent = Some("Stop")) /\ (IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE (IF ((layer_mob_placed_completion_lifecycle_intent = Some("Reset")) /\ (IF (packet.payload.intent = "Stop") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE ((layer_mob_placed_completion_lifecycle_intent = Some("Complete")) /\ (packet.payload.intent = "Destroy")))))))
+    \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (layer_mob_phase = "Running") /\ (layer_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition)) /\ ((packet.payload.intent = "Stop")) /\ ((IF (packet.payload.intent # "Stop") THEN TRUE ELSE (layer_mob_active_run_count = 0))) /\ ((layer_mob_placed_completion_lifecycle_quiescing = TRUE)) /\ ((IF (layer_mob_placed_completion_lifecycle_intent = Some(packet.payload.intent)) THEN TRUE ELSE (IF (layer_mob_placed_completion_lifecycle_intent = Some("RetireAll")) THEN TRUE ELSE (IF ((layer_mob_placed_completion_lifecycle_intent = Some("Stop")) /\ (IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE (IF ((layer_mob_placed_completion_lifecycle_intent = Some("Reset")) /\ (IF (packet.payload.intent = "Stop") THEN TRUE ELSE (IF (packet.payload.intent = "Complete") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE ((layer_mob_placed_completion_lifecycle_intent = Some("Complete")) /\ (packet.payload.intent = "Destroy")))))))
     \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (layer_mob_phase = "Stopped") /\ (layer_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition)) /\ ((IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "RetireAll") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) /\ ((layer_mob_placed_completion_lifecycle_quiescing = FALSE))
     \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (layer_mob_phase = "Stopped") /\ (layer_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition)) /\ ((IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "RetireAll") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) /\ ((layer_mob_placed_completion_lifecycle_quiescing = TRUE)) /\ ((IF (layer_mob_placed_completion_lifecycle_intent = Some(packet.payload.intent)) THEN TRUE ELSE (IF ((IF (layer_mob_placed_completion_lifecycle_intent = Some("Stop")) THEN TRUE ELSE (layer_mob_placed_completion_lifecycle_intent = Some("RetireAll"))) /\ (IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "RetireAll") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) THEN TRUE ELSE ((layer_mob_placed_completion_lifecycle_intent = Some("Reset")) /\ (packet.payload.intent = "Destroy")))))
     \/ /\ (packet.variant = "BeginPlacedCompletionLifecycleQuiesce") /\ (layer_mob_phase = "Completed") /\ (layer_mob__entry_packet__mob_machine_adaptive_lifecycle_drained(layer_mob_adaptive_active_run, layer_mob_adaptive_active_layer, layer_mob_adaptive_active_members, layer_mob_adaptive_layer_phase, layer_mob_adaptive_layer_disposition)) /\ ((IF (packet.payload.intent = "Reset") THEN TRUE ELSE (IF (packet.payload.intent = "RetireAll") THEN TRUE ELSE (packet.payload.intent = "Destroy")))) /\ ((layer_mob_placed_completion_lifecycle_quiescing = FALSE))
@@ -76867,7 +76975,9 @@ CoreNext ==
     \/ \E arg_obligation \in RemoteTurnObligationValues : control_mob_DisposeRemoteTurnObligationCompleted(arg_obligation)
     \/ \E arg_obligation \in RemoteTurnObligationValues : control_mob_DisposeRemoteTurnObligationDestroyed(arg_obligation)
     \/ \E arg_intent \in PlacedCompletionLifecycleIntentKindValues : control_mob_BeginPlacedCompletionLifecycleQuiesceFresh(arg_intent)
+    \/ \E arg_intent \in PlacedCompletionLifecycleIntentKindValues : control_mob_BeginPlacedCompletionLifecycleQuiesceFreshStop(arg_intent)
     \/ \E arg_intent \in PlacedCompletionLifecycleIntentKindValues : control_mob_BeginPlacedCompletionLifecycleQuiesceReplay(arg_intent)
+    \/ \E arg_intent \in PlacedCompletionLifecycleIntentKindValues : control_mob_BeginPlacedCompletionLifecycleQuiesceReplayStop(arg_intent)
     \/ \E arg_intent \in PlacedCompletionLifecycleIntentKindValues : control_mob_BeginPlacedCompletionLifecycleQuiesceStoppedFresh(arg_intent)
     \/ \E arg_intent \in PlacedCompletionLifecycleIntentKindValues : control_mob_BeginPlacedCompletionLifecycleQuiesceStoppedReplay(arg_intent)
     \/ \E arg_intent \in PlacedCompletionLifecycleIntentKindValues : control_mob_BeginPlacedCompletionLifecycleQuiesceCompletedFresh(arg_intent)
@@ -78185,7 +78295,9 @@ CoreNext ==
     \/ \E arg_obligation \in RemoteTurnObligationValues : layer_mob_DisposeRemoteTurnObligationCompleted(arg_obligation)
     \/ \E arg_obligation \in RemoteTurnObligationValues : layer_mob_DisposeRemoteTurnObligationDestroyed(arg_obligation)
     \/ \E arg_intent \in PlacedCompletionLifecycleIntentKindValues : layer_mob_BeginPlacedCompletionLifecycleQuiesceFresh(arg_intent)
+    \/ \E arg_intent \in PlacedCompletionLifecycleIntentKindValues : layer_mob_BeginPlacedCompletionLifecycleQuiesceFreshStop(arg_intent)
     \/ \E arg_intent \in PlacedCompletionLifecycleIntentKindValues : layer_mob_BeginPlacedCompletionLifecycleQuiesceReplay(arg_intent)
+    \/ \E arg_intent \in PlacedCompletionLifecycleIntentKindValues : layer_mob_BeginPlacedCompletionLifecycleQuiesceReplayStop(arg_intent)
     \/ \E arg_intent \in PlacedCompletionLifecycleIntentKindValues : layer_mob_BeginPlacedCompletionLifecycleQuiesceStoppedFresh(arg_intent)
     \/ \E arg_intent \in PlacedCompletionLifecycleIntentKindValues : layer_mob_BeginPlacedCompletionLifecycleQuiesceStoppedReplay(arg_intent)
     \/ \E arg_intent \in PlacedCompletionLifecycleIntentKindValues : layer_mob_BeginPlacedCompletionLifecycleQuiesceCompletedFresh(arg_intent)

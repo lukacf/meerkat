@@ -82942,6 +82942,11 @@ fn a_stop_cancel_that_finds_its_run_over_reports_it_ended() {
         Err(meerkat_runtime::RuntimeDriverError::NotReady {
             state: meerkat_runtime::RuntimeState::Idle,
         }),
+        // The run committed back to Attached between the hold and the cancel
+        // (MobKit: stop right after a turn reached the model).
+        Err(meerkat_runtime::RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Attached,
+        }),
     ] {
         assert_eq!(
             classify_stop_member_cancel(ended, run_id.clone()).unwrap(),

@@ -306,6 +306,212 @@ pub mod thinking_capture {
     }
 }
 
+/// Scoped recording of the raw provider stream at the adapter boundary, for
+/// replay fixtures (Turbo S recurrence fix 2): the create request and
+/// response, every outbound [`ClientEvent`] and every inbound
+/// [`ServerFrame`]'s lossless `raw` JSON, in the order this adapter saw them.
+/// Opt-in per task like [`thinking_capture`]; test-fixture builds only. The
+/// file is an evidence artifact, never committed as written: the fixture
+/// scrubber replaces SDP, ids, tokens and audio before a stream is committed.
+#[cfg(feature = "test-realtime-fixtures")]
+#[doc(hidden)]
+pub mod provider_recording {
+    use std::io::Write;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    use serde_json::Value;
+
+    /// One recorded crossing of the adapter boundary.
+    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "dir", rename_all = "snake_case")]
+    pub enum Entry {
+        /// The `POST /v1/live/sessions` body (session config plus offer SDP).
+        CreateRequest { body: Value },
+        /// Its response (session identity plus answer SDP).
+        CreateResponse { body: Value },
+        /// One client event sent on the sideband.
+        ClientEvent { event: Value },
+        /// One server frame received on the sideband, as the provider sent it.
+        ServerFrame { raw: Value },
+        /// The sideband receiver ended (`error` set when it failed).
+        ReceiverEnd { error: Option<String> },
+    }
+
+    /// One JSONL line of a recording.
+    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    pub struct Line {
+        pub seq: u64,
+        pub channel_ordinal: u32,
+        pub elapsed_ms: u64,
+        pub entry: Entry,
+    }
+
+    struct Inner {
+        started: Instant,
+        seq: AtomicU64,
+        out: Mutex<Option<std::fs::File>>,
+        failed: Mutex<Option<String>>,
+    }
+
+    /// A task-scoped recorder writing one JSONL file.
+    #[derive(Clone)]
+    pub struct Recorder {
+        inner: Arc<Inner>,
+        channel_ordinal: u32,
+    }
+
+    tokio::task_local! {
+        static CURRENT: Recorder;
+    }
+
+    impl Recorder {
+        /// Create the recording file (it must not exist; owner-only mode).
+        pub fn create(path: &Path) -> std::io::Result<Self> {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let file = options.open(path)?;
+            Ok(Self {
+                inner: Arc::new(Inner {
+                    started: Instant::now(),
+                    seq: AtomicU64::new(0),
+                    out: Mutex::new(Some(file)),
+                    failed: Mutex::new(None),
+                }),
+                channel_ordinal: 0,
+            })
+        }
+
+        pub fn for_channel(&self, channel_ordinal: u32) -> Self {
+            Self {
+                inner: self.inner.clone(),
+                channel_ordinal,
+            }
+        }
+
+        pub async fn scope<F: std::future::Future>(&self, future: F) -> F::Output {
+            CURRENT.scope(self.clone(), future).await
+        }
+
+        pub(super) fn current() -> Option<Self> {
+            CURRENT.try_with(Clone::clone).ok()
+        }
+
+        /// The first write failure, if any: a recording that lost a line is
+        /// not a fixture.
+        pub fn failure(&self) -> Option<String> {
+            self.inner
+                .failed
+                .lock()
+                .ok()
+                .and_then(|failed| failed.clone())
+        }
+
+        pub(super) fn record(&self, entry: Entry) {
+            let line = Line {
+                seq: self.inner.seq.fetch_add(1, Ordering::AcqRel),
+                channel_ordinal: self.channel_ordinal,
+                elapsed_ms: u64::try_from(self.inner.started.elapsed().as_millis())
+                    .unwrap_or(u64::MAX),
+                entry,
+            };
+            let result = serde_json::to_string(&line)
+                .map_err(|error| error.to_string())
+                .and_then(|text| {
+                    let mut out = self
+                        .inner
+                        .out
+                        .lock()
+                        .map_err(|_| "recording file lock poisoned".to_string())?;
+                    let file = out.as_mut().ok_or("recording file closed")?;
+                    writeln!(file, "{text}").map_err(|error| error.to_string())
+                });
+            if let Err(error) = result
+                && let Ok(mut failed) = self.inner.failed.lock()
+                && failed.is_none()
+            {
+                *failed = Some(error);
+            }
+        }
+
+        pub(super) fn record_value<T: serde::Serialize>(
+            &self,
+            entry: impl FnOnce(Value) -> Entry,
+            value: &T,
+        ) {
+            match serde_json::to_value(value) {
+                Ok(value) => self.record(entry(value)),
+                Err(error) => {
+                    if let Ok(mut failed) = self.inner.failed.lock()
+                        && failed.is_none()
+                    {
+                        *failed = Some(error.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Read a recording back, in recorded order.
+    pub fn read(path: &Path) -> std::io::Result<Vec<Line>> {
+        let text = std::fs::read_to_string(path)?;
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str(line)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn recorder_is_opt_in_task_scoped_and_writes_ordered_lines() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("stream.jsonl");
+            let recorder = Recorder::create(&path).unwrap().for_channel(3);
+            assert!(Recorder::current().is_none());
+            let scoped = recorder
+                .scope(async {
+                    assert!(
+                        tokio::spawn(async { Recorder::current().is_none() })
+                            .await
+                            .unwrap()
+                    );
+                    Recorder::current().unwrap()
+                })
+                .await;
+            scoped.record(Entry::ClientEvent {
+                event: serde_json::json!({"type": "close"}),
+            });
+            scoped.record(Entry::ServerFrame {
+                raw: serde_json::json!({"type": "session.closed"}),
+            });
+            let lines = read(&path).unwrap();
+            assert_eq!(lines.len(), 2);
+            assert_eq!(lines[0].seq, 0);
+            assert_eq!(lines[1].seq, 1);
+            assert!(lines.iter().all(|line| line.channel_ordinal == 3));
+            assert!(recorder.failure().is_none());
+            assert!(
+                Recorder::create(&path).is_err(),
+                "never overwrites a recording"
+            );
+        }
+    }
+}
+
 /// Provider-owned mechanical configuration for one browser WebRTC bootstrap.
 ///
 /// The public broker always starts the session with a client delegation: the
@@ -834,6 +1040,8 @@ pub struct PublicLiveBrokerFactory {
     client: LiveClient,
     #[cfg(feature = "test-realtime-fixtures")]
     thinking_capture: Option<thinking_capture::Capture>,
+    #[cfg(feature = "test-realtime-fixtures")]
+    provider_recording: Option<provider_recording::Recorder>,
 }
 
 impl std::fmt::Debug for PublicLiveBrokerFactory {
@@ -901,6 +1109,8 @@ impl PublicLiveBrokerFactory {
             client,
             #[cfg(feature = "test-realtime-fixtures")]
             thinking_capture: thinking_capture::Capture::current(),
+            #[cfg(feature = "test-realtime-fixtures")]
+            provider_recording: provider_recording::Recorder::current(),
         })
     }
 
@@ -1000,11 +1210,25 @@ impl PublicLiveBrokerFactory {
                 sdp: config.offer_sdp,
             },
         };
+        #[cfg(feature = "test-realtime-fixtures")]
+        if let Some(recorder) = &self.provider_recording {
+            recorder.record_value(
+                |body| provider_recording::Entry::CreateRequest { body },
+                &request,
+            );
+        }
         let created = self
             .client
             .create_webrtc(&request)
             .await
             .map_err(map_live_error)?;
+        #[cfg(feature = "test-realtime-fixtures")]
+        if let Some(recorder) = &self.provider_recording {
+            recorder.record_value(
+                |body| provider_recording::Entry::CreateResponse { body },
+                &created,
+            );
+        }
         let answer_sdp = created.transport.sdp().to_string();
         let sideband = self
             .client
@@ -1024,6 +1248,8 @@ impl PublicLiveBrokerFactory {
                 state: Mutex::new(SessionState::default()),
                 #[cfg(feature = "test-realtime-fixtures")]
                 thinking_capture: self.thinking_capture.clone(),
+                #[cfg(feature = "test-realtime-fixtures")]
+                provider_recording: self.provider_recording.clone(),
             },
         })
     }
@@ -1101,6 +1327,8 @@ pub struct PublicLiveBrokerSession {
     state: Mutex<SessionState>,
     #[cfg(feature = "test-realtime-fixtures")]
     thinking_capture: Option<thinking_capture::Capture>,
+    #[cfg(feature = "test-realtime-fixtures")]
+    provider_recording: Option<provider_recording::Recorder>,
 }
 
 impl std::fmt::Debug for PublicLiveBrokerSession {
@@ -1110,6 +1338,16 @@ impl std::fmt::Debug for PublicLiveBrokerSession {
 }
 
 impl PublicLiveBrokerSession {
+    #[cfg(feature = "test-realtime-fixtures")]
+    fn record_client_event(&self, event: &ClientEvent) {
+        if let Some(recorder) = &self.provider_recording {
+            recorder.record_value(
+                |event| provider_recording::Entry::ClientEvent { event },
+                event,
+            );
+        }
+    }
+
     /// Seed one ordered canonical commentary envelope after the answer has
     /// been delivered and the sideband has attached. The exact commentary
     /// acknowledgement is the server-side readiness evidence when a seed
@@ -1386,6 +1624,8 @@ impl PublicLiveBrokerSession {
                 text: content.clone(),
             });
         }
+        #[cfg(feature = "test-realtime-fixtures")]
+        self.record_client_event(&event);
         if self.sender.send(event).await.is_err() {
             self.state.lock().await.append_delivery_ambiguous = true;
             return Err(GptLiveBrokerError::AppendDeliveryAmbiguous { token });
@@ -1416,6 +1656,18 @@ impl PublicLiveBrokerSession {
             // Keep the same output identity across pauses, including while a
             // delegation result is being injected into the provider context.
             let next = receiver.next_event().await;
+            #[cfg(feature = "test-realtime-fixtures")]
+            if let Some(recorder) = &self.provider_recording {
+                recorder.record(match &next {
+                    Ok(Some(frame)) => provider_recording::Entry::ServerFrame {
+                        raw: frame.raw.clone(),
+                    },
+                    Ok(None) => provider_recording::Entry::ReceiverEnd { error: None },
+                    Err(error) => provider_recording::Entry::ReceiverEnd {
+                        error: Some(error.to_string()),
+                    },
+                });
+            }
             let Some(frame) = next.map_err(map_live_error)? else {
                 if !self.state.lock().await.closed_observed {
                     return Err(GptLiveBrokerError::Transport {
@@ -1549,14 +1801,14 @@ impl PublicLiveBrokerSession {
         // audio still flowing that stall never comes. Muting input first
         // creates it, so a close issued while an append is in flight can
         // complete instead of waiting on media the client has not stopped.
-        self.sender
-            .send(ClientEvent::new(Command::InputAudioMute))
-            .await
-            .map_err(map_live_error)?;
-        self.sender
-            .send(ClientEvent::new(Command::Close))
-            .await
-            .map_err(map_live_error)?;
+        let mute = ClientEvent::new(Command::InputAudioMute);
+        #[cfg(feature = "test-realtime-fixtures")]
+        self.record_client_event(&mute);
+        self.sender.send(mute).await.map_err(map_live_error)?;
+        let close = ClientEvent::new(Command::Close);
+        #[cfg(feature = "test-realtime-fixtures")]
+        self.record_client_event(&close);
+        self.sender.send(close).await.map_err(map_live_error)?;
         state.close_requested = true;
         Ok(())
     }

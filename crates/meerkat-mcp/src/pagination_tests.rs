@@ -222,6 +222,7 @@ async fn enumerate(
                     Default::default(),
                 ),
                 service: service.into(),
+                stdio_child: None,
             };
             let result = tokio::time::timeout(
                 Duration::from_secs(30),

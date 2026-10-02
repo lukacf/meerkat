@@ -67,6 +67,13 @@ them.
     `ConflictingToolChoicePlan`.
   - `meerkat_core::model_fallback::ModelFallbackSkipReason` gains
     `ToolChoiceUnsupported` (wire value `tool_choice_unsupported`).
+- Behaviour-only (not measured by the gate): MCP stdio servers are killed
+  immediately after their stdin closes. rmcp gave established servers up to
+  3 s after EOF, and we now terminate immediately after EOF, so a server that
+  needs to flush state on EOF must not rely on it. This applies to
+  `McpConnection::close`, `McpProtocol::close`, `McpRouter::shutdown`, and to
+  server remove, reload and replace. On Unix the whole process group of the
+  server is killed (see Fixed).
 
 ### Added
 
@@ -133,6 +140,13 @@ them.
   passes the generated overlay through on all three paths, now pinned by
   payload tests.
 
+
+- `meerkat_runtime::MeerkatMachine::wait_input_admitted_by_idempotency_key`
+  waits until a live session's runtime has admitted an input for an
+  idempotency key and returns its id. The driver signals every accepted
+  input, so the wait is woken by the admission rather than re-reading on a
+  timer. It returns `Ok(None)` for a session without a live registration.
+
 ### Deprecated
 
 - `SessionRuntime::set_callback_channel`. It replaced the route shared by
@@ -169,35 +183,6 @@ them.
   (discard the actor, release its exact registration) and re-attempts. It
   still waits on in-flight claims. The competitor's old bindings and
   registration witness are refused typed afterwards.
-### Changed
-
-- Debug worker-stack headroom (#1446): the unregister teardown saga and the
-  session registration chain no longer reserve every section's temporaries
-  in one poll frame. Their numbered phases and sections now run in boxed
-  async blocks, and the registration path's large child futures are built in
-  their own frames, with bodies unchanged. Measured on the 2 MiB stack canary
-  (debug), at the deepest machine apply:
-  - the teardown chain went from 1,487,592 B to 597,784 B (the saga's own
-    poll frame from 787,560 B to 58,584 B);
-  - the registration chain went from 1,490,216 B to 697,224 B.
-
-  The canary now also passes at 1536 KiB and 1280 KiB. No behaviour change.
-- rkat-rpc over TCP: a new connection no longer overwrites the shared
-  runtime's callback channel, id counter and tool registry (#1451). Before,
-  callbacks for an older connection's new sessions went to the newest
-  connection, its registered tools were cleared, and callback ids restarted
-  in another connection's id space. On connection close the server now fails
-  pending callbacks before its graceful request shutdown, so a session waiting
-  on a gone client gets the typed failure immediately.
-### Added
-
-- `meerkat_runtime::MeerkatMachine::wait_input_admitted_by_idempotency_key`
-  waits until a live session's runtime has admitted an input for an
-  idempotency key and returns its id. The driver signals every accepted
-  input, so the wait is woken by the admission rather than re-reading on a
-  timer. It returns `Ok(None)` for a session without a live registration.
-
-### Fixed
 
 - `MeerkatMachine::wait_input_terminal_receipt` resolves a directed
   (peer-request) batch's input when its receipt is finalized, not only once
@@ -218,6 +203,42 @@ them.
   evidence read) as impossible. That failed
   `batched_autonomous_deliveries_report_one_shared_run_and_their_batch` 26/90
   times at 30 copies per core. They now await the admission itself.
+- MCP stdio server processes are owned until their exit is observed (#1439).
+  The process is deposited in a typed custody before the handshake, so no
+  connect future exclusively owns it. `McpConnection::close`,
+  `McpProtocol::close` and a failed connect return after the server has
+  exited, and `McpRouter::shutdown` terminates the server of every connect
+  attempt it aborted and joins every close it started for remove, reload,
+  replace and rejected completions (previously detached tasks), so every
+  server has exited when shutdown returns. On Unix servers start in their own
+  process group and the whole group is killed, so a server launched through a
+  wrapper (`sh -c`, `npx`, `uvx`) no longer leaves its real server running as
+  an orphaned grandchild; EOF on the server's stdout confirms every process
+  holding it has exited, behind a 10 s hang guard for a process that left the
+  group. Elsewhere only the direct child is killed. A close that fails or
+  panics is reported through `tracing`. `meerkat-mcp` depends on `nix` on
+  Unix.
+
+### Changed
+
+- Debug worker-stack headroom (#1446): the unregister teardown saga and the
+  session registration chain no longer reserve every section's temporaries
+  in one poll frame. Their numbered phases and sections now run in boxed
+  async blocks, and the registration path's large child futures are built in
+  their own frames, with bodies unchanged. Measured on the 2 MiB stack canary
+  (debug), at the deepest machine apply:
+  - the teardown chain went from 1,487,592 B to 597,784 B (the saga's own
+    poll frame from 787,560 B to 58,584 B);
+  - the registration chain went from 1,490,216 B to 697,224 B.
+
+  The canary now also passes at 1536 KiB and 1280 KiB. No behaviour change.
+- rkat-rpc over TCP: a new connection no longer overwrites the shared
+  runtime's callback channel, id counter and tool registry (#1451). Before,
+  callbacks for an older connection's new sessions went to the newest
+  connection, its registered tools were cleared, and callback ids restarted
+  in another connection's id space. On connection close the server now fails
+  pending callbacks before its graceful request shutdown, so a session waiting
+  on a gone client gets the typed failure immediately.
 
 ## [0.8.50] - 2026-10-01
 

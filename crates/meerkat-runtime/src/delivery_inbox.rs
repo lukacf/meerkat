@@ -174,6 +174,9 @@ struct PersistedAuthorityState {
     committed_sequences: std::collections::BTreeSet<u64>,
     next_sequence: u64,
     applied_cursor: u64,
+    // Absent on authorities written before out-of-band acknowledgement.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    acknowledged_sequences: std::collections::BTreeSet<u64>,
 }
 
 impl From<&dsl::RuntimeDeliveryMachineState> for PersistedAuthorityState {
@@ -185,6 +188,7 @@ impl From<&dsl::RuntimeDeliveryMachineState> for PersistedAuthorityState {
             committed_sequences: state.committed_sequences.clone(),
             next_sequence: state.next_sequence,
             applied_cursor: state.applied_cursor,
+            acknowledged_sequences: state.acknowledged_sequences.clone(),
         }
     }
 }
@@ -199,6 +203,7 @@ impl From<PersistedAuthorityState> for dsl::RuntimeDeliveryMachineState {
             committed_sequences: state.committed_sequences,
             next_sequence: state.next_sequence,
             applied_cursor: state.applied_cursor,
+            acknowledged_sequences: state.acknowledged_sequences,
         }
     }
 }
@@ -266,8 +271,29 @@ impl PersistedAuthorityState {
                 "runtime delivery applied cursor exceeds the committed high-water mark".into(),
             ));
         }
+        if self
+            .acknowledged_sequences
+            .iter()
+            .any(|sequence| *sequence <= self.applied_cursor || *sequence > self.next_sequence)
+        {
+            return Err(RuntimeDeliveryError::Corrupt(
+                "runtime delivery acknowledgement lies outside the pending committed range".into(),
+            ));
+        }
         Ok(())
     }
+}
+
+/// Outcome of [`RuntimeDeliveryInbox::acknowledge`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RuntimeDeliveryAcknowledgement {
+    /// The delivery is at or below the applied cursor (applied now or earlier).
+    Applied { applied_cursor: u64 },
+    /// The delivery is ahead of the cursor behind an unapplied row. It is
+    /// recorded and consumed, without re-application, when the cursor reaches
+    /// it; nothing behind it is blocked by the out-of-order acknowledgement.
+    Recorded { applied_cursor: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -549,6 +575,7 @@ impl RuntimeDeliveryInbox {
             )
             .map_err(|error| RuntimeDeliveryError::Authority(format!("{error:?}")))?;
             classify_applied_effects(transition.effects(), delivery_id, sequence)?;
+            advance_acknowledged_prefix(&mut authority)?;
             let applied_cursor = authority.state().applied_cursor;
             if applied_cursor == current {
                 return Ok(applied_cursor);
@@ -577,6 +604,99 @@ impl RuntimeDeliveryInbox {
                 "runtime delivery cursor CAS did not converge after {MAX_CAS_ATTEMPTS} attempts"
             ),
         )))
+    }
+
+    /// Record that `delivery_id`'s effect already reached its runtime by
+    /// another path (for example a shell completion projection), without
+    /// applying it through a sink.
+    ///
+    /// At the cursor this applies the row and then advances over any
+    /// contiguous rows acknowledged earlier. Ahead of the cursor it records
+    /// the acknowledgement and returns [`RuntimeDeliveryAcknowledgement::Recorded`]
+    /// instead of failing out of order, so an acknowledgement that arrives
+    /// before an earlier row is applied never wedges the runtime's queue. The
+    /// cursor itself still only moves in sequence order.
+    pub async fn acknowledge(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        delivery_id: &RuntimeDeliveryId,
+        sequence: u64,
+    ) -> Result<RuntimeDeliveryAcknowledgement, RuntimeDeliveryError> {
+        for _ in 0..MAX_CAS_ATTEMPTS {
+            let observed = self
+                .store
+                .load_runtime_delivery_authority(runtime_id)
+                .await?
+                .ok_or_else(|| {
+                    RuntimeDeliveryError::Corrupt(format!(
+                        "runtime {runtime_id} has no delivery authority"
+                    ))
+                })?;
+            let mut authority = decode_authority(&observed)?;
+            let before = authority.state().clone();
+            let transition = dsl::RuntimeDeliveryMachineMutator::apply(
+                &mut authority,
+                dsl::RuntimeDeliveryInput::AcknowledgeDelivery {
+                    delivery_id: delivery_id.as_str().to_string(),
+                    delivery_sequence: sequence,
+                },
+            )
+            .map_err(|error| RuntimeDeliveryError::Authority(format!("{error:?}")))?;
+            let recorded =
+                classify_acknowledgement_effects(transition.effects(), delivery_id, sequence)?;
+            advance_acknowledged_prefix(&mut authority)?;
+            let state = authority.state();
+            let applied_cursor = state.applied_cursor;
+            let outcome = if recorded && applied_cursor < sequence {
+                RuntimeDeliveryAcknowledgement::Recorded { applied_cursor }
+            } else {
+                RuntimeDeliveryAcknowledgement::Applied { applied_cursor }
+            };
+            if state.applied_cursor == before.applied_cursor
+                && state.acknowledged_sequences == before.acknowledged_sequences
+            {
+                return Ok(outcome);
+            }
+            let replacement = RuntimeDeliveryAuthorityRecord::from_parts(
+                next_revision(observed.revision())?,
+                encode_authority(&authority)?,
+            );
+            match self
+                .store
+                .compare_and_swap_runtime_delivery_authority(
+                    runtime_id,
+                    Some(observed.revision()),
+                    replacement,
+                    None,
+                )
+                .await?
+            {
+                RuntimeDeliveryAuthorityCasOutcome::Applied(_) => return Ok(outcome),
+                RuntimeDeliveryAuthorityCasOutcome::Conflict(_) => continue,
+            }
+        }
+        Err(RuntimeDeliveryError::Store(RuntimeStoreError::WriteFailed(
+            format!(
+                "runtime delivery acknowledgement CAS did not converge after {MAX_CAS_ATTEMPTS} attempts"
+            ),
+        )))
+    }
+
+    /// Sequences of this runtime's pending rows that were acknowledged out of
+    /// band and await the cursor. An applier marks such a row applied without
+    /// re-running its sink.
+    pub async fn acknowledged_pending_sequences(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<std::collections::BTreeSet<u64>, RuntimeDeliveryError> {
+        let observed = self
+            .store
+            .load_runtime_delivery_authority(runtime_id)
+            .await?;
+        Ok(decode_or_new_authority(observed.as_ref())?
+            .state()
+            .acknowledged_sequences
+            .clone())
     }
 
     /// Total committed-but-unapplied deliveries across every runtime in this
@@ -758,6 +878,85 @@ fn classify_commit_effects(
         ));
     }
     Ok(first)
+}
+
+/// Drive `AdvanceAcknowledgedPrefix` until the generated machine reports the
+/// prefix at rest: each advance either carries the cursor over the next
+/// sequence that was acknowledged out of band, or is the typed no-op. The
+/// machine decides which; exactly one matching effect is required.
+fn advance_acknowledged_prefix(
+    authority: &mut dsl::RuntimeDeliveryMachineAuthority,
+) -> Result<(), RuntimeDeliveryError> {
+    loop {
+        let cursor = authority.state().applied_cursor;
+        let transition = dsl::RuntimeDeliveryMachineMutator::apply(
+            authority,
+            dsl::RuntimeDeliveryInput::AdvanceAcknowledgedPrefix {},
+        )
+        .map_err(|error| RuntimeDeliveryError::Authority(format!("{error:?}")))?;
+        let mut advanced = 0usize;
+        let mut at_rest = 0usize;
+        for effect in transition.effects() {
+            match effect {
+                dsl::RuntimeDeliveryEffect::AcknowledgedPrefixAdvanced { delivery_sequence }
+                    if cursor.checked_add(1) == Some(*delivery_sequence) =>
+                {
+                    advanced += 1;
+                }
+                dsl::RuntimeDeliveryEffect::AcknowledgedPrefixAtRest { applied_cursor }
+                    if *applied_cursor == cursor =>
+                {
+                    at_rest += 1;
+                }
+                _ => {}
+            }
+        }
+        match (advanced, at_rest) {
+            (1, 0) => {}
+            (0, 1) => return Ok(()),
+            _ => {
+                return Err(RuntimeDeliveryError::Authority(format!(
+                    "generated prefix advance at cursor {cursor} emitted {advanced} advances and {at_rest} at-rest reports"
+                )));
+            }
+        }
+    }
+}
+
+/// `true` when the acknowledgement was recorded ahead of the cursor, `false`
+/// when it applied (or had already applied) the row. Exactly one matching
+/// effect is required.
+fn classify_acknowledgement_effects(
+    effects: &[dsl::RuntimeDeliveryEffect],
+    delivery_id: &RuntimeDeliveryId,
+    sequence: u64,
+) -> Result<bool, RuntimeDeliveryError> {
+    let mut recorded = 0;
+    let mut applied = 0;
+    for effect in effects {
+        match effect {
+            dsl::RuntimeDeliveryEffect::DeliveryAcknowledged {
+                delivery_id: emitted_id,
+                delivery_sequence: emitted_sequence,
+            } if emitted_id == delivery_id.as_str() && *emitted_sequence == sequence => {
+                recorded += 1;
+            }
+            dsl::RuntimeDeliveryEffect::DeliveryApplied {
+                delivery_id: emitted_id,
+                delivery_sequence: emitted_sequence,
+            } if emitted_id == delivery_id.as_str() && *emitted_sequence == sequence => {
+                applied += 1;
+            }
+            _ => {}
+        }
+    }
+    match (recorded, applied) {
+        (1, 0) => Ok(true),
+        (0, 1) => Ok(false),
+        _ => Err(RuntimeDeliveryError::Authority(format!(
+            "generated acknowledgement emitted {recorded} recorded and {applied} applied verdicts"
+        ))),
+    }
 }
 
 fn classify_applied_effects(

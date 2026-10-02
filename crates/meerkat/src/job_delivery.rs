@@ -149,11 +149,27 @@ impl JobRuntimeDeliveryApplier {
         limit: usize,
     ) -> Result<RuntimeJobDeliveryDrain, JobOutboxProjectionError> {
         let pending = self.runtime_inbox.list_pending(runtime_id, limit).await?;
+        // Rows whose effect already reached the runtime out of band (the
+        // shell's completion projection). Their sink must not run again; the
+        // inbox consumes them when the cursor reaches them, which happens
+        // inside the preceding row's `mark_applied`.
+        let acknowledged = self
+            .runtime_inbox
+            .acknowledged_pending_sequences(runtime_id)
+            .await?;
         let mut drain = RuntimeJobDeliveryDrain {
             applied: Vec::with_capacity(pending.len()),
             blocked: None,
         };
         for record in pending {
+            if acknowledged.contains(&record.sequence) {
+                drain.applied.push(AppliedRuntimeJobDelivery {
+                    delivery_id: record.submission.delivery_id().clone(),
+                    runtime_sequence: record.sequence,
+                    applications: 0,
+                });
+                continue;
+            }
             match self.apply_record(runtime_id, &record).await {
                 Ok(applications) => drain.applied.push(AppliedRuntimeJobDelivery {
                     delivery_id: record.submission.delivery_id().clone(),
@@ -622,8 +638,13 @@ impl meerkat_tools::builtin::shell::ShellJobDeliveryProjector for JobOutboxProje
         else {
             return Ok(());
         };
+        // Acknowledge rather than apply: when an earlier row of this runtime
+        // (a monitor notification, or another job's terminal) is still
+        // pending, the acknowledgement is recorded and consumed when the
+        // cursor reaches it, instead of failing out of order and leaving this
+        // row to block every later delivery for the session.
         self.runtime_inbox
-            .mark_applied(
+            .acknowledge(
                 &runtime_id,
                 record.submission.delivery_id(),
                 record.sequence,

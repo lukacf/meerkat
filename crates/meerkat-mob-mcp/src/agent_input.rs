@@ -1,13 +1,16 @@
 //! Decoding of model-supplied mob tool arguments.
 //!
-//! Agent-facing tools decode through the public input contract, plus two
+//! Agent-facing tools decode through the public input contract, plus
 //! refusals the host-facing surfaces do not make: a model may not name a host
-//! filesystem path as a skill source, and may not reference a stored blob by
-//! id, because the blob store has no fact showing the calling session may
-//! read it. Inline skill content and inline image bytes still work.
+//! filesystem path as a skill source; may not reference a stored blob by id,
+//! because the blob store has no fact showing the calling session may read
+//! it; and may not reference a video by URI, which the provider would fetch
+//! with the host's credentials. Inline skill content and inline image and
+//! video bytes still work.
 
 use meerkat_contracts::wire::{
     MobDefinitionInput, MobSkillSourceInput, WireContentBlock, WireContentInput, WireImageData,
+    WireVideoData,
 };
 use meerkat_core::types::ContentInput;
 use meerkat_mob::MobDefinition;
@@ -29,24 +32,35 @@ pub(crate) fn decode_agent_mob_definition(
 }
 
 /// Decode model-supplied content: the public contract, without stored-blob
-/// references.
+/// or provider-fetched references.
 pub(crate) fn decode_agent_content_input(input: WireContentInput) -> Result<ContentInput, String> {
-    if let WireContentInput::Blocks(blocks) = &input
-        && blocks.iter().any(|block| {
-            matches!(
-                block,
+    if let WireContentInput::Blocks(blocks) = &input {
+        for block in blocks {
+            match block {
                 WireContentBlock::Image {
                     data: WireImageData::Blob { .. },
                     ..
+                } => {
+                    return Err(
+                        "an image may not reference a stored blob by id from a model-supplied \
+                         message; send the image bytes inline"
+                            .to_string(),
+                    );
                 }
-            )
-        })
-    {
-        return Err(
-            "an image may not reference a stored blob by id from a model-supplied message; \
-             send the image bytes inline"
-                .to_string(),
-        );
+                WireContentBlock::Video {
+                    data: WireVideoData::Uri { .. },
+                    ..
+                } => {
+                    return Err(
+                        "a video may not reference a URI from a model-supplied message, because \
+                         the provider would fetch it with the host's credentials; send the video \
+                         bytes inline"
+                            .to_string(),
+                    );
+                }
+                _ => {}
+            }
+        }
     }
     ContentInput::try_from(input).map_err(str::to_string)
 }
@@ -94,5 +108,22 @@ mod tests {
         ]))
         .unwrap();
         decode_agent_content_input(inline).expect("inline image bytes are accepted");
+    }
+
+    #[test]
+    fn a_video_uri_is_refused_and_inline_bytes_are_kept() {
+        let uri: WireContentInput = serde_json::from_value(json!([
+            { "type": "video", "media_type": "video/mp4", "duration_ms": 1000,
+              "source": "uri", "uri": "gs://host-bucket/private.mp4" }
+        ]))
+        .unwrap();
+        let error = decode_agent_content_input(uri).expect_err("a video URI is refused");
+        assert!(error.contains("host's credentials"), "{error}");
+        let inline: WireContentInput = serde_json::from_value(json!([
+            { "type": "video", "media_type": "video/mp4", "duration_ms": 1000,
+              "source": "inline", "data": "AAAAIGZ0eXA=" }
+        ]))
+        .unwrap();
+        decode_agent_content_input(inline).expect("inline video bytes are accepted");
     }
 }

@@ -261,7 +261,7 @@ pub use session::{
     WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
     WireSessionTranscriptRevision, WireSessionTranscriptRevisionEntry,
     WireSessionTranscriptRevisionList, WireStopReason, WireSystemMessageIdentity, WireToolResult,
-    WireToolResultContent, WireTranscriptSource,
+    WireToolResultContent, WireTranscriptSource, WireVideoData,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
 pub use spec_digest::{SpecDigestError, portable_member_spec_digest};

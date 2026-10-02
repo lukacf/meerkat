@@ -7169,6 +7169,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_member_refuses_a_provider_fetched_video_uri() {
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(Arc::clone(&state));
+        let error = dispatch_err(
+            &surface,
+            "mob_spawn_member",
+            json!({
+                "mob_id": "any",
+                "profile": "worker",
+                "member_id": "w1",
+                "initial_message": [{
+                    "type": "video", "media_type": "video/mp4", "duration_ms": 1000,
+                    "source": "uri", "uri": "gs://host-bucket/private.mp4"
+                }],
+            }),
+        )
+        .await;
+        assert_refused_as_argument_error(&error, "host's credentials");
+    }
+
+    #[tokio::test]
     async fn realm_profile_writes_refuse_model_supplied_host_only_fields() {
         let temp = tempfile::tempdir().unwrap();
         let marker = temp.path().join("launched");

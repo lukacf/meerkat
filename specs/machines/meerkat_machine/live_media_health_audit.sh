@@ -22,8 +22,8 @@ set -euo pipefail
 
 max_steps="${1:?usage: live_media_health_audit.sh <max-steps> [extra tlc args...]}"
 shift
-if ! [[ "${max_steps}" =~ ^[0-9]+$ ]] || (( max_steps < 12 )); then
-  echo "error: max-steps must be an integer >= 12 (the deterministic prefix is 5 steps; the exhausted budget needs 7 more)" >&2
+if ! [[ "${max_steps}" =~ ^[0-9]+$ ]] || (( max_steps < 20 )); then
+  echo "error: max-steps must be an integer >= 20 (the deterministic prefix is 5 steps; earning the reopen again after a stop and resume needs 15 more)" >&2
   exit 2
 fi
 
@@ -56,7 +56,7 @@ derive_cfg() {
   replace_exact_line "  AgentRuntimeIdValues = {}" '  AgentRuntimeIdValues = {"runtime_1"}' "${cfg}"
   replace_exact_line "  SessionLlmIdentityValues = {}" '  SessionLlmIdentityValues = {"identity_1"}' "${cfg}"
   replace_exact_line "  RunIdValues = {}" '  RunIdValues = {"run_1"}' "${cfg}"
-  replace_exact_line "  StringValues = {}" '  StringValues = {"session_1", "channel_1", "channel_2", "output_1", "output_2"}' "${cfg}"
+  replace_exact_line "  StringValues = {}" '  StringValues = {"session_1", "channel_1", "channel_2", "output_1", "output_2", "stop"}' "${cfg}"
   replace_exact_line "CONSTANTS" "CONSTANTS
   AuditMaxSteps = ${max_steps}" "${cfg}"
   replace_exact_line "INVARIANTS" "INVARIANTS
@@ -85,10 +85,11 @@ run_tlc() {
   local name="$1" cfg="$2"
   local log="${work_dir}/${name}.log"
   local status=0
+  local run_workers="${RUN_WORKERS:-${workers}}"
   # Goal runs end in a violation by design: -noGenerateSpecTE keeps TLC from
   # writing trace-explorer specs next to the model.
   tlc_run_capped live_media_health_audit "${name}" "${log}" \
-    -workers "${workers}" -metadir "${work_dir}/${name}-states" -noGenerateSpecTE \
+    -workers "${run_workers}" -metadir "${work_dir}/${name}-states" -noGenerateSpecTE \
     -config "${cfg}" "${@:3}" live_media_health_audit.tla || status=$?
   grep -E 'states generated|distinct states|depth of the complete state graph|Invariant .* is violated|Temporal properties were violated|Action property .* is violated|Error:|Model checking completed' "${log}" | sed "s/^/[${name}] /"
   echo "${status}" > "${work_dir}/${name}.status"
@@ -106,29 +107,43 @@ if [[ "$(cat "${work_dir}/safety.status")" != "0" ]] \
   exit 1
 fi
 
-for goal in Audible SilentReopen SilentExhausted FaultedChannelReportsClosed; do
+for goal in Audible SilentReopen SilentExhausted FaultedChannelReportsClosed ReRegisteredSilentReopen; do
   cfg="${work_dir}/goal-${goal}.cfg"
   derive_cfg "${cfg}" "  NotGoal${goal}"
-  run_tlc "goal-${goal}" "${cfg}" "$@"
+  # One worker, as for the firing runs below: it stops at the first violation
+  # and always prints the (shortest) counterexample.
+  RUN_WORKERS=1 run_tlc "goal-${goal}" "${cfg}" "$@"
   if ! grep -q "Invariant NotGoal${goal} is violated" "${work_dir}/goal-${goal}.log"; then
     echo "error: media health judgement ${goal} is not reachable within ${max_steps} steps" >&2
     tail -40 "${work_dir}/goal-${goal}.log" >&2
     exit 1
   fi
   states="$(grep -cE '^State [0-9]+:' "${work_dir}/goal-${goal}.log" || true)"
+  if [[ "${states}" == "0" ]]; then
+    echo "error: TLC reported goal ${goal} without a counterexample trace" >&2
+    exit 1
+  fi
   echo "[goal-${goal}] counterexample length ${states} states"
 done
 for edge in RequestAttached RequestRunning AudibleAttached AudibleRunning \
   SilentReopenAttached SilentReopenRunning SilentExhaustedAttached SilentExhaustedRunning; do
   cfg="${work_dir}/fires-${edge}.cfg"
   derive_cfg "${cfg}" "" "  Never${edge}"
-  run_tlc "fires-${edge}" "${cfg}" "$@"
+  # One worker: with many workers TLC can report a violation yet drop its
+  # trace (it then explores the whole graph). A single worker stops at the
+  # first violation and prints the shortest witness, and the space is small
+  # enough that a non-firing edge still finishes fast.
+  RUN_WORKERS=1 run_tlc "fires-${edge}" "${cfg}" "$@"
   if ! grep -q "Action property Never${edge} is violated" "${work_dir}/fires-${edge}.log"; then
     echo "error: media health transition ${edge} never fires within ${max_steps} steps" >&2
     tail -40 "${work_dir}/fires-${edge}.log" >&2
     exit 1
   fi
   states="$(grep -cE '^State [0-9]+:' "${work_dir}/fires-${edge}.log" || true)"
+  if [[ "${states}" == "0" ]]; then
+    echo "error: TLC reported fires ${edge} without a witness trace" >&2
+    exit 1
+  fi
   echo "[fires-${edge}] witness length ${states} states"
 done
 echo "live media health audit passed at model_step_count <= ${max_steps}; every judgement reachable; every transition fires"

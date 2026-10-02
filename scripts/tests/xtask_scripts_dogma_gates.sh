@@ -309,6 +309,8 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # (durable_in_turn_steer_audit.sh, live_context_outbox_audit.sh) require it
 # before they accept a run. live_context_outbox_audit.sh also requires each of
 # its goals to be reported violated, so the fake reports those too.
+# live_media_health_audit.sh also requires a non-empty trace for each goal and
+# firing run, so the fake prints one trace state.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -326,6 +328,7 @@ printf '%s\n' \
   'echo "Error: Invariant NotGoalSilentReopen is violated."' \
   'echo "Error: Invariant NotGoalSilentExhausted is violated."' \
   'echo "Error: Invariant NotGoalFaultedChannelReportsClosed is violated."' \
+  'echo "Error: Invariant NotGoalReRegisteredSilentReopen is violated."' \
   'echo "Error: Action property NeverRequestAttached is violated."' \
   'echo "Error: Action property NeverRequestRunning is violated."' \
   'echo "Error: Action property NeverAudibleAttached is violated."' \
@@ -334,6 +337,7 @@ printf '%s\n' \
   'echo "Error: Action property NeverSilentReopenRunning is violated."' \
   'echo "Error: Action property NeverSilentExhaustedAttached is violated."' \
   'echo "Error: Action property NeverSilentExhaustedRunning is violated."' \
+  'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
 

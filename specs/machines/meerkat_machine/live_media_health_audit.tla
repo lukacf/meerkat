@@ -14,8 +14,10 @@
 \* with the session's one reopen, silent after that reopen is spent), the
 \* channel's status reporting closed, closing the channel, and opening and
 \* binding the second channel on the same session (the reopen a media fault
-\* recommends). The edges have no Idle variant: an idle session has no
-\* attached runtime to bind a live channel to.
+\* recommends), and stopping and resuming or unregistering the session
+\* (media health is per session lifetime: the resumed session earns its reopen
+\* again; unregistering clears it too). The edges have no Idle variant: an idle session has no attached
+\* runtime to bind a live channel to.
 \*
 \* The TLC config is DERIVED from the generated ci.cfg by
 \* live_media_health_audit.sh (every generated constant and invariant,
@@ -28,6 +30,11 @@ EXTENDS model
 
 CONSTANT AuditMaxSteps
 
+\* Audit history: how many times a reopen was recommended along the
+\* behavior. The budget allows one per session lifetime, so a second one
+\* proves the budget reset with the session.
+VARIABLE audit_recommended_reopens
+
 AuditSession == "session_1"
 AuditFirstChannel == "channel_1"
 AuditSecondChannel == "channel_2"
@@ -35,6 +42,7 @@ AuditChannels == {AuditFirstChannel, AuditSecondChannel}
 AuditRuntime == "runtime_1"
 AuditIdentity == "identity_1"
 AuditRun == "run_1"
+AuditStopReason == "stop"
 AuditOutputs == {"output_1", "output_2"}
 \* Raw client counters: no audible frame and a peak below the 2000
 \* micro-RMS floor, a peak at the floor, and audible frames.
@@ -96,12 +104,48 @@ AuditChannelLifecycle ==
 \* Running.
 AuditRunLifecycle == PrepareAttached(AuditSession, AuditRun)
 
-AuditNext ==
+\* The session lifecycle around media health: unregistering (begin, the
+\* three drains, unregister; the machine then stays draining and a new
+\* registration starts on a fresh authority), and stopping the runtime and
+\* resuming the stopped session with a fresh runtime binding (the same
+\* machine continues, so its media-health state must reset with the new
+\* lifetime).
+\* The two lifecycles are explored apart: an unregister never begins with a
+\* runtime stop deferred, and a stop is never requested while draining.
+\* (Interleaving them reaches a pre-existing gap outside media health:
+\* UnregisterSession leaves runtime_stop_deferred set while moving to Idle,
+\* which violates the generated deferred_stop_requires_active_runtime_phase.)
+AuditSessionLifecycle ==
+    \/ runtime_stop_deferred = FALSE
+        /\ BeginUnregisterSessionAttached(AuditSession, active_runtime_id, active_fence_token, active_runtime_generation, active_runtime_epoch_id)
+    \/ RuntimeLoopStoppedForUnregisterAttached(AuditSession, FALSE)
+    \/ CommsDrainExitedForUnregisterAttached(AuditSession, FALSE)
+    \/ CompletionWaitersResolvedForUnregisterAttached(AuditSession)
+    \/ UnregisterSessionAttached(AuditSession, active_runtime_id, active_fence_token, active_runtime_generation, active_runtime_epoch_id)
+    \/ registration_phase # "Draining" /\ StopRuntimeExecutorAttached(AuditStopReason)
+    \/ RuntimeExecutorExitedFromAttached
+    \/ RegisterSessionResumesStopped(AuditSession, None)
+    \/ PrepareBindingsIdle(AuditRuntime, 1, Some(1), None, AuditSession)
+
+AuditModelNext ==
     \/ AuditPrefix
     \/ (model_step_count >= AuditPrefixLength
-        /\ (AuditMediaHealth \/ AuditChannelLifecycle \/ AuditRunLifecycle))
+        /\ (AuditMediaHealth \/ AuditChannelLifecycle \/ AuditRunLifecycle \/ AuditSessionLifecycle))
 
-AuditSpec == Init /\ [][AuditNext]_vars
+AuditNewlyRecommended ==
+    \E c \in DOMAIN live_media_fault_reopen_recommended_by_channel' :
+        /\ live_media_fault_reopen_recommended_by_channel'[c] = TRUE
+        /\ ~(c \in DOMAIN live_media_fault_reopen_recommended_by_channel
+              /\ live_media_fault_reopen_recommended_by_channel[c] = TRUE)
+
+AuditNext ==
+    /\ AuditModelNext
+    /\ audit_recommended_reopens' =
+        audit_recommended_reopens + (IF AuditNewlyRecommended THEN 1 ELSE 0)
+
+AuditInit == Init /\ audit_recommended_reopens = 0
+
+AuditSpec == AuditInit /\ [][AuditNext]_<<vars, audit_recommended_reopens>>
 
 AuditStateConstraint == model_step_count <= AuditMaxSteps
 
@@ -129,23 +173,34 @@ AuditVerdictsFollowTheBudget ==
 \* a faulted channel's closed status is reachable, the state that projection
 \* reads from.
 
-\* Judged once: a judged channel stays judged with an unchanged verdict.
+\* While its channel stays open within the session's lifetime: still bound,
+\* on the registered session, with its runtime still attached (a stop and
+\* resume, or an unregister, ends the lifetime and clears the runtime).
+AuditStaysOpen(c) ==
+    /\ c \in DOMAIN live_channel_session_by_channel'
+    /\ session_id' # None
+    /\ active_runtime_id' # None
+
+\* Judged once: while the channel stays open, a judged channel stays judged
+\* with an unchanged verdict.
 AuditJudgedOnce ==
     [][\A c \in live_media_health_judged_channels :
-        /\ c \in live_media_health_judged_channels'
-        /\ (c \in DOMAIN live_media_fault_reopen_recommended_by_channel)
-            = (c \in DOMAIN live_media_fault_reopen_recommended_by_channel')
-        /\ c \in DOMAIN live_media_fault_reopen_recommended_by_channel =>
-            live_media_fault_reopen_recommended_by_channel'[c]
-                = live_media_fault_reopen_recommended_by_channel[c]]_vars
+        AuditStaysOpen(c) =>
+            /\ c \in live_media_health_judged_channels'
+            /\ (c \in DOMAIN live_media_fault_reopen_recommended_by_channel)
+                = (c \in DOMAIN live_media_fault_reopen_recommended_by_channel')
+            /\ c \in DOMAIN live_media_fault_reopen_recommended_by_channel =>
+                live_media_fault_reopen_recommended_by_channel'[c]
+                    = live_media_fault_reopen_recommended_by_channel[c]]_vars
 
-\* First output only: once a channel's output is requested, the requested
-\* output never changes.
+\* First output only: while the channel stays open, its requested output
+\* never changes.
 AuditFirstOutputOnly ==
     [][\A c \in DOMAIN live_media_health_requested_output_by_channel :
-        /\ c \in DOMAIN live_media_health_requested_output_by_channel'
-        /\ live_media_health_requested_output_by_channel'[c]
-            = live_media_health_requested_output_by_channel[c]]_vars
+        AuditStaysOpen(c) =>
+            /\ c \in DOMAIN live_media_health_requested_output_by_channel'
+            /\ live_media_health_requested_output_by_channel'[c]
+                = live_media_health_requested_output_by_channel[c]]_vars
 
 \* Reachability goals: the script checks each negation and requires a
 \* counterexample, proving the judgement is reachable within the bound.
@@ -162,10 +217,19 @@ GoalFaultedChannelReportsClosed ==
     \E c \in DOMAIN live_media_fault_reopen_recommended_by_channel :
         /\ c \in DOMAIN live_channel_status_by_channel
         /\ live_channel_status_by_channel[c] = "Closed"
+\* The session earns its reopen again after its runtime stops and the
+\* stopped session resumes: a second recommended reopen along one behavior.
+GoalReRegisteredSilentReopen ==
+    /\ audit_recommended_reopens >= 2
+    \* earned on the fresh channel opened after the first one closed
+    /\ AuditFirstChannel \notin DOMAIN live_channel_session_by_channel
+    /\ AuditSecondChannel \in DOMAIN live_media_fault_reopen_recommended_by_channel
+    /\ live_media_fault_reopen_recommended_by_channel[AuditSecondChannel] = TRUE
 NotGoalAudible == ~GoalAudible
 NotGoalSilentReopen == ~GoalSilentReopen
 NotGoalSilentExhausted == ~GoalSilentExhausted
 NotGoalFaultedChannelReportsClosed == ~GoalFaultedChannelReportsClosed
+NotGoalReRegisteredSilentReopen == ~GoalReRegisteredSilentReopen
 
 \* Firing: each new transition must fire in the explored space. The script
 \* checks every action property below and requires TLC to report it

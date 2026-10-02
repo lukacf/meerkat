@@ -49,6 +49,14 @@ them.
   exhaustive matches need arms. `render_machine_semantic_model` now returns
   `CanonicalNamedTypeMismatch` for a machine that keeps a canonical id but
   drops or rebinds a canonical named type, where it used to panic.
+- `meerkat_machine_schema::MachineSchema` gains the public field
+  `input_field_domains: Vec<InputFieldDomain>`, and
+  `meerkat_machine_schema::catalog::dsl::MachineSchemaMetadata` gains
+  `input_field_domains` and `state_bound_input_fields`. Struct literals must
+  set them; an empty `Vec` keeps today's behaviour.
+  `meerkat_machine_schema::MachineSchemaError` gains the variant
+  `InvalidInputFieldDomain { variant, field, reason }`, so exhaustive matches
+  need an arm.
 - `meerkat_runtime::EphemeralRuntimeDriver` is no longer `UnwindSafe` or
   `RefUnwindSafe`: it now holds the runtime admission signal added with the
   typed admission wait (#1431). Callers that relied on these auto traits (for
@@ -207,6 +215,23 @@ them.
   copies of a 100 ms poll loop. With `test-support`,
   `McpRouterAdapter::wait_connect_results_delivered` and
   `McpRouterAdapter::wait_removals_finalized` are typed waits for tests.
+- Machine schemas can declare the TLC payload domain of an unsigned input
+  field (`MachineSchema::input_field_domains`, built with
+  `MachineSchemaMetadata::with_input_field_domain`). An
+  `InputFieldDomainKind::AdditionalValues` set is explored on top of the
+  default `0..2`; an `InputFieldDomainKind::StateField` binding explores
+  exactly the current value of a same-typed state field. The declaration is
+  rendered into the generated model, so `machine-check-drift` and the TLC
+  lane check exactly what it declares; the generated Rust machine is
+  unchanged. Validation refuses an unknown or non-unsigned field, a field no
+  transition binds, a duplicate, an empty or out-of-range value set
+  (`TLC_MAX_UNSIGNED_INPUT_SAMPLE`), an unknown or differently typed state
+  field, and a TLC representative input, each as a typed
+  `InputFieldDomainError`. This replaces the codegen's hard-coded rule that
+  bound any `expected_revision` input to a `revision` state field: WorkGraph
+  and WorkAttention now declare it with
+  `MachineSchemaMetadata::with_state_bound_input_field`, and every generated
+  model is byte-identical.
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a

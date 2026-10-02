@@ -1326,7 +1326,6 @@ mod tests {
             )
             .await
             .unwrap();
-            drop(request);
             assert!(matches!(result, Err(AuthError::LeaseAbsent)));
             assert!(headers.is_empty());
             assert_eq!(fixture.store.calls.load(Ordering::SeqCst), calls);

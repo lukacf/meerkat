@@ -2369,6 +2369,10 @@ pub struct AgentFactory {
     /// Default machine handle for generated-image planning/routing.
     pub image_generation_machine:
         Option<Arc<dyn meerkat_tools::builtin::image_generation::ImageGenerationMachine>>,
+    /// Default credential source for OAuth-protected MCP servers, used when
+    /// a build sets no `AgentBuildConfig::mcp_auth_resolver`.
+    #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+    mcp_auth_resolver: Option<Arc<dyn meerkat_mcp::McpAuthResolver>>,
 }
 
 impl std::fmt::Debug for AgentFactory {
@@ -3477,6 +3481,8 @@ impl AgentFactory {
             provider_auth_persistence: ProviderAuthPersistenceAttachment::Detached,
             external_auth_resolvers: BTreeMap::new(),
             image_generation_machine: None,
+            #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+            mcp_auth_resolver: None,
         }
     }
 
@@ -3614,7 +3620,19 @@ impl AgentFactory {
             provider_registry: Arc::new(build_provider_registry()),
             experimental_live_admission: crate::ExperimentalLiveAdmissionOwner::default(),
             image_generation_machine: None,
+            #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+            mcp_auth_resolver: None,
         }
+    }
+
+    /// Install the default credential source for OAuth-protected MCP
+    /// servers (typically [`crate::HostAuthService::mcp_oauth_authority`]).
+    /// A missing credential surfaces as the typed `AuthorizationRequired`
+    /// host status; agents never open a browser.
+    #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+    pub fn mcp_auth_resolver(mut self, resolver: Arc<dyn meerkat_mcp::McpAuthResolver>) -> Self {
+        self.mcp_auth_resolver = Some(resolver);
+        self
     }
 
     /// Attach explicit operator and realm policy for the compiled
@@ -6469,7 +6487,10 @@ impl AgentFactory {
             let mut router = meerkat_mcp::McpRouter::new_with_surface_handle(surface_handle)
                 .with_mcp_auth(
                     meerkat_providers::mcp_oauth::McpAuthMode::Interactive,
-                    build_config.mcp_auth_resolver.clone(),
+                    build_config
+                        .mcp_auth_resolver
+                        .clone()
+                        .or_else(|| self.mcp_auth_resolver.clone()),
                 );
             for server in &build_config.mcp_servers {
                 router.stage_add(server.clone()).map_err(|error| {

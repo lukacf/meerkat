@@ -4838,7 +4838,32 @@ impl MeerkatMachine {
             };
         }
 
+        #[cfg(test)]
+        {
+            let test_gate = self
+                .test_pending_attachment_before_regate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some((reached, release)) = test_gate {
+                let _ = reached.send(());
+                let _ = release.await;
+            }
+        }
         let pending_guard = Arc::clone(&registration_gate).lock_owned().await;
+        // `should_wake` was read before the runtime loop took the registration
+        // gate for startup recovery. Input admitted after the loop released it
+        // and before `pending_guard` reacquired it found the slot Pending, so
+        // it had no wake sender. Re-read the queue now that the gate is held
+        // through commit, or that input stays queued until something else
+        // wakes the loop (#1482).
+        let should_wake = should_wake
+            || !driver
+                .lock()
+                .await
+                .as_driver()
+                .active_input_ids()
+                .is_empty();
         let exact_pending_is_current = {
             let sessions = self.sessions.read().await;
             sessions.get(&session_id).is_some_and(|entry| {

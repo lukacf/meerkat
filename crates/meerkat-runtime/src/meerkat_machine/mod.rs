@@ -8822,6 +8822,16 @@ pub struct MeerkatMachineShared {
             crate::tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
+    /// Deterministic test gate after an executor attachment's runtime loop
+    /// has released the registration gate it held through startup recovery,
+    /// before the attachment reacquires that gate as its pending guard.
+    #[cfg(test)]
+    test_pending_attachment_before_regate: StdMutex<
+        Option<(
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     /// One-shot positive witness for registration-slot contention. The armed
     /// acquisition itself uses `try_lock_owned`, reports whether it found the
     /// exact stable slot held, then either returns that guard or waits on that
@@ -10314,6 +10324,8 @@ impl MeerkatMachine {
                 #[cfg(test)]
                 test_fenced_accept_after_lease: StdMutex::new(None),
                 #[cfg(test)]
+                test_pending_attachment_before_regate: StdMutex::new(None),
+                #[cfg(test)]
                 test_registration_transaction_contention_probe: StdMutex::new(None),
                 #[cfg(test)]
                 test_fail_post_stop_unregister_after_fence: StdMutex::new(None),
@@ -10410,6 +10422,8 @@ impl MeerkatMachine {
                 #[cfg(test)]
                 test_fenced_accept_after_lease: StdMutex::new(None),
                 #[cfg(test)]
+                test_pending_attachment_before_regate: StdMutex::new(None),
+                #[cfg(test)]
                 test_registration_transaction_contention_probe: StdMutex::new(None),
                 #[cfg(test)]
                 test_fail_post_stop_unregister_after_fence: StdMutex::new(None),
@@ -10505,6 +10519,8 @@ impl MeerkatMachine {
                 test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
                 #[cfg(test)]
                 test_fenced_accept_after_lease: StdMutex::new(None),
+                #[cfg(test)]
+                test_pending_attachment_before_regate: StdMutex::new(None),
                 #[cfg(test)]
                 test_registration_transaction_contention_probe: StdMutex::new(None),
                 #[cfg(test)]

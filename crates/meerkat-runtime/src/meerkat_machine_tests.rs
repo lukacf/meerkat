@@ -11432,6 +11432,116 @@ async fn destroy_relooks_current_entry_after_same_id_replacement() {
     .await;
 }
 
+/// An input admitted after an attachment's runtime loop released the
+/// registration gate, and before the attachment reacquired it, finds the slot
+/// Pending and so has no wake sender; the attachment read its queue before the
+/// input existed. Commit must still wake the loop for it: a mob resume
+/// reviving a member while a detached completion was delivered to it left the
+/// completion queued forever (#1482).
+#[tokio::test]
+async fn input_admitted_before_a_pending_attachment_regates_wakes_at_commit() {
+    struct RecordingExecutor {
+        applied: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for RecordingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.applied.notify_one();
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register pending-attachment fixture");
+    let applied = Arc::new(Notify::new());
+    let (regate_reached_tx, regate_reached) = tokio::sync::oneshot::channel();
+    let (release_regate, release_regate_rx) = tokio::sync::oneshot::channel();
+    *machine
+        .test_pending_attachment_before_regate
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((regate_reached_tx, release_regate_rx));
+    let ensure = tokio::spawn({
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        let applied = Arc::clone(&applied);
+        async move {
+            machine
+                .ensure_session_with_executor_factory(session_id, move |_| {
+                    Box::new(RecordingExecutor { applied }) as Box<dyn CoreExecutor>
+                })
+                .await
+        }
+    });
+    // The runtime loop has finished startup and released the registration
+    // gate; the attachment is Pending and has not reacquired the gate.
+    regate_reached
+        .await
+        .expect("the attachment reaches the gap before reacquiring its gate");
+
+    let applied_wait = applied.notified();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("admitted before commit"))
+        .await
+        .expect("admit while the attachment is pending");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    release_regate
+        .send(())
+        .expect("release the attachment to reacquire its gate");
+    let pending = match ensure
+        .await
+        .expect("ensure task must not panic")
+        .expect("prepare the pending attachment")
+    {
+        EnsureRuntimeExecutorAttachment::Pending(pending) => pending,
+        EnsureRuntimeExecutorAttachment::Existing(witness) => {
+            panic!("fresh fixture unexpectedly found {witness:?}")
+        }
+    };
+    pending
+        .commit()
+        .await
+        .expect("commit the pending attachment");
+
+    // Hang guard only: a lost wake never applies the input.
+    tokio::time::timeout(Duration::from_secs(30), applied_wait)
+        .await
+        .expect("the committed attachment must run the input admitted while it was pending");
+}
+
 #[tokio::test]
 async fn retire_recaptures_wake_sender_after_pending_attachment_commits() {
     struct BlockingExecutor {

@@ -11138,6 +11138,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_session_by_append == EmptyMap
                 && self.live_delegation_active_worker_count_by_channel == EmptyMap
                 && self.live_execution_fence_by_channel == EmptyMap
+                && self.live_media_health_requested_output_by_channel == EmptyMap
+                && self.live_media_health_judged_channels == EmptySet
                 && self.live_execution_generation_by_channel == EmptyMap
                 && self.live_execution_runtime_id_by_channel == EmptyMap
                 && self.live_experimental_execution_channels == EmptySet
@@ -11295,6 +11297,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_session_by_append == EmptyMap
                 && self.live_delegation_active_worker_count_by_channel == EmptyMap
                 && self.live_execution_fence_by_channel == EmptyMap
+                && self.live_media_health_requested_output_by_channel == EmptyMap
+                && self.live_media_health_judged_channels == EmptySet
                 && self.live_execution_generation_by_channel == EmptyMap
                 && self.live_execution_runtime_id_by_channel == EmptyMap
                 && self.live_experimental_execution_channels == EmptySet
@@ -11450,6 +11454,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_session_by_append == EmptyMap
                 && self.live_delegation_active_worker_count_by_channel == EmptyMap
                 && self.live_execution_fence_by_channel == EmptyMap
+                && self.live_media_health_requested_output_by_channel == EmptyMap
+                && self.live_media_health_judged_channels == EmptySet
                 && self.live_execution_generation_by_channel == EmptyMap
                 && self.live_execution_runtime_id_by_channel == EmptyMap
                 && self.live_experimental_execution_channels == EmptySet
@@ -11607,6 +11613,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_session_by_append == EmptyMap
                 && self.live_delegation_active_worker_count_by_channel == EmptyMap
                 && self.live_execution_fence_by_channel == EmptyMap
+                && self.live_media_health_requested_output_by_channel == EmptyMap
+                && self.live_media_health_judged_channels == EmptySet
                 && self.live_execution_generation_by_channel == EmptyMap
                 && self.live_execution_runtime_id_by_channel == EmptyMap
                 && self.live_experimental_execution_channels == EmptySet
@@ -11762,6 +11770,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_session_by_append == EmptyMap
                 && self.live_delegation_active_worker_count_by_channel == EmptyMap
                 && self.live_execution_fence_by_channel == EmptyMap
+                && self.live_media_health_requested_output_by_channel == EmptyMap
+                && self.live_media_health_judged_channels == EmptySet
                 && self.live_execution_generation_by_channel == EmptyMap
                 && self.live_execution_runtime_id_by_channel == EmptyMap
                 && self.live_experimental_execution_channels == EmptySet
@@ -37119,6 +37129,8 @@ mod live_close_classification_tests {
         "live_result_delivery_channel_by_operation",
         "live_result_delivery_digest_by_operation",
         "live_result_delivery_operation_by_channel",
+        "live_media_health_judged_channels",
+        "live_media_health_requested_output_by_channel",
     ];
 
     const RESIDUE: &[&str] = &[

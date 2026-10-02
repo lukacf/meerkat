@@ -347,6 +347,15 @@ them.
   the deferral recorded instead of retrying. A deferred transcript projection
   refused because a close released the channel from the held boundary
   re-arms the boundary wait and waits on the boundary itself.
+- An experimental GPT Live WebRTC activation no longer fails on a timer. The
+  commit used to give the three sideband actors (observation reader, control
+  consumer, adapter pump) two seconds to start and reported a failed
+  activation when a loaded scheduler took longer. It now waits for them with
+  no deadline: each actor owns a start lease from spawn, and an actor that
+  ends before it starts (aborted, panicked or dropped) cancels the activation
+  gate, so the commit fails typed instead of hanging. A start or cancel that
+  landed between the wait's checks and its registration could also be missed;
+  the wait now re-reads both after registering.
 
 - A delivery whose caller left while it was parked behind a member's
   in-flight admission no longer runs as a ghost turn. The admission lane

@@ -25378,7 +25378,7 @@ default_model = "gemma"
         }
     }
 
-    /// CLI entry point of the MCP OAuth canary (ADR-001 Toolkit r2, item 3):
+    /// CLI entry point of the MCP OAuth canary (ADR-001 secret-canary requirement):
     /// the CLI host login (loopback, advisory launch, completion), a launch
     /// that reports failure but navigated, a refused exchange, and the
     /// non-terminal resolver path, with every `tracing` event and `log`

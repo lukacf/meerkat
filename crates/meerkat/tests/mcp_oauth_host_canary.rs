@@ -11,7 +11,7 @@
 )]
 
 //! Host-driven MCP OAuth keeps human authentication outside model
-//! observation (ADR-001 Toolkit r2, item 3).
+//! observation (ADR-001 secret-canary requirement).
 //!
 //! Through the facade host API this exercises a successful login, a failed
 //! completion, an explicit cancel, a dropped pending login and the advisory

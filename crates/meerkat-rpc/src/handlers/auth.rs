@@ -3148,7 +3148,7 @@ mod tests {
         serde_json::from_str(resp.result.expect("RPC result").get()).unwrap()
     }
 
-    /// RPC entry point of the MCP OAuth canary (ADR-001 Toolkit r2, item 3):
+    /// RPC entry point of the MCP OAuth canary (ADR-001 secret-canary requirement):
     /// login, a failed completion and a cancel over `auth/login/*`, with every
     /// `tracing` event and `log` record captured. RPC responses are the host
     /// channel; logs must hold none of the attempts' secrets.

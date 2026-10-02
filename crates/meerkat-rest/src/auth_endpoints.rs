@@ -2920,7 +2920,7 @@ mod tests {
         (status, serde_json::from_slice(&body).unwrap())
     }
 
-    /// REST entry point of the MCP OAuth canary (ADR-001 Toolkit r2, item 3):
+    /// REST entry point of the MCP OAuth canary (ADR-001 secret-canary requirement):
     /// login, a failed completion and a cancel over `/auth/login/*`, with
     /// every `tracing` event and `log` record captured. Responses are the
     /// host channel; logs must hold none of the attempts' secrets.

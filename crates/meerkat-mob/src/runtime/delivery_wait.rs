@@ -494,8 +494,10 @@ mod observe {
     /// receipt batch. It is also the whole budget of a call whose deadline has
     /// passed or is closer than this.
     const EVIDENCE_READ_FLOOR: Duration = Duration::from_millis(100);
-    /// Polling covers only what the runtime cannot notify: a key not yet
-    /// bound (the inbox gap) and a session without a live registration.
+    /// Polling covers only what the runtime cannot notify: a session without
+    /// a live registration (durable evidence only). A key not yet bound on a
+    /// live session (the inbox gap) is awaited through the runtime's
+    /// admission signal.
     const POLL_START: Duration = Duration::from_millis(10);
     const POLL_MAX: Duration = Duration::from_millis(250);
     /// While armed on the runtime's waiter, re-read at least this often.
@@ -730,6 +732,32 @@ mod observe {
                     Ok(Err(
                         RuntimeDriverError::NotFound { .. } | RuntimeDriverError::NotReady { .. },
                     )) => {}
+                    Ok(Err(error)) => return Err(DeliveryTerminalWaitError::RuntimeRead(error)),
+                }
+            }
+            let remaining = wait_until.saturating_duration_since(Instant::now());
+            if input_id.is_none() {
+                // Not admitted yet: the live runtime signals the admission,
+                // so wait for it instead of re-reading on a backoff.
+                match tokio::time::timeout(
+                    remaining,
+                    runtime.wait_input_admitted_by_idempotency_key(session_id, idempotency_key),
+                )
+                .await
+                {
+                    // The deadline came first; the loop ends at the top.
+                    Err(_elapsed) => continue,
+                    // Admitted: read its evidence.
+                    Ok(Ok(Some(_admitted))) => continue,
+                    // No live registration: only durable evidence is left, so
+                    // re-read it below.
+                    Ok(
+                        Ok(None)
+                        | Err(
+                            RuntimeDriverError::NotFound { .. }
+                            | RuntimeDriverError::NotReady { .. },
+                        ),
+                    ) => {}
                     Ok(Err(error)) => return Err(DeliveryTerminalWaitError::RuntimeRead(error)),
                 }
             }

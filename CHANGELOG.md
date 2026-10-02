@@ -189,6 +189,26 @@ them.
   in another connection's id space. On connection close the server now fails
   pending callbacks before its graceful request shutdown, so a session waiting
   on a gone client gets the typed failure immediately.
+### Added
+
+- `meerkat_runtime::MeerkatMachine::wait_input_admitted_by_idempotency_key`
+  waits until a live session's runtime has admitted an input for an
+  idempotency key and returns its id. The driver signals every accepted
+  input, so the wait is woken by the admission rather than re-reading on a
+  timer. It returns `Ok(None)` for a session without a live registration.
+
+### Fixed
+
+- The Mob delivery-identity terminal wait no longer re-reads on a sleep
+  backoff while a delivery is not yet admitted on a live session. It awaits
+  the runtime's admission signal; only a session without a live registration
+  (durable evidence only) is still re-read. The
+  `host_human_input::delivery_terminal_wait` tests waited for admission by
+  repeating 200 ms delivery waits and treated the documented
+  `Unknown { NotObservedByDeadline }` (a window that ends before its first
+  evidence read) as impossible. That failed
+  `batched_autonomous_deliveries_report_one_shared_run_and_their_batch` 26/90
+  times at 30 copies per core. They now await the admission itself.
 
 ## [0.8.50] - 2026-10-01
 

@@ -15746,6 +15746,65 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
 /// Cancellation, retry, and ownership pins for the machine-owned stop /
 /// unregister coordinator. Production cleanup hooks own external material
 /// only; recursive unregister is tested separately as a typed self-join error.
+/// A waiter for a delivery's admission is woken by the admission itself:
+/// it stays parked while nothing holds the key, resolves with the admitted
+/// input's id once an input with that idempotency key is accepted, and is
+/// `None` for a session without a live registration.
+#[tokio::test]
+async fn admission_wait_is_woken_by_the_admission_of_its_key() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let key = "delivery-admission-wait";
+
+    let waiter = {
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            machine
+                .wait_input_admitted_by_idempotency_key(&session_id, key)
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "nothing holds the key yet, so the waiter stays parked"
+    );
+
+    let mut input = make_prompt("admitted delivery");
+    let Input::Prompt(prompt) = &mut input else {
+        unreachable!("make_prompt always constructs Prompt input")
+    };
+    prompt.header.idempotency_key = Some(crate::identifiers::IdempotencyKey::new(key));
+    let accepted = match machine
+        .accept_input(&session_id, input)
+        .await
+        .expect("accept keyed input")
+    {
+        AcceptOutcome::Accepted { input_id, .. } => input_id,
+        other => panic!("expected a fresh accepted input, got {other:?}"),
+    };
+    let admitted = tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("the admission wakes the waiter")
+        .expect("waiter task")
+        .expect("admission wait runs");
+    assert_eq!(admitted, Some(accepted));
+
+    assert_eq!(
+        machine
+            .wait_input_admitted_by_idempotency_key(&SessionId::new(), key)
+            .await
+            .expect("admission wait runs"),
+        None,
+        "a session without a live registration has nothing to wait on"
+    );
+}
+
 mod stop_teardown_coordinator_class {
     use super::*;
 

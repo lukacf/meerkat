@@ -1591,6 +1591,8 @@ pub mod effects {
     pub struct ChildJoinClassified {
         pub disposition: ChildJoinDisposition,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct UnpairedAdmissionIdentityRejected {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1619,6 +1621,7 @@ pub enum Effect {
     ConfirmationAdmissionClassified(effects::ConfirmationAdmissionClassified),
     WorkItemReadinessClassified(effects::WorkItemReadinessClassified),
     ChildJoinClassified(effects::ChildJoinClassified),
+    UnpairedAdmissionIdentityRejected(effects::UnpairedAdmissionIdentityRejected),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -1644,12 +1647,15 @@ pub enum EffectKind {
     ConfirmationAdmissionClassified,
     WorkItemReadinessClassified,
     ChildJoinClassified,
+    UnpairedAdmissionIdentityRejected,
 }
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
+    CreateOpenRejectedUnpairedAdmission,
     CreateOpen,
+    CreateBlockedRejectedUnpairedAdmission,
     CreateBlocked,
     UpdateOpen,
     UpdateInProgress,

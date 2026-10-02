@@ -235,6 +235,35 @@ workgraph__completion_policy_escalation_admissible(current_policy, current_revie
 
 workgraph__confirmation_admits(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) == ((workgraph__confirmation_denies_principal_required(arg_completion_policy, requested_principal_owner_key) = FALSE) /\ (workgraph__confirmation_denies_principal_kind_mismatch(arg_completion_policy, requested_principal_owner_key, requested_principal_kind) = FALSE) /\ (workgraph__confirmation_denies_supervisor_mismatch(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key) = FALSE) /\ (workgraph__confirmation_denies_self_attest_empty(arg_completion_policy, supplied_evidence_kind) = FALSE) /\ (workgraph__confirmation_denies_evidence_kind(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) = FALSE))
 
+workgraph_CreateOpenRejectedUnpairedAdmission(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, arg_admission_key, arg_admission_request_digest) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "CreateOpen"
+       /\ packet.payload.due_at_utc_ms = arg_due_at_utc_ms
+       /\ packet.payload.not_before_utc_ms = arg_not_before_utc_ms
+       /\ packet.payload.snoozed_until_utc_ms = arg_snoozed_until_utc_ms
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ packet.payload.completion_supervisor_owner_key = arg_completion_supervisor_owner_key
+       /\ packet.payload.completion_reviewer_quorum_threshold = arg_completion_reviewer_quorum_threshold
+       /\ packet.payload.unresolved_blocker_count = arg_unresolved_blocker_count
+       /\ packet.payload.failed_child_join_policy = arg_failed_child_join_policy
+       /\ packet.payload.cancelled_child_join_policy = arg_cancelled_child_join_policy
+       /\ packet.payload.admission_key = arg_admission_key
+       /\ packet.payload.admission_request_digest = arg_admission_request_digest
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (IF ((packet.payload.admission_key # None) /\ (packet.payload.admission_request_digest = None)) THEN TRUE ELSE ((packet.payload.admission_key = None) /\ (packet.payload.admission_request_digest # None)))
+       /\ workgraph_phase' = "Absent"
+       /\ UnchangedFrame_817bb7f71a278cf1
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "UnpairedAdmissionIdentityRejected", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CreateOpenRejectedUnpairedAdmission"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "CreateOpenRejectedUnpairedAdmission", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 workgraph_CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, arg_admission_key, arg_admission_request_digest) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "workgraph"
@@ -272,6 +301,35 @@ workgraph_CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until
        /\ delivered_routes' = delivered_routes \cup { [route |-> "work_item_create_binds_admission", source_machine |-> "workgraph", effect |-> "Created", target_machine |-> "admission", target_input |-> "Bind", payload |-> [admission_key |-> packet.payload.admission_key, request_digest |-> packet.payload.admission_request_digest], actor |-> "admission_authority", effect_id |-> (model_step_count + 1), source_transition |-> "CreateOpen"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "Created", payload |-> [admission_key |-> packet.payload.admission_key, admission_request_digest |-> packet.payload.admission_request_digest], effect_id |-> (model_step_count + 1), source_transition |-> "CreateOpen"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "CreateOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_CreateBlockedRejectedUnpairedAdmission(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, arg_admission_key, arg_admission_request_digest) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "CreateBlocked"
+       /\ packet.payload.due_at_utc_ms = arg_due_at_utc_ms
+       /\ packet.payload.not_before_utc_ms = arg_not_before_utc_ms
+       /\ packet.payload.snoozed_until_utc_ms = arg_snoozed_until_utc_ms
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ packet.payload.completion_supervisor_owner_key = arg_completion_supervisor_owner_key
+       /\ packet.payload.completion_reviewer_quorum_threshold = arg_completion_reviewer_quorum_threshold
+       /\ packet.payload.unresolved_blocker_count = arg_unresolved_blocker_count
+       /\ packet.payload.failed_child_join_policy = arg_failed_child_join_policy
+       /\ packet.payload.cancelled_child_join_policy = arg_cancelled_child_join_policy
+       /\ packet.payload.admission_key = arg_admission_key
+       /\ packet.payload.admission_request_digest = arg_admission_request_digest
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (IF ((packet.payload.admission_key # None) /\ (packet.payload.admission_request_digest = None)) THEN TRUE ELSE ((packet.payload.admission_key = None) /\ (packet.payload.admission_request_digest # None)))
+       /\ workgraph_phase' = "Absent"
+       /\ UnchangedFrame_817bb7f71a278cf1
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "UnpairedAdmissionIdentityRejected", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CreateBlockedRejectedUnpairedAdmission"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "CreateBlockedRejectedUnpairedAdmission", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -7626,7 +7684,9 @@ workgraph__entry_packet__completion_policy_escalation_admissible(current_policy,
 workgraph__entry_packet__confirmation_admits(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) == ((workgraph__entry_packet__confirmation_denies_principal_required(arg_completion_policy, requested_principal_owner_key) = FALSE) /\ (workgraph__entry_packet__confirmation_denies_principal_kind_mismatch(arg_completion_policy, requested_principal_owner_key, requested_principal_kind) = FALSE) /\ (workgraph__entry_packet__confirmation_denies_supervisor_mismatch(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key) = FALSE) /\ (workgraph__entry_packet__confirmation_denies_self_attest_empty(arg_completion_policy, supplied_evidence_kind) = FALSE) /\ (workgraph__entry_packet__confirmation_denies_evidence_kind(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) = FALSE))
 
 EntryPacketAdmissible_workgraph(packet) ==
+    \/ /\ (packet.variant = "CreateOpen") /\ (workgraph_phase = "Absent") /\ ((IF ((packet.payload.admission_key # None) /\ (packet.payload.admission_request_digest = None)) THEN TRUE ELSE ((packet.payload.admission_key = None) /\ (packet.payload.admission_request_digest # None))))
     \/ /\ (packet.variant = "CreateOpen") /\ (workgraph_phase = "Absent") /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)) /\ ((IF ((packet.payload.admission_key = None) /\ (packet.payload.admission_request_digest = None)) THEN TRUE ELSE ((packet.payload.admission_key # None) /\ (packet.payload.admission_request_digest # None))))
+    \/ /\ (packet.variant = "CreateBlocked") /\ (workgraph_phase = "Absent") /\ ((IF ((packet.payload.admission_key # None) /\ (packet.payload.admission_request_digest = None)) THEN TRUE ELSE ((packet.payload.admission_key = None) /\ (packet.payload.admission_request_digest # None))))
     \/ /\ (packet.variant = "CreateBlocked") /\ (workgraph_phase = "Absent") /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)) /\ ((IF ((packet.payload.admission_key = None) /\ (packet.payload.admission_request_digest = None)) THEN TRUE ELSE ((packet.payload.admission_key # None) /\ (packet.payload.admission_request_digest # None))))
     \/ /\ (packet.variant = "Update") /\ (workgraph_phase = "Open") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)) /\ (((packet.payload.completion_policy = workgraph_completion_policy) /\ (packet.payload.completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold)))
     \/ /\ (packet.variant = "Update") /\ (workgraph_phase = "InProgress") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)) /\ (((packet.payload.completion_policy = workgraph_completion_policy) /\ (packet.payload.completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold)))
@@ -8174,7 +8234,9 @@ WitnessSatisfiedStutter_unkeyed_admission_replay_is_key_mismatch ==
 
 CoreNext ==
     \/ DeliverQueuedRoute
+    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : \E arg_admission_key \in OptionWorkAdmissionKeyRefValues : \E arg_admission_request_digest \in OptionWorkAdmissionDigestRefValues : workgraph_CreateOpenRejectedUnpairedAdmission(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, arg_admission_key, arg_admission_request_digest)
     \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : \E arg_admission_key \in OptionWorkAdmissionKeyRefValues : \E arg_admission_request_digest \in OptionWorkAdmissionDigestRefValues : workgraph_CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, arg_admission_key, arg_admission_request_digest)
+    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : \E arg_admission_key \in OptionWorkAdmissionKeyRefValues : \E arg_admission_request_digest \in OptionWorkAdmissionDigestRefValues : workgraph_CreateBlockedRejectedUnpairedAdmission(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, arg_admission_key, arg_admission_request_digest)
     \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : \E arg_admission_key \in OptionWorkAdmissionKeyRefValues : \E arg_admission_request_digest \in OptionWorkAdmissionDigestRefValues : workgraph_CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, arg_admission_key, arg_admission_request_digest)
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : workgraph_UpdateOpen(arg_expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : workgraph_UpdateInProgress(arg_expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)

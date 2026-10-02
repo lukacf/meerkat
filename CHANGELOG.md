@@ -121,6 +121,9 @@ them.
     `Created { admission_key, admission_request_digest }`; the
     `meerkat_machine_kernels` `Created` effect struct gains `admission_key` and
     `admission_request_digest`.
+  - `WorkGraphLifecycleEffect` gains the variant
+    `UnpairedAdmissionIdentityRejected` (with new transitions
+    `CreateOpenRejectedUnpairedAdmission` / `CreateBlockedRejectedUnpairedAdmission`).
 - Typed tool choice (see Added). Struct literals and exhaustive matches must
   handle the new members:
   - `meerkat_llm_core::LlmRequest` gains `tool_choice: ToolChoice` (serde
@@ -307,6 +310,9 @@ them.
     routes to the admission `Bind`, and `Bind` originates only from that
     route, so no keyed item exists without its admission and no admission
     without its item. The lifecycle machine's state space is unchanged.
+  - A create with a half-present identity (a key without a digest, or the
+    reverse) is a typed machine refusal (`UnpairedAdmissionIdentityRejected`),
+    surfaced as `WorkGraphError::InvalidInput`, never a guard failure.
   - Item JSON is unchanged; existing items load as unkeyed.
   - SQLite indexes the key in the new `workgraph_item_admissions` table
     (workgraph schema version 4; version 3 files migrate on open), in the

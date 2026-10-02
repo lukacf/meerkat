@@ -1516,7 +1516,7 @@ fn normalize_labels(labels: BTreeSet<String>) -> Result<BTreeSet<String>, WorkGr
 /// Apply a create input and return the new lifecycle state together with the
 /// admission identity its `Created` effect carries (exactly one such effect is
 /// required).
-fn apply_new_item_dsl_created(
+pub(crate) fn apply_new_item_dsl_created(
     input: wg_dsl::WorkGraphLifecycleInput,
 ) -> Result<
     (
@@ -1531,6 +1531,16 @@ fn apply_new_item_dsl_created(
     let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
     let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
+    if transition.effects().iter().any(|effect| {
+        matches!(
+            effect,
+            wg_dsl::WorkGraphLifecycleEffect::UnpairedAdmissionIdentityRejected
+        )
+    }) {
+        return Err(WorkGraphError::InvalidInput(
+            "work item admission identity must carry both an admission key and a request digest, or neither".to_string(),
+        ));
+    }
     let mut created = None;
     for effect in transition.effects() {
         if let wg_dsl::WorkGraphLifecycleEffect::Created {

@@ -563,3 +563,61 @@ mod sqlite {
         assert_eq!(indexed, item.id.as_str());
     }
 }
+
+#[test]
+fn half_present_admission_identity_is_a_typed_refusal_not_a_guard_failure() {
+    use crate::machines::workgraph_lifecycle as wg_dsl;
+    let key = || Some(wg_dsl::WorkAdmissionKeyRef::from("unpaired-1"));
+    let digest = || Some(wg_dsl::WorkAdmissionDigestRef::from("sha256:digest"));
+    let create_open =
+        |admission_key, admission_request_digest| wg_dsl::WorkGraphLifecycleInput::CreateOpen {
+            due_at_utc_ms: None,
+            not_before_utc_ms: None,
+            snoozed_until_utc_ms: None,
+            completion_policy: wg_dsl::WorkCompletionPolicy::default(),
+            completion_supervisor_owner_key: None,
+            completion_reviewer_quorum_threshold: None,
+            unresolved_blocker_count: 0,
+            failed_child_join_policy: wg_dsl::FailedChildJoinPolicy::default(),
+            cancelled_child_join_policy: wg_dsl::CancelledChildJoinPolicy::default(),
+            admission_key,
+            admission_request_digest,
+        };
+    let create_blocked =
+        |admission_key, admission_request_digest| wg_dsl::WorkGraphLifecycleInput::CreateBlocked {
+            due_at_utc_ms: None,
+            not_before_utc_ms: None,
+            snoozed_until_utc_ms: None,
+            completion_policy: wg_dsl::WorkCompletionPolicy::default(),
+            completion_supervisor_owner_key: None,
+            completion_reviewer_quorum_threshold: None,
+            unresolved_blocker_count: 1,
+            failed_child_join_policy: wg_dsl::FailedChildJoinPolicy::default(),
+            cancelled_child_join_policy: wg_dsl::CancelledChildJoinPolicy::default(),
+            admission_key,
+            admission_request_digest,
+        };
+    for input in [
+        create_open(key(), None),
+        create_open(None, digest()),
+        create_blocked(key(), None),
+        create_blocked(None, digest()),
+    ] {
+        match crate::machine::apply_new_item_dsl_created(input) {
+            Err(WorkGraphError::InvalidInput(message)) => {
+                assert!(message.contains("admission key"), "{message}");
+            }
+            other => panic!("half-present identity must be refused as invalid input: {other:?}"),
+        }
+    }
+    // Paired and absent identities still create.
+    for input in [
+        create_open(key(), digest()),
+        create_open(None, None),
+        create_blocked(key(), digest()),
+        create_blocked(None, None),
+    ] {
+        crate::machine::apply_new_item_dsl_created(input)
+            .expect("paired or absent identity creates");
+    }
+}

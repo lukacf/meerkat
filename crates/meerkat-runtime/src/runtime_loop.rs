@@ -9896,6 +9896,7 @@ mod tests {
     #[test]
     fn reply_capability_overlay_composes_with_existing_dispatch_context() {
         let workgraph_overlay = meerkat_core::service::TurnToolOverlay {
+            tool_choice_plan: Vec::new(),
             allowed_tools: None,
             blocked_tools: Some(vec![meerkat_core::types::ToolName::from("blocked_by_flow")]),
             dispatch_context: std::collections::BTreeMap::from([(

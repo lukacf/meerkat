@@ -220,6 +220,25 @@ export type SourceUuid = string;
 
 export type ToolName = string;
 
+export interface ToolChoiceAuto {
+  mode: "auto";
+}
+
+export interface ToolChoiceRequired {
+  mode: "required";
+}
+
+export interface ToolChoiceNone {
+  mode: "none";
+}
+
+export interface ToolChoiceTool {
+  mode: "tool";
+  name: string;
+}
+
+export type ToolChoice = ToolChoiceAuto | ToolChoiceRequired | ToolChoiceNone | ToolChoiceTool;
+
 export interface SkillEntry {
   description: string;
   is_active: boolean;
@@ -2253,6 +2272,7 @@ export interface WireMobRuntimeConfig {
 export interface PublicTurnToolOverlay {
   allowed_tools?: ToolName[] | null;
   blocked_tools?: ToolName[] | null;
+  tool_choice_plan?: ToolChoice[];
 }
 
 export interface MobDefinitionInput {

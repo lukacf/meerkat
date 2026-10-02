@@ -57,6 +57,7 @@ const BASE_CAPS: ModelCapabilities = ModelCapabilities {
     supports_thinking_budget_legacy: false,
     beta_headers: &[],
     call_timeout_secs: Some(600),
+    supports_forced_tool_choice: true,
 };
 
 const CAPABILITIES: &[ModelCapabilities] = &[

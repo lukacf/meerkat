@@ -471,8 +471,10 @@ where
                 &deferred_authorities,
             )?;
             self.turn_tool_dispatch_metadata = dispatch_context;
+            self.turn_tool_choice_plan = overlay.tool_choice_plan;
         } else {
             self.turn_tool_dispatch_metadata.clear();
+            self.turn_tool_choice_plan.clear();
             handle.clear_turn_overlay()?;
         }
         Ok(())
@@ -3069,6 +3071,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             live_bridge_tool_defs: Some(frozen_tool_defs),
             noncommitting_live_bridge_run: true,
             turn_tool_dispatch_metadata: Default::default(),
+            turn_tool_choice_plan: Vec::new(),
             tools_config: self.tools_config.clone(),
         };
 

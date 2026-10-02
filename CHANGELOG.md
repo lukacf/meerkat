@@ -49,6 +49,22 @@ them.
     Binding mob callback tools to the creating connection is tracked in #1459.
   - Stdio and embedded servers that pre-create the channel with
     `SessionRuntime::init_callback_channel` are unchanged.
+- Typed tool choice (see Added). Struct literals and exhaustive matches must
+  handle the new members:
+  - `meerkat_llm_core::LlmRequest` gains `tool_choice: ToolChoice` (serde
+    default `Auto`, omitted when `Auto`).
+  - `meerkat_core::service::TurnToolOverlay` and `PublicTurnToolOverlay`
+    gain `tool_choice_plan: Vec<ToolChoice>` (omitted when empty).
+  - `meerkat_core::lifecycle::run_primitive::ProviderParamsOverride` gains
+    the request-local `tool_choice: Option<ToolChoice>`. It is never
+    serialized, so a params override cannot carry or persist one.
+  - `meerkat_core::model_profile::capabilities::ModelCapabilities` gains
+    `supports_forced_tool_choice: bool`.
+  - `meerkat_llm_core::LlmError` gains `ToolChoiceUnsupported { provider,
+    choice, reason }`.
+  - `meerkat_core::service::TurnToolOverlayComposeError` and
+    `meerkat::surface::WorkGraphAttentionTurnOverlayError` gain
+    `ConflictingToolChoicePlan`.
 
 ### Added
 
@@ -67,6 +83,49 @@ them.
   create_session_with_params_on_route}` and
   `handlers::jobs::{handle_cancel_on_route, handle_retry_on_route}`. The
   existing handlers keep their signatures and use the process-default route.
+- Typed tool choice on provider calls: `meerkat_core::ToolChoice` with
+  `Auto` (the default, today's behaviour), `Required`, `None` and
+  `Tool { name }`, lowered to each provider's native field:
+  - **OpenAI Responses:** `tool_choice` `"required"` / `"none"` /
+    `{type: "function", name}`. The ChatGPT backend keeps its fixed `"auto"`
+    and refuses other choices.
+  - **Chat Completions** (self-hosted and compatible): `"required"` / `"none"`
+    / `{type: "function", function: {name}}`.
+  - **Gemini:** `toolConfig.functionCallingConfig` `ANY` / `NONE` / `ANY` with
+    `allowedFunctionNames: [name]`, merged with the server-side tool flag.
+  - **Anthropic:** `tool_choice` `{type: "any" | "none" | "tool", name}`. A
+    forced call (`any` or a named tool) is refused locally in two cases:
+    - on models proven to reject one: Claude Opus 5.5 answers 400 "not
+      supported for this model" with or without thinking (catalog field
+      `supports_forced_tool_choice`);
+    - under explicit thinking, which is never switched off implicitly.
+
+    Elsewhere the forced choice is sent (live: `claude-sonnet-5` and
+    `claude-haiku-4-5-20251001` accept it), and Anthropic's own 400 rejection
+    maps to the same typed refusal.
+
+  A choice the provider, model or request cannot honour is the typed,
+  non-retryable `LlmError::ToolChoiceUnsupported` with a `ToolChoiceRefusal`
+  reason, never a silent downgrade to `Auto`. Other refusals: a named tool
+  that is not offered, a forcing choice with no tools, and the OpenAI
+  realtime text adapter.
+
+  Per turn, `tool_choice_plan` on the turn tool overlay (RPC `turn/start`
+  `turn_tool_overlay`, REST, mob flow steps, the supervisor bridge) sets the
+  choice for each model request of the run in order. Entry `k` applies to the
+  run's `k`-th provider call, and every call after the plan is exhausted is
+  `Auto`, so a script can force several steps and then let the model
+  complete. The plan is run-local: it is set and cleared with the overlay,
+  never written into session defaults or later turns, and stripped from the
+  model-fallback switch policy. Structured-output extraction carries no
+  choice. Composing two different non-empty plans is a typed conflict. The
+  generated schemas and SDK types gain the `ToolChoice` union and the
+  `tool_choice_plan` field. The TypeScript SDK's public `TurnToolOverlay`
+  gains `toolChoicePlan` (typed with the generated `ToolChoice`, also
+  exported). It is serialized on the normal, streaming and mob turn paths
+  through one shared projection, so no path drops it. The Python SDK already
+  passes the generated overlay through on all three paths, now pinned by
+  payload tests.
 
 ### Deprecated
 

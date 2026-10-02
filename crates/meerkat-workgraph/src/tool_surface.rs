@@ -220,6 +220,7 @@ impl WorkGraphToolSurface {
             })?,
         );
         Ok(TurnToolOverlay {
+            tool_choice_plan: Vec::new(),
             allowed_tools: Some(
                 allowed
                     .into_iter()
@@ -1020,6 +1021,7 @@ mod tests {
             json!({ "binding_id": 42 }),
         );
         let overlay = TurnToolOverlay {
+            tool_choice_plan: Vec::new(),
             allowed_tools: None,
             blocked_tools: None,
             dispatch_context,

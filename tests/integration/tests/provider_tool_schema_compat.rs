@@ -652,3 +652,132 @@ async fn live_openai_chat_completions_accepts_every_builtin_tool_family() {
     );
     assert_live_acceptance("openai-chat", OPENAI_LIVE_MODEL, &client, &families).await;
 }
+
+// ---------------------------------------------------------------------------
+// Live forced tool choice (lane: e2e-live, ignored by default)
+// ---------------------------------------------------------------------------
+
+/// A Claude model whose thinking is off unless configured, so a forced
+/// choice is accepted (the Claude 5 family refuses it locally).
+const ANTHROPIC_FORCEABLE_LIVE_MODEL: &str = "claude-sonnet-4-6";
+
+fn anthropic_api_key() -> Option<String> {
+    first_env(&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"])
+}
+
+fn forced_probe_request(model: &str) -> LlmRequest {
+    let probe = Arc::new(ToolDef {
+        name: "record_greeting".into(),
+        description: "Records a greeting.".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"]
+        }),
+        provenance: None,
+    });
+    let other = Arc::new(ToolDef {
+        name: "unrelated_lookup".into(),
+        description: "Looks something up.".to_string(),
+        input_schema: json!({"type": "object", "properties": {}}),
+        provenance: None,
+    });
+    // The prompt needs no tool: only the forced choice makes the call.
+    let mut request = LlmRequest::new(
+        model,
+        vec![Message::User(UserMessage::text(
+            "Reply with the single word: hello.".to_string(),
+        ))],
+    )
+    .with_tools(vec![other, probe])
+    .with_tool_choice(meerkat_core::ToolChoice::Tool {
+        name: "record_greeting".into(),
+    });
+    request.max_tokens = 256;
+    request
+}
+
+/// The provider calls exactly the forced tool on a prompt that needs none.
+async fn assert_forced_tool_call(provider: &str, client: &dyn LlmClient, model: &str) {
+    let request = forced_probe_request(model);
+    let mut stream = client.stream(&request);
+    let mut called = Vec::new();
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(LlmEvent::ToolCallComplete { name, .. }) => called.push(name),
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success { .. },
+            }) => break,
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            }) => panic!("{provider}: provider Done(Error): {error:?}"),
+            Ok(_) => {}
+            Err(error) => panic!("{provider}: stream error: {error:?}"),
+        }
+    }
+    eprintln!("-- {provider} model={model} forced tool calls: {called:?}");
+    assert_eq!(
+        called,
+        ["record_greeting"],
+        "{provider}: the forced tool was not called"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "lane:e2e-live"]
+async fn live_openai_responses_honours_a_forced_tool_choice() {
+    let Some(api_key) = openai_api_key() else {
+        skip_or_fail_on_missing_key(
+            "live_openai_responses_honours_a_forced_tool_choice",
+            "OPENAI_API_KEY",
+        );
+        return;
+    };
+    let client = OpenAiClient::new(api_key);
+    assert_forced_tool_call("openai-responses", &client, OPENAI_LIVE_MODEL).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "lane:e2e-live"]
+async fn live_openai_chat_completions_honours_a_forced_tool_choice() {
+    let Some(api_key) = openai_api_key() else {
+        skip_or_fail_on_missing_key(
+            "live_openai_chat_completions_honours_a_forced_tool_choice",
+            "OPENAI_API_KEY",
+        );
+        return;
+    };
+    let client = OpenAiCompatibleClient::new_with_options(
+        OpenAiCompatibleMode::ChatCompletions,
+        OPENAI_LIVE_MODEL.to_string(),
+        "https://api.openai.com/v1".to_string(),
+        Some(api_key),
+        compat_options(),
+    );
+    assert_forced_tool_call("openai-chat", &client, OPENAI_LIVE_MODEL).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "lane:e2e-live"]
+async fn live_gemini_honours_a_forced_tool_choice() {
+    let Some(api_key) = gemini_api_key() else {
+        skip_or_fail_on_missing_key("live_gemini_honours_a_forced_tool_choice", "GEMINI_API_KEY");
+        return;
+    };
+    let client = GeminiClient::new(api_key);
+    assert_forced_tool_call("gemini", &client, GEMINI_LIVE_MODEL).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "lane:e2e-live"]
+async fn live_anthropic_honours_a_forced_tool_choice() {
+    let Some(api_key) = anthropic_api_key() else {
+        skip_or_fail_on_missing_key(
+            "live_anthropic_honours_a_forced_tool_choice",
+            "ANTHROPIC_API_KEY",
+        );
+        return;
+    };
+    let client = meerkat_client::AnthropicClient::new(api_key).expect("anthropic client");
+    assert_forced_tool_call("anthropic", &client, ANTHROPIC_FORCEABLE_LIVE_MODEL).await;
+}

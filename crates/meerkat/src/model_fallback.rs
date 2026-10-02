@@ -393,6 +393,10 @@ impl AgentLlmClient for ModelFallbackClient {
                 skipped_targets.push(*skipped);
                 continue;
             }
+            // A tool choice is request-local (the agent loop sets it per call
+            // from the turn plan); the sticky policy the switch hands on must
+            // never carry one into later requests.
+            params.tool_choice = None;
             let mut request_policy = next.request_policy.clone();
             request_policy.provider_params = (!params.is_empty()).then_some(params);
             request_policy.provider_tool_defaults = None;
@@ -777,6 +781,66 @@ mod tests {
         );
         assert!(!meerkat_core::model_fallback::has_native_search(admitted));
         assert!(switch.request_policy.provider_tool_defaults.is_none());
+    }
+
+    /// The switch's sticky request policy never carries a tool choice, even
+    /// when the failed request and the target's in-process policy did: the
+    /// choice is request-local and set per call by the agent loop.
+    #[test]
+    fn model_fallback_switch_policy_never_carries_a_tool_choice() {
+        let mut target = candidate(
+            Provider::Anthropic,
+            "target",
+            Some(200_000),
+            Some(8192),
+            Arc::default(),
+        );
+        target.request_policy.provider_params = Some(ProviderParamsOverride {
+            temperature: Some(0.3),
+            tool_choice: Some(meerkat_core::ToolChoice::Required),
+            ..Default::default()
+        });
+        let client = ModelFallbackClient::new(
+            vec![
+                candidate(
+                    Provider::OpenAI,
+                    "primary",
+                    Some(1_000_000),
+                    Some(8192),
+                    Arc::default(),
+                ),
+                target,
+            ],
+            cross_provider_policy(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let forced = ProviderParamsOverride {
+            tool_choice: Some(meerkat_core::ToolChoice::Tool {
+                name: "deny_probe".into(),
+            }),
+            ..Default::default()
+        };
+        let switch = client
+            .prepare_model_fallback(
+                &retryable_error(Provider::OpenAI),
+                &ModelFallbackRequest {
+                    provider_params: Some(&forced),
+                    ..request(&[])
+                },
+            )
+            .unwrap();
+        let sticky = switch
+            .request_policy
+            .provider_params
+            .as_ref()
+            .expect("the target's own params survive");
+        assert_eq!(sticky.temperature, Some(0.3));
+        assert_eq!(
+            sticky.tool_choice, None,
+            "no tool choice sticks into fallback"
+        );
     }
 
     #[test]

@@ -13081,6 +13081,13 @@
               "array",
               "null"
             ]
+          },
+          "tool_choice_plan": {
+            "description": "Tool choice for this turn's model requests, in order: entry `k`\napplies to the run's `k`-th provider call, and every call after the\nplan is exhausted is `Auto`. Run-local: it lives only as long as the\noverlay and never reaches session defaults, later turns or fallback.",
+            "items": {
+              "$ref": "#/$defs/ToolChoice"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -13244,6 +13251,71 @@
           }
         },
         "type": "object"
+      },
+      "ToolChoice": {
+        "description": "Which tool use the model may or must make on one provider call.\n\n`Auto` is today's behaviour and the default: the model decides, and the\nprovider request carries no choice beyond what each adapter always sent.\nEvery other variant is lowered to the provider's native tool-choice field.\nA provider or model that cannot honour a requested choice refuses the\ncall with a typed unsupported error; a choice is never downgraded to\n`Auto` silently.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The model decides whether to call a tool.",
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call at least one of the offered tools.",
+            "properties": {
+              "mode": {
+                "const": "required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must not call any tool.",
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call the named tool, which must be offered.",
+            "properties": {
+              "mode": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
@@ -16602,6 +16674,13 @@
               "array",
               "null"
             ]
+          },
+          "tool_choice_plan": {
+            "description": "Tool choice for this turn's model requests, in order: entry `k`\napplies to the run's `k`-th provider call, and every call after the\nplan is exhausted is `Auto`. Run-local: it lives only as long as the\noverlay and never reaches session defaults, later turns or fallback.",
+            "items": {
+              "$ref": "#/$defs/ToolChoice"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -16629,6 +16708,71 @@
       "SourceUuid": {
         "description": "Canonical source identifier.",
         "type": "string"
+      },
+      "ToolChoice": {
+        "description": "Which tool use the model may or must make on one provider call.\n\n`Auto` is today's behaviour and the default: the model decides, and the\nprovider request carries no choice beyond what each adapter always sent.\nEvery other variant is lowered to the provider's native tool-choice field.\nA provider or model that cannot honour a requested choice refuses the\ncall with a typed unsupported error; a choice is never downgraded to\n`Auto` silently.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The model decides whether to call a tool.",
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call at least one of the offered tools.",
+            "properties": {
+              "mode": {
+                "const": "required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must not call any tool.",
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call the named tool, which must be offered.",
+            "properties": {
+              "mode": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
@@ -47924,9 +48068,81 @@
               "array",
               "null"
             ]
+          },
+          "tool_choice_plan": {
+            "description": "Tool choice for this turn's model requests, in order: entry `k`\napplies to the run's `k`-th provider call, and every call after the\nplan is exhausted is `Auto`. Run-local: it lives only as long as the\noverlay and never reaches session defaults, later turns or fallback.",
+            "items": {
+              "$ref": "#/$defs/ToolChoice"
+            },
+            "type": "array"
           }
         },
         "type": "object"
+      },
+      "ToolChoice": {
+        "description": "Which tool use the model may or must make on one provider call.\n\n`Auto` is today's behaviour and the default: the model decides, and the\nprovider request carries no choice beyond what each adapter always sent.\nEvery other variant is lowered to the provider's native tool-choice field.\nA provider or model that cannot honour a requested choice refuses the\ncall with a typed unsupported error; a choice is never downgraded to\n`Auto` silently.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The model decides whether to call a tool.",
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call at least one of the offered tools.",
+            "properties": {
+              "mode": {
+                "const": "required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must not call any tool.",
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call the named tool, which must be offered.",
+            "properties": {
+              "mode": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
@@ -59618,6 +59834,13 @@
               "array",
               "null"
             ]
+          },
+          "tool_choice_plan": {
+            "description": "Tool choice for this turn's model requests, in order: entry `k`\napplies to the run's `k`-th provider call, and every call after the\nplan is exhausted is `Auto`. Run-local: it lives only as long as the\noverlay and never reaches session defaults, later turns or fallback.",
+            "items": {
+              "$ref": "#/$defs/ToolChoice"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -61028,6 +61251,71 @@
           }
         },
         "type": "object"
+      },
+      "ToolChoice": {
+        "description": "Which tool use the model may or must make on one provider call.\n\n`Auto` is today's behaviour and the default: the model decides, and the\nprovider request carries no choice beyond what each adapter always sent.\nEvery other variant is lowered to the provider's native tool-choice field.\nA provider or model that cannot honour a requested choice refuses the\ncall with a typed unsupported error; a choice is never downgraded to\n`Auto` silently.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The model decides whether to call a tool.",
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call at least one of the offered tools.",
+            "properties": {
+              "mode": {
+                "const": "required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must not call any tool.",
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call the named tool, which must be offered.",
+            "properties": {
+              "mode": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ToolConfigChangeDomain": {
         "description": "Optional typed domain for tool-configuration change payloads.",
@@ -68958,6 +69246,13 @@
               "array",
               "null"
             ]
+          },
+          "tool_choice_plan": {
+            "description": "Tool choice for this turn's model requests, in order: entry `k`\napplies to the run's `k`-th provider call, and every call after the\nplan is exhausted is `Auto`. Run-local: it lives only as long as the\noverlay and never reaches session defaults, later turns or fallback.",
+            "items": {
+              "$ref": "#/$defs/ToolChoice"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -69121,6 +69416,71 @@
           }
         },
         "type": "object"
+      },
+      "ToolChoice": {
+        "description": "Which tool use the model may or must make on one provider call.\n\n`Auto` is today's behaviour and the default: the model decides, and the\nprovider request carries no choice beyond what each adapter always sent.\nEvery other variant is lowered to the provider's native tool-choice field.\nA provider or model that cannot honour a requested choice refuses the\ncall with a typed unsupported error; a choice is never downgraded to\n`Auto` silently.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The model decides whether to call a tool.",
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call at least one of the offered tools.",
+            "properties": {
+              "mode": {
+                "const": "required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must not call any tool.",
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call the named tool, which must be offered.",
+            "properties": {
+              "mode": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",

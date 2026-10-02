@@ -2077,6 +2077,7 @@ mod tests {
             handling_mode: HandlingMode::Steer,
             request_id: Some("binding-1".into()),
             turn_tool_overlay: Some(TurnToolOverlay {
+                tool_choice_plan: Vec::new(),
                 allowed_tools: Some(vec!["workgraph_add_evidence".into()]),
                 blocked_tools: None,
                 dispatch_context: Default::default(),

@@ -30,7 +30,7 @@ pub mod types;
 
 pub use adapter::LlmClientAdapter;
 pub use block_assembler::{BlockAssembler, BlockKey, StreamAssemblyError};
-pub use error::LlmError;
+pub use error::{LlmError, TOOL_CHOICE_UNSUPPORTED_DETAILS_CLASS, ToolChoiceRefusal};
 pub use factory::FactoryError;
 pub use realtime_session::{
     RealtimeExternalSessionTarget, RealtimeSession, RealtimeSessionEvent, RealtimeSessionFactory,

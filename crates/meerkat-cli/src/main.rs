@@ -9679,6 +9679,23 @@ async fn cli_mcp_browser_login(
     target: &meerkat::McpServerIdentity,
     www_authenticate: Option<&str>,
 ) -> Result<meerkat::McpOAuthLoginComplete, meerkat::HostAuthError> {
+    cli_mcp_browser_login_with(service, target, www_authenticate, |url| {
+        meerkat::open_system_browser(&url)
+    })
+    .await
+}
+
+/// [`cli_mcp_browser_login`] with an explicit browser launcher.
+#[cfg(feature = "mcp")]
+async fn cli_mcp_browser_login_with<F>(
+    service: &meerkat::HostAuthService,
+    target: &meerkat::McpServerIdentity,
+    www_authenticate: Option<&str>,
+    launch: F,
+) -> Result<meerkat::McpOAuthLoginComplete, meerkat::HostAuthError>
+where
+    F: FnOnce(String) -> std::io::Result<()> + Send + 'static,
+{
     let pending = match service
         .mcp_begin_loopback_login(target, www_authenticate)
         .await?
@@ -9699,7 +9716,7 @@ async fn cli_mcp_browser_login(
         "Authorize MCP server '{}' in your browser. Waiting for the callback...",
         target.server_name()
     );
-    if pending.launch_system_browser().await == meerkat::McpOAuthBrowserLaunch::Failed {
+    if pending.launch_browser(launch).await == meerkat::McpOAuthBrowserLaunch::Failed {
         eprintln!(
             "Could not open a browser. Open this URL to continue:\n  {}",
             pending.start().authorize_url
@@ -25343,6 +25360,133 @@ default_model = "gemma"
                 }
             })
         ));
+    }
+
+    #[cfg(feature = "mcp")]
+    #[derive(Clone, Default)]
+    struct CanaryLogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    #[cfg(feature = "mcp")]
+    impl std::io::Write for CanaryLogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// CLI entry point of the MCP OAuth canary (ADR-001 Toolkit r2, item 3):
+    /// the CLI host login (loopback, advisory launch, completion), a launch
+    /// that reports failure but navigated, a refused exchange, and the
+    /// non-terminal resolver path, with every `tracing` event and `log`
+    /// record captured on this single-threaded runtime.
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn mcp_oauth_cli_entry_points_keep_secrets_out_of_logs() {
+        use meerkat::test_fixtures::mcp_oauth::{
+            ISSUED_SECRET_CANARIES, McpOAuthFixture, SUBJECT, follow_authorize_url,
+        };
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let logs = CanaryLogBuffer::default();
+        let writer = logs.clone();
+        let _capture = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish()
+            .set_default();
+
+        let fixture = McpOAuthFixture::spawn().await.unwrap();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let service = meerkat::HostAuthService::new(
+            meerkat_providers::auth_store::ProviderAuthPersistence::new(
+                Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+                Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+            ),
+            runtime.provider_auth_runtime_authority(),
+        );
+        let target = meerkat::McpServerIdentity::from_server_config("canary", fixture.mcp_url())
+            .with_expected_account(SUBJECT)
+            .unwrap();
+        let launched = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+        // Each launcher records the authorize URL (a canary) and lets the
+        // fixture browser navigate on the runtime; `report_failure` models an
+        // opener that navigated but reported failure.
+        let launcher = |report_failure: bool| {
+            let launched = Arc::clone(&launched);
+            move |url: String| {
+                launched.lock().unwrap().push(url.clone());
+                tokio::runtime::Handle::current().spawn(async move {
+                    let _ = follow_authorize_url(&url).await;
+                });
+                if report_failure {
+                    Err(std::io::Error::other("opener reported failure"))
+                } else {
+                    Ok(())
+                }
+            }
+        };
+
+        // Refused exchange.
+        fixture.fail_token_exchange(true);
+        let refused = cli_mcp_browser_login_with(&service, &target, None, launcher(false))
+            .await
+            .expect_err("the provider refused the exchange")
+            .to_string();
+        fixture.fail_token_exchange(false);
+        // Advisory launch failure: the login still completes.
+        let completed = cli_mcp_browser_login_with(&service, &target, None, launcher(true))
+            .await
+            .expect("a failed launch is advisory");
+        assert_eq!(completed.account_id.as_deref(), Some(SUBJECT));
+
+        // Non-terminal resolver path: typed status, no attempt admitted.
+        let resolver = CliMcpHostAuthResolver {
+            authority: service.mcp_oauth_authority().unwrap(),
+            service: service.clone(),
+            mode: CliMcpAuthMode::Stored,
+        };
+        let stored_only =
+            meerkat_mcp::McpAuthResolver::interactive_login(&resolver, &target, None).await;
+        assert!(matches!(
+            stored_only,
+            Err(meerkat::McpOAuthError::HumanAuthorizationRequired { .. })
+        ));
+
+        let launched = launched.lock().unwrap().clone();
+        assert_eq!(launched.len(), 2, "positive control: both launches ran");
+        let mut canaries: Vec<String> = ISSUED_SECRET_CANARIES
+            .iter()
+            .map(|canary| (*canary).to_owned())
+            .collect();
+        for url in &launched {
+            canaries.push(url.clone());
+            let query: std::collections::HashMap<String, String> = url::Url::parse(url)
+                .unwrap()
+                .query_pairs()
+                .into_owned()
+                .collect();
+            canaries.push(query["state"].clone());
+            canaries.push(query["code_challenge"].clone());
+        }
+        let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("reqwest"),
+            "positive control: log-crate records are captured through the bridge"
+        );
+        for (surface, observed) in [("CLI error", &refused), ("CLI logs", &captured)] {
+            for canary in &canaries {
+                assert!(
+                    !observed.contains(canary.as_str()),
+                    "{surface} leaked an OAuth secret canary"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "mcp")]

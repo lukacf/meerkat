@@ -2900,6 +2900,206 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Default)]
+    struct CanaryLogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CanaryLogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn rest_json(response: axum::response::Response) -> (StatusCode, serde_json::Value) {
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    /// REST entry point of the MCP OAuth canary (ADR-001 Toolkit r2, item 3):
+    /// login, a failed completion and a cancel over `/auth/login/*`, with
+    /// every `tracing` event and `log` record captured. Responses are the
+    /// host channel; logs must hold none of the attempts' secrets.
+    #[tokio::test]
+    async fn mcp_oauth_rest_entry_points_keep_secrets_out_of_logs() {
+        use meerkat::test_fixtures::mcp_oauth::{
+            ISSUED_SECRET_CANARIES, McpOAuthFixture, SUBJECT, follow_authorize_url,
+        };
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let logs = CanaryLogBuffer::default();
+        let writer = logs.clone();
+        let _capture = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish()
+            .set_default();
+
+        let fixture = McpOAuthFixture::spawn().await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".rkat")).unwrap();
+        std::fs::write(
+            project.path().join(".rkat/mcp.toml"),
+            format!(
+                "[[servers]]\nname = \"canary\"\nurl = \"{}\"\noauth_account = \"{SUBJECT}\"\n",
+                fixture.mcp_url()
+            ),
+        )
+        .unwrap();
+        state.context_root = Some(project.path().to_path_buf());
+        let mcp = meerkat_contracts::WireMcpAuthTarget {
+            server_name: "canary".to_string(),
+            server_url: fixture.mcp_url(),
+            oauth_account: Some(SUBJECT.to_string()),
+        };
+        let target = meerkat::McpServerIdentity::from_server_config("canary", fixture.mcp_url())
+            .with_expected_account(SUBJECT)
+            .unwrap();
+        let identity: meerkat_core::AuthCredentialIdentity =
+            target.auth_binding_ref().unwrap().into();
+        let mut canaries: Vec<String> = ISSUED_SECRET_CANARIES
+            .iter()
+            .map(|canary| (*canary).to_owned())
+            .collect();
+        let admit = |start: &serde_json::Value| {
+            let url = start["authorize_url"].as_str().unwrap().to_owned();
+            let attempt_state = start["state"].as_str().unwrap().to_owned();
+            let challenge = url
+                .split("code_challenge=")
+                .nth(1)
+                .and_then(|rest| rest.split('&').next())
+                .unwrap()
+                .to_owned();
+            let verifier = state
+                .runtime_adapter
+                .provider_auth_runtime_authority()
+                .oauth_flow_authority()
+                .admitted_connector_browser_attempt(&attempt_state, &identity)
+                .unwrap()
+                .expect("admitted")
+                .pkce_verifier;
+            let secrets = vec![url.clone(), attempt_state.clone(), challenge, verifier];
+            (url, attempt_state, secrets)
+        };
+
+        // Cancel path.
+        let (status, start) = rest_json(
+            start_login(
+                State(state.clone()),
+                Json(LoginStartBody {
+                    target: WireLoginTarget::Mcp(WireMcpLoginTarget { mcp: mcp.clone() }),
+                    redirect_uri: "http://127.0.0.1:1/mcp/oauth/callback".to_string(),
+                }),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{start}");
+        let (_, attempt_state, secrets) = admit(&start);
+        canaries.extend(secrets);
+        let (status, cancelled) = rest_json(
+            cancel_login(
+                State(state.clone()),
+                Json(LoginCancelBody {
+                    mcp: mcp.clone(),
+                    state: attempt_state,
+                }),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cancelled["cancelled"], true);
+
+        // Error path, then success, both through the host's loopback.
+        for fail in [true, false] {
+            let binding = meerkat_providers::auth_oauth::bind_loopback_callback(
+                meerkat::MCP_OAUTH_CALLBACK_PATH,
+            )
+            .await
+            .unwrap();
+            let (status, start) = rest_json(
+                start_login(
+                    State(state.clone()),
+                    Json(LoginStartBody {
+                        target: WireLoginTarget::Mcp(WireMcpLoginTarget { mcp: mcp.clone() }),
+                        redirect_uri: binding.redirect_url.clone(),
+                    }),
+                )
+                .await
+                .into_response(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{start}");
+            let (url, attempt_state, secrets) = admit(&start);
+            canaries.extend(secrets);
+            let callback = binding.expect_state(attempt_state);
+            follow_authorize_url(&url).await.unwrap();
+            let outcome = callback
+                .wait(meerkat::MCP_INTERACTIVE_LOGIN_TIMEOUT)
+                .await
+                .unwrap();
+            fixture.fail_token_exchange(fail);
+            let (status, completed) = rest_json(
+                complete_login(
+                    State(state.clone()),
+                    Json(LoginCompleteBody {
+                        target: WireLoginTarget::Mcp(WireMcpLoginTarget { mcp: mcp.clone() }),
+                        code: outcome.code,
+                        state: outcome.state,
+                        redirect_uri: start["redirect_uri"].as_str().unwrap().to_string(),
+                    }),
+                )
+                .await
+                .into_response(),
+            )
+            .await;
+            if fail {
+                assert_ne!(status, StatusCode::OK);
+                let rendered = completed.to_string();
+                assert!(
+                    canaries
+                        .iter()
+                        .all(|canary| !rendered.contains(canary.as_str())),
+                    "a REST error leaked an OAuth secret canary"
+                );
+            } else {
+                assert_eq!(status, StatusCode::OK, "{completed}");
+                assert_eq!(
+                    completed["account_id"], SUBJECT,
+                    "positive control: the login landed"
+                );
+            }
+        }
+
+        let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("MCP OAuth login completed via REST"),
+            "positive control: tracing events are captured"
+        );
+        assert!(
+            captured.contains("reqwest"),
+            "positive control: log-crate records are captured through the bridge"
+        );
+        for canary in &canaries {
+            assert!(
+                !captured.contains(canary.as_str()),
+                "REST logs leaked an OAuth secret canary"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn rest_mcp_login_refuses_unconfigured_or_mismatched_targets_without_network() {
         let temp = tempfile::tempdir().unwrap();

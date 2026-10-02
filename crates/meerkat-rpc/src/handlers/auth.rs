@@ -3125,6 +3125,209 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Default)]
+    struct CanaryLogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CanaryLogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn rpc_result(resp: RpcResponse) -> serde_json::Value {
+        assert!(
+            resp.error.is_none(),
+            "unexpected RPC error: {:?}",
+            resp.error
+        );
+        serde_json::from_str(resp.result.expect("RPC result").get()).unwrap()
+    }
+
+    /// RPC entry point of the MCP OAuth canary (ADR-001 Toolkit r2, item 3):
+    /// login, a failed completion and a cancel over `auth/login/*`, with every
+    /// `tracing` event and `log` record captured. RPC responses are the host
+    /// channel; logs must hold none of the attempts' secrets.
+    #[tokio::test]
+    async fn mcp_oauth_rpc_entry_points_keep_secrets_out_of_logs() {
+        use meerkat::test_fixtures::mcp_oauth::{
+            ISSUED_SECRET_CANARIES, McpOAuthFixture, SUBJECT, follow_authorize_url,
+        };
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let logs = CanaryLogBuffer::default();
+        let writer = logs.clone();
+        let _capture = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish()
+            .set_default();
+
+        let fixture = McpOAuthFixture::spawn().await.unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".rkat")).unwrap();
+        std::fs::write(
+            project.path().join(".rkat/mcp.toml"),
+            format!(
+                "[[servers]]\nname = \"canary\"\nurl = \"{}\"\noauth_account = \"{SUBJECT}\"\n",
+                fixture.mcp_url()
+            ),
+        )
+        .unwrap();
+        let runtime = test_runtime();
+        runtime.set_skill_identity_roots(Some(project.path().to_path_buf()), None);
+        let mcp = serde_json::json!({
+            "server_name": "canary",
+            "server_url": fixture.mcp_url(),
+            "oauth_account": SUBJECT,
+        });
+        let target = meerkat::McpServerIdentity::from_server_config("canary", fixture.mcp_url())
+            .with_expected_account(SUBJECT)
+            .unwrap();
+        let identity: meerkat_core::AuthCredentialIdentity =
+            target.auth_binding_ref().unwrap().into();
+        let mut canaries: Vec<String> = ISSUED_SECRET_CANARIES
+            .iter()
+            .map(|canary| (*canary).to_owned())
+            .collect();
+        let admit = |start: &serde_json::Value| {
+            let url = start["authorize_url"].as_str().unwrap().to_owned();
+            let state = start["state"].as_str().unwrap().to_owned();
+            let challenge = url
+                .split("code_challenge=")
+                .nth(1)
+                .and_then(|rest| rest.split('&').next())
+                .unwrap()
+                .to_owned();
+            let verifier = runtime
+                .provider_auth_runtime_authority()
+                .oauth_flow_authority()
+                .admitted_connector_browser_attempt(&state, &identity)
+                .unwrap()
+                .expect("admitted")
+                .pkce_verifier;
+            let secrets = vec![url.clone(), state.clone(), challenge, verifier];
+            (url, state, secrets)
+        };
+
+        // Cancel path.
+        let start = rpc_result(
+            handle_auth_login_start(
+                Some(RpcId::Num(1)),
+                Some(
+                    raw_params(serde_json::json!({
+                        "mcp": mcp,
+                        "redirect_uri": "http://127.0.0.1:1/mcp/oauth/callback",
+                    }))
+                    .as_ref(),
+                ),
+                &runtime,
+            )
+            .await,
+        );
+        let (_, state, secrets) = admit(&start);
+        canaries.extend(secrets);
+        let cancelled = rpc_result(
+            handle_auth_login_cancel(
+                Some(RpcId::Num(2)),
+                Some(raw_params(serde_json::json!({ "mcp": mcp, "state": state })).as_ref()),
+                &runtime,
+            )
+            .await,
+        );
+        assert_eq!(cancelled["cancelled"], true);
+
+        // Error path, then success, both through the host's loopback.
+        for fail in [true, false] {
+            let binding = meerkat_providers::auth_oauth::bind_loopback_callback(
+                meerkat::MCP_OAUTH_CALLBACK_PATH,
+            )
+            .await
+            .unwrap();
+            let start = rpc_result(
+                handle_auth_login_start(
+                    Some(RpcId::Num(3)),
+                    Some(
+                        raw_params(serde_json::json!({
+                            "mcp": mcp,
+                            "redirect_uri": binding.redirect_url,
+                        }))
+                        .as_ref(),
+                    ),
+                    &runtime,
+                )
+                .await,
+            );
+            let (url, state, secrets) = admit(&start);
+            canaries.extend(secrets);
+            let callback = binding.expect_state(state);
+            follow_authorize_url(&url).await.unwrap();
+            let outcome = callback
+                .wait(meerkat::MCP_INTERACTIVE_LOGIN_TIMEOUT)
+                .await
+                .unwrap();
+            fixture.fail_token_exchange(fail);
+            let completed = handle_auth_login_complete(
+                Some(RpcId::Num(4)),
+                Some(
+                    raw_params(serde_json::json!({
+                        "mcp": mcp,
+                        "code": outcome.code,
+                        "state": outcome.state,
+                        "redirect_uri": start["redirect_uri"],
+                    }))
+                    .as_ref(),
+                ),
+                &runtime,
+            )
+            .await;
+            if fail {
+                let message = completed.error.expect("refused exchange").message;
+                assert!(
+                    canaries
+                        .iter()
+                        .all(|canary| !message.contains(canary.as_str())),
+                    "an RPC error leaked an OAuth secret canary"
+                );
+            } else {
+                assert_eq!(rpc_result(completed)["account_id"], SUBJECT);
+            }
+        }
+        let status = rpc_result(
+            handle_auth_status_get(
+                Some(RpcId::Num(5)),
+                Some(raw_params(serde_json::json!({ "mcp": mcp })).as_ref()),
+                &runtime,
+            )
+            .await,
+        );
+        assert_eq!(
+            status["phase"], "authorized",
+            "positive control: the login landed"
+        );
+
+        let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("MCP OAuth login completed via RPC"),
+            "positive control: tracing events are captured"
+        );
+        assert!(
+            captured.contains("reqwest"),
+            "positive control: log-crate records are captured through the bridge"
+        );
+        for canary in &canaries {
+            assert!(
+                !captured.contains(canary.as_str()),
+                "RPC logs leaked an OAuth secret canary"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn login_complete_requires_explicit_realm_and_binding() {
         let runtime = test_runtime();

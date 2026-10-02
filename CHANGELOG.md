@@ -182,6 +182,24 @@ them.
   overrides, so the profile restates fast's filter and every fast override is
   mirrored in the default profile, whose overrides apply to all profiles; that
   also gives the existing `ci-pr` profile the overrides it was missing.
+- MeerkatMachine `UnregisterSession*` no longer leaves a session's live
+  channel state behind (#1476).
+  - Each variant is now guarded on every live channel being closed and its
+    close custody settled. Every field a channel close removes must be empty,
+    so the close transitions stay the single authority that settles live
+    obligations (result deliveries, bridge operations, staged or bound
+    execution custody). The shell already closes the session's channel
+    before unregistering.
+  - Unregister then clears the session's terminal context-preparation
+    records and any runtime stop deferred for its lifetime. Revocation
+    tombstones stay: they are durable executor evidence in the live bridge
+    recovery image.
+  - A new generated invariant, `live_channel_state_requires_registered_session`,
+    requires live channel bindings to name the registered session and leaves
+    no binding, custody or preparation state once it is unregistered.
+  - `specs/machines/meerkat_machine/live_unregister_cleanup_audit.{tla,sh}`
+    (run in the canonical TLC lane) proves unregister stays reachable through
+    the close transitions from an admitted, staged and bound channel.
 
 - Tests that need the `mcp-test-server` fixture binary no longer pass
   without running when it is missing. Each test hand-rolled a

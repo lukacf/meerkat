@@ -8322,6 +8322,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `live_delegation_items_are_channel_bound_and_capped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `live_channel_state_requires_registered_session`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `live_close_settlement_deferral_is_for_closed_channels`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

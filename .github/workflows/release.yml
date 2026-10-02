@@ -885,6 +885,40 @@ jobs:
             echo "packaged=${bin} -> dist/${artifact_name}"
           done
 
+      # An asset recovery runs this workflow from main against the tag, so
+      # its attestations name main's commit, not the tag. Each archive
+      # therefore carries a stamp of the tree it was built from, written only
+      # after checking that the checkout is the tag's commit, and attested
+      # with it (see scripts/verify-release-asset-provenance --stamps).
+      - name: Stamp archives with the checked-out release commit
+        id: source_commit
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tree="$(git rev-parse HEAD)"
+          if ! tag_commit="$(git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}^{commit}")"; then
+            git fetch --no-tags --depth=1 origin "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+            tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          fi
+          if [[ "${tree}" != "${tag_commit}" ]]; then
+            echo "checked-out tree ${tree} is not the ${RELEASE_TAG} commit ${tag_commit}" >&2
+            exit 1
+          fi
+          echo "source_commit=${tree}" >> "${GITHUB_OUTPUT}"
+          stamped=0
+          for archive in dist/*.tar.gz dist/*.zip; do
+            [[ -f "${archive}" ]] || continue
+            printf '%s\n' "${tree}" > "${archive}.source-commit"
+            stamped=$((stamped + 1))
+          done
+          if [[ "${stamped}" -eq 0 ]]; then
+            echo "no release archives under dist/ to stamp" >&2
+            exit 1
+          fi
+          echo "stamped ${stamped} archive(s) with ${RELEASE_TAG} ${tree}"
+
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v4
         with:
@@ -961,6 +995,40 @@ jobs:
         uses: ./.release-tooling/.github/actions/build-windows-cross
         with:
           version: ${{ steps.version.outputs.version }}
+
+      # An asset recovery runs this workflow from main against the tag, so
+      # its attestations name main's commit, not the tag. Each archive
+      # therefore carries a stamp of the tree it was built from, written only
+      # after checking that the checkout is the tag's commit, and attested
+      # with it (see scripts/verify-release-asset-provenance --stamps).
+      - name: Stamp archives with the checked-out release commit
+        id: source_commit
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tree="$(git rev-parse HEAD)"
+          if ! tag_commit="$(git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}^{commit}")"; then
+            git fetch --no-tags --depth=1 origin "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+            tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          fi
+          if [[ "${tree}" != "${tag_commit}" ]]; then
+            echo "checked-out tree ${tree} is not the ${RELEASE_TAG} commit ${tag_commit}" >&2
+            exit 1
+          fi
+          echo "source_commit=${tree}" >> "${GITHUB_OUTPUT}"
+          stamped=0
+          for archive in dist/*.tar.gz dist/*.zip; do
+            [[ -f "${archive}" ]] || continue
+            printf '%s\n' "${tree}" > "${archive}.source-commit"
+            stamped=$((stamped + 1))
+          done
+          if [[ "${stamped}" -eq 0 ]]; then
+            echo "no release archives under dist/ to stamp" >&2
+            exit 1
+          fi
+          echo "stamped ${stamped} archive(s) with ${RELEASE_TAG} ${tree}"
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v4
@@ -1174,6 +1242,40 @@ jobs:
             fi
             echo "packaged=${bin} -> dist/${artifact_name}"
           done
+
+      # An asset recovery runs this workflow from main against the tag, so
+      # its attestations name main's commit, not the tag. Each archive
+      # therefore carries a stamp of the tree it was built from, written only
+      # after checking that the checkout is the tag's commit, and attested
+      # with it (see scripts/verify-release-asset-provenance --stamps).
+      - name: Stamp archives with the checked-out release commit
+        id: source_commit
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tree="$(git rev-parse HEAD)"
+          if ! tag_commit="$(git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}^{commit}")"; then
+            git fetch --no-tags --depth=1 origin "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+            tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          fi
+          if [[ "${tree}" != "${tag_commit}" ]]; then
+            echo "checked-out tree ${tree} is not the ${RELEASE_TAG} commit ${tag_commit}" >&2
+            exit 1
+          fi
+          echo "source_commit=${tree}" >> "${GITHUB_OUTPUT}"
+          stamped=0
+          for archive in dist/*.tar.gz dist/*.zip; do
+            [[ -f "${archive}" ]] || continue
+            printf '%s\n' "${tree}" > "${archive}.source-commit"
+            stamped=$((stamped + 1))
+          done
+          if [[ "${stamped}" -eq 0 ]]; then
+            echo "no release archives under dist/ to stamp" >&2
+            exit 1
+          fi
+          echo "stamped ${stamped} archive(s) with ${RELEASE_TAG} ${tree}"
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v4
@@ -1466,11 +1568,27 @@ jobs:
             --output-dir prepared-release-artifacts \
             --release-tag "${RELEASE_TAG}"
 
+      # Tag push, or a dispatch on the tag ref: every archive is attested
+      # from exactly the tag commit. An asset recovery dispatched from main
+      # runs main's workflow against the tag, so its attestations name the
+      # run's commit: then each archive must be attested by release.yml at
+      # that commit on refs/heads/main, and carry an attested stamp proving
+      # its build job checked out the tag commit.
       - name: Verify exact-tag release build provenance
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
-        run: scripts/verify-release-asset-provenance prepared-release-artifacts "${RELEASE_TAG}"
+          RECOVERY_FROM_MAIN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release_assets_only == 'true' && github.ref == 'refs/heads/main' }}
+        run: |
+          set -euo pipefail
+          if [[ "${RECOVERY_FROM_MAIN}" == "true" ]]; then
+            scripts/verify-release-asset-provenance \
+              --recovery-source "${GITHUB_SHA}" \
+              --stamps release-artifacts \
+              prepared-release-artifacts "${RELEASE_TAG}"
+          else
+            scripts/verify-release-asset-provenance prepared-release-artifacts "${RELEASE_TAG}"
+          fi
 
       - name: Publish release archives
         uses: softprops/action-gh-release@v2

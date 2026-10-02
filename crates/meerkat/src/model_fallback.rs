@@ -63,6 +63,16 @@ fn provider_tag_requirements(
     has_requirements.then_some(tag)
 }
 
+/// Whether a projected provider error is the typed tool-choice refusal
+/// (`LlmError::ToolChoiceUnsupported`, projected with its details class).
+fn is_tool_choice_refusal(error: &meerkat_core::error::LlmProviderError) -> bool {
+    error
+        .details
+        .get("class")
+        .and_then(serde_json::Value::as_str)
+        == Some(meerkat_llm_core::TOOL_CHOICE_UNSUPPORTED_DETAILS_CLASS)
+}
+
 /// Whether `target` keeps every requirement the caller placed on the failed
 /// request.
 ///
@@ -411,6 +421,13 @@ impl AgentLlmClient for ModelFallbackClient {
                 ));
                 continue;
             }
+            // Probe the target with the failed request's own tool choice, so
+            // the target adapter's lowering (the one owner of what each
+            // provider and model can honour) refuses a forced choice it
+            // cannot serve before any provider call. Stripped again below.
+            params.tool_choice = request
+                .provider_params
+                .and_then(|source| source.tool_choice.clone());
             let pressure = match next.client.request_pressure(
                 request.messages,
                 request.tools,
@@ -425,6 +442,12 @@ impl AgentLlmClient for ModelFallbackClient {
                             reason: LlmFailureReason::AuthError,
                             ..
                         }) => ModelFallbackSkipReason::AuthUnavailable,
+                        Err(AgentError::Llm {
+                            reason: LlmFailureReason::ProviderError(error),
+                            ..
+                        }) if is_tool_choice_refusal(&error) => {
+                            ModelFallbackSkipReason::ToolChoiceUnsupported
+                        }
                         Ok(None) => ModelFallbackSkipReason::AdmissionUnavailable,
                         _ => ModelFallbackSkipReason::RequestUnsupported,
                     };
@@ -449,6 +472,10 @@ impl AgentLlmClient for ModelFallbackClient {
                 skipped_targets.push(*skipped);
                 continue;
             }
+            // A tool choice is request-local (the agent loop sets it per call
+            // from the turn plan); the sticky policy the switch hands on must
+            // never carry one into later requests.
+            params.tool_choice = None;
             let mut request_policy = next.request_policy.clone();
             request_policy.provider_params = (!params.is_empty()).then_some(params);
             request_policy.provider_tool_defaults = None;
@@ -959,6 +986,169 @@ mod tests {
         );
         assert!(!meerkat_core::model_fallback::has_native_search(admitted));
         assert!(switch.request_policy.provider_tool_defaults.is_none());
+    }
+
+    /// The switch's sticky request policy never carries a tool choice, even
+    /// when the failed request and the target's in-process policy did: the
+    /// choice is request-local and set per call by the agent loop.
+    #[test]
+    fn model_fallback_switch_policy_never_carries_a_tool_choice() {
+        let mut target = candidate(
+            Provider::Anthropic,
+            "target",
+            Some(200_000),
+            Some(8192),
+            Arc::default(),
+        );
+        target.request_policy.provider_params = Some(ProviderParamsOverride {
+            temperature: Some(0.3),
+            tool_choice: Some(meerkat_core::ToolChoice::Required),
+            ..Default::default()
+        });
+        let client = ModelFallbackClient::new(
+            vec![
+                candidate(
+                    Provider::OpenAI,
+                    "primary",
+                    Some(1_000_000),
+                    Some(8192),
+                    Arc::default(),
+                ),
+                target,
+            ],
+            cross_provider_policy(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let forced = ProviderParamsOverride {
+            tool_choice: Some(meerkat_core::ToolChoice::Tool {
+                name: "deny_probe".into(),
+            }),
+            ..Default::default()
+        };
+        let switch = client
+            .prepare_model_fallback(
+                &retryable_error(Provider::OpenAI),
+                &ModelFallbackRequest {
+                    provider_params: Some(&forced),
+                    ..request(&[])
+                },
+            )
+            .unwrap();
+        let sticky = switch
+            .request_policy
+            .provider_params
+            .as_ref()
+            .expect("the target's own params survive");
+        assert_eq!(sticky.temperature, Some(0.3));
+        assert_eq!(
+            sticky.tool_choice, None,
+            "no tool choice sticks into fallback"
+        );
+    }
+
+    /// A fallback target backed by the real Anthropic adapter, so admission
+    /// consults the adapter's own tool-choice lowering.
+    #[cfg(feature = "anthropic")]
+    fn anthropic_adapter_candidate(model: &str) -> ModelFallbackCandidate {
+        let mut target = candidate(
+            Provider::Anthropic,
+            model,
+            Some(200_000),
+            Some(8192),
+            Arc::default(),
+        );
+        target.client = Arc::new(
+            meerkat_llm_core::LlmClientAdapter::try_for_provider_identity(
+                Arc::new(meerkat_anthropic::AnthropicClient::new("test-key".to_string()).unwrap()),
+                model.to_string(),
+                Provider::Anthropic,
+            )
+            .unwrap(),
+        );
+        target
+    }
+
+    /// Admission asks the target adapter whether it can honour the failed
+    /// request's forced tool choice. A target that refuses it (Claude Opus
+    /// 5.5) is skipped with the typed reason before any provider call; the
+    /// same target is admitted for an unforced request, and a target that
+    /// accepts the choice is admitted without carrying it into its policy.
+    #[cfg(feature = "anthropic")]
+    #[test]
+    fn model_fallback_skips_targets_that_cannot_honour_a_forced_tool_choice() {
+        let primary = || {
+            candidate(
+                Provider::OpenAI,
+                "primary",
+                Some(1_000_000),
+                Some(8192),
+                Arc::default(),
+            )
+        };
+        let tools = [Arc::new(ToolDef::new(
+            "deny_probe",
+            "probe",
+            serde_json::json!({"type": "object", "properties": {}}),
+        ))];
+        let forced = ProviderParamsOverride {
+            tool_choice: Some(meerkat_core::ToolChoice::Tool {
+                name: "deny_probe".into(),
+            }),
+            ..Default::default()
+        };
+        let forced_request = ModelFallbackRequest {
+            tools: &tools,
+            provider_params: Some(&forced),
+            ..request(&[])
+        };
+        let failure = retryable_error(Provider::OpenAI);
+
+        let refusing = ModelFallbackClient::new(
+            vec![primary(), anthropic_adapter_candidate("claude-opus-5-5")],
+            cross_provider_policy(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let skipped = refusing
+            .prepare_model_fallback(&failure, &forced_request)
+            .unwrap_err();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(
+            skipped[0].reason,
+            ModelFallbackSkipReason::ToolChoiceUnsupported
+        );
+        // The same target is admitted when the request forces nothing.
+        refusing
+            .prepare_model_fallback(
+                &failure,
+                &ModelFallbackRequest {
+                    tools: &tools,
+                    ..request(&[])
+                },
+            )
+            .expect("an unforced request may fall back to Opus 5.5");
+
+        let accepting = ModelFallbackClient::new(
+            vec![primary(), anthropic_adapter_candidate("claude-sonnet-4-6")],
+            cross_provider_policy(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let switch = accepting
+            .prepare_model_fallback(&failure, &forced_request)
+            .expect("a target that honours the forced choice is admitted");
+        assert!(
+            switch
+                .request_policy
+                .provider_params
+                .as_ref()
+                .is_none_or(|params| params.tool_choice.is_none()),
+            "the admitted policy never carries the request's tool choice"
+        );
     }
 
     #[test]

@@ -4352,6 +4352,131 @@ async fn aborted_directed_candidate_checkpoint_recovers_exact_completed_terminal
     drop(runtime_bindings);
 }
 
+/// A directed batch finalizes its receipt before publishing its interaction
+/// terminals, and resolves completion waiters only after publication. A
+/// receipt wait armed while the input was pending must resolve at the
+/// finalization, not park until publication (which a transient failure can
+/// delay): finalization wakes the receipt observers. The mob delivery wait
+/// used to re-read every second to cover that window.
+#[tokio::test]
+async fn receipt_wait_resolves_at_directed_finalization_while_publication_is_parked() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let machine = Arc::new(MeerkatMachine::persistent(
+        inner as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let checkpoint_entered = Arc::new(Notify::new());
+    let release_checkpoint = Arc::new(Notify::new());
+    let first_publish_entered = Arc::new(Notify::new());
+    let release_first_publish = Arc::new(Notify::new());
+    let publisher = Arc::new(RuntimeRecoveryTerminalPublisher::blocking_first_publish(
+        Arc::clone(&first_publish_entered),
+        Arc::clone(&release_first_publish),
+    ));
+    machine
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare runtime bindings");
+    machine
+        .ensure_session_with_executor(
+            session_id.clone(),
+            Box::new(RuntimeRecoveryExecutor {
+                session: runtime_recovery_session(&session_id, "directed receipt wake"),
+                result_text: "directed receipt wake".to_string(),
+                publisher: Some(Arc::clone(&publisher)),
+                first_reconcile_gate: None,
+                first_checkpoint_gate: Some((
+                    Arc::clone(&checkpoint_entered),
+                    Arc::clone(&release_checkpoint),
+                )),
+                target_checkpoint_calls: Arc::new(AtomicUsize::new(0)),
+                expected_compaction_intents: Vec::new(),
+                projection_order: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }),
+        )
+        .await
+        .expect("install executor");
+
+    let interaction_uuid = meerkat_core::time_compat::new_uuid_v7();
+    let input = crate::mob_adapter::create_tracked_flow_step_input(
+        "directed-receipt-wake-step",
+        meerkat_core::types::ContentInput::Text("directed receipt wake".to_string()),
+        "directed-receipt-wake-flow",
+        None,
+        &interaction_uuid.to_string(),
+    )
+    .expect("construct directed input");
+    let input_id = input.id().clone();
+    let (_outcome, completion) = machine
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .expect("accept directed input");
+    let completion = completion.expect("accepted directed input has a completion waiter");
+
+    // Held at the committed-boundary checkpoint, before receipt finalization.
+    tokio::time::timeout(Duration::from_secs(5), checkpoint_entered.notified())
+        .await
+        .expect("the run reaches the committed-boundary checkpoint");
+    let pending = machine
+        .input_terminal_receipt(
+            &session_id,
+            crate::terminal_status::InteractionSelector::InputId(input_id.clone()),
+        )
+        .await
+        .expect("read receipt")
+        .expect("the input is held live");
+    assert!(
+        !pending.report.is_resolved(),
+        "the receipt is not finalized before the checkpoint returns: {:?}",
+        pending.report
+    );
+    let waiter = {
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        let input_id = input_id.clone();
+        tokio::spawn(async move {
+            machine
+                .wait_input_terminal_receipt(&session_id, &input_id)
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "the waiter parks on the pending input"
+    );
+
+    release_checkpoint.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), first_publish_entered.notified())
+        .await
+        .expect("publication begins after the receipt is finalized");
+    // Publication is parked; the receipt wait resolves anyway. The deadline
+    // only bounds a broken run.
+    let resolved = tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("receipt finalization wakes the receipt wait while publication is parked")
+        .expect("waiter task")
+        .expect("receipt wait runs")
+        .expect("the input is known");
+    match resolved {
+        crate::terminal_status::InputTerminalReceiptWait::Resolved(read) => {
+            assert!(read.report.is_resolved(), "{:?}", read.report);
+        }
+        other => panic!("expected a resolved receipt, got {other:?}"),
+    }
+    assert_eq!(publisher.calls(), 1, "publication is still parked");
+
+    release_first_publish.notify_one();
+    match tokio::time::timeout(Duration::from_secs(5), completion.wait_authorized())
+        .await
+        .expect("completion resolves after publication")
+    {
+        CompletionOutcome::Completed(result) => assert_eq!(result.text, "directed receipt wake"),
+        other => panic!("expected a completed directed terminal, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn aborted_finalized_directed_publication_replays_once_and_preserves_completed() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
@@ -11319,6 +11444,116 @@ async fn destroy_relooks_current_entry_after_same_id_replacement() {
     .await;
 }
 
+/// An input admitted after an attachment's runtime loop released the
+/// registration gate, and before the attachment reacquired it, finds the slot
+/// Pending and so has no wake sender; the attachment read its queue before the
+/// input existed. Commit must still wake the loop for it: a mob resume
+/// reviving a member while a detached completion was delivered to it left the
+/// completion queued forever (#1482).
+#[tokio::test]
+async fn input_admitted_before_a_pending_attachment_regates_wakes_at_commit() {
+    struct RecordingExecutor {
+        applied: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for RecordingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.applied.notify_one();
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register pending-attachment fixture");
+    let applied = Arc::new(Notify::new());
+    let (regate_reached_tx, regate_reached) = tokio::sync::oneshot::channel();
+    let (release_regate, release_regate_rx) = tokio::sync::oneshot::channel();
+    *machine
+        .test_pending_attachment_before_regate
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((regate_reached_tx, release_regate_rx));
+    let ensure = tokio::spawn({
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        let applied = Arc::clone(&applied);
+        async move {
+            machine
+                .ensure_session_with_executor_factory(session_id, move |_| {
+                    Box::new(RecordingExecutor { applied }) as Box<dyn CoreExecutor>
+                })
+                .await
+        }
+    });
+    // The runtime loop has finished startup and released the registration
+    // gate; the attachment is Pending and has not reacquired the gate.
+    regate_reached
+        .await
+        .expect("the attachment reaches the gap before reacquiring its gate");
+
+    let applied_wait = applied.notified();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("admitted before commit"))
+        .await
+        .expect("admit while the attachment is pending");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    release_regate
+        .send(())
+        .expect("release the attachment to reacquire its gate");
+    let pending = match ensure
+        .await
+        .expect("ensure task must not panic")
+        .expect("prepare the pending attachment")
+    {
+        EnsureRuntimeExecutorAttachment::Pending(pending) => pending,
+        EnsureRuntimeExecutorAttachment::Existing(witness) => {
+            panic!("fresh fixture unexpectedly found {witness:?}")
+        }
+    };
+    pending
+        .commit()
+        .await
+        .expect("commit the pending attachment");
+
+    // Hang guard only: a lost wake never applies the input.
+    tokio::time::timeout(Duration::from_secs(30), applied_wait)
+        .await
+        .expect("the committed attachment must run the input admitted while it was pending");
+}
+
 #[tokio::test]
 async fn retire_recaptures_wake_sender_after_pending_attachment_commits() {
     struct BlockingExecutor {
@@ -15758,6 +15993,65 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
 /// Cancellation, retry, and ownership pins for the machine-owned stop /
 /// unregister coordinator. Production cleanup hooks own external material
 /// only; recursive unregister is tested separately as a typed self-join error.
+/// A waiter for a delivery's admission is woken by the admission itself:
+/// it stays parked while nothing holds the key, resolves with the admitted
+/// input's id once an input with that idempotency key is accepted, and is
+/// `None` for a session without a live registration.
+#[tokio::test]
+async fn admission_wait_is_woken_by_the_admission_of_its_key() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let key = "delivery-admission-wait";
+
+    let waiter = {
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            machine
+                .wait_input_admitted_by_idempotency_key(&session_id, key)
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "nothing holds the key yet, so the waiter stays parked"
+    );
+
+    let mut input = make_prompt("admitted delivery");
+    let Input::Prompt(prompt) = &mut input else {
+        unreachable!("make_prompt always constructs Prompt input")
+    };
+    prompt.header.idempotency_key = Some(crate::identifiers::IdempotencyKey::new(key));
+    let accepted = match machine
+        .accept_input(&session_id, input)
+        .await
+        .expect("accept keyed input")
+    {
+        AcceptOutcome::Accepted { input_id, .. } => input_id,
+        other => panic!("expected a fresh accepted input, got {other:?}"),
+    };
+    let admitted = tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("the admission wakes the waiter")
+        .expect("waiter task")
+        .expect("admission wait runs");
+    assert_eq!(admitted, Some(accepted));
+
+    assert_eq!(
+        machine
+            .wait_input_admitted_by_idempotency_key(&SessionId::new(), key)
+            .await
+            .expect("admission wait runs"),
+        None,
+        "a session without a live registration has nothing to wait on"
+    );
+}
+
 mod stop_teardown_coordinator_class {
     use super::*;
 
@@ -49137,4 +49431,138 @@ async fn run_input_read_refuses_a_driver_replaced_or_removed_while_it_waited() {
         matches!(removed, Err(RuntimeDriverError::NotReady { .. })),
         "a removed session is not held: {removed:?}"
     );
+}
+
+/// #1476: the production close of a staged live channel (custody revoke,
+/// then the recorded close) must leave the session unregisterable. The close
+/// keeps the receipts, execution mode/profile and capability sets as its
+/// tombstone (closed replays match against it), so unregister must not
+/// require them to be empty.
+#[test]
+fn unregister_completes_after_normal_close_of_a_staged_live_channel() {
+    let session = mm_dsl::SessionId("staged-close-session".to_string());
+    let runtime = mm_dsl::AgentRuntimeId("staged-close-runtime".to_string());
+    let s = "staged-close-session".to_string();
+    let c = "staged-close-channel".to_string();
+    let mut authority = registered_dsl_authority_for_session("staged-close-session");
+    let mut apply = |input: mm_dsl::MeerkatMachineInput, step: &str| {
+        mm_dsl::MeerkatMachineMutator::apply(&mut authority, input)
+            .unwrap_or_else(|error| panic!("{step}: {error:?}"));
+    };
+    apply(
+        mm_dsl::MeerkatMachineInput::PrepareBindings {
+            agent_runtime_id: runtime.clone(),
+            fence_token: mm_dsl::FenceToken(1),
+            generation: Some(mm_dsl::Generation(1)),
+            runtime_epoch_id: None,
+            session_id: session.clone(),
+        },
+        "prepare bindings",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::ResolveLiveOpenAdmission {
+            session_id: s.clone(),
+            channel_id: c.clone(),
+            llm_identity: dsl_live_identity("gpt-realtime-2"),
+        },
+        "live open",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::ResolveLiveExecutionModeAdmission {
+            session_id: s.clone(),
+            channel_id: c.clone(),
+            profile_id: "profile".to_string(),
+            requested_mode: mm_dsl::LiveExecutionMode::FunctionBridge,
+            function_bridge_available: true,
+            client_context_available: false,
+        },
+        "execution mode",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::StageExperimentalLiveExecution {
+            session_id: s.clone(),
+            channel_id: c.clone(),
+            runtime_id: runtime.clone(),
+            fence_token: mm_dsl::FenceToken(1),
+            generation: mm_dsl::Generation(1),
+            canonical_seed_cursor: 0,
+            pending_receipt: "pending".to_string(),
+        },
+        "stage",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::RevokeLiveChannelCloseCustody {
+            session_id: s.clone(),
+            channel_id: c.clone(),
+            pending_receipt: Some("pending".to_string()),
+            activation_receipt: None,
+        },
+        "revoke close custody",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::RecordLiveCloseClosed {
+            session_id: s.clone(),
+            channel_id: c.clone(),
+            close_observation_sequence: 1,
+        },
+        "record closed",
+    );
+    let binding = |input: fn(
+        mm_dsl::SessionId,
+        Option<mm_dsl::AgentRuntimeId>,
+        Option<mm_dsl::FenceToken>,
+        Option<mm_dsl::Generation>,
+    ) -> mm_dsl::MeerkatMachineInput| {
+        input(
+            session.clone(),
+            Some(runtime.clone()),
+            Some(mm_dsl::FenceToken(1)),
+            Some(mm_dsl::Generation(1)),
+        )
+    };
+    apply(
+        binding(|session_id, agent_runtime_id, fence_token, generation| {
+            mm_dsl::MeerkatMachineInput::BeginUnregisterSession {
+                session_id,
+                agent_runtime_id,
+                fence_token,
+                generation,
+                runtime_epoch_id: None,
+            }
+        }),
+        "begin unregister",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
+            session_id: session.clone(),
+            forced_abort: false,
+        },
+        "runtime loop stopped",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::CommsDrainExitedForUnregister {
+            session_id: session.clone(),
+            forced_abort: false,
+        },
+        "comms drain exited",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::CompletionWaitersResolvedForUnregister {
+            session_id: session.clone(),
+        },
+        "completion waiters resolved",
+    );
+    apply(
+        binding(|session_id, agent_runtime_id, fence_token, generation| {
+            mm_dsl::MeerkatMachineInput::UnregisterSession {
+                session_id,
+                agent_runtime_id,
+                fence_token,
+                generation,
+                runtime_epoch_id: None,
+            }
+        }),
+        "unregister after a normal live close",
+    );
+    assert_eq!(authority.state().session_id, None);
 }

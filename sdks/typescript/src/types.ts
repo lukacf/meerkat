@@ -175,6 +175,12 @@ export interface BlobPayload {
 export interface TurnToolOverlay {
   readonly allowedTools?: readonly string[];
   readonly blockedTools?: readonly string[];
+  /**
+   * Tool choice for this turn's model requests, in order: entry `k` applies
+   * to the run's `k`-th provider call, and every call after the plan is
+   * exhausted is `{ mode: "auto" }`. Run-local; never persisted.
+   */
+  readonly toolChoicePlan?: readonly Generated.ToolChoice[];
 }
 
 /** Result of an agent session creation or turn. */

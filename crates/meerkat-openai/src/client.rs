@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use meerkat_core::ToolChoice;
 use meerkat_core::lifecycle::run_primitive::{
     OpenAiPromptCacheRetention, OpenAiProviderTag, ProviderTag,
 };
@@ -16,13 +17,13 @@ use meerkat_core::{
     RevisedPromptDisposition, RevisedPromptSource, ServerToolKind, StopReason, SystemNoticeBlock,
     SystemNoticeMessage, ToolResult, Usage, UserMessage,
 };
-use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{
     ImageGenerationExecutor, LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream,
     PreparedLlmRequest, ProviderGeneratedImage, ProviderImageGenerationOutput,
     ProviderImageGenerationRequest, dimensions_from_size_preference,
     media_type_from_format_preference, normalize_base64_image_data,
 };
+use meerkat_llm_core::{LlmError, ToolChoiceRefusal};
 use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
 use serde_json::Value;
@@ -1070,6 +1071,8 @@ impl OpenAiClient {
             }
         }
 
+        self.apply_tool_choice(request, &mut body)?;
+
         if let Some(tag) = openai_tag(request) {
             if let Some(store) = tag.store {
                 body["store"] = Value::Bool(store);
@@ -1183,6 +1186,28 @@ impl OpenAiClient {
                 leading_system_prefix = false;
             }
         }
+        Ok(())
+    }
+
+    /// Lower the typed tool choice to the Responses `tool_choice` field.
+    /// `Auto` leaves the body as it always was (the ChatGPT backend's fixed
+    /// `"auto"` included); that backend fixes the choice, so it refuses others.
+    fn apply_tool_choice(&self, request: &LlmRequest, body: &mut Value) -> Result<(), LlmError> {
+        request.validate_tool_choice("openai")?;
+        let choice = match &request.tool_choice {
+            ToolChoice::Auto => return Ok(()),
+            _ if self.is_chatgpt_backend_wire() => {
+                return Err(LlmError::ToolChoiceUnsupported {
+                    provider: "openai".to_owned(),
+                    choice: request.tool_choice.clone(),
+                    reason: ToolChoiceRefusal::BackendFixesToolChoice,
+                });
+            }
+            ToolChoice::Required => Value::String("required".to_owned()),
+            ToolChoice::None => Value::String("none".to_owned()),
+            ToolChoice::Tool { name } => serde_json::json!({"type": "function", "name": name}),
+        };
+        body["tool_choice"] = choice;
         Ok(())
     }
 

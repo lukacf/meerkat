@@ -53,27 +53,63 @@ struct RecordedRequest {
 }
 
 /// Every provider request, in issue order.
-#[derive(Clone, Default)]
-struct RequestLog(Arc<Mutex<Vec<RecordedRequest>>>);
+#[derive(Clone)]
+struct RequestLog {
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    /// Requests recorded so far; a watch, so waiters wake on each record.
+    recorded: Arc<tokio::sync::watch::Sender<usize>>,
+}
+
+impl Default for RequestLog {
+    fn default() -> Self {
+        Self {
+            requests: Arc::default(),
+            recorded: Arc::new(tokio::sync::watch::Sender::new(0)),
+        }
+    }
+}
 
 impl RequestLog {
     fn record(&self, request: &LlmRequest) {
-        self.0.lock().unwrap().push(RecordedRequest {
+        self.requests.lock().unwrap().push(RecordedRequest {
             last_user: last_user_text(request),
             rendered: format!("{:?}", request.messages),
         });
+        self.recorded
+            .send_modify(|recorded| *recorded = recorded.saturating_add(1));
+    }
+
+    /// Every recorded request matching `filter`.
+    fn matching(&self, filter: impl Fn(&RecordedRequest) -> bool) -> Vec<RecordedRequest> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| filter(request))
+            .cloned()
+            .collect()
+    }
+
+    /// Wait until at least one recorded request matches `filter`, woken by
+    /// each record; the bound is a hang guard only.
+    async fn wait_matching(
+        &self,
+        filter: impl Fn(&RecordedRequest) -> bool,
+        what: &str,
+    ) -> Vec<RecordedRequest> {
+        let mut recorded = self.recorded.subscribe();
+        let reached = tokio::time::timeout(
+            Duration::from_secs(120),
+            recorded.wait_for(|_| !self.matching(&filter).is_empty()),
+        )
+        .await;
+        assert!(matches!(reached, Ok(Ok(_))), "{what}");
+        self.matching(filter)
     }
 
     /// The single request whose last user message carries `prompt`.
     fn request_for(&self, prompt: &str) -> RecordedRequest {
-        let matching: Vec<_> = self
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|request| request.last_user.contains(prompt))
-            .cloned()
-            .collect();
+        let matching = self.matching(|request| request.last_user.contains(prompt));
         assert_eq!(
             matching.len(),
             1,
@@ -511,25 +547,15 @@ async fn detached_fork_off_completion_reaches_the_forkers_next_model_request() {
     );
 
     // The idle forker is woken once, and that turn's request carries it.
-    let wake_requests = || {
-        log.0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|request| {
-                request.rendered.contains(&job_id) && !request.last_user.contains("FOLLOW-UP")
-            })
-            .cloned()
-            .collect::<Vec<_>>()
+    let is_wake = |request: &RecordedRequest| {
+        request.rendered.contains(&job_id) && !request.last_user.contains("FOLLOW-UP")
     };
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    while wake_requests().is_empty() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the idle forker was never woken by its child's completion"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    let wake_requests = || log.matching(is_wake);
+    log.wait_matching(
+        is_wake,
+        "the idle forker was never woken by its child's completion",
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let woken = wake_requests();
     assert_eq!(
@@ -1112,26 +1138,11 @@ async fn detached_completion_reaches_an_owner_whose_executor_was_torn_down() {
         BackgroundJobTerminalStatus::Completed,
         "{record:?}"
     );
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    loop {
-        let woken = log
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|request| {
-                request.rendered.contains(&job_id) && !request.last_user.contains("FOLLOW-UP-A")
-            })
-            .count();
-        if woken >= 1 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the revived owner was never woken"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    log.wait_matching(
+        |request| request.rendered.contains(&job_id) && !request.last_user.contains("FOLLOW-UP-A"),
+        "the revived owner was never woken",
+    )
+    .await;
     let prompt = "FOLLOW-UP-A after the revival";
     assert_eq!(
         drive_turn(&fixture, "forker", prompt).await,
@@ -1207,26 +1218,15 @@ async fn detached_council_completion_revives_a_convener_whose_executor_was_torn_
         BackgroundJobTerminalStatus::Completed,
         "{record:?}"
     );
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let woken = loop {
-        let woken = log
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|request| {
+    let woken = log
+        .wait_matching(
+            |request| {
                 request.rendered.contains(&job_id) && !request.last_user.contains("FOLLOW-UP-C")
-            })
-            .count();
-        if woken >= 1 {
-            break woken;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the revived convener was never woken"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    };
+            },
+            "the revived convener was never woken",
+        )
+        .await
+        .len();
     assert_eq!(woken, 1, "the convener is woken for one turn");
     assert!(
         runtime.contains_session(&convener.session).await,

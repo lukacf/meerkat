@@ -924,28 +924,7 @@ mod mcp_protocol {
     #[tokio::test]
     #[ignore = "lane:e2e-system"]
     async fn integration_real_mcp_tool_call_roundtrip() {
-        // Test with real MCP test server if available
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-        let workspace_root = std::path::Path::new(&manifest_dir)
-            .parent()
-            .and_then(std::path::Path::parent)
-            .unwrap_or(std::path::Path::new("."));
-        let server_path = std::env::var_os("CARGO_TARGET_DIR")
-            .map(std::path::PathBuf::from)
-            .and_then(|target_dir| {
-                [
-                    target_dir.join("debug/mcp-test-server"),
-                    target_dir.join("release/mcp-test-server"),
-                ]
-                .into_iter()
-                .find(|path| path.exists())
-            })
-            .unwrap_or_else(|| workspace_root.join("target/debug/mcp-test-server"));
-
-        if !server_path.exists() {
-            eprintln!("Skipping: MCP test server not built (run cargo build -p mcp-test-server)");
-            return;
-        }
+        let server_path = mcp_test_server::fixture_binary();
 
         let config = McpServerConfig::stdio(
             "test",

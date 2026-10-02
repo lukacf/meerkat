@@ -8385,3 +8385,91 @@ def test_settlement_history_explicit_empty_vector_stays_empty():
     assert rewritten["results"][0].get("settlement_failures", []) == []
     assert rewritten["results"][0]["content"] == "physical result retained"
     assert rewritten["results"][0]["is_error"] is False
+
+
+# ---------------------------------------------------------------------------
+# Turn tool-choice plan reaches the wire on every turn path
+# ---------------------------------------------------------------------------
+
+_TOOL_CHOICE_PLAN = [
+    {"mode": "tool", "name": "deny_action"},
+    {"mode": "required"},
+    {"mode": "auto"},
+]
+
+
+def _plan_overlay():
+    from meerkat.generated.types import PublicTurnToolOverlay as GeneratedOverlay
+
+    return GeneratedOverlay(allowed_tools=["read"], tool_choice_plan=list(_TOOL_CHOICE_PLAN))
+
+
+@pytest.mark.asyncio
+async def test_turn_start_payload_carries_tool_choice_plan():
+    client = MeerkatClient()
+    calls = []
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, params))
+        return {
+            "session_id": "s1",
+            "text": "ok",
+            "turns": 1,
+            "tool_calls": 0,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+    await client._start_turn("s1", "go", turn_tool_overlay=_plan_overlay())
+    method, params = calls[0]
+    assert method == "turn/start"
+    assert params["turn_tool_overlay"] == {
+        "allowed_tools": ["read"],
+        "tool_choice_plan": _TOOL_CHOICE_PLAN,
+    }
+
+
+def test_streaming_turn_payload_carries_tool_choice_plan():
+    client = MeerkatClient()
+    loop = asyncio.new_event_loop()
+
+    class _Dispatcher:
+        def subscribe_events(self, session_id):
+            return asyncio.Queue()
+
+        def expect_response(self, request_id):
+            return loop.create_future()
+
+    class _Process:
+        stdin = object()
+
+    client._dispatcher = _Dispatcher()  # type: ignore[assignment]
+    client._process = _Process()  # type: ignore[assignment]
+    stream = client._start_turn_streaming("s1", "go", turn_tool_overlay=_plan_overlay())
+    _, data = stream._pending_send
+    request = json.loads(data)
+    loop.close()
+    assert request["method"] == "turn/start"
+    assert request["params"]["turn_tool_overlay"] == {
+        "allowed_tools": ["read"],
+        "tool_choice_plan": _TOOL_CHOICE_PLAN,
+    }
+
+
+@pytest.mark.asyncio
+async def test_mob_turn_start_payload_carries_tool_choice_plan():
+    client = MeerkatClient()
+    calls = []
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, params))
+        return {"status": "started"}
+
+    client._request = fake_request  # type: ignore[method-assign]
+    await client.mob_turn_start("mob-1", "worker-1", "go", turn_tool_overlay=_plan_overlay())
+    method, params = calls[0]
+    assert method == "mob/turn_start"
+    assert params["turn_tool_overlay"] == {
+        "allowed_tools": ["read"],
+        "tool_choice_plan": _TOOL_CHOICE_PLAN,
+    }

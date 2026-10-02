@@ -241,6 +241,7 @@ export type {
   TranscriptToolResultContentBlockReplacement,
   TranscriptUserContentBlockReplacement,
   TurnOptions,
+  TurnToolOverlay,
   UpdateSchedulePatch,
   UpdateScheduleRequest,
   Usage,
@@ -305,6 +306,14 @@ export type {
   WireStaleCursorDetail,
   WireStaleFenceDetail,
 } from "./generated/errors.js";
+
+export type {
+  ToolChoice,
+  ToolChoiceAuto,
+  ToolChoiceNone,
+  ToolChoiceRequired,
+  ToolChoiceTool,
+} from "./generated/types.js";
 
 export type {
   WireAssistantImageRef,

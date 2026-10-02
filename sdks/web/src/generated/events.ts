@@ -408,7 +408,7 @@ export interface LoweredRequestProvenance {
 
 export type MeerkatSchema = unknown;
 
-export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable";
+export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable" | "tool_choice_unsupported";
 
 export type ModelFallbackSkippedTarget = {
   context?: ContextBudgetFact | null;

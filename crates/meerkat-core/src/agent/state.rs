@@ -1808,6 +1808,8 @@ where
             .set_structured_output(provider, output_schema)
             .map_err(|error| AgentError::ConfigError(error.to_string()))?;
         effective.clear_web_search();
+        // Extraction offers no tools, so a turn's tool choice does not apply.
+        effective.tool_choice = None;
         Ok((!effective.is_empty()).then_some(effective))
     }
 
@@ -5686,6 +5688,8 @@ where
             // Strip the provider-native web-search/grounding body via the typed
             // ProviderTag owner — extraction is deterministic and tool-free.
             effective_provider_params.clear_web_search();
+            // Tool-free extraction: a turn's tool choice does not apply.
+            effective_provider_params.tool_choice = None;
         }
         if matches!(
             self.config.provider_native_tools,
@@ -5693,6 +5697,20 @@ where
         ) {
             effective_provider_params.clear_provider_native_tools();
         }
+        // The request-local tool choice comes only from this turn's plan:
+        // entry `k` for the run's `k`-th provider call, `Auto` once the plan
+        // is exhausted (so a forced step never re-forces itself) and for
+        // tool-free extraction. Any value that arrived with session or turn
+        // params is replaced, so no choice can persist past its request.
+        effective_provider_params.tool_choice = if in_extraction {
+            None
+        } else {
+            usize::try_from(ctx.turn_count)
+                .ok()
+                .and_then(|index| self.turn_tool_choice_plan.get(index))
+                .filter(|choice| !choice.is_auto())
+                .cloned()
+        };
         let typed_provider_params =
             Some(effective_provider_params).filter(|params| !params.is_empty());
         Ok(CallingLlmGate::Continue(CallingLlmPrepared {

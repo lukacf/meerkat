@@ -1466,6 +1466,7 @@ async fn test_turn_tool_overlay_is_cleared_after_canceled_turn() {
     let service_clone = service.clone();
     let sid_clone = session_id.clone();
     let overlay = TurnToolOverlay {
+        tool_choice_plan: Vec::new(),
         allowed_tools: Some(vec!["alpha".into()]),
         blocked_tools: Some(vec!["beta".into()]),
         dispatch_context: Default::default(),
@@ -1497,6 +1498,7 @@ async fn test_turn_tool_overlay_is_cleared_after_canceled_turn() {
         .expect("overlay updates lock poisoned")
         .clone();
     assert!(updates.contains(&Some(TurnToolOverlay {
+        tool_choice_plan: Vec::new(),
         allowed_tools: Some(vec!["alpha".into()]),
         blocked_tools: Some(vec!["beta".into()]),
         dispatch_context: Default::default(),
@@ -1536,6 +1538,7 @@ async fn test_turn_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
                 runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                     HandlingMode::Queue,
                     Some(TurnToolOverlay {
+                        tool_choice_plan: Vec::new(),
                         allowed_tools: Some(vec!["alpha".into(), "beta".into()]),
                         blocked_tools: Some(vec!["beta".into()]),
                         dispatch_context: Default::default(),
@@ -1597,6 +1600,7 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
                 runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                     HandlingMode::Queue,
                     Some(TurnToolOverlay {
+                        tool_choice_plan: Vec::new(),
                         allowed_tools: Some(vec!["alpha".into()]),
                         blocked_tools: None,
                         dispatch_context: Default::default(),
@@ -1619,6 +1623,7 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
     assert_eq!(
         updates,
         vec![Some(TurnToolOverlay {
+            tool_choice_plan: Vec::new(),
             allowed_tools: Some(vec!["alpha".into()]),
             blocked_tools: None,
             dispatch_context: Default::default(),

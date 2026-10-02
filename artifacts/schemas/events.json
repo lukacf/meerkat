@@ -2244,18 +2244,27 @@
         "description": "A Meerkat-native JSON schema."
       },
       "ModelFallbackSkipReason": {
-        "enum": [
-          "provider_boundary",
-          "auth_unavailable",
-          "context_fit",
-          "context_unknown",
-          "output_budget",
-          "tool_parity",
-          "modality_parity",
-          "request_unsupported",
-          "admission_unavailable"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "provider_boundary",
+              "auth_unavailable",
+              "context_fit",
+              "context_unknown",
+              "output_budget",
+              "tool_parity",
+              "modality_parity",
+              "request_unsupported",
+              "admission_unavailable"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "tool_choice_unsupported",
+            "description": "The target cannot honour the failed request's forced tool choice (the\ntarget adapter's own typed refusal), so it is skipped before any\nprovider call instead of being switched to and refused.",
+            "type": "string"
+          }
+        ]
       },
       "ModelFallbackSkippedTarget": {
         "description": "Evidence attached even when every configured candidate is rejected.",
@@ -10290,18 +10299,27 @@
         "description": "A Meerkat-native JSON schema."
       },
       "ModelFallbackSkipReason": {
-        "enum": [
-          "provider_boundary",
-          "auth_unavailable",
-          "context_fit",
-          "context_unknown",
-          "output_budget",
-          "tool_parity",
-          "modality_parity",
-          "request_unsupported",
-          "admission_unavailable"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "provider_boundary",
+              "auth_unavailable",
+              "context_fit",
+              "context_unknown",
+              "output_budget",
+              "tool_parity",
+              "modality_parity",
+              "request_unsupported",
+              "admission_unavailable"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "tool_choice_unsupported",
+            "description": "The target cannot honour the failed request's forced tool choice (the\ntarget adapter's own typed refusal), so it is skipped before any\nprovider call instead of being switched to and refused.",
+            "type": "string"
+          }
+        ]
       },
       "ModelFallbackSkippedTarget": {
         "description": "Evidence attached even when every configured candidate is rejected.",

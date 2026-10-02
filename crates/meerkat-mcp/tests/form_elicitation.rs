@@ -207,14 +207,7 @@ fn factory(
 }
 
 fn binary() -> PathBuf {
-    let binary = PathBuf::from(std::env::var_os("MEERKAT_MCP_TEST_SERVER")
-        .expect("set MEERKAT_MCP_TEST_SERVER to the exact fixture binary from ./scripts/repo-cargo build -p mcp-test-server; no ambient executable search is performed"));
-    assert!(
-        binary.is_file(),
-        "form fixture binary missing at {}. First run ./scripts/repo-cargo build -p mcp-test-server, or set MEERKAT_MCP_TEST_SERVER to that built binary",
-        binary.display()
-    );
-    binary
+    mcp_test_server::fixture_binary()
 }
 fn stdio_config(marker: Option<&std::path::Path>) -> McpServerConfig {
     let mut args = vec!["--form-elicitation".to_owned()];

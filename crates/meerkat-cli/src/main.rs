@@ -11765,6 +11765,7 @@ fn build_turn_tool_overlay(
         return None;
     }
     Some(TurnToolOverlay {
+        tool_choice_plan: Vec::new(),
         allowed_tools: if allow_tools.is_empty() {
             None
         } else {

@@ -175,7 +175,7 @@ EmitRunningNotification(attempt_id, fence, notification_id, idempotency_key, run
     /\ notification_idempotency_keys' = (notification_idempotency_keys \cup {idempotency_key})
     /\ notification_id_by_key' = MapSet(notification_id_by_key, idempotency_key, notification_id)
     /\ notification_delivery_ids' = MapSet(notification_delivery_ids, notification_id, runtime_delivery_id)
-    /\ notification_sequences' = MapSet(notification_sequences, notification_id, (delivery_sequence) + 1)
+    /\ notification_sequences' = MapSet(notification_sequences, notification_id, ((delivery_sequence) + 1))
     /\ UnchangedFrame_62df8988a689d1a1
 
 
@@ -189,7 +189,7 @@ EmitExternalWaitNotification(attempt_id, fence, notification_id, idempotency_key
     /\ notification_idempotency_keys' = (notification_idempotency_keys \cup {idempotency_key})
     /\ notification_id_by_key' = MapSet(notification_id_by_key, idempotency_key, notification_id)
     /\ notification_delivery_ids' = MapSet(notification_delivery_ids, notification_id, runtime_delivery_id)
-    /\ notification_sequences' = MapSet(notification_sequences, notification_id, (delivery_sequence) + 1)
+    /\ notification_sequences' = MapSet(notification_sequences, notification_id, ((delivery_sequence) + 1))
     /\ UnchangedFrame_62df8988a689d1a1
 
 

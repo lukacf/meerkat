@@ -18,7 +18,8 @@ use meerkat_core::authorization::{
 use meerkat_core::{
     AgentLlmClient, AuthBindingRef, AuthCredentialIdentity, AuthMetadata, BackendProfile,
     BindingId, BindingOrigin, Config, HttpAuthorizer, LlmRequestAuthorization, Message,
-    ModelRegistry, OperationId, Provider, RealmId, SessionLlmIdentity, UserMessage,
+    ModelRegistry, OperationId, Provider, RealmId, SessionLlmIdentity, ToolChoice, ToolDef,
+    UserMessage,
 };
 use meerkat_llm_core::provider_runtime::binding::{
     DynamicLease, NormalizedBackendKind, ResolvedConnection, ResolvedTextTarget,
@@ -26,6 +27,7 @@ use meerkat_llm_core::provider_runtime::binding::{
 use meerkat_llm_core::provider_runtime::registry::ProviderRuntimeRegistry;
 use meerkat_llm_core::{
     LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, PreparedLlmRequest,
+    ToolChoiceRefusal,
 };
 use serde_json::Value;
 use tokio::sync::Notify;
@@ -199,6 +201,8 @@ struct ServerState {
     bodies: Arc<Mutex<Vec<Value>>>,
     status: StatusCode,
     redirect: Option<String>,
+    content_type: &'static str,
+    response_body: &'static str,
 }
 struct Server {
     url: String,
@@ -211,11 +215,21 @@ impl Drop for Server {
     }
 }
 async fn serve(status: StatusCode, redirect: Option<String>) -> Server {
+    serve_response(status, redirect, "text/event-stream", SSE).await
+}
+async fn serve_response(
+    status: StatusCode,
+    redirect: Option<String>,
+    content_type: &'static str,
+    response_body: &'static str,
+) -> Server {
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let state = ServerState {
         bodies: Arc::clone(&bodies),
         status,
         redirect,
+        content_type,
+        response_body,
     };
     let app = Router::new()
         .route(
@@ -223,7 +237,11 @@ async fn serve(status: StatusCode, redirect: Option<String>) -> Server {
             post(
                 |State(state): State<ServerState>, Json(body): Json<Value>| async move {
                     state.bodies.lock().unwrap().push(body);
-                    let mut response = (state.status, [("content-type", "text/event-stream")], SSE)
+                    let mut response = (
+                        state.status,
+                        [("content-type", state.content_type)],
+                        state.response_body,
+                    )
                         .into_response();
                     if let Some(location) = state.redirect {
                         response
@@ -825,4 +843,216 @@ async fn authority_unavailable_before_prepare_or_after_auth_never_sends() {
             "only new explicit healthy action sends"
         );
     }
+}
+
+fn forced_request(client: &dyn LlmClient, policy: Arc<Policy>) -> PreparedLlmRequest {
+    let prepared = request(client, policy);
+    prepared.with_lowered_request(
+        prepared
+            .request()
+            .clone()
+            .with_tools(vec![Arc::new(ToolDef {
+                name: "lookup".to_owned(),
+                description: "Synthetic lookup tool".to_owned(),
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                provenance: None,
+            })])
+            .with_tool_choice(ToolChoice::Tool {
+                name: "lookup".to_owned(),
+            }),
+    )
+}
+
+#[tokio::test]
+async fn prepared_forced_choice_rechecks_final_authority_before_http() {
+    for revoke_on_entry in [false, true] {
+        let server = serve(StatusCode::OK, None).await;
+        let policy = Policy::new();
+        policy
+            .revoke_on_entry
+            .store(revoke_on_entry, Ordering::SeqCst);
+        let authorizer = Authorizer::new(false, None);
+        let selected = client(&server.url, Arc::clone(&authorizer));
+        let prepared = forced_request(selected.as_ref(), Arc::clone(&policy));
+        let events = collect(selected.as_ref(), &prepared).await;
+
+        assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1);
+        let facts = policy.facts.lock().unwrap();
+        assert_eq!(facts.len(), 1, "one actual selected-target preparation");
+        assert_eq!(facts[0].wire_model.as_ref(), MODEL);
+        assert_eq!(
+            facts[0].endpoint.as_ref(),
+            format!("{}/v1/messages", server.url)
+        );
+        assert_eq!(
+            facts[0].credential,
+            Some(AuthCredentialIdentity::Binding(binding()))
+        );
+        assert!(facts[0].hosted_capabilities.is_empty());
+        let bodies = server.bodies.lock().unwrap();
+        let observations = policy.observations.lock().unwrap();
+        if revoke_on_entry {
+            assert!(
+                bodies.is_empty(),
+                "no send after final authority revocation"
+            );
+            assert!(
+                matches!(
+                    events.iter().find_map(stream_error),
+                    Some(LlmError::OperationRefused { refusal })
+                        if refusal.kind() == OperationRefusalKind::Denied
+                ),
+                "{events:?}"
+            );
+            assert!(matches!(
+                observations.as_slice(),
+                [
+                    OperationObservation::Entry,
+                    OperationObservation::Refused(OperationRefusalKind::Denied),
+                ]
+            ));
+        } else {
+            assert!(
+                events.iter().all(|event| stream_error(event).is_none()),
+                "{events:?}"
+            );
+            assert!(matches!(
+                events.last(),
+                Some(Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { .. }
+                }))
+            ));
+            assert_eq!(
+                bodies.len(),
+                1,
+                "healthy forced request reaches the same receiver"
+            );
+            assert_eq!(bodies[0]["model"], MODEL);
+            assert_eq!(
+                bodies[0]["tool_choice"],
+                serde_json::json!({"type": "tool", "name": "lookup"})
+            );
+            assert_eq!(bodies[0]["tools"].as_array().unwrap().len(), 1);
+            assert_eq!(bodies[0]["tools"][0]["name"], "lookup");
+            assert!(matches!(
+                observations.as_slice(),
+                [
+                    OperationObservation::Entry,
+                    OperationObservation::Outcome(OperationObservedOutcome::HttpResponse {
+                        status: 200
+                    })
+                ]
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn prepared_forced_choice_with_thinking_refuses_before_auth_or_http() {
+    let server = serve(StatusCode::OK, None).await;
+    let policy = Policy::new();
+    let authorizer = Authorizer::new(false, None);
+    let selected = client(&server.url, Arc::clone(&authorizer));
+    let prepared = forced_request(selected.as_ref(), Arc::clone(&policy));
+    let prepared =
+        prepared.with_lowered_request(prepared.request().clone().with_anthropic_tag_merge(|tag| {
+            tag.thinking =
+                Some(meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Adaptive);
+        }));
+    let events = collect(selected.as_ref(), &prepared).await;
+    let errors: Vec<_> = events.iter().filter_map(stream_error).collect();
+    assert_eq!(errors.len(), 1, "{events:?}");
+    assert!(
+        matches!(
+            errors[0],
+            LlmError::ToolChoiceUnsupported {
+                provider,
+                choice: ToolChoice::Tool { name },
+                reason: ToolChoiceRefusal::ForcedToolWithThinking,
+            } if provider == "anthropic" && name == "lookup"
+        ),
+        "{events:?}"
+    );
+    assert!(!errors[0].is_retryable());
+    assert!(
+        !refused(&events),
+        "a request-shape refusal is not policy denial"
+    );
+    assert_eq!(authorizer.calls.load(Ordering::SeqCst), 0);
+    assert!(policy.facts.lock().unwrap().is_empty());
+    assert!(policy.observations.lock().unwrap().is_empty());
+    assert!(server.bodies.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn prepared_forced_choice_provider_rejection_keeps_http_outcome_and_typed_error() {
+    let server = serve_response(
+        StatusCode::BAD_REQUEST,
+        None,
+        "application/json",
+        r#"{"type":"error","error":{"type":"invalid_request_error","message":"tool_choice: type \"tool\" and \"any\" are not supported for this model."}}"#,
+    )
+    .await;
+    let policy = Policy::new();
+    let authorizer = Authorizer::new(false, None);
+    let selected = client(&server.url, Arc::clone(&authorizer));
+    let prepared = forced_request(selected.as_ref(), Arc::clone(&policy));
+    let events = collect(selected.as_ref(), &prepared).await;
+    let errors: Vec<_> = events.iter().filter_map(stream_error).collect();
+    assert_eq!(errors.len(), 1, "{events:?}");
+    assert!(
+        matches!(
+            errors[0],
+            LlmError::ToolChoiceUnsupported {
+                provider,
+                choice: ToolChoice::Tool { name },
+                reason: ToolChoiceRefusal::ModelDoesNotSupportForcedToolChoice,
+            } if provider == "anthropic" && name == "lookup"
+        ),
+        "{events:?}"
+    );
+    assert!(!errors[0].is_retryable());
+    assert!(
+        !refused(&events),
+        "provider rejection must not become policy denial"
+    );
+    assert!(
+        events.iter().all(|event| !matches!(
+            event,
+            Ok(LlmEvent::ToolCallDelta { .. } | LlmEvent::ToolCallComplete { .. })
+        )),
+        "a rejected request must not synthesize a tool dispatch: {events:?}"
+    );
+    assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1, "no auth retry");
+    let bodies = server.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1, "one physical rejected request, no retry");
+    assert_eq!(bodies[0]["model"], MODEL);
+    assert_eq!(
+        bodies[0]["tool_choice"],
+        serde_json::json!({"type": "tool", "name": "lookup"})
+    );
+    let facts = policy.facts.lock().unwrap();
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].wire_model.as_ref(), MODEL);
+    assert_eq!(
+        facts[0].endpoint.as_ref(),
+        format!("{}/v1/messages", server.url)
+    );
+    assert_eq!(
+        facts[0].credential,
+        Some(AuthCredentialIdentity::Binding(binding()))
+    );
+    assert!(facts[0].hosted_capabilities.is_empty());
+    assert!(
+        matches!(
+            policy.observations.lock().unwrap().as_slice(),
+            [
+                OperationObservation::Entry,
+                OperationObservation::Outcome(OperationObservedOutcome::HttpResponse {
+                    status: 400
+                })
+            ]
+        ),
+        "the real HTTP outcome must not be rewritten as a Refused observation"
+    );
 }

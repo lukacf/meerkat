@@ -423,9 +423,18 @@ case "${lane}" in
     configure_nested_cargo_workspace
     export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
     export_mcp_test_server_fixture
+    # Profile ci-unit, not default: the default profile has no slow-timeout,
+    # so a lib test that hung in the remote sandbox ran until the 3000 s GCP
+    # SLO watchdog killed the whole batch and named nothing (v0.8.50 run
+    # 36941270028: still running after 2680 s remote, while the same command
+    # takes 356 s of tests locally and the lane took about 1200 s through
+    # v0.8.47). ci-unit inherits default (overrides included) and kills a test
+    # after four slow periods (the xtask workflow test has eight), so a hang
+    # fails as a named TIMEOUT that the submitter log prints; status level
+    # slow keeps the slow tests visible in that output.
     "${CARGO_NEXTEST}" nextest run --workspace \
-      -E 'kind(lib)' --no-tests=fail --no-fail-fast \
-      --show-progress none --status-level none --final-status-level fail
+      --profile ci-unit -E 'kind(lib)' --no-tests=fail --no-fail-fast \
+      --show-progress none --status-level slow --final-status-level slow
     ;;
   integration-fast)
     configure_rust "${host_rust_toolchain}"
@@ -433,9 +442,12 @@ case "${lane}" in
     configure_nested_cargo_workspace
     export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
     export_mcp_test_server_fixture
+    # Profile ci-integration: `fast` plus a kill bound (see .config/nextest.toml),
+    # so a hang fails as a named TIMEOUT instead of eating the SLO; status level
+    # slow keeps the slow tests visible in the submitter log.
     "${CARGO_NEXTEST}" nextest run --workspace \
-      --profile fast -E 'kind(test)' --no-tests=fail --no-fail-fast \
-      --show-progress none --status-level none --final-status-level fail
+      --profile ci-integration -E 'kind(test)' --no-tests=fail --no-fail-fast \
+      --show-progress none --status-level slow --final-status-level slow
     ;;
   release-validate)
     configure_rust "${host_rust_toolchain}"

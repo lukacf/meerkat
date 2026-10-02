@@ -1,5 +1,76 @@
 # ADR-001 implementation checkpoint
 
+## Current first-native-path acceptance, 2026-10-02
+
+Root and independent raw review accepted the narrow R7 gate: 14 selected,
+14 PASS, zero failures, ignored tests or timeouts, on source
+`f7e871a46296a2c494cb748780db86957675d39e`. This covers 11 custody/cancellation
+controls, two governed JSONL tests and one MCP unsupported-profile control;
+historical gate counts are not included.
+
+The first supported slice is fixed-host, single-connection JSONL with stock
+memory-backed persistence for the process lifetime. Real loopback model HTTP,
+model-visible tool refusal, a permitted callback and same-run completion pass
+with retained actor/seed/context and stored history/audit. The MCP control
+proves refusal before setup, not governed MCP support. See the
+[native embedding guide](../../../rust/native-authorization.mdx) for the exact
+realm, selected-client and fixed-registry configuration.
+
+R7 evidence is retained under
+`/Users/luka/.codex/adr-001-evidence/gcp-native-governed-jsonl-r7-20261002`,
+seal `68c703166c141ad2b46fe6752ff459fb43dc828a265ca27263904968719ad45e`.
+Schema R2 and module metadata acceptance are separate, source-qualified gates.
+Clean checkpoint `11b3b77912bd7c6511f3d26f7f2a1b81087948e0` normally merges main
+without an authorization-code change; it does not establish a new aggregate
+runtime result.
+
+The accepted R4 optimized build and two correctness smokes cover historical
+source `455d0e3b6bb143a53017392b203df49af2b518cc`, not the final publication
+candidate. Their receipt is
+`/Users/luka/.codex/adr-001-evidence/gcp-native-cost-build-smoke-r4-20261002/root-acceptance.json`.
+Before a fresh measurement grant, the final publication candidate must have
+its own exact-source optimized build and both correctness smokes. Performance
+remains unproven. Window `W-minimal-20261002-1` was not granted and was cancelled
+at 2026-10-02 11:19:43 UTC; zero measurements ran. Native publication comes
+first, followed by a fresh minimal full-host window after the native PR push.
+Representative measurement follows later with its own lock and reserved cores.
+
+Separately, root and independent review accepted 47 Console backend tests on
+`1966cb3ce2ce97988a3381932f362a739377bebf`, zero failed or ignored. Composed
+backend/UI tree `6f8cf3d3e52736489fb6c2bfd98bc3b8f3271511` builds and exactly
+reproduces its assets; canonical HEAD freshness remains unaccepted until a
+normal commit supplies the matching baseline. These candidates are not
+published and do not establish integrated UI/backend network E2E acceptance.
+PR520's earlier green CI belongs to old `8ebe2cb9`; its current conflicts and
+rebase remain reserved after PR541, PR542 and release 0.8.45. It is not CI for
+the accepted new candidates.
+
+The PR targets `release/0.8.51`. Only the no-wedge fix, TLA precedence fix and
+a demonstrated mandatory tip CI blocker may precede it; other queued PRs are
+held behind it. The reserved release tip is
+`178f137543d532820cbe1f9013a25de93975de10`. At source preparation, the merge is
+resolved; canonical generation, merged-source tests, normal publication hooks
+and required PR CI remain pending. This source preparation is not a native
+PR or CI result.
+
+The separate persistent controller-administration extension passed eight focused
+tests on `8f65c1364395f7f91c477134b859069b64e2132b`: the unchanged real JSONL
+scenario, four native custody controls and three memory-store controls. Root and
+independent raw review accepted matching source/binary identities and all eight
+passes, with no ignored tests or timeouts. The initial candidate on `c20172`
+had returned `Unavailable` instead of `ControllerInUse`; the repair joins the
+initial empty Idle checkpoint to the actual live owner without adding hot-path
+persistence. The original failure and diagnostic evidence remain preserved.
+The accepted result is under
+`/Users/luka/.codex/adr-001-evidence/gcp-native-s3-persistent-admin-green-r2-20261002`.
+This source candidate remains outside the first publication checkpoint. It
+covers loaded owners with the stock memory store, not SQLite or process restart,
+and must be revalidated when integrated after publication. SQLite/restart,
+broader surfaces, performance and full five-story/37-checkpoint ADR coverage
+remain required next slices. Earlier
+records retain their historical source and scope; this section supersedes
+only their first-native-path and publication status.
+
 ## Scope change, 2026-10-01
 
 The owner explicitly approved replacing the previous first-profile requirements
@@ -10,7 +81,7 @@ blanket requirement to finish parked high-assurance work before delivery.
 Existing source/test claims below retain their exact historical scope. They
 do not establish an implemented local governed path.
 
-## Current integration and publication checkpoint, 2026-10-01
+## Earlier integration and publication checkpoint, 2026-10-01
 
 The integrated donor remains `meerkat-native-governed-m1` on
 `codex/local-governed-default`. Its frozen audit/SDK checkpoint is unchanged:

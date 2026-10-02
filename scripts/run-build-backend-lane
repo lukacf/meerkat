@@ -41,8 +41,8 @@ use_standard_rust_test_stack() {
   export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
 }
 
-# meerkat-mcp's form-elicitation integration tests spawn the exact
-# mcp-test-server binary named here (Bazel sets it from runfiles).
+# Tests of crates that dev-depend on mcp-test-server spawn the exact fixture
+# binary named here and fail without it (Bazel sets it from runfiles).
 export_mcp_test_server_fixture() {
   MEERKAT_MCP_TEST_SERVER="$(CARGO="${cargo_bin}" "${root}/scripts/mcp-test-server-fixture")"
   export MEERKAT_MCP_TEST_SERVER
@@ -211,6 +211,7 @@ case "${lane}" in
       exec "${root}/scripts/buildbuddy-dev" test-unit
     fi
     use_standard_rust_test_stack
+    export_mcp_test_server_fixture
     exec "${cargo_bin}" nextest run --workspace --lib --show-progress none --status-level none --final-status-level fail
     ;;
   test-int)

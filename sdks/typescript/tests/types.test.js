@@ -6106,3 +6106,84 @@ describe("settlement history strict validation", () => {
     assert.equal(rewritten.results[0].is_error, false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Turn tool-choice plan reaches the wire on every turn path
+// ---------------------------------------------------------------------------
+
+describe("turn tool-choice plan", () => {
+  const plan = [
+    { mode: "tool", name: "deny_action" },
+    { mode: "required" },
+    { mode: "auto" },
+  ];
+  const overlay = { allowedTools: ["read"], toolChoicePlan: plan };
+  const runResult = {
+    session_id: "s1",
+    text: "ok",
+    turns: 1,
+    tool_calls: 0,
+    usage: { input_tokens: 1, output_tokens: 1 },
+  };
+
+  it("serializes tool_choice_plan on the normal and streaming turn payloads", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return runResult;
+    };
+    const writes = [];
+    client.process = { stdin: { write: (data) => writes.push(data) } };
+    client.registerRequest = async () => runResult;
+
+    await client._startTurn("s1", "go", { turnToolOverlay: overlay });
+    client._startTurnStreaming("s1", "go", { turnToolOverlay: overlay });
+
+    const expected = {
+      allowed_tools: ["read"],
+      blocked_tools: undefined,
+      tool_choice_plan: plan,
+    };
+    assert.equal(calls[0].method, "turn/start");
+    assert.deepEqual(calls[0].params.turn_tool_overlay, expected);
+    const streamed = JSON.parse(writes[0]);
+    assert.equal(streamed.method, "turn/start");
+    assert.deepEqual(streamed.params.turn_tool_overlay, {
+      allowed_tools: ["read"],
+      tool_choice_plan: plan,
+    });
+  });
+
+  it("serializes tool_choice_plan on the mob turn payload", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return { mob_id: "mob-1", agent_identity: "worker-1", status: "accepted" };
+    };
+    await client.mobTurnStart("mob-1", "worker-1", "go", { turnToolOverlay: overlay });
+    assert.equal(calls[0].method, "mob/turn_start");
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(calls[0].params.turn_tool_overlay)),
+      { allowed_tools: ["read"], tool_choice_plan: plan },
+    );
+  });
+
+  it("keeps an overlay without a plan unchanged on the wire", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return runResult;
+    };
+    await client._startTurn("s1", "go", {
+      turnToolOverlay: { allowedTools: ["read"], blockedTools: [] },
+    });
+    assert.deepEqual(calls[0].params.turn_tool_overlay, {
+      allowed_tools: ["read"],
+      blocked_tools: [],
+    });
+    assert.equal("tool_choice_plan" in calls[0].params.turn_tool_overlay, false);
+  });
+});

@@ -193,6 +193,11 @@ const MEMBER_PROGRESS_OBSERVATION_TIMEOUT: Duration = Duration::from_millis(250)
 /// unbounded handoff here would prevent those authoritative cleanup steps
 /// from ever running.
 const RETIRE_PEER_LIFECYCLE_NOTICE_TIMEOUT: Duration = Duration::from_millis(250);
+/// Hang guard for one member's held supervisor-rotation observation. The
+/// member answers when the operation is terminal, so success returns at that
+/// transition; the guard bounds a member that never settles and leaves half
+/// for the retained-authority read that can see a rejection.
+const ROTATION_OBSERVE_HOLD_GUARD: Duration = Duration::from_secs(10);
 
 /// Actor-owned task termination policy at a `JoinError` boundary.
 ///
@@ -17213,6 +17218,9 @@ impl MobActor {
                     agent_identity = %agent_identity,
                     "skipping parked delivery whose caller dropped its reply receiver"
                 );
+                #[cfg(test)]
+                self.member_admission_backlog
+                    .record_abandoned_skip(agent_identity);
                 continue;
             }
             next = Some(parked);
@@ -27612,12 +27620,12 @@ impl MobActor {
         }
         self.drain_completed_actor_io_tasks();
         self.drain_completed_peer_delivery_tasks();
-        if Box::pin(self.continue_retirement_batch_after_settlement()).await {
+        if boxed_arm_future(|| self.continue_retirement_batch_after_settlement()).await {
             return ActorLoopWakeSelection::Continue;
         }
-        Box::pin(self.continue_resume_topology_after_prior_owners()).await;
+        boxed_arm_future(|| self.continue_resume_topology_after_prior_owners()).await;
         self.start_graph_gated_effects();
-        Box::pin(self.tick_spawn_activation_custody()).await;
+        boxed_arm_future(|| self.tick_spawn_activation_custody()).await;
         self.resume_parked_member_reloads_if_allowed();
         if let Err(error) = self.drain_completed_lifecycle_tasks() {
             tracing::warn!(
@@ -27627,7 +27635,7 @@ impl MobActor {
             );
             self.retain_lifecycle_delivery_error(error);
         }
-        self.drain_completed_member_live_mutations().await;
+        boxed_arm_future(|| self.drain_completed_member_live_mutations()).await;
         if self.durable_uncertainty_fail_stop {
             return ActorLoopWakeSelection::Continue;
         }
@@ -27717,12 +27725,13 @@ impl MobActor {
                 if member_live_mutation_pending =>
             {
                 if let Some(joined) = joined
-                    && let Err(error) = self
-                        .reconcile_joined_member_live_mutation(
+                    && let Err(error) = boxed_arm_future(|| {
+                        self.reconcile_joined_member_live_mutation(
                             joined,
                             MemberLiveReconcileMode::Background,
                         )
-                        .await
+                    })
+                    .await
                 {
                     tracing::warn!(
                         mob_id = %self.definition.id,
@@ -27734,13 +27743,13 @@ impl MobActor {
             }
             joined = self.wiring_io_tasks.join_next(), if wiring_io_pending => {
                 if let Some(joined) = joined {
-                    self.reconcile_joined_wiring_io(joined).await;
+                    boxed_arm_future(|| self.reconcile_joined_wiring_io(joined)).await;
                 }
                 return ActorLoopWakeSelection::Continue;
             }
             joined = self.member_effect_tasks.join_next(), if member_effect_pending => {
                 if let Some(joined) = joined {
-                    self.reconcile_joined_member_effect(joined).await;
+                    boxed_arm_future(|| self.reconcile_joined_member_effect(joined)).await;
                 }
                 return ActorLoopWakeSelection::Continue;
             }
@@ -27757,12 +27766,14 @@ impl MobActor {
                         return ActorLoopWakeSelection::BreakActor;
                     }
                     RegularActorWake::HostStatusPoll => {
-                        self.spawn_periodic_host_status_polls(host_status_polls_in_flight)
-                            .await;
+                        boxed_arm_future(|| {
+                            self.spawn_periodic_host_status_polls(host_status_polls_in_flight)
+                        })
+                        .await;
                         return ActorLoopWakeSelection::Continue;
                     }
                     RegularActorWake::IdentityReconcile => {
-                        self.reconcile_next_identity(identity_session_witnesses).await;
+                        boxed_arm_future(|| self.reconcile_next_identity(identity_session_witnesses)).await;
                         return ActorLoopWakeSelection::Continue;
                     }
                     RegularActorWake::IdentityBackoffDeadline => {
@@ -27770,7 +27781,7 @@ impl MobActor {
                         return ActorLoopWakeSelection::Continue;
                     }
                     RegularActorWake::IdentitySafetyScan => {
-                        self.enqueue_next_identity_intent_safety_page().await;
+                        boxed_arm_future(|| self.enqueue_next_identity_intent_safety_page()).await;
                         return ActorLoopWakeSelection::Continue;
                     }
                 }
@@ -27882,7 +27893,7 @@ impl MobActor {
         // projection. Every cold actor incarnation starts by reading the sole
         // durable intent authority and scheduling one level-triggered pass per
         // identity.
-        self.enqueue_all_identity_intents().await;
+        boxed_arm_future(|| self.enqueue_all_identity_intents()).await;
         let mut deferred_commands: VecDeque<RoutedMobCommand> = VecDeque::new();
         let mut host_status_polls_in_flight = BTreeSet::new();
         // Run-scoped converged session witnesses: volatile by construction, so
@@ -27915,7 +27926,7 @@ impl MobActor {
                     mob_id = %self.definition.id,
                     "durable mutation outcome remained uncertain; crash-quiescing and terminating mob actor for cold replay"
                 );
-                self.quiesce_volatile_producers_after_fail_stop().await;
+                boxed_arm_future(|| self.quiesce_volatile_producers_after_fail_stop()).await;
                 command_rx.close();
                 break;
             }
@@ -28025,8 +28036,10 @@ impl MobActor {
                     };
                     if self.pending_resume_controls.is_empty()
                         && let Some(intent) = intent
-                        && let Err(error) =
-                            self.begin_placed_completion_lifecycle_quiesce(intent).await
+                        && let Err(error) = boxed_arm_future(|| {
+                            self.begin_placed_completion_lifecycle_quiesce(intent)
+                        })
+                        .await
                     {
                         cmd.reject_with_error(error);
                         continue;
@@ -28089,7 +28102,7 @@ impl MobActor {
                     mob_id = %self.definition.id,
                     "durable mutation outcome remained uncertain; crash-quiescing and terminating mob actor for cold replay"
                 );
-                self.quiesce_volatile_producers_after_fail_stop().await;
+                boxed_arm_future(|| self.quiesce_volatile_producers_after_fail_stop()).await;
                 // Publish channel closure only after volatile producers and
                 // listeners are fully quiescent. A caller observing
                 // `ActorCommandChannelClosed` can therefore safely construct
@@ -28116,7 +28129,7 @@ impl MobActor {
                 continue;
             }
             loop {
-                let result = self.flush_routed_effects().await;
+                let result = boxed_arm_future(|| self.flush_routed_effects()).await;
                 match Self::classify_actor_boundary_flush(result) {
                     ActorBoundaryFlushDisposition::Drained => break,
                     ActorBoundaryFlushDisposition::RetryAfterMachineClosure(error) => {
@@ -28146,7 +28159,7 @@ impl MobActor {
         // execution tables, making this idempotent; abnormal paths must also
         // abort run, pending-spawn, and autonomous-turn producers before the
         // actor object (and its command receiver) is dropped.
-        self.quiesce_volatile_producers_after_fail_stop().await;
+        boxed_arm_future(|| self.quiesce_volatile_producers_after_fail_stop()).await;
         #[cfg(any(test, feature = "test-support"))]
         let crash_stop_reply_tx = self.crash_stop_reply_tx.take();
         // Process death releases actor-owned runtime adapters and their inproc
@@ -30729,18 +30742,25 @@ impl MobActor {
                 &panic_mob_id,
                 "spawn provisioning task",
                 &panic_member_identity,
-                async {
+                // Box the guarded provisioning future in its own frame: built by
+                // value it transits this task's poll frame and the guard's at
+                // full size (#1462).
+                meerkat_runtime::stack_relief::box_in_own_frame(|| async {
                     let provision_result: Result<_, MobError> = async {
                         // Deferred-resume request preparation (resume verdict,
                         // config build) shares the spawn-preparation bound so a
                         // cold-boot burst cannot run unbounded durable reads.
                         let preparation_permit =
                             spawn_preparation_permits.acquire_owned().await.ok();
-                        let provision_request =
-                            provision_input.into_request(session_service).await?;
+                        let provision_request = meerkat_runtime::stack_relief::box_in_own_frame(
+                            || provision_input.into_request(session_service),
+                        )
+                        .await?;
                         drop(preparation_permit);
-                        let spawn_receipt =
-                            provisioner.provision_member(provision_request).await?;
+                        let spawn_receipt = meerkat_runtime::stack_relief::box_in_own_frame(
+                            || provisioner.provision_member(provision_request),
+                        )
+                        .await?;
                         if let Some(bridge_session_id) =
                             spawn_receipt.member_ref.bridge_session_id().cloned()
                         {
@@ -30781,7 +30801,7 @@ impl MobActor {
                     }
                     .await;
                     Ok::<_, MobError>(provision_result)
-                },
+                }),
             )
             .await;
             let provision_result = match guarded_provision {
@@ -33593,7 +33613,7 @@ impl MobActor {
                 "remote spawn found an existing session binding",
             )
             .await;
-            return Err(self.fail_remote_spawn_exec(
+            return Err(boxed_arm_future(|| self.fail_remote_spawn_exec(
                 agent_identity,
                 &remote.pending_carrier,
                 true,
@@ -33602,7 +33622,7 @@ impl MobActor {
                 )),
                 "commit_refused_replacing_present".to_string(),
                 "finalize_spawn_admit_remote_replacing",
-            ).await);
+            )).await);
         }
         tracing::debug!(
             agent_identity = %agent_identity,
@@ -33682,8 +33702,8 @@ impl MobActor {
                 &remote.ack.member_peer,
                 "remote_spawn_member_trust",
             ) {
-                let failure = self
-                    .fail_remote_spawn_exec(
+                let failure = boxed_arm_future(|| {
+                    self.fail_remote_spawn_exec(
                         agent_identity,
                         &remote.pending_carrier,
                         true,
@@ -33691,7 +33711,8 @@ impl MobActor {
                         "member_trust_install_failed".to_string(),
                         "finalize_spawn_admit_remote_trust_obligation",
                     )
-                    .await;
+                })
+                .await;
                 self.consume_spawn_provision_failure(
                     provision,
                     true,
@@ -33708,14 +33729,15 @@ impl MobActor {
             {
                 Ok(install) => Some(install),
                 Err(error) => {
-                    let failure = self
-                        .fail_remote_spawn_exec_after_recipient_trust_error(
+                    let failure = boxed_arm_future(|| {
+                        self.fail_remote_spawn_exec_after_recipient_trust_error(
                             agent_identity,
                             &remote.pending_carrier,
                             error,
                             &remote.ack.member_peer,
                         )
-                        .await;
+                    })
+                    .await;
                     self.consume_spawn_provision_failure(
                         provision,
                         true,
@@ -33783,8 +33805,8 @@ impl MobActor {
                     } else {
                         "host_engine_version_changed".to_string()
                     };
-                    let failure = self
-                        .fail_remote_spawn_exec_after_recipient_trust(
+                    let failure = boxed_arm_future(|| {
+                        self.fail_remote_spawn_exec_after_recipient_trust(
                             agent_identity,
                             &remote.pending_carrier,
                             error,
@@ -33793,7 +33815,8 @@ impl MobActor {
                             &remote.ack.member_peer,
                             remote_recipient_trust_install,
                         )
-                        .await;
+                    })
+                    .await;
                     self.consume_spawn_provision_failure(
                         provision,
                         true,
@@ -33833,8 +33856,8 @@ impl MobActor {
             "finalize_spawn_admit_commit_membership",
         ) {
             if let Some(remote) = ctx.remote.as_ref() {
-                let failure = self
-                    .fail_remote_spawn_exec_after_recipient_trust(
+                let failure = boxed_arm_future(|| {
+                    self.fail_remote_spawn_exec_after_recipient_trust(
                         agent_identity,
                         &remote.pending_carrier,
                         error,
@@ -33843,7 +33866,8 @@ impl MobActor {
                         &remote.ack.member_peer,
                         remote_recipient_trust_install,
                     )
-                    .await;
+                })
+                .await;
                 self.consume_spawn_provision_failure(
                     provision,
                     true,
@@ -33873,14 +33897,15 @@ impl MobActor {
         );
 
         if let Some(remote) = ctx.remote.as_ref() {
-            let persist_result = self
-                .persist_placed_spawn_commit_exact(
+            let persist_result = boxed_arm_future(|| {
+                self.persist_placed_spawn_commit_exact(
                     &remote.pending_carrier,
                     &remote.ack,
                     &ctx.operation_id,
                     &prepared_spawn.transition,
                 )
-                .await;
+            })
+            .await;
             if let Err(error) = persist_result {
                 if self.durable_uncertainty_fail_stop {
                     // CAS may have committed.  Preserve durable ownership for
@@ -33889,8 +33914,8 @@ impl MobActor {
                     let _member_ref = provision.commit()?;
                     return Err(error);
                 }
-                let failure = self
-                    .fail_remote_spawn_exec_after_recipient_trust(
+                let failure = boxed_arm_future(|| {
+                    self.fail_remote_spawn_exec_after_recipient_trust(
                         agent_identity,
                         &remote.pending_carrier,
                         error,
@@ -33899,7 +33924,8 @@ impl MobActor {
                         &remote.ack.member_peer,
                         remote_recipient_trust_install,
                     )
-                    .await;
+                })
+                .await;
                 self.consume_spawn_provision_failure(
                     provision,
                     true,
@@ -33966,8 +33992,10 @@ impl MobActor {
             spawned.fork_job = ctx.fork_job.clone();
             spawned.fork_source = ctx.fork_source.clone();
             spawned.fork_overlay = ctx.fork_overlay;
-            self.append_committed_placed_event_exact(MobEventKind::MemberSpawned(spawned))
-                .await?;
+            boxed_arm_future(|| {
+                self.append_committed_placed_event_exact(MobEventKind::MemberSpawned(spawned))
+            })
+            .await?;
             self.restore_diagnostics
                 .write()
                 .await
@@ -34131,12 +34159,13 @@ impl MobActor {
         spawned_event.fork_source = ctx.fork_source.clone();
         spawned_event.fork_overlay = ctx.fork_overlay;
         spawned_event = spawned_event.with_placed_spawn_id(None);
-        if let Err(append_error) = self
-            .append_member_spawned_with_identity_fence(
+        if let Err(append_error) = boxed_arm_future(|| {
+            self.append_member_spawned_with_identity_fence(
                 ctx.identity_member_permit.as_ref(),
                 spawned_event,
             )
-            .await
+        })
+        .await
         {
             if overlay_record.is_some() {
                 let _ = self
@@ -50715,13 +50744,15 @@ impl MobActor {
                     "supervisor rotation operation {operation_id} has no durable target for peer '{peer_id}'"
                 ))
             })?;
-            let next_observe_command =
+            let build_next_observe = |hold_until_terminal_ms: Option<u64>| {
                 BridgeCommand::ObserveSupervisorRotation(BridgeSupervisorRotationObserve {
                     operation_id,
                     observer: expected_target.clone(),
                     observer_epoch: next.epoch,
                     protocol_version: next.protocol_version,
-                });
+                    hold_until_terminal_ms,
+                })
+            };
             let retained_observer = self
                 .supervisor_bridge
                 .supervisor_spec_for_authority_and_recipient(&stable_current, peer)
@@ -50732,8 +50763,21 @@ impl MobActor {
                     observer: retained_observer.into(),
                     observer_epoch: stable_current.epoch,
                     protocol_version: next.protocol_version,
+                    hold_until_terminal_ms: None,
                 });
-            let observation_window = if cfg!(test) {
+            // A member that implements held observation answers the
+            // attempted-authority read when the operation is terminal: no
+            // polling, and the window below is only a hang guard. Offer it
+            // unless the member is known not to implement it; a member whose
+            // capabilities were stale or never advertised rejects the hold
+            // with the typed `Unsupported` cause and falls back. Members that
+            // predate the extension keep the single-shot observation loop
+            // (the compatibility path), with its historic window.
+            let mut hold =
+                self.supervisor_bridge.peer_rotation_observe_hold(&peer_id) != Some(false);
+            let observation_window = if hold {
+                ROTATION_OBSERVE_HOLD_GUARD
+            } else if cfg!(test) {
                 std::time::Duration::from_secs(1)
             } else {
                 std::time::Duration::from_secs(5)
@@ -50744,19 +50788,33 @@ impl MobActor {
                 |error| format!("one-way submission was not delivered: {error}"),
             );
             let mut legacy_adoption_submitted = false;
+            let mut observed_found = false;
             let completed = loop {
                 let now = Instant::now();
                 if now >= deadline {
                     break false;
                 }
+                // Legacy detection needs a prompt NotFound: probe single-shot
+                // until the operation has been seen or adopted, then hold.
+                let held = hold
+                    && !(accepted_before_observation
+                        && !legacy_adoption_submitted
+                        && !observed_found);
                 // Reserve half of the remaining observation window for the
                 // retained-authority read. A rejected attempted authority can
                 // consume its whole request timeout without returning a typed
-                // rejection because it has no reply route.
-                let request_timeout = std::cmp::min(
-                    deadline.saturating_duration_since(now) / 2,
-                    std::time::Duration::from_millis(500),
-                );
+                // rejection because it has no reply route. A held read asks
+                // the member to answer well inside its own request timeout.
+                let remaining = deadline.saturating_duration_since(now);
+                let request_timeout = if held {
+                    remaining / 2
+                } else {
+                    std::cmp::min(remaining / 2, std::time::Duration::from_millis(500))
+                };
+                let hold_until_terminal_ms = held.then(|| {
+                    u64::try_from((request_timeout * 3 / 4).as_millis()).unwrap_or(u64::MAX)
+                });
+                let next_observe_command = build_next_observe(hold_until_terminal_ms);
                 // Completed rotations are observable under `next`, while a
                 // terminal rejection deliberately retains the previous/current
                 // supervisor. Try the attempted authority first, then fall back
@@ -50775,6 +50833,19 @@ impl MobActor {
                     )
                     .await;
                 let observation = match next_observation {
+                    Err(MobError::BridgeCommandRejected {
+                        cause: super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                        ..
+                    }) if held => {
+                        // Stale or never-advertised capabilities: the member
+                        // predates held observation. Fall back to the
+                        // single-shot compatibility path for this member.
+                        self.supervisor_bridge
+                            .record_peer_rotation_observe_hold(&peer_id, false);
+                        hold = false;
+                        last_observation = "member does not implement held observation".to_string();
+                        continue;
+                    }
                     Ok(observation @ BridgeSupervisorRotationObservation::Found { .. }) => {
                         observation
                     }
@@ -50798,6 +50869,10 @@ impl MobActor {
                                 last_observation = format!(
                                     "{last_observation}; attempted authority returned not-found; retained-authority observation failed: {error}"
                                 );
+                                if hold {
+                                    break false;
+                                }
+                                // Compatibility path only.
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                                 continue;
                             }
@@ -50831,6 +50906,10 @@ impl MobActor {
                                 last_observation = format!(
                                     "{last_observation}; attempted-authority observation failed: {next_error}; retained-authority observation failed: {retained_error}"
                                 );
+                                if hold {
+                                    break false;
+                                }
+                                // Compatibility path only.
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                                 continue;
                             }
@@ -50862,6 +50941,10 @@ impl MobActor {
                                 last_observation = format!(
                                     "{last_observation}; attempted-authority observation failed: {next_error}; retained-authority observation failed: {retained_error}"
                                 );
+                                if hold {
+                                    break false;
+                                }
+                                // Compatibility path only.
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                                 continue;
                             }
@@ -50938,6 +51021,10 @@ impl MobActor {
                                 }
                             }
                             let Some(refresh_value) = refresh_value else {
+                                if hold {
+                                    break false;
+                                }
+                                // Compatibility path only.
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                                 continue;
                             };
@@ -50949,6 +51036,10 @@ impl MobActor {
                                 last_observation = format!(
                                     "legacy next-authority route refresh was not acknowledged: {error}"
                                 );
+                                if hold {
+                                    break false;
+                                }
+                                // Compatibility path only.
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                                 continue;
                             }
@@ -50978,6 +51069,9 @@ impl MobActor {
                             }
                         } else {
                             last_observation = "operation not found yet".to_string();
+                            if hold {
+                                break false;
+                            }
                         }
                     }
                     BridgeSupervisorRotationObservation::Found {
@@ -50992,6 +51086,12 @@ impl MobActor {
                             )));
                         }
                         last_observation = format!("operation pending in phase {phase:?}");
+                        observed_found = true;
+                        if held {
+                            // The member held the read until its deadline:
+                            // the operation is durably pending.
+                            break false;
+                        }
                     }
                     BridgeSupervisorRotationObservation::Found {
                         state: BridgeSupervisorRotationState::Completed { receipt },
@@ -51042,7 +51142,10 @@ impl MobActor {
                         )));
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                if !hold {
+                    // Compatibility path only: single-shot observation polls.
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
             };
 
             if !completed {

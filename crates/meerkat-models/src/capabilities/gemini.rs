@@ -58,6 +58,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
         call_timeout_secs: Some(120),
+        supports_forced_tool_choice: true,
     },
     // Gemini 3.7 Flash
     //
@@ -108,6 +109,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
         call_timeout_secs: Some(120),
+        supports_forced_tool_choice: true,
     },
     // Gemini 3.5 Flash
     //
@@ -161,6 +163,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: true,
         beta_headers: &[],
         call_timeout_secs: Some(120),
+        supports_forced_tool_choice: true,
     },
     // Gemini 3.1 Pro Preview
     //
@@ -211,6 +214,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: true,
         beta_headers: &[],
         call_timeout_secs: Some(600),
+        supports_forced_tool_choice: true,
     },
     // Gemini 3.1 Flash Lite Preview
     //
@@ -259,5 +263,6 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: true,
         beta_headers: &[],
         call_timeout_secs: Some(120),
+        supports_forced_tool_choice: true,
     },
 ];

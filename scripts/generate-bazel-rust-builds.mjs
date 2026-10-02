@@ -6,6 +6,33 @@ import { testSourcePaths as sharedTestSourcePaths } from "./rust-test-selector.m
 
 const checkOnly = process.argv.includes("--check");
 
+// Every test of a crate that dev-depends on the mcp-test-server fixture crate
+// gets the fixture binary in its runfiles and MEERKAT_MCP_TEST_SERVER naming
+// it: those tests fail, never skip, when the fixture cannot be resolved.
+const MCP_TEST_SERVER_CRATE = "mcp-test-server";
+const MCP_TEST_SERVER_BIN = "//tests/fixtures/mcp-test-server:mcp_test_server_bin";
+const MCP_TEST_SERVER_ENV = "MEERKAT_MCP_TEST_SERVER";
+const mcpFixtureViolations = [];
+
+function devDependsOnMcpTestServer(pkg) {
+  return pkg.dependencies.some(
+    (dep) => dep.name === MCP_TEST_SERVER_CRATE && dep.kind === "dev" && dep.source === null,
+  );
+}
+
+// Structural invariant over the rendered rules: a fixture-dependent crate's
+// every rust_test (including generated variants) carries the fixture env.
+function checkMcpFixtureEnv(pkg, rules) {
+  if (!devDependsOnMcpTestServer(pkg)) return;
+  for (const rule of rules) {
+    if (!rule.startsWith("rust_test(")) continue;
+    const name = /\n    name = "([^"]+)"/.exec(rule)?.[1] ?? "<unnamed>";
+    if (!rule.includes(`"${MCP_TEST_SERVER_ENV}": "$(rootpath ${MCP_TEST_SERVER_BIN})"`)) {
+      mcpFixtureViolations.push(`${packageKey(pkg)}:${name}`);
+    }
+  }
+}
+
 const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
   encoding: "utf8",
 }).trim();
@@ -2079,11 +2106,11 @@ for (const pkg of localPackages.values()) {
         data.unshift(":package_runfiles");
       }
       const env = [`        "RUST_MIN_STACK": "8388608",`, ...SINGLE_THREADED_TEST_ENV];
+      if (devDependsOnMcpTestServer(pkg)) {
+        data.push(MCP_TEST_SERVER_BIN);
+        env.push(`        "${MCP_TEST_SERVER_ENV}": "$(rootpath ${MCP_TEST_SERVER_BIN})",`);
+      }
       if (key === "meerkat-mcp" && target.name === "form_elicitation") {
-        // Mandatory real transport fixture, kept out of the pure unit target.
-        const server = "//tests/fixtures/mcp-test-server:mcp_test_server_bin";
-        data.push(server);
-        env.push(`        "MEERKAT_MCP_TEST_SERVER": "$(rootpath ${server})",`);
         attrs.splice(attrs.length - 1, 0, `    exec_properties = {"test.network": "external"},`);
       }
       attrs.splice(attrs.length - 1, 0, `    tags = ${listExpr([...new Set(tags)].sort())},`);
@@ -2349,6 +2376,10 @@ for (const pkg of localPackages.values()) {
       // meerkat-live). Give exactly those binaries the network the
       // cargo-equivalent tests already have.
       const unitNeedsNetwork = unitFeatures.some((feature) => /(^|-)webrtc$/.test(feature));
+      if (devDependsOnMcpTestServer(pkg)) {
+        unitData.push(MCP_TEST_SERVER_BIN);
+        unitEnv.push(`        "${MCP_TEST_SERVER_ENV}": "$(rootpath ${MCP_TEST_SERVER_BIN})",`);
+      }
       if (key === "xtask") {
         const rustfmt = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin";
         const rustfmtLib = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib";
@@ -2633,6 +2664,7 @@ for (const pkg of localPackages.values()) {
   }
 
   if (rules.length === 0) continue;
+  checkMcpFixtureEnv(pkg, rules);
   if (packageFastTests.length) {
     rules.push(`test_suite(\n    name = "fast_tests",\n    tests = ${listExpr(packageFastTests.sort())},\n)`);
   }
@@ -2688,6 +2720,12 @@ writeRootBuild(
   [...new Set(e2eSystemTestLabels)].sort(),
   [...new Set(surfaceFeatureMatrixLabels)].sort(),
 );
+if (mcpFixtureViolations.length) {
+  console.error(
+    `rust_test targets of crates that dev-depend on ${MCP_TEST_SERVER_CRATE} lack ${MCP_TEST_SERVER_ENV}: ${mcpFixtureViolations.join(", ")}`,
+  );
+  process.exit(1);
+}
 if (checkOnly && staleFileCount > 0) {
   console.error(`${staleFileCount} generated Bazel file(s) are stale; run node scripts/generate-bazel-rust-builds.mjs`);
   process.exit(1);

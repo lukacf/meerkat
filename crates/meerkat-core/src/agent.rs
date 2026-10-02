@@ -3134,6 +3134,10 @@ where
     pub(crate) noncommitting_live_bridge_run: bool,
     /// Runtime-owned dispatch metadata for this turn.
     pub(crate) turn_tool_dispatch_metadata: BTreeMap<String, serde_json::Value>,
+    /// This turn's tool-choice plan from the per-turn overlay: entry `k` is
+    /// the choice for the run's `k`-th provider call, `Auto` once exhausted.
+    /// Set and cleared with the overlay, so it is run-local by construction.
+    pub(crate) turn_tool_choice_plan: Vec<crate::lifecycle::run_primitive::ToolChoice>,
     /// Typed tool-execution policy (per-call timeouts + concurrency bound)
     /// applied to the normal LLM-driven tool dispatch loop. Populated by the
     /// composition seam via `AgentBuilder::with_tools_config`; defaults to

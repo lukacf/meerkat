@@ -467,6 +467,9 @@ pub struct MobMcpState {
     /// Signals every change of the offset above, so a sweep waiting for a
     /// claim lease re-reads the clock instead of sleeping past a moved one.
     temporary_council_clock_changes: tokio::sync::watch::Sender<i64>,
+    /// Bumped each time the post-restore council sweep finishes a pass, so
+    /// tests can order work after a pass without polling.
+    temporary_council_sweep_passes: tokio::sync::watch::Sender<u64>,
     /// Set once the automatic post-restore recovery sweep has been scheduled.
     /// Also what keeps the sweep from re-entering `ensure_restored`.
     temporary_council_recovery_scheduled: std::sync::atomic::AtomicBool,
@@ -570,6 +573,7 @@ impl MobMcpState {
             coordinator_id: uuid::Uuid::new_v4().simple().to_string(),
             temporary_council_clock_offset_ms: std::sync::atomic::AtomicI64::new(0),
             temporary_council_clock_changes: tokio::sync::watch::channel(0).0,
+            temporary_council_sweep_passes: tokio::sync::watch::channel(0).0,
             temporary_council_cleanup_budget_ms: std::sync::atomic::AtomicU64::new(
                 u64::try_from(temporary_council::TEMPORARY_COUNCIL_CLEANUP_BUDGET.as_millis())
                     .unwrap_or(30_000),
@@ -884,6 +888,18 @@ impl MobMcpState {
     /// Wakes when the coordinator's clock offset changes.
     pub(crate) fn temporary_council_clock_changes(&self) -> tokio::sync::watch::Receiver<i64> {
         self.temporary_council_clock_changes.subscribe()
+    }
+
+    pub(crate) fn note_temporary_council_sweep_pass(&self) {
+        self.temporary_council_sweep_passes
+            .send_modify(|passes| *passes = passes.wrapping_add(1));
+    }
+
+    /// Passes the post-restore council sweep has finished. Test support:
+    /// order work after a sweep pass without polling.
+    #[doc(hidden)]
+    pub fn temporary_council_sweep_passes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.temporary_council_sweep_passes.subscribe()
     }
 
     /// Adjust the bounded cleanup budget on a live state.

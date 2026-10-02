@@ -316,6 +316,9 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # (durable_in_turn_steer_audit.sh, live_context_outbox_audit.sh) require it
 # before they accept a run. live_context_outbox_audit.sh also requires each of
 # its goals to be reported violated, so the fake reports those too.
+# live_unregister_cleanup_audit.sh also walks a TLC state-graph dump
+# (-dump dot <base>), so the fake writes a one-state graph whose state is
+# unregistered.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -329,6 +332,10 @@ printf '%s\n' \
   'echo "Error: Invariant NotGoalNotDelivered is violated."' \
   'echo "Error: Invariant NotGoalMaterialConflict is violated."' \
   'echo "Error: Invariant NotGoalMissing is violated."' \
+  'echo "Error: Action property AuditNeverUnregisters is violated."' \
+  'echo "Error: Action property AuditNeverUnregistersWithPreparation is violated."' \
+  'echo "Error: Invariant AuditNeverCancelsRecovery is violated."' \
+  'prev=""; for a in "$@"; do if [ "$prev" = "dot" ]; then printf "%s\n" "1 [label=\"\\n/\\\\ session_id = [tag |-> \\\"none\\\"]\"]" > "$a.dot"; fi; prev="$a"; done' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
 

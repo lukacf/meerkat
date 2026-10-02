@@ -350,6 +350,22 @@ impl OpenAiCompatibleClient {
             body["tools"] = Value::Array(tools);
         }
 
+        // Chat Completions `tool_choice`; `Auto` sends nothing (as before).
+        request.validate_tool_choice(self.provider.as_str())?;
+        match &request.tool_choice {
+            meerkat_core::ToolChoice::Auto => {}
+            meerkat_core::ToolChoice::Required => {
+                body["tool_choice"] = Value::String("required".to_owned());
+            }
+            meerkat_core::ToolChoice::None => {
+                body["tool_choice"] = Value::String("none".to_owned());
+            }
+            meerkat_core::ToolChoice::Tool { name } => {
+                body["tool_choice"] =
+                    serde_json::json!({"type": "function", "function": {"name": name}});
+            }
+        }
+
         if let Some(tag) = tag {
             if tag.prompt_cache_enabled == Some(false) {
                 // Stable Meerkat opt-out. This remains authoritative over

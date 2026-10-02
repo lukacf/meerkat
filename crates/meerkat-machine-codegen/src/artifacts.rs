@@ -5218,6 +5218,61 @@ fn collect_composition_named_bindings<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn substituted_compound_values_are_delimited_and_atoms_are_not() {
+        for atom in [
+            "x",
+            "packet.payload.run_id",
+            "Some(run_id)",
+            "MapSet(m, k, v)",
+            "m[k]",
+            "f(a)[b](c)",
+            "(a + 1)",
+            "\"a(b\"",
+            "42",
+        ] {
+            assert_eq!(tla_delimited(atom), atom, "{atom} is already an operand");
+        }
+        for compound in [
+            "IF c THEN a ELSE b",
+            "x + 1",
+            "s \\cup {x}",
+            "(a) + (b)",
+            "f(a) = b",
+            "~x",
+        ] {
+            assert_eq!(
+                tla_delimited(compound),
+                format!("({compound})"),
+                "{compound} must be delimited before splicing"
+            );
+        }
+    }
+
+    /// A field assigned by a conditional update earlier in the same block is
+    /// read through its pending value, a bare `IF c THEN a ELSE b`. Spliced
+    /// unparenthesized into a later expression, TLA+ precedence captured the
+    /// surrounding operator. Shipped instance: the meerkat_mob_seam
+    /// `TurnRunFailed` payload unwraps the conditionally updated
+    /// `terminal_cause_kind` as `IF "value" \in DOMAIN v THEN v["value"] ELSE
+    /// None`; with `v` bare, `["value"]` applied to v's ELSE branch only, so
+    /// the THEN branch emitted the Option record instead of its value.
+    #[test]
+    fn a_conditionally_updated_field_read_later_in_the_block_splices_as_one_operand() {
+        let model = render_composition_semantic_model(&meerkat_mob_seam_composition())
+            .expect("render meerkat_mob_seam model");
+        assert!(
+            model.contains(
+                "terminal_cause_kind |-> (IF \"value\" \\in DOMAIN (IF (IF (meerkat_terminal_cause_kind = None)"
+            ),
+            "the TurnRunFailed unwrap must test the whole conditional value"
+        );
+        assert!(
+            !model.contains("ELSE meerkat_terminal_cause_kind[\"value\"]"),
+            "no index may bind to one branch of a spliced conditional"
+        );
+    }
     use meerkat_machine_schema::RustTypeAtom;
     use meerkat_machine_schema::catalog::dsl::{
         dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
@@ -11370,10 +11425,17 @@ impl<'a> MachineTlaCompiler<'a> {
             ),
             Expr::CurrentPhase => self.phase_symbol.clone().unwrap_or_else(|| "phase".into()),
             Expr::Phase(value) => tla_string(value),
-            Expr::Field(name) => env
-                .get(name.as_str())
-                .cloned()
-                .unwrap_or_else(|| name.as_str().to_owned()),
+            // A field already assigned earlier in the same update block reads
+            // its pending value, which may be an unparenthesized compound
+            // (a conditional update renders `IF c THEN a ELSE b`). Spliced bare
+            // into a larger expression, TLA+ precedence would capture the
+            // surrounding operator: `IF c THEN a ELSE b = x` parses as
+            // `IF c THEN a ELSE (b = x)`. Delimit every substituted value.
+            Expr::Field(name) => match env.get(name.as_str()) {
+                Some(value) if value != name.as_str() => tla_delimited(value),
+                Some(value) => value.clone(),
+                None => name.as_str().to_owned(),
+            },
             Expr::Binding(name) => binding_env
                 .get(name)
                 .cloned()
@@ -12629,4 +12691,76 @@ fn tla_ident(value: impl AsRef<str>) -> String {
 
 fn tla_string(value: impl AsRef<str>) -> String {
     format!("\"{}\"", value.as_ref().replace('"', "\\\""))
+}
+
+/// Wrap a rendered TLA+ expression in parentheses unless it is already an
+/// atom (an identifier, field path, number or string, optionally applied with balanced
+/// `(...)`/`[...]` suffixes, or one parenthesized group), so it can be spliced
+/// as an operand without TLA+ operator precedence reaching into it.
+fn tla_delimited(expr: &str) -> String {
+    if tla_is_atom(expr) {
+        expr.to_owned()
+    } else {
+        format!("({expr})")
+    }
+}
+
+fn tla_is_atom(expr: &str) -> bool {
+    let bytes = expr.as_bytes();
+    let mut index = 0;
+    match bytes.first() {
+        Some(b'(') => {}
+        Some(b'"') => {
+            index = 1;
+            while index < bytes.len() && bytes[index] != b'"' {
+                index += 1;
+            }
+            if index >= bytes.len() {
+                return false;
+            }
+            index += 1;
+        }
+        Some(byte) if byte.is_ascii_alphanumeric() || *byte == b'_' => {
+            // Identifiers and record field paths (`packet.payload.run_id`):
+            // field access binds tighter than every operator.
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric()
+                    || bytes[index] == b'_'
+                    || bytes[index] == b'.')
+            {
+                index += 1;
+            }
+        }
+        _ => return false,
+    }
+    // Zero or more balanced `(...)` / `[...]` groups, with nothing between.
+    while index < bytes.len() {
+        let (open, close) = match bytes[index] {
+            b'(' => (b'(', b')'),
+            b'[' => (b'[', b']'),
+            _ => return false,
+        };
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut end = None;
+        for (offset, byte) in bytes[index..].iter().enumerate() {
+            match *byte {
+                b'"' => in_string = !in_string,
+                b if b == open && !in_string => depth += 1,
+                b if b == close && !in_string => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(index + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match end {
+            Some(end) => index = end + 1,
+            None => return false,
+        }
+    }
+    true
 }

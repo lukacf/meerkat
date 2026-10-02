@@ -1025,17 +1025,48 @@ async fn governed_jsonl_refusal_retains_actor_seed_and_context_then_same_run_rea
     let (client_io, server_io) = tokio::io::duplex(1 << 20);
     let (reader, writer) = tokio::io::split(server_io);
     let (mut server, runtime) = construct(BufReader::new(reader), writer, setup).unwrap();
+    let commissioned_tools = server.registered_tools();
+    let callback_sender = server.callback_request_tx();
+    let callback_id_counter = server.callback_id_counter();
     let server_task = tokio::spawn(async move { server.run().await });
     let (reader, mut writer) = tokio::io::split(client_io);
     let mut reader = BufReader::new(reader);
     let effects: Arc<Mutex<Vec<String>>> = Arc::default();
     let scenario = async {
+        assert_eq!(
+            commissioned_tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            ["delete_record", "read_record"],
+            "the server connection owns exactly the commissioned callback catalog"
+        );
+        assert!(
+            runtime.default_callback_route().is_none(),
+            "governed callbacks must not use the process-default route"
+        );
         send(&mut writer, json!({"jsonrpc":"2.0","id":1,"method":"session/create","params":{
             "prompt":"deferred-seed-s2", "injected_context":["deferred-context-s2"], "initial_turn":"deferred"
         }})).await;
         let created = response(&mut reader, &mut writer, 1, &effects).await;
         assert!(created.get("error").is_none(), "{created}");
         let sid = SessionId::parse(created["result"]["session_id"].as_str().unwrap()).unwrap();
+        let route = runtime
+            .session_callback_route(&sid)
+            .expect("deferred governed session retains its connection callback route");
+        assert!(
+            route.sender().same_channel(&callback_sender),
+            "the session retains the actual server callback channel"
+        );
+        assert!(
+            Arc::ptr_eq(&route.id_counter(), &callback_id_counter),
+            "the session retains the actual server callback ID owner"
+        );
+        assert_eq!(
+            serde_json::to_value(route.registry().snapshot()).unwrap(),
+            serde_json::to_value(&commissioned_tools).unwrap(),
+            "the session route retains the complete commissioned tool definitions"
+        );
         let rid = LogicalRuntimeId::for_session(&sid);
         assert!(
             store

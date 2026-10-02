@@ -828,6 +828,42 @@ pub enum ReasoningMode {
     Off,
 }
 
+/// Which tool use the model may or must make on one provider call.
+///
+/// `Auto` is today's behaviour and the default: the model decides, and the
+/// provider request carries no choice beyond what each adapter always sent.
+/// Every other variant is lowered to the provider's native tool-choice field.
+/// A provider or model that cannot honour a requested choice refuses the
+/// call with a typed unsupported error; a choice is never downgraded to
+/// `Auto` silently.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolChoice {
+    /// The model decides whether to call a tool.
+    #[default]
+    Auto,
+    /// The model must call at least one of the offered tools.
+    Required,
+    /// The model must not call any tool.
+    None,
+    /// The model must call the named tool, which must be offered.
+    Tool { name: String },
+}
+
+impl ToolChoice {
+    #[must_use]
+    pub fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
+
+    /// Whether this choice obliges the model to call a tool.
+    #[must_use]
+    pub fn forces_a_tool_call(&self) -> bool {
+        matches!(self, Self::Required | Self::Tool { .. })
+    }
+}
+
 /// Typed per-turn provider parameter overrides.
 ///
 /// Replaces the legacy untyped `serde_json::Value` bag. Every knob exposed
@@ -851,6 +887,14 @@ pub struct ProviderParamsOverride {
     pub thinking_budget_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_tag: Option<ProviderTag>,
+    /// Request-local tool choice for one provider call. The agent loop sets
+    /// it on each request's own copy from the turn's tool-choice plan
+    /// (`TurnToolOverlay::tool_choice_plan`) and replaces any value that
+    /// arrived with session or turn params. Never serialized: it cannot be
+    /// persisted into session defaults or sent on a wire. `None` is `Auto`.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub tool_choice: Option<ToolChoice>,
 }
 
 impl ProviderParamsOverride {
@@ -861,6 +905,7 @@ impl ProviderParamsOverride {
             && self.reasoning.is_none()
             && self.thinking_budget_tokens.is_none()
             && self.provider_tag.is_none()
+            && self.tool_choice.is_none()
     }
 
     /// Clear any provider-native web-search / grounding tool body from this

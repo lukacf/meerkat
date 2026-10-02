@@ -938,15 +938,19 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let (callback_request_tx, callback_request_rx) =
             mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
-        let callback_id_counter = Arc::new(AtomicU64::new(0));
         let (long_running_tx, long_running_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
 
-        // Wire callback tool state into the runtime so session/create handlers
-        // can build CallbackToolDispatchers that route through this server.
-        runtime.set_callback_channel(callback_request_tx.clone(), callback_id_counter.clone());
+        // This connection owns its callback route: its channel, its id space
+        // and its registered callback tools. The route lives on this
+        // connection's router and is never written into the shared runtime,
+        // so another connection on the same runtime cannot replace it.
+        let callback_route =
+            crate::callback_dispatcher::CallbackRoute::new(callback_request_tx.clone());
+        let callback_id_counter = callback_route.id_counter();
 
         let router = MethodRouter::new(Arc::clone(&runtime), config_store, notification_sink)
-            .with_skill_runtime(skill_runtime);
+            .with_skill_runtime(skill_runtime)
+            .with_callback_route(callback_route);
         #[cfg(feature = "openai-live")]
         let router = router.with_experimental_live_public_observation_publisher(Arc::new(
             ExperimentalLiveRpcObservationPublisher {
@@ -979,9 +983,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     pub(crate) fn with_governed_connection(
         mut self,
         connection: Arc<crate::governed_jsonl::GovernedConnection>,
-    ) -> Self {
-        self.router = self.router.with_governed_connection(connection);
-        self
+        tools: Vec<meerkat_core::ToolDef>,
+    ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
+        self.router = self.router.with_governed_connection(connection, tools)?;
+        Ok(self)
     }
 
     pub fn with_live_session_factory_opt(
@@ -1139,7 +1144,11 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
 
     /// Get the shared registered tools list.
     pub fn registered_tools(&self) -> Vec<meerkat_core::ToolDef> {
-        self.router.runtime().callback_tool_registry().snapshot()
+        self.router
+            .callback_route()
+            .map(|route| route.registry())
+            .unwrap_or_else(|| self.router.runtime().callback_tool_registry())
+            .snapshot()
     }
 
     /// Run the server until EOF or a fatal transport error.
@@ -1429,6 +1438,12 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         // connection that failed to deliver its answer.
         self.reject_queued_responses().await;
         self.reject_queued_experimental_live_notifications();
+        // The connection that owns this callback route is gone. Close the
+        // route and fail every callback it still owes BEFORE the graceful
+        // request shutdown: dispatchers observe a closed route or a dropped
+        // response as typed `tool_unavailable` immediately, instead of
+        // waiting on a client that can never answer.
+        self.close_callback_route();
         connection_result?;
 
         // Graceful shutdown: close all sessions (unless this is a shared TCP
@@ -1560,6 +1575,17 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         admitted.settle(write_result.is_ok());
         drop(publication_custody);
         write_result.map_err(ServerError::from)
+    }
+
+    /// Close this connection's callback route and fail its pending and
+    /// queued callbacks. Dropping each response sender is the typed failure
+    /// its dispatcher maps to `tool_unavailable`.
+    fn close_callback_route(&mut self) {
+        self.callback_request_rx.close();
+        while let Ok(envelope) = self.callback_request_rx.try_recv() {
+            drop(envelope);
+        }
+        self.pending_callbacks.clear();
     }
 
     fn reject_queued_experimental_live_notifications(&mut self) {

@@ -2071,13 +2071,15 @@ impl MeerkatMachine {
         preparation: SessionBindingPreparation,
         attempt: Option<&mut super::session_management::IdempotentBindingPreparationAttempt>,
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
-        self.prepare_session_runtime_bindings_with_claim(
-            session_id,
-            preparation,
-            attempt,
-            MaterializationClaimRequest::ReleaseOnDrop,
-            None,
-        )
+        crate::stack_relief::box_in_own_frame(|| {
+            self.prepare_session_runtime_bindings_with_claim(
+                session_id,
+                preparation,
+                attempt,
+                MaterializationClaimRequest::ReleaseOnDrop,
+                None,
+            )
+        })
         .await
     }
 
@@ -2147,11 +2149,13 @@ impl MeerkatMachine {
             }
             (false, guard)
         } else {
-            Box::pin(self.register_session_inner_for_actor_materialization(
-                session_id.clone(),
-                Arc::clone(&candidate_materialization_claim_state),
-                attempt,
-            ))
+            crate::stack_relief::box_in_own_frame(|| {
+                self.register_session_inner_for_actor_materialization(
+                    session_id.clone(),
+                    Arc::clone(&candidate_materialization_claim_state),
+                    attempt,
+                )
+            })
             .await?
         };
         tracing::debug!(
@@ -2160,6 +2164,10 @@ impl MeerkatMachine {
             ?preparation,
             "MeerkatMachine::prepare_session_runtime_bindings registered session"
         );
+        // #1446: the binding transaction below runs in its own boxed block, so
+        // its temporaries are not reserved in this frame while the registration
+        // call above recurses. Its `return`s are the function's own returns.
+        crate::stack_relief::box_in_own_frame(|| async {
         // Serialize the full generated registration/binding transaction with
         // executor attachment and teardown. A live idempotent binding remains a
         // valid handle bundle, but it cannot reopen actor materialization.
@@ -2736,6 +2744,8 @@ impl MeerkatMachine {
             }
         };
         Ok(MeerkatMachineCommandResult::Bindings(bindings))
+        })
+        .await
     }
 
     async fn prepare_session_materialization_with_mode(

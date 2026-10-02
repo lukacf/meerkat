@@ -20,6 +20,8 @@ pub mod image_generation;
 pub mod runtime;
 #[cfg(test)]
 mod structured_output_request_tests;
+#[cfg(test)]
+mod tool_choice_request_tests;
 pub mod web_search;
 
 pub use client::GeminiClient;

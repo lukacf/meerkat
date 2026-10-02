@@ -2105,6 +2105,10 @@ pub(super) enum ProvisionPrepareTestFault {
     /// Another owner occupies the session's runtime materialization claim
     /// (a `RetainedActor` registration), so the real unique prepare refuses.
     OccupiedClaim,
+    /// Another owner holds an in-flight unique materialization transaction
+    /// (a `Prepared` claim) for the session; the test releases it through the
+    /// exact rollback captured in [`IN_FLIGHT_CLAIMS_FOR_TEST`].
+    InFlightClaim,
     /// The attempt fails having recorded no settlement fact at all.
     UnrecordedFailure,
     /// The attempt leaves a claimed runtime registration behind (residue)
@@ -2115,6 +2119,29 @@ pub(super) enum ProvisionPrepareTestFault {
 #[cfg(all(test, feature = "runtime-adapter"))]
 static PROVISION_PREPARE_TEST_FAULTS: std::sync::LazyLock<
     StdMutex<HashMap<SessionId, ProvisionPrepareTestFault>>,
+> = std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// #1251 fault seam: the competing owner's in-flight unique materialization
+/// transaction captured when `InFlightClaim` fires.
+#[cfg(all(test, feature = "runtime-adapter"))]
+pub(super) static IN_FLIGHT_CLAIMS_FOR_TEST: std::sync::LazyLock<
+    StdMutex<HashMap<SessionId, meerkat_runtime::PreparedSessionMaterialization>>,
+> = std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// #1251 fault seam: the competing owner's exact handles (its cloneable
+/// bindings and registration witness) captured when `OccupiedClaim` fires, so
+/// a test can drive that owner after the member reclaimed its claim.
+#[cfg(all(test, feature = "runtime-adapter"))]
+pub(super) static OCCUPIED_CLAIM_COMPETITORS_FOR_TEST: std::sync::LazyLock<
+    StdMutex<
+        HashMap<
+            SessionId,
+            (
+                meerkat_core::SessionRuntimeBindings,
+                Option<meerkat_runtime::RuntimeSessionRegistrationWitness>,
+            ),
+        >,
+    >,
 > = std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 #[cfg(all(test, feature = "runtime-adapter"))]
@@ -2155,6 +2182,17 @@ async fn apply_provision_prepare_test_fault(
                 "test-forced provisioning failure for '{session_id}' after registration residue"
             )))
         }
+        Some(ProvisionPrepareTestFault::InFlightClaim) => {
+            let prepared = adapter
+                .prepare_session_materialization(session_id.clone())
+                .await
+                .map_err(|error| MobError::Internal(error.to_string()))?;
+            IN_FLIGHT_CLAIMS_FOR_TEST
+                .lock()
+                .expect("in-flight claim slot")
+                .insert(session_id.clone(), prepared);
+            Ok(())
+        }
         Some(ProvisionPrepareTestFault::OccupiedClaim) => {
             let bindings = adapter
                 .prepare_bindings(session_id.clone())
@@ -2164,6 +2202,13 @@ async fn apply_provision_prepare_test_fault(
                 .map_err(|error| MobError::Internal(error.to_string()))?
                 .commit()
                 .map_err(|error| MobError::Internal(error.to_string()))?;
+            let registration = adapter
+                .session_registration_witness_for_bindings(&bindings)
+                .await;
+            OCCUPIED_CLAIM_COMPETITORS_FOR_TEST
+                .lock()
+                .expect("occupied claim competitor slot")
+                .insert(session_id.clone(), (bindings, registration));
             Ok(())
         }
     }
@@ -11837,9 +11882,10 @@ impl MobProvisioner for SessionBackend {
                                     &mut actor_materialization_route,
                                     super::session_service::SessionActorMaterializationRoute::Fresh,
                                 );
-                                match route
-                                    .advance_resume_preparation_after_machine_prepare(prepared)
-                                    .await
+                                match meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                                    route.advance_resume_preparation_after_machine_prepare(prepared)
+                                })
+                                .await
                                 {
                                     Ok(route) => {
                                         actor_materialization_route = route;
@@ -11888,26 +11934,29 @@ impl MobProvisioner for SessionBackend {
                             "actor-only recovery for '{recovery_session_id}' lost B before actor creation"
                         ))
                     })?;
-                let created = create_attached_session_actor_recovery_owned(
-                    AttachedSessionActorRecoveryContext {
-                        session_id: recovery_session_id,
-                        session_service: Arc::clone(&backend.session_service),
-                        prepared,
-                        boundary,
-                        state: Arc::clone(&state),
-                        route: actor_materialization_route,
-                        actor_witness_slot: actor_witness_slot.clone(),
-                        req: req.create_session,
-                    },
-                )
+                let created = meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                    create_attached_session_actor_recovery_owned(
+                        AttachedSessionActorRecoveryContext {
+                            session_id: recovery_session_id,
+                            session_service: Arc::clone(&backend.session_service),
+                            prepared,
+                            boundary,
+                            state: Arc::clone(&state),
+                            route: actor_materialization_route,
+                            actor_witness_slot: actor_witness_slot.clone(),
+                            req: req.create_session,
+                        },
+                    )
+                })
                 .await?;
                 recovered_attached_state = Some(state);
                 Ok(created)
             }
         } else if let Some(transaction) = actor_transaction.take() {
-            match transaction
-                .create_owned_with_route(req.create_session, actor_materialization_route)
-                .await
+            match meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                transaction.create_owned_with_route(req.create_session, actor_materialization_route)
+            })
+            .await
             {
                 Ok((created, transaction)) => {
                     actor_transaction = Some(transaction);
@@ -14367,8 +14416,18 @@ impl MultiBackendProvisioner {
                 )
                 .await);
         }
-        match super::bridge_protocol::decode_bridge_payload(&command, value, "BindMember command") {
-            Ok(payload) => Ok((payload, install)),
+        match super::bridge_protocol::decode_bridge_payload::<
+            super::bridge_protocol::BridgeBindResponse,
+        >(&command, value, "BindMember command")
+        {
+            Ok(payload) => {
+                // Capabilities choose the rotation observation path later.
+                self.supervisor_bridge.record_peer_rotation_observe_hold(
+                    &payload.peer_id,
+                    payload.capabilities.rotation_observe_hold,
+                );
+                Ok((payload, install))
+            }
             Err(error) => Err(MobError::ExternalMemberCleanupUncertain {
                 reason: format!(
                     "BindMember returned an unauthenticated or undecodable terminal response after send: {error}; recipient trust retained"
@@ -15020,8 +15079,10 @@ impl MobProvisioner for MultiBackendProvisioner {
     ) -> Result<MemberSpawnReceipt, MobError> {
         match req.binding {
             RuntimeBinding::Session => {
-                self.session
-                    .provision_member(ProvisionMemberRequest {
+                // Built in its own boxed frame: the request and the session
+                // backend's saga are large at opt-level 0 (#1462).
+                meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                    self.session.provision_member(ProvisionMemberRequest {
                         create_session: req.create_session,
                         authorized_resume: req.authorized_resume,
                         session_origin: req.session_origin,
@@ -15034,7 +15095,8 @@ impl MobProvisioner for MultiBackendProvisioner {
                         runtime_revival_intent: req.runtime_revival_intent,
                         direct_member_incarnation: None,
                     })
-                    .await
+                })
+                .await
             }
             RuntimeBinding::External {
                 peer_id,

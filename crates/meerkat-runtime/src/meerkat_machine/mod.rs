@@ -1987,6 +1987,43 @@ struct RuntimeExecutorAttachmentMaterializationClaim {
 /// to admit exact compare-and-remove teardown. Durable epoch identity alone is
 /// not exact because an epoch may survive an in-process entry rebuild; the
 /// private weak mutation-gate identity distinguishes those incarnations.
+/// What a caller refused with
+/// [`RuntimeBindingsError::RegistrationOwned`](crate::RuntimeBindingsError::RegistrationOwned) observes once a session's
+/// actor-materialization claim is no longer in flight.
+///
+/// In-flight claim phases (prepared, staged, actor creating, pending commit,
+/// aborting) always leave through a transition that notifies, so they are
+/// awaited. A claim that settled as an actor committed without an executor is
+/// not in flight: nothing obliges its owner to ever attach one, so waiting for
+/// it to clear could wait forever. That settlement is reported instead of
+/// awaited, and only an authority entitled to replace the session's actor may
+/// reclaim it.
+#[derive(Clone)]
+pub enum MaterializationClaimObservation {
+    /// No claim blocks a new materialization: the claim is vacant, the
+    /// registration left the registry or was replaced, or a committed
+    /// executor attachment now owns the session.
+    Released,
+    /// The claim settled as a retained actor with no executor attachment.
+    /// `registration` names the exact registration that actor was built
+    /// against.
+    RetainedUnattached {
+        registration: RuntimeSessionRegistrationWitness,
+    },
+}
+
+impl std::fmt::Debug for MaterializationClaimObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Released => f.write_str("Released"),
+            Self::RetainedUnattached { registration } => f
+                .debug_struct("RetainedUnattached")
+                .field("session_id", registration.session_id())
+                .finish(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RuntimeSessionRegistrationWitness {
     machine: std::sync::Weak<MeerkatMachineShared>,
@@ -8833,6 +8870,16 @@ pub struct MeerkatMachineShared {
             crate::tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
+    /// Deterministic test gate after an executor attachment's runtime loop
+    /// has released the registration gate it held through startup recovery,
+    /// before the attachment reacquires that gate as its pending guard.
+    #[cfg(test)]
+    test_pending_attachment_before_regate: StdMutex<
+        Option<(
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     /// One-shot positive witness for registration-slot contention. The armed
     /// acquisition itself uses `try_lock_owned`, reports whether it found the
     /// exact stable slot held, then either returns that guard or waits on that
@@ -10329,6 +10376,8 @@ impl MeerkatMachine {
                 #[cfg(test)]
                 test_fenced_accept_after_lease: StdMutex::new(None),
                 #[cfg(test)]
+                test_pending_attachment_before_regate: StdMutex::new(None),
+                #[cfg(test)]
                 test_registration_transaction_contention_probe: StdMutex::new(None),
                 #[cfg(test)]
                 test_fail_post_stop_unregister_after_fence: StdMutex::new(None),
@@ -10444,6 +10493,8 @@ impl MeerkatMachine {
                 #[cfg(test)]
                 test_fenced_accept_after_lease: StdMutex::new(None),
                 #[cfg(test)]
+                test_pending_attachment_before_regate: StdMutex::new(None),
+                #[cfg(test)]
                 test_registration_transaction_contention_probe: StdMutex::new(None),
                 #[cfg(test)]
                 test_fail_post_stop_unregister_after_fence: StdMutex::new(None),
@@ -10558,6 +10609,8 @@ impl MeerkatMachine {
                 test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
                 #[cfg(test)]
                 test_fenced_accept_after_lease: StdMutex::new(None),
+                #[cfg(test)]
+                test_pending_attachment_before_regate: StdMutex::new(None),
                 #[cfg(test)]
                 test_registration_transaction_contention_probe: StdMutex::new(None),
                 #[cfg(test)]

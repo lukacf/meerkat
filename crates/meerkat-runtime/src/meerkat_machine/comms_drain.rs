@@ -189,18 +189,42 @@ struct SupervisorRotationTask {
     handle: crate::tokio::task::JoinHandle<()>,
 }
 
+/// Every applied supervisor-authority input may move a rotation, except an
+/// observation, which reads it (and would otherwise wake its own waiter).
+fn notifies_rotation_progress(input: &crate::meerkat_machine::dsl::MeerkatMachineInput) -> bool {
+    !matches!(
+        input,
+        crate::meerkat_machine::dsl::MeerkatMachineInput::ObserveSupervisorRotation { .. }
+    )
+}
+
 /// Session-owned driver slot for a durable supervisor rotation. The task is
 /// only a liveness mechanism; operation identity, phase, and terminal receipts
 /// remain generated-machine authority and survive task/process loss.
 pub(crate) struct SupervisorRotationTaskSlot {
     task: crate::tokio::sync::Mutex<Option<SupervisorRotationTask>>,
+    /// Bumped after every applied supervisor-authority input except an
+    /// observation, so a held rotation observation re-reads the generated
+    /// operation state only when it may have changed. Dropping the session
+    /// entry drops the sender and ends every held observation.
+    progress: crate::tokio::sync::watch::Sender<u64>,
 }
 
 impl SupervisorRotationTaskSlot {
     pub(crate) fn new() -> Self {
         Self {
             task: crate::tokio::sync::Mutex::new(None),
+            progress: crate::tokio::sync::watch::Sender::new(0),
         }
+    }
+
+    pub(crate) fn subscribe_progress(&self) -> crate::tokio::sync::watch::Receiver<u64> {
+        self.progress.subscribe()
+    }
+
+    fn notify_progress(&self) {
+        self.progress
+            .send_modify(|seen| *seen = seen.wrapping_add(1));
     }
 
     pub(crate) async fn install(
@@ -561,18 +585,28 @@ impl MeerkatMachine {
                 } => SupervisorBindingStageError::SessionNotRegistered,
                 error => SupervisorBindingStageError::Persistence(error.to_string()),
             })?;
-        let authority = {
+        let (authority, rotation) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(session_id)
                 .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
-            Arc::clone(&entry.dsl_authority)
+            (
+                Arc::clone(&entry.dsl_authority),
+                Arc::clone(&entry.supervisor_rotation_task),
+            )
         };
-        let mut authority = authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *authority, input)
-            .map_err(SupervisorBindingStageError::Dsl)
+        let notifies = notifies_rotation_progress(&input);
+        let transition = {
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+                .map_err(SupervisorBindingStageError::Dsl)?
+        };
+        if notifies {
+            rotation.notify_progress();
+        }
+        Ok(transition)
     }
 
     /// Preview a supervisor-authority transition, durably replace only its
@@ -600,13 +634,18 @@ impl MeerkatMachine {
                 } => SupervisorBindingStageError::SessionNotRegistered,
                 error => SupervisorBindingStageError::Persistence(error.to_string()),
             })?;
-        let (driver, authority) = {
+        let (driver, authority, rotation) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(session_id)
                 .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
-            (Arc::clone(&entry.driver), Arc::clone(&entry.dsl_authority))
+            (
+                Arc::clone(&entry.driver),
+                Arc::clone(&entry.dsl_authority),
+                Arc::clone(&entry.supervisor_rotation_task),
+            )
         };
+        let notifies = notifies_rotation_progress(&input);
         let projected_supervisor_authority = {
             let authority = authority
                 .lock()
@@ -633,11 +672,31 @@ impl MeerkatMachine {
             .await
             .map_err(|error| SupervisorBindingStageError::Persistence(error.to_string()))?;
 
-        let mut authority = authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *authority, input)
-            .map_err(SupervisorBindingStageError::Dsl)
+        let transition = {
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+                .map_err(SupervisorBindingStageError::Dsl)?
+        };
+        if notifies {
+            rotation.notify_progress();
+        }
+        Ok(transition)
+    }
+
+    /// Subscribe to `session_id`'s supervisor-rotation progress signal
+    /// before reading the operation, so a change after the read wakes the
+    /// subscriber.
+    pub(crate) async fn subscribe_supervisor_rotation_progress(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::tokio::sync::watch::Receiver<u64>, SupervisorBindingStageError> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        Ok(entry.supervisor_rotation_task.subscribe_progress())
     }
 
     pub async fn update_peer_ingress_context(

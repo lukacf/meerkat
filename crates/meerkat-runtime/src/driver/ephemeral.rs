@@ -151,6 +151,10 @@ pub struct EphemeralRuntimeDriver {
     control: Arc<StdRwLock<RuntimeControlProjection>>,
     ledger: InputLedger,
     events: Vec<RuntimeEventEnvelope>,
+    /// Bumped on every input accepted into the ledger, so a waiter for an
+    /// admission (see `MeerkatMachine::wait_input_admitted_by_idempotency_key`)
+    /// is woken by the admission itself rather than re-reading on a timer.
+    admissions: Arc<crate::tokio::sync::watch::Sender<u64>>,
     /// Typed post-admission signal replacing boolean wake/process flags.
     ///
     /// Accumulates the strongest signal across all ingress effects since last
@@ -282,6 +286,7 @@ impl EphemeralRuntimeDriver {
             control,
             ledger: InputLedger::new(),
             events: Vec::new(),
+            admissions: Arc::new(crate::tokio::sync::watch::Sender::new(0)),
             post_admission_signal: PostAdmissionSignal::None,
             dsl: DslAuthority(dsl),
             run_start_window: crate::run_progress::SharedRunStartWindowCell::default(),
@@ -3801,7 +3806,22 @@ impl EphemeralRuntimeDriver {
     }
 
     fn emit_event(&mut self, event: RuntimeEvent) {
+        let admitted = matches!(
+            event,
+            RuntimeEvent::InputLifecycle(InputLifecycleEvent::Accepted { .. })
+        );
         self.events.push(self.make_envelope(event));
+        if admitted {
+            self.admissions
+                .send_modify(|admissions| *admissions = admissions.wrapping_add(1));
+        }
+    }
+
+    /// Subscribe to input admissions. Subscribe while holding the driver
+    /// before checking the ledger, so an admission after the check is a
+    /// change on this receiver.
+    pub(crate) fn subscribe_admissions(&self) -> crate::tokio::sync::watch::Receiver<u64> {
+        self.admissions.subscribe()
     }
 
     pub(crate) fn record_durable_idempotency_deduplication(

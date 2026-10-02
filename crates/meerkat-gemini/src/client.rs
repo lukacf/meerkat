@@ -724,6 +724,24 @@ impl GeminiClient {
             body["toolConfig"]["includeServerSideToolInvocations"] = Value::Bool(true);
         }
 
+        // functionCallingConfig; `Auto` sends nothing (as before).
+        request.validate_tool_choice("gemini")?;
+        let function_calling = match &request.tool_choice {
+            meerkat_core::ToolChoice::Auto => None,
+            meerkat_core::ToolChoice::Required => Some(serde_json::json!({"mode": "ANY"})),
+            meerkat_core::ToolChoice::None => Some(serde_json::json!({"mode": "NONE"})),
+            meerkat_core::ToolChoice::Tool { name } => Some(serde_json::json!({
+                "mode": "ANY",
+                "allowedFunctionNames": [name],
+            })),
+        };
+        if let Some(config) = function_calling {
+            if !body["toolConfig"].is_object() {
+                body["toolConfig"] = serde_json::json!({});
+            }
+            body["toolConfig"]["functionCallingConfig"] = config;
+        }
+
         Ok(body)
     }
 

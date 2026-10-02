@@ -232,13 +232,7 @@ where
     runtime.set_default_llm_client(Some(client));
     let runtime = Arc::new(runtime);
     let server = RpcServer::new(reader, writer, runtime.clone(), config_store)
-        .with_governed_connection(Arc::new(connection));
-    // RpcServer::new first installs its sole callback channel and resets the
-    // registry. This is the only catalog mutation in the commissioned lifetime.
-    runtime
-        .callback_tool_registry()
-        .replace_or_add(tools)
-        .map_err(|_| unsupported())?;
+        .with_governed_connection(Arc::new(connection), tools)?;
     Ok((server, runtime))
 }
 
@@ -265,6 +259,7 @@ fn invalid(message: &str) -> RpcError {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch(
     connection: &Arc<GovernedConnection>,
     method: &str,
@@ -272,6 +267,7 @@ pub(crate) async fn dispatch(
     params: Option<&RawValue>,
     runtime: &Arc<SessionRuntime>,
     sink: &NotificationSink,
+    callback_route: Option<crate::callback_dispatcher::CallbackRoute>,
     context: Option<meerkat::surface::RequestContext>,
 ) -> RpcResponse {
     let result = async {
@@ -304,21 +300,29 @@ pub(crate) async fn dispatch(
                 if params.initial_turn != Some(crate::handlers::session::InitialTurn::Deferred) {
                     return Err(invalid("fixed governed JSONL requires deferred create"));
                 }
-                params.external_tools = Some(runtime.callback_tool_registry().snapshot());
+                let route = callback_route
+                    .filter(|route| !route.is_closed())
+                    .ok_or_else(|| {
+                        crate::session_runtime::runtime_driver_error_to_rpc(unsupported())
+                    })?;
+                params.external_tools = Some(route.registry().snapshot());
                 params.auth_binding = runtime
                     .default_llm_client()
                     .and_then(|client| client.controller_model_selection())
                     .and_then(|selection| selection.auth_binding().cloned())
                     .map(Into::into);
-                Ok(crate::handlers::session::create_session_with_params(
-                    id.clone(),
-                    params,
-                    runtime.clone(),
-                    sink,
-                    &runtime.runtime_adapter(),
-                    context,
+                Ok(
+                    crate::handlers::session::create_session_with_params_on_route(
+                        id.clone(),
+                        params,
+                        runtime.clone(),
+                        sink,
+                        &runtime.runtime_adapter(),
+                        context,
+                        Some(route),
+                    )
+                    .await,
                 )
-                .await)
             }
             "turn/start" => {
                 let raw = checked_params(params, &["session_id", "prompt", "injected_context"])?;

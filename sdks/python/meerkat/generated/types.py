@@ -399,6 +399,29 @@ SourceUuid = str
 # strings do not become the tool identity owner.
 ToolName = str
 
+# Which tool use the model may or must make on one provider call.
+#
+# `Auto` is today's behaviour and the default: the model decides, and the
+# provider request carries no choice beyond what each adapter always sent.
+# Every other variant is lowered to the provider's native tool-choice field.
+# A provider or model that cannot honour a requested choice refuses the
+# call with a typed unsupported error; a choice is never downgraded to
+# `Auto` silently.
+class ToolChoiceAuto(TypedDict, total=False):
+    mode: Required[Literal['auto']]
+
+class ToolChoiceRequired(TypedDict, total=False):
+    mode: Required[Literal['required']]
+
+class ToolChoiceNone(TypedDict, total=False):
+    mode: Required[Literal['none']]
+
+class ToolChoiceTool(TypedDict, total=False):
+    mode: Required[Literal['tool']]
+    name: Required[str]
+
+ToolChoice = ToolChoiceAuto | ToolChoiceRequired | ToolChoiceNone | ToolChoiceTool
+
 @dataclass
 class SkillEntry:
     """Wire representation of a skill entry (for list responses)."""
@@ -3155,6 +3178,7 @@ class PublicTurnToolOverlay:
     """Public caller-safe per-turn tool overlay."""
     allowed_tools: Optional[list[ToolName]] = None
     blocked_tools: Optional[list[ToolName]] = None
+    tool_choice_plan: Optional[list[ToolChoice]] = None
 
 
 @dataclass
@@ -4177,6 +4201,7 @@ class BridgeCapabilities:
     observe_member: Optional[bool] = None
     resolvable_providers: Optional[list[Provider]] = None
     retire_member: Optional[bool] = None
+    rotation_observe_hold: Optional[bool] = None
     supported_protocol_versions: Optional[list[BridgeProtocolVersion]] = None
     tracked_input_cancel: Optional[bool] = None
     unwire_member: Optional[bool] = None
@@ -8074,6 +8099,7 @@ class BridgeCommandMemberOperatorRequest(TypedDict, total=False):
 
 class BridgeCommandObserveSupervisorRotation(TypedDict, total=False):
     command: Required[Literal['observe_supervisor_rotation']]
+    hold_until_terminal_ms: NotRequired[Optional[int]]
     observer: Required[BridgePeerSpec]
     observer_epoch: Required[int]
     operation_id: Required[str]

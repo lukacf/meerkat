@@ -2206,13 +2206,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-authorization-contracts"
-version = "0.8.49"
+version = "0.8.50"
 dependencies = [
  "meerkat-core",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -2511,6 +2512,7 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-skills",
+ "nix 0.29.0",
  "reqwest 0.12.28",
  "rmcp",
  "serde",
@@ -2694,6 +2696,7 @@ dependencies = [
  "futures",
  "indexmap",
  "meerkat-auth-core",
+ "meerkat-authorization-contracts",
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-live",

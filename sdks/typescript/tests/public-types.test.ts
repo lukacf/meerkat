@@ -857,7 +857,11 @@ void publicSpawnManySpecWithSingleSpawnOnlyField;
 
 const publicMobTurnStartOptions: MobTurnStartOptions = {
   skillRefs: [{ sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" }],
-  turnToolOverlay: { allowedTools: ["read"], blockedTools: [] },
+  turnToolOverlay: {
+    allowedTools: ["read"],
+    blockedTools: [],
+    toolChoicePlan: [{ mode: "tool", name: "read" }, { mode: "required" }, { mode: "auto" }],
+  },
   additionalInstructions: ["stay concise"],
   injectedContext: ["remembered operator preferences"],
   transientTurnContext: "ephemeral operator context",

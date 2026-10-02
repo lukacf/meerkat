@@ -494,16 +494,12 @@ mod observe {
     /// receipt batch. It is also the whole budget of a call whose deadline has
     /// passed or is closer than this.
     const EVIDENCE_READ_FLOOR: Duration = Duration::from_millis(100);
-    /// Polling covers only what the runtime cannot notify: a key not yet
-    /// bound (the inbox gap) and a session without a live registration.
+    /// Polling covers only what the runtime cannot notify: a session without
+    /// a live registration (durable evidence only). A key not yet bound on a
+    /// live session (the inbox gap) is awaited through the runtime's
+    /// admission signal.
     const POLL_START: Duration = Duration::from_millis(10);
     const POLL_MAX: Duration = Duration::from_millis(250);
-    /// While armed on the runtime's waiter, re-read at least this often.
-    /// Every terminal transition wakes that waiter; this bounded re-read is
-    /// defense in depth for a wake that lags receipt finalization (the
-    /// runtime resolves waiters after finalizing, and a directed terminal can
-    /// finalize before its publication succeeds).
-    const REREAD_INTERVAL: Duration = Duration::from_secs(1);
 
     /// When the call must return: the caller's deadline, or one evidence
     /// floor from now for a deadline that has passed or is closer than that.
@@ -710,13 +706,16 @@ mod observe {
                 break;
             }
             if let Some(armed_on) = armed_on {
+                // The runtime wakes this wait on every terminal fact of the
+                // input, including a directed receipt's finalization before
+                // its publication, so it is awaited for the whole budget.
                 match tokio::time::timeout(
-                    remaining.min(REREAD_INTERVAL),
+                    remaining,
                     runtime.wait_input_terminal_receipt(session_id, &armed_on),
                 )
                 .await
                 {
-                    // Re-read on expiry; the loop re-arms if still pending.
+                    // The deadline came first; the loop ends at the top.
                     Err(_elapsed) => continue,
                     Ok(Ok(Some(InputTerminalReceiptWait::Resolved(read)))) => {
                         if let Observation::Terminal(record) = observer.classify(read)? {
@@ -730,6 +729,32 @@ mod observe {
                     Ok(Err(
                         RuntimeDriverError::NotFound { .. } | RuntimeDriverError::NotReady { .. },
                     )) => {}
+                    Ok(Err(error)) => return Err(DeliveryTerminalWaitError::RuntimeRead(error)),
+                }
+            }
+            let remaining = wait_until.saturating_duration_since(Instant::now());
+            if input_id.is_none() {
+                // Not admitted yet: the live runtime signals the admission,
+                // so wait for it instead of re-reading on a backoff.
+                match tokio::time::timeout(
+                    remaining,
+                    runtime.wait_input_admitted_by_idempotency_key(session_id, idempotency_key),
+                )
+                .await
+                {
+                    // The deadline came first; the loop ends at the top.
+                    Err(_elapsed) => continue,
+                    // Admitted: read its evidence.
+                    Ok(Ok(Some(_admitted))) => continue,
+                    // No live registration: only durable evidence is left, so
+                    // re-read it below.
+                    Ok(
+                        Ok(None)
+                        | Err(
+                            RuntimeDriverError::NotFound { .. }
+                            | RuntimeDriverError::NotReady { .. },
+                        ),
+                    ) => {}
                     Ok(Err(error)) => return Err(DeliveryTerminalWaitError::RuntimeRead(error)),
                 }
             }

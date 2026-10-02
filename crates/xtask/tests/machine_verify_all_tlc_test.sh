@@ -155,6 +155,25 @@ fi
 echo "running bounded live delegation steer TLC audit"
 TLC_WORKERS="${tlc_workers}" "${live_steer_audit}" "${LIVE_STEER_AUDIT_MAX_STEPS:-16}"
 
+# UnregisterSession against live channels (#1476): unregister is guarded on
+# every live channel being closed and its close custody settled, and then
+# clears the session's terminal context-preparation records. A third
+# hand-written audit over the same generated model starts one channel of a
+# registered session admitted, staged, bound, under a running run or with the
+# session retired during that run, and explores its context preparation, its
+# close transitions and the unregister drain in each phase under every
+# generated invariant (including live_channel_state_requires_registered_session)
+# plus the property that unregister never fires while a channel is bound. It
+# requires unregister to be reachable from every start (no wedge) and to meet
+# preparation records from the staged start. 16 steps reach every goal.
+live_unregister_audit="${workspace_root}/specs/machines/meerkat_machine/live_unregister_cleanup_audit.sh"
+if [[ ! -x "${live_unregister_audit}" ]]; then
+  echo "error: live unregister cleanup audit runner is missing from workspace runfiles: ${live_unregister_audit}" >&2
+  exit 1
+fi
+echo "running bounded live unregister cleanup TLC audit"
+TLC_WORKERS="${tlc_workers}" "${live_unregister_audit}" "${LIVE_UNREGISTER_AUDIT_MAX_STEPS:-16}"
+
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
 # codegen defects. `machine-verify` still validates drift and the generated
 # ci.cfg structural-invariant contract before honoring these skips. The earlier

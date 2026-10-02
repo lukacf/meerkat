@@ -472,6 +472,7 @@ import type {
   TranscriptRewriteSelection,
   UpdateScheduleRequest,
   TurnOptions,
+  TurnToolOverlay,
   Usage,
   ReadyWorkFilter,
   WorkGraphEventFilter,
@@ -655,6 +656,23 @@ function skillKeysToWire(refs: SkillRef[] | undefined): WireSkillKey[] | undefin
 function skillRefsToWire(refs: SkillRef[] | undefined): WireSkillRef[] | undefined {
   const keys = skillKeysToWire(refs);
   return keys?.map((key) => ({ kind: "structured", ...key }));
+}
+
+/**
+ * The one projection of a public turn tool overlay onto the wire
+ * (`PublicTurnToolOverlay`), shared by the normal, streaming and mob turn
+ * paths so no field can be dropped on one of them. An absent plan is omitted,
+ * keeping existing payloads unchanged.
+ */
+function turnToolOverlayToWire(overlay: TurnToolOverlay): Record<string, unknown> {
+  const wire: Record<string, unknown> = {
+    allowed_tools: overlay.allowedTools,
+    blocked_tools: overlay.blockedTools,
+  };
+  if (overlay.toolChoicePlan !== undefined) {
+    wire.tool_choice_plan = overlay.toolChoicePlan.map((choice) => ({ ...choice }));
+  }
+  return wire;
 }
 
 const MOB_CONTROL_SCOPES = new Set<MobControlScope>([
@@ -855,10 +873,9 @@ function mobTurnStartPayload(
     payload.skill_refs = wireRefs as MobTurnStartParams["skill_refs"];
   }
   if (options?.turnToolOverlay) {
-    payload.turn_tool_overlay = {
-      allowed_tools: options.turnToolOverlay.allowedTools,
-      blocked_tools: options.turnToolOverlay.blockedTools,
-    } as MobTurnStartParams["turn_tool_overlay"];
+    payload.turn_tool_overlay = turnToolOverlayToWire(
+      options.turnToolOverlay,
+    ) as MobTurnStartParams["turn_tool_overlay"];
   }
   setIfDefined(payload, "additional_instructions", options?.additionalInstructions);
   setIfDefined(
@@ -3908,10 +3925,7 @@ export class MeerkatClient {
       params.skill_refs = wireRefs;
     }
     if (options?.turnToolOverlay) {
-      params.turn_tool_overlay = {
-        allowed_tools: options.turnToolOverlay.allowedTools,
-        blocked_tools: options.turnToolOverlay.blockedTools,
-      };
+      params.turn_tool_overlay = turnToolOverlayToWire(options.turnToolOverlay);
     }
     if (options?.additionalInstructions != null) {
       params.additional_instructions = options.additionalInstructions;
@@ -3965,10 +3979,7 @@ export class MeerkatClient {
       params.skill_refs = wireRefs;
     }
     if (options?.turnToolOverlay) {
-      params.turn_tool_overlay = {
-        allowed_tools: options.turnToolOverlay.allowedTools,
-        blocked_tools: options.turnToolOverlay.blockedTools,
-      };
+      params.turn_tool_overlay = turnToolOverlayToWire(options.turnToolOverlay);
     }
     if (options?.additionalInstructions != null) {
       params.additional_instructions = options.additionalInstructions;

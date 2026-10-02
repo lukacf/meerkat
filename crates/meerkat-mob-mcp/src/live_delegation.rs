@@ -6857,8 +6857,15 @@ mod tests {
         let first_user_turn = "provider:user:1".to_string();
         let first_assistant_turn = "provider:assistant:1".to_string();
         let second_user_turn = "provider:user:2".to_string();
+        let fixture_session = "session:barge-in-authority-fixture".to_string();
+        // Live channel bindings must name the registered session
+        // (`live_channel_state_requires_registered_session`), so the recovered
+        // fixture registers the same session its channel is bound to.
         let mut state = MeerkatMachineState {
             lifecycle_phase: meerkat_runtime::meerkat_machine::dsl::MeerkatPhase::Idle,
+            session_id: Some(meerkat_runtime::meerkat_machine::dsl::SessionId(
+                fixture_session.clone(),
+            )),
             ..Default::default()
         };
         state
@@ -6870,10 +6877,9 @@ mod tests {
         state
             .live_execution_generation_by_channel
             .insert(channel_id.clone(), generation);
-        state.live_channel_session_by_channel.insert(
-            channel_id.clone(),
-            "session:barge-in-authority-fixture".to_string(),
-        );
+        state
+            .live_channel_session_by_channel
+            .insert(channel_id.clone(), fixture_session);
         let mut authority = MeerkatMachineAuthority::recover_from_state(state)
             .expect("recover exact generated barge-in fixture");
 

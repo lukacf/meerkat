@@ -1365,6 +1365,18 @@ async fn publish_authorized_runtime_terminal_batch(
                 error,
             )
         })?;
+    // The receipt is final and readable from here, but completion waiters are
+    // resolved only after the interaction terminals publish below, which a
+    // transient failure can delay. Wake every receipt waiter now, so a
+    // receipt wait resolves at finalization instead of parking until
+    // publication. A waiter that read the input pending registered its
+    // observer under the driver lock before this persist, so it is woken.
+    if let Some(completions) = completions {
+        completions
+            .lock()
+            .await
+            .wake_receipt_less_terminal_observers(input_ids.iter().cloned());
+    }
     let events = bundle.interaction_events();
     let observations = events
         .iter()
@@ -9950,6 +9962,7 @@ mod tests {
     #[test]
     fn reply_capability_overlay_composes_with_existing_dispatch_context() {
         let workgraph_overlay = meerkat_core::service::TurnToolOverlay {
+            tool_choice_plan: Vec::new(),
             allowed_tools: None,
             blocked_tools: Some(vec![meerkat_core::types::ToolName::from("blocked_by_flow")]),
             dispatch_context: std::collections::BTreeMap::from([(

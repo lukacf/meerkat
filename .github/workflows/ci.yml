@@ -647,6 +647,14 @@ jobs:
           # An empty RUST_MIN_STACK would drop tests to Rust's 2 MiB default, so it
           # is exported only when the row sets one.
           if [[ -n "${MIN_STACK}" ]]; then export RUST_MIN_STACK="${MIN_STACK}"; fi
+          # Tests of crates that dev-depend on mcp-test-server spawn this exact
+          # fixture and fail without it (mcp_test_server::fixture_binary).
+          # shellcheck disable=SC2086
+          fixture="$(scripts/mcp-test-server-fixture --if-needed ${PACKAGES})"
+          if [[ -n "${fixture}" ]]; then
+            export MEERKAT_MCP_TEST_SERVER="${fixture}"
+            echo "mcp-test-server fixture: ${MEERKAT_MCP_TEST_SERVER}"
+          fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} --lib --bins --profile ci-pr \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
@@ -846,6 +854,14 @@ jobs:
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in an integration lane"; exit 1; }
           # --no-tests=fail: a suite whose package lost its tests/ binaries
           # must be removed from INTEGRATION_SUITES, not pass silently.
+          # Tests of crates that dev-depend on mcp-test-server spawn this exact
+          # fixture and fail without it (mcp_test_server::fixture_binary).
+          # shellcheck disable=SC2086
+          fixture="$(scripts/mcp-test-server-fixture --if-needed ${PACKAGES})"
+          if [[ -n "${fixture}" ]]; then
+            export MEERKAT_MCP_TEST_SERVER="${fixture}"
+            echo "mcp-test-server fixture: ${MEERKAT_MCP_TEST_SERVER}"
+          fi
           # shellcheck disable=SC2086
           # Status level slow: the suites hold known heavy tests with exact-case
           # timeout overrides in .config/nextest.toml; their durations stay visible.
@@ -923,6 +939,14 @@ jobs:
           # An empty RUST_MIN_STACK would drop tests to Rust's 2 MiB default, so it
           # is exported only when the row sets one.
           if [[ -n "${MIN_STACK}" ]]; then export RUST_MIN_STACK="${MIN_STACK}"; fi
+          # Tests of crates that dev-depend on mcp-test-server spawn this exact
+          # fixture and fail without it (mcp_test_server::fixture_binary).
+          # shellcheck disable=SC2086
+          fixture="$(scripts/mcp-test-server-fixture --if-needed ${PACKAGES})"
+          if [[ -n "${fixture}" ]]; then
+            export MEERKAT_MCP_TEST_SERVER="${fixture}"
+            echo "mcp-test-server fixture: ${MEERKAT_MCP_TEST_SERVER}"
+          fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} --lib --bins --profile ci-pr \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
@@ -991,6 +1015,13 @@ jobs:
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" && -n "${ARCHIVE}" ]] || { echo "::error::empty archived unit lane"; exit 1; }
+          # Built into the target directory, the fixture rides in the archive
+          # (archive.include, .config/nextest.toml) and sits next to the
+          # extracted test binaries' deps/, where
+          # mcp_test_server::fixture_binary() resolves it.
+          # shellcheck disable=SC2086
+          fixture="$(scripts/mcp-test-server-fixture --if-needed ${PACKAGES})"
+          if [[ -n "${fixture}" ]]; then echo "mcp-test-server fixture (archived): ${fixture}"; fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest archive ${PACKAGES} --lib --bins \
             --archive-file "${RUNNER_TEMP}/nextest-${ARCHIVE}.tar.zst"

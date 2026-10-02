@@ -10,7 +10,7 @@ use meerkat_core::image_generation::{
     ImageGenerationToolResult, ImageOperationTerminalClass, ImageProviderTerminalObservation,
     ImageSizePreference, ProviderImageMetadata, ProviderTextDisposition, RevisedPromptDisposition,
 };
-use meerkat_core::lifecycle::run_primitive::ProviderTag;
+use meerkat_core::lifecycle::run_primitive::{ProviderTag, ToolChoice};
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::web_search::{WebSearchRequest, WebSearchResult};
 use meerkat_core::{
@@ -489,6 +489,10 @@ pub struct LlmRequest {
     /// the request surface never carries `serde_json::Value`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<ProviderTag>,
+    /// Tool choice lowered to the provider's native field. `Auto` (the
+    /// default) keeps every adapter's request bytes as they were.
+    #[serde(default, skip_serializing_if = "ToolChoice::is_auto")]
+    pub tool_choice: ToolChoice,
 }
 
 impl LlmRequest {
@@ -502,7 +506,36 @@ impl LlmRequest {
             temperature: None,
             stop_sequences: None,
             provider_params: None,
+            tool_choice: ToolChoice::Auto,
         }
+    }
+
+    /// Set the tool choice for this call.
+    #[must_use]
+    pub fn with_tool_choice(mut self, choice: ToolChoice) -> Self {
+        self.tool_choice = choice;
+        self
+    }
+
+    /// Check the tool choice against the offered tools, before lowering.
+    /// A forcing choice needs tools; a named tool must be offered.
+    pub fn validate_tool_choice(&self, provider: &str) -> Result<(), LlmError> {
+        let refusal = match &self.tool_choice {
+            ToolChoice::Auto | ToolChoice::None => return Ok(()),
+            ToolChoice::Required if self.tools.is_empty() => {
+                crate::error::ToolChoiceRefusal::NoToolsOffered
+            }
+            ToolChoice::Required => return Ok(()),
+            ToolChoice::Tool { name } if self.tools.iter().any(|tool| &tool.name == name) => {
+                return Ok(());
+            }
+            ToolChoice::Tool { .. } => crate::error::ToolChoiceRefusal::ToolNotOffered,
+        };
+        Err(LlmError::ToolChoiceUnsupported {
+            provider: provider.to_owned(),
+            choice: self.tool_choice.clone(),
+            reason: refusal,
+        })
     }
 
     /// Set max tokens
@@ -788,7 +821,7 @@ impl ToolCallBuffer {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -1035,5 +1068,90 @@ mod tests {
         assert_eq!(tool_calls[0].args["path"], "/tmp/test.txt");
 
         Ok(())
+    }
+
+    #[test]
+    fn tool_choice_serde_shape_and_auto_omission() {
+        use meerkat_core::ToolChoice;
+        for (choice, encoded) in [
+            (ToolChoice::Auto, serde_json::json!({"mode": "auto"})),
+            (
+                ToolChoice::Required,
+                serde_json::json!({"mode": "required"}),
+            ),
+            (ToolChoice::None, serde_json::json!({"mode": "none"})),
+            (
+                ToolChoice::Tool {
+                    name: "deny_probe".into(),
+                },
+                serde_json::json!({"mode": "tool", "name": "deny_probe"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&choice).unwrap(), encoded);
+            assert_eq!(
+                serde_json::from_value::<ToolChoice>(encoded).unwrap(),
+                choice
+            );
+        }
+        assert!(
+            serde_json::from_value::<ToolChoice>(serde_json::json!({"mode": "tool"})).is_err(),
+            "a named choice needs its name"
+        );
+        let request = LlmRequest::new("m", Vec::new());
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert!(
+            encoded.get("tool_choice").is_none(),
+            "Auto is omitted: {encoded}"
+        );
+        let forced = request.with_tool_choice(ToolChoice::Required);
+        let encoded = serde_json::to_value(&forced).unwrap();
+        assert_eq!(
+            encoded["tool_choice"],
+            serde_json::json!({"mode": "required"})
+        );
+    }
+
+    #[test]
+    fn validate_tool_choice_checks_offered_tools() {
+        use crate::error::ToolChoiceRefusal;
+        use meerkat_core::ToolChoice;
+        let tool = Arc::new(ToolDef {
+            name: "lookup".into(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type": "object"}),
+            provenance: None,
+        });
+        let refused = |request: &LlmRequest| match request.validate_tool_choice("p") {
+            Err(LlmError::ToolChoiceUnsupported { reason, .. }) => Some(reason),
+            Err(other) => panic!("unexpected {other:?}"),
+            Ok(()) => None,
+        };
+        let base = LlmRequest::new("m", Vec::new());
+        assert_eq!(refused(&base), None);
+        assert_eq!(
+            refused(&base.clone().with_tool_choice(ToolChoice::None)),
+            None
+        );
+        assert_eq!(
+            refused(&base.clone().with_tool_choice(ToolChoice::Required)),
+            Some(ToolChoiceRefusal::NoToolsOffered)
+        );
+        let offered = base.with_tools(vec![tool]);
+        assert_eq!(
+            refused(&offered.clone().with_tool_choice(ToolChoice::Required)),
+            None
+        );
+        assert_eq!(
+            refused(&offered.clone().with_tool_choice(ToolChoice::Tool {
+                name: "lookup".into()
+            })),
+            None
+        );
+        assert_eq!(
+            refused(&offered.with_tool_choice(ToolChoice::Tool {
+                name: "other".into()
+            })),
+            Some(ToolChoiceRefusal::ToolNotOffered)
+        );
     }
 }

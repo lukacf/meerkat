@@ -186,6 +186,63 @@ struct CallbackToolRegistryState {
     tools: Vec<RegisteredCallbackTool>,
 }
 
+/// One RPC connection's callback route: the channel its server writes
+/// `tool/execute` requests to, the id space those requests are numbered in,
+/// and the callback tools that connection registered.
+///
+/// A route belongs to exactly one connection (or to the process-default
+/// stdio channel). Dispatchers capture the route they were built from, so a
+/// session's callbacks always go to the connection that owns its route, and
+/// fail typed (`tool_unavailable`) once that connection is gone instead of
+/// borrowing another connection's channel or id space.
+#[derive(Clone)]
+pub struct CallbackRoute {
+    tx: mpsc::Sender<CallbackRequestEnvelope>,
+    id_counter: Arc<AtomicU64>,
+    registry: Arc<CallbackToolRegistry>,
+}
+
+impl CallbackRoute {
+    /// A fresh route over `tx` with its own id space and empty registry.
+    pub fn new(tx: mpsc::Sender<CallbackRequestEnvelope>) -> Self {
+        Self::from_parts(
+            tx,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(CallbackToolRegistry::default()),
+        )
+    }
+
+    /// A route over explicit parts (used by the process-default channel).
+    pub fn from_parts(
+        tx: mpsc::Sender<CallbackRequestEnvelope>,
+        id_counter: Arc<AtomicU64>,
+        registry: Arc<CallbackToolRegistry>,
+    ) -> Self {
+        Self {
+            tx,
+            id_counter,
+            registry,
+        }
+    }
+
+    pub fn sender(&self) -> mpsc::Sender<CallbackRequestEnvelope> {
+        self.tx.clone()
+    }
+
+    pub fn id_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.id_counter)
+    }
+
+    pub fn registry(&self) -> Arc<CallbackToolRegistry> {
+        Arc::clone(&self.registry)
+    }
+
+    /// True once the owning connection stopped receiving callback requests.
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+}
+
 /// Live callback-tool registry whose semantic mutation and epoch advancement
 /// share one lock/authority boundary.
 pub struct CallbackToolRegistry {
@@ -369,6 +426,35 @@ impl CallbackToolDispatcher {
             detached_jobs: None,
             last_seen_globals: StdRwLock::new(last_seen_globals),
         }
+    }
+
+    /// Create a callback dispatcher bound to one connection's route.
+    pub fn from_route(route: &CallbackRoute, inline_tools: Vec<ToolDef>) -> Self {
+        Self::from_registry(
+            route.registry(),
+            route.sender(),
+            route.id_counter(),
+            inline_tools,
+        )
+    }
+
+    /// Create a route-bound dispatcher that can also own detached callback jobs.
+    pub fn from_route_with_job_runtime(
+        route: &CallbackRoute,
+        inline_tools: Vec<ToolDef>,
+        realm_id: impl Into<String>,
+        job_store: Arc<dyn meerkat::DetachedJobStore>,
+        blob_store: Arc<dyn meerkat_core::BlobStore>,
+    ) -> Self {
+        Self::from_registry_with_job_runtime(
+            route.registry(),
+            route.sender(),
+            route.id_counter(),
+            inline_tools,
+            realm_id,
+            job_store,
+            blob_store,
+        )
     }
 
     pub fn from_registry_with_job_runtime(
@@ -935,13 +1021,24 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
                 outbound_permit,
             ))
             .await
-            .map_err(|_| ToolError::execution_failed("Callback channel closed".to_string()))?;
+            // The route's owning connection is gone: the tool is unavailable
+            // to this session. It never falls back to another connection.
+            .map_err(|_| {
+                ToolError::unavailable(
+                    call.name,
+                    meerkat_core::ToolUnavailableReason::NotCurrentlyCallable,
+                )
+            })?;
 
         let response_handoff = tokio::time::timeout(CALLBACK_TIMEOUT, response_rx)
             .await
             .map_err(|_| callback_timeout_error(call.name))?
+            // The owning connection closed and failed its pending callbacks.
             .map_err(|_| {
-                ToolError::execution_failed("Callback response channel dropped".to_string())
+                ToolError::unavailable(
+                    call.name,
+                    meerkat_core::ToolUnavailableReason::NotCurrentlyCallable,
+                )
             })?;
 
         let response = response_handoff.response();

@@ -1388,6 +1388,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_provider_turn_occupancy_has_exact_interaction`
 - `live_assistant_turn_has_frozen_typed_attribution`
 - `live_delegation_items_are_channel_bound_and_capped`
+- `live_channel_state_requires_registered_session`
 - `live_close_settlement_deferral_is_for_closed_channels`
 - `live_delegation_operation_has_exact_join_identity`
 - `live_delegation_worker_binding_is_exact`
@@ -2247,6 +2248,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_loop_drained`
   - `comms_drain_exited`
   - `completion_waiters_drained`
+  - `live_channels_closed`
+  - `live_recovery_obligations_settled`
 - To: `Idle`
 
 ### `UnregisterSessionAttached`
@@ -2262,6 +2265,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_loop_drained`
   - `comms_drain_exited`
   - `completion_waiters_drained`
+  - `live_channels_closed`
+  - `live_recovery_obligations_settled`
 - To: `Idle`
 
 ### `UnregisterSessionRunning`
@@ -2277,6 +2282,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_loop_drained`
   - `comms_drain_exited`
   - `completion_waiters_drained`
+  - `live_channels_closed`
+  - `live_recovery_obligations_settled`
 - To: `Idle`
 
 ### `UnregisterSessionRetired`
@@ -2292,6 +2299,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_loop_drained`
   - `comms_drain_exited`
   - `completion_waiters_drained`
+  - `live_channels_closed`
+  - `live_recovery_obligations_settled`
 - To: `Retired`
 
 ### `UnregisterSessionStopped`
@@ -2307,6 +2316,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_loop_drained`
   - `comms_drain_exited`
   - `completion_waiters_drained`
+  - `live_channels_closed`
+  - `live_recovery_obligations_settled`
 - To: `Idle`
 
 ### `ResolveRuntimeOpsLifecycleDurabilityIdle`
@@ -14816,6 +14827,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
 - Guards:
+  - `session_registered`
   - `exactly_one_close_receipt_is_present`
   - `closed_tombstone_matches`
 - Emits: `LiveChannelCloseCustodyRevoked`
@@ -14825,6 +14837,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
 - Guards:
+  - `session_registered`
   - `exactly_one_close_receipt_is_present`
   - `closed_tombstone_matches`
 - Emits: `LiveChannelCloseCustodyRevoked`
@@ -14834,6 +14847,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
 - Guards:
+  - `session_registered`
   - `exactly_one_close_receipt_is_present`
   - `closed_tombstone_matches`
 - Emits: `LiveChannelCloseCustodyRevoked`
@@ -14843,6 +14857,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
 - Guards:
+  - `session_registered`
   - `exactly_one_close_receipt_is_present`
   - `closed_tombstone_matches`
 - Emits: `LiveChannelCloseCustodyRevoked`
@@ -14852,6 +14867,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
 - Guards:
+  - `session_registered`
   - `exactly_one_close_receipt_is_present`
   - `closed_tombstone_matches`
 - Emits: `LiveChannelCloseCustodyRevoked`

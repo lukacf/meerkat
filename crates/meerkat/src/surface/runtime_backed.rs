@@ -2391,6 +2391,7 @@ mod tests {
             }),
             skill_references: Some(vec![skill]),
             turn_tool_overlay: Some(meerkat_core::service::TurnToolOverlay {
+                tool_choice_plan: Vec::new(),
                 allowed_tools: Some(vec!["runtime_tool".into()]),
                 blocked_tools: None,
                 dispatch_context: Default::default(),

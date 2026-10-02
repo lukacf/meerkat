@@ -1214,8 +1214,11 @@ impl CompletionRegistry {
     }
 
     /// Wake every observer of these inputs. Called only after the machine
-    /// committed the receipt-less terminal, under the same driver-then-registry
-    /// lock order every resolver uses.
+    /// committed the inputs' terminal fact: a receipt-less terminal (under the
+    /// driver-then-registry lock order every resolver uses), or a directed
+    /// batch's finalized receipt (after its persist released the driver). An
+    /// observer registers under the driver lock while the input still reads
+    /// pending, so every observer of a committed terminal is woken.
     pub(crate) fn wake_receipt_less_terminal_observers<I>(&mut self, input_ids: I)
     where
         I: IntoIterator<Item = InputId>,

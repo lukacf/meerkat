@@ -2226,13 +2226,17 @@ pub struct SessionRuntime {
     mob_actor_witnesses: RpcMobActorWitnesses,
     #[cfg(feature = "mcp")]
     mcp_sessions: Arc<RwLock<std::collections::HashMap<SessionId, SessionMcpState>>>,
-    /// Channel for sending callback tool requests to the RPC server loop.
-    /// Wrapped in `RwLock` so it can be set after Arc wrapping (server construction).
-    callback_request_tx: StdRwLock<Option<mpsc::Sender<CallbackRequestEnvelope>>>,
-    /// Counter for generating unique server-originated callback request IDs.
-    callback_id_counter_slot: StdRwLock<Arc<std::sync::atomic::AtomicU64>>,
-    /// Callback tool definitions and their inseparable live generation.
-    registered_tools_slot: StdRwLock<Arc<crate::callback_dispatcher::CallbackToolRegistry>>,
+    /// The process-default callback route: the pre-created stdio/embedded
+    /// channel from [`Self::init_callback_channel`] (or the deprecated
+    /// [`Self::set_callback_channel`]). Connection-owned routes (one per TCP
+    /// connection) are never written here: a connection's callbacks must
+    /// never be borrowed by another connection.
+    default_callback_route: StdRwLock<Option<crate::callback_dispatcher::CallbackRoute>>,
+    /// The callback route each session was created on. Recovery and live
+    /// orchestration rebuild a session's callback tools from its own route;
+    /// an unbound session falls back to the process-default route only.
+    session_callback_routes:
+        StdRwLock<HashMap<SessionId, crate::callback_dispatcher::CallbackRoute>>,
     /// Handle to the builder's mob tools slot inside the session service.
     /// Captured before the builder is consumed so `set_mob_tools` can write
     /// through to the actual builder that creates agents.
@@ -2812,7 +2816,7 @@ impl SessionRuntime {
 
     async fn live_session_is_stale(&self, session_id: &SessionId) -> Result<bool, RpcError> {
         let snapshot = self.realm_context_snapshot();
-        let recovery_ctx = self.recovery_context(&snapshot);
+        let recovery_ctx = self.recovery_context(&snapshot, Some(session_id));
         self.runtime_state_ops()
             .live_session_is_stale(session_id, &recovery_ctx)
             .await
@@ -3082,13 +3086,8 @@ impl SessionRuntime {
             mob_actor_witnesses: Arc::new(StdRwLock::new(HashMap::new())),
             #[cfg(feature = "mcp")]
             mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            callback_request_tx: StdRwLock::new(None),
-            callback_id_counter_slot: StdRwLock::new(Arc::new(std::sync::atomic::AtomicU64::new(
-                0,
-            ))),
-            registered_tools_slot: StdRwLock::new(Arc::new(
-                crate::callback_dispatcher::CallbackToolRegistry::default(),
-            )),
+            default_callback_route: StdRwLock::new(None),
+            session_callback_routes: StdRwLock::new(HashMap::new()),
             builder_mob_tools_slot,
             builder_schedule_tools_slot,
             builder_agent_llm_client_decorator_slot,
@@ -3237,13 +3236,8 @@ impl SessionRuntime {
             mob_actor_witnesses: Arc::new(StdRwLock::new(HashMap::new())),
             #[cfg(feature = "mcp")]
             mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            callback_request_tx: StdRwLock::new(None),
-            callback_id_counter_slot: StdRwLock::new(Arc::new(std::sync::atomic::AtomicU64::new(
-                0,
-            ))),
-            registered_tools_slot: StdRwLock::new(Arc::new(
-                crate::callback_dispatcher::CallbackToolRegistry::default(),
-            )),
+            default_callback_route: StdRwLock::new(None),
+            session_callback_routes: StdRwLock::new(HashMap::new()),
             builder_mob_tools_slot,
             builder_schedule_tools_slot,
             builder_agent_llm_client_decorator_slot,
@@ -4496,7 +4490,7 @@ impl SessionRuntime {
     ) -> Result<(), SessionError> {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, Some(session_id))
             .materialize_staged_session_for_realtime_open(session_id)
             .await
     }
@@ -4510,7 +4504,7 @@ impl SessionRuntime {
     ) -> Result<(), SessionError> {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, Some(session_id))
             .recover_live_session_for_realtime_open(session_id)
             .await
     }
@@ -4526,7 +4520,7 @@ impl SessionRuntime {
     ) -> Result<RealtimeSessionOpenConfig, RealtimeSessionOpenProjectionError> {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, Some(session_id))
             .realtime_session_open_config(session_id, turning_mode)
             .await
     }
@@ -4554,7 +4548,7 @@ impl SessionRuntime {
     ) -> Result<RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError> {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, Some(session_id))
             .live_open_projection_for_session(session_id, turning_mode, seed_window)
             .await
     }
@@ -4568,7 +4562,7 @@ impl SessionRuntime {
     ) -> Result<RealtimeSessionOpenConfig, RealtimeSessionOpenProjectionError> {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, Some(session_id))
             .live_refresh_config_for_session(session_id, turning_mode)
             .await
     }
@@ -4583,7 +4577,7 @@ impl SessionRuntime {
     ) -> Result<SessionLlmIdentity, SessionError> {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, Some(session_id))
             .live_llm_identity_for_session(session_id)
             .await
     }
@@ -4600,7 +4594,7 @@ impl SessionRuntime {
     ) -> Result<(), LiveOpenPrecheckError> {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, Some(session_id))
             .precheck_live_open(session_id)
             .await
     }
@@ -4625,7 +4619,7 @@ impl SessionRuntime {
         let reconciler = RpcLiveIngressReconciler {
             runtime: Arc::clone(self),
         };
-        let mut orchestrator = self.live_orchestrator(&snapshot, cleanup);
+        let mut orchestrator = self.live_orchestrator(&snapshot, cleanup, Some(session_id));
         orchestrator.ingress_reconciler = Some(&reconciler);
         orchestrator
             .open_live_channel_with_seed(
@@ -4663,7 +4657,7 @@ impl SessionRuntime {
         let reconciler = RpcLiveIngressReconciler {
             runtime: Arc::clone(self),
         };
-        let mut orchestrator = self.live_orchestrator(&snapshot, cleanup);
+        let mut orchestrator = self.live_orchestrator(&snapshot, cleanup, Some(session_id));
         orchestrator.ingress_reconciler = Some(&reconciler);
         orchestrator
             .open_live_channel_with_execution_identity(
@@ -4689,7 +4683,7 @@ impl SessionRuntime {
     ) -> Result<(), meerkat::session_runtime::errors::LiveChannelVerbError> {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, Some(session_id))
             .cleanup_experimental_live_channel_after_publication_failure(
                 host, authority, session_id, channel_id,
             )
@@ -4708,7 +4702,7 @@ impl SessionRuntime {
     > {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, None)
             .close_live_channel(host, channel_id, None)
             .await
     }
@@ -4726,7 +4720,7 @@ impl SessionRuntime {
     > {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, None)
             .close_experimental_live_channel(host, authority, channel_id)
             .await
     }
@@ -4742,7 +4736,7 @@ impl SessionRuntime {
     > {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, None)
             .live_channel_status(host, channel_id, None)
             .await
     }
@@ -4758,7 +4752,7 @@ impl SessionRuntime {
     > {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, None)
             .refresh_live_channel(host, channel_id, None)
             .await
     }
@@ -4776,7 +4770,7 @@ impl SessionRuntime {
     > {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, None)
             .send_live_input(host, channel_id, None, chunk)
             .await
     }
@@ -4793,7 +4787,7 @@ impl SessionRuntime {
     > {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, None)
             .commit_live_input(host, channel_id, None, response_modality)
             .await
     }
@@ -4811,7 +4805,7 @@ impl SessionRuntime {
     > {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, None)
             .interrupt_live_channel(host, transport_ctx, channel_id, None)
             .await
     }
@@ -4834,7 +4828,7 @@ impl SessionRuntime {
     > {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, None)
             .truncate_live_output(
                 host,
                 transport_ctx,
@@ -4862,7 +4856,7 @@ impl SessionRuntime {
     > {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, None)
             .complete_live_playback(host, channel_id, None, output_id)
             .await
     }
@@ -4876,6 +4870,7 @@ impl SessionRuntime {
         &'a self,
         snapshot: &'a RealmContextSnapshot,
         archive_runtime_cleanup: meerkat::session_runtime::runtime_state::ArchiveRuntimeCleanup,
+        session_id: Option<&SessionId>,
     ) -> meerkat::session_runtime::live_orchestration::LiveOrchestrator<'a> {
         let agent_llm_client_decorator = self
             .agent_llm_client_decorator
@@ -4899,7 +4894,7 @@ impl SessionRuntime {
             config_runtime: self.config_runtime(),
             default_llm_client: self.default_llm_client(),
             agent_llm_client_decorator,
-            external_tools: self.recovery_external_tools(),
+            external_tools: self.recovery_external_tools(session_id),
             archive_runtime_cleanup,
             realm_id: snapshot.realm_id.as_ref(),
             instance_id: snapshot.instance_id.as_deref(),
@@ -4950,9 +4945,21 @@ impl SessionRuntime {
         })
     }
 
-    fn recovery_external_tools(&self) -> Option<Arc<dyn meerkat_core::AgentToolDispatcher>> {
-        self.callback_tool_dispatcher(vec![])
-            .map(|dispatcher| Arc::new(dispatcher) as Arc<dyn meerkat_core::AgentToolDispatcher>)
+    /// Callback tools for a recovered or live-orchestrated session: the
+    /// session's own route, or the process-default route when the session is
+    /// unbound or unknown. Never another connection's route.
+    fn recovery_external_tools(
+        &self,
+        session_id: Option<&SessionId>,
+    ) -> Option<Arc<dyn meerkat_core::AgentToolDispatcher>> {
+        let route = match session_id {
+            Some(session_id) => self.session_callback_route(session_id),
+            None => self.default_callback_route(),
+        }?;
+        Some(
+            Arc::new(self.callback_tool_dispatcher_for_route(&route, vec![]))
+                as Arc<dyn meerkat_core::AgentToolDispatcher>,
+        )
     }
 
     /// Translate the surface-agnostic [`meerkat::session_runtime::errors::RecoveryError`]
@@ -5005,6 +5012,7 @@ impl SessionRuntime {
     fn recovery_context<'a>(
         &'a self,
         snapshot: &'a RealmContextSnapshot,
+        session_id: Option<&SessionId>,
     ) -> meerkat::session_runtime::recovery::RecoveryContext<'a> {
         let agent_llm_client_decorator = {
             self.agent_llm_client_decorator
@@ -5020,7 +5028,7 @@ impl SessionRuntime {
             backend: snapshot.backend.as_deref(),
             default_llm_client: self.default_llm_client(),
             agent_llm_client_decorator,
-            external_tools: self.recovery_external_tools(),
+            external_tools: self.recovery_external_tools(session_id),
             config_runtime: self.config_runtime(),
         }
     }
@@ -5032,7 +5040,7 @@ impl SessionRuntime {
         overrides: SurfaceSessionRecoveryOverrides,
     ) -> Result<RecoveredCreateRequest, RpcError> {
         let snapshot = self.realm_context_snapshot();
-        self.recovery_context(&snapshot)
+        self.recovery_context(&snapshot, Some(session_id))
             .recovered_create_request(session_id, session, overrides)
             .await
             .map_err(Self::recovery_error_to_rpc)
@@ -5046,7 +5054,7 @@ impl SessionRuntime {
         binding_mode: RecoveryRuntimeBindingMode,
     ) -> Result<RecoveredCreateRequest, RpcError> {
         let snapshot = self.realm_context_snapshot();
-        self.recovery_context(&snapshot)
+        self.recovery_context(&snapshot, Some(session_id))
             .recovered_create_request_with_runtime_binding_mode(
                 session_id,
                 session,
@@ -5916,7 +5924,7 @@ impl SessionRuntime {
             let snapshot = self.realm_context_snapshot();
             let cleanup = self.archive_runtime_cleanup();
             let close_report = self
-                .live_orchestrator(&snapshot, cleanup)
+                .live_orchestrator(&snapshot, cleanup, Some(session_id))
                 .close_live_channels_for_identity_change(session_id, &report.new_identity)
                 .await;
             if !close_report.close_failed.is_empty() {
@@ -6362,93 +6370,141 @@ impl SessionRuntime {
         ))
     }
 
-    /// Pre-initialize the callback channel and return the receiver half.
+    /// Pre-initialize the process-default callback channel and return the
+    /// receiver half.
     ///
-    /// Call this before any code that reads `callback_request_tx()` (e.g.
-    /// mob resume that invokes an `ExternalToolsProvider`). The server
-    /// constructor that accepts a pre-created rx will reuse this channel
-    /// instead of creating a new one.
+    /// For a single-client stdio/embedded server: call this before any code
+    /// that reads `callback_request_tx()` (e.g. mob resume that invokes an
+    /// `ExternalToolsProvider`). The server constructor that accepts a
+    /// pre-created rx reuses this route instead of creating a new one.
+    /// Connection-owned TCP servers do not use this route.
     pub fn init_callback_channel(&self) -> mpsc::Receiver<CallbackRequestEnvelope> {
         let (tx, rx) = mpsc::channel(crate::NOTIFICATION_CHANNEL_CAPACITY);
-        let id_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        self.set_callback_channel(tx, id_counter);
+        self.install_default_callback_route(crate::callback_dispatcher::CallbackRoute::new(tx));
         rx
     }
 
-    /// Set the callback request channel for tool callbacks.
+    /// Replace the process-default callback route.
     ///
-    /// Takes `&self` so it can be called after the runtime is wrapped in `Arc`
-    /// (e.g. during `RpcServer` construction).
+    /// Deprecated: a runtime shared by several connections must not have one
+    /// connection overwrite another's route. Connection-owned servers keep
+    /// their route on their own router; use [`Self::init_callback_channel`]
+    /// for the single-client default channel.
+    #[deprecated(
+        since = "0.8.51",
+        note = "callback routes are connection-owned; use init_callback_channel for the single-client default route"
+    )]
     pub fn set_callback_channel(
         &self,
         tx: mpsc::Sender<CallbackRequestEnvelope>,
         id_counter: Arc<std::sync::atomic::AtomicU64>,
     ) {
-        if let Ok(mut slot) = self.callback_request_tx.write() {
-            *slot = Some(tx);
-        }
-        if let Ok(mut c) = self.callback_id_counter_slot.write() {
-            *c = id_counter;
-        }
-        if let Ok(mut t) = self.registered_tools_slot.write() {
-            *t = Arc::new(crate::callback_dispatcher::CallbackToolRegistry::default());
-        }
+        self.install_default_callback_route(crate::callback_dispatcher::CallbackRoute::from_parts(
+            tx,
+            id_counter,
+            Arc::new(crate::callback_dispatcher::CallbackToolRegistry::default()),
+        ));
     }
 
-    /// Get a clone of the callback request sender, if configured.
+    fn install_default_callback_route(&self, route: crate::callback_dispatcher::CallbackRoute) {
+        *self
+            .default_callback_route
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(route);
+    }
+
+    /// The process-default callback route, if one was initialized.
+    pub fn default_callback_route(&self) -> Option<crate::callback_dispatcher::CallbackRoute> {
+        self.default_callback_route
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Get a clone of the process-default callback request sender, if configured.
     pub fn callback_request_tx(&self) -> Option<mpsc::Sender<CallbackRequestEnvelope>> {
-        self.callback_request_tx
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone())
+        self.default_callback_route().map(|route| route.sender())
     }
 
-    /// Get the callback ID counter.
+    /// Get the process-default callback ID counter.
     pub fn callback_id_counter(&self) -> Arc<std::sync::atomic::AtomicU64> {
-        self.callback_id_counter_slot
-            .read()
-            .ok()
-            .map(|g| g.clone())
+        self.default_callback_route()
+            .map(|route| route.id_counter())
             .unwrap_or_default()
     }
 
-    /// Get the inseparable callback registry mutation/epoch authority.
+    /// Get the process-default callback registry mutation/epoch authority.
     pub fn callback_tool_registry(&self) -> Arc<crate::callback_dispatcher::CallbackToolRegistry> {
-        self.registered_tools_slot
-            .read()
-            .ok()
-            .map(|g| g.clone())
+        self.default_callback_route()
+            .map(|route| route.registry())
             .unwrap_or_else(
                 || Arc::new(crate::callback_dispatcher::CallbackToolRegistry::default()),
             )
     }
 
+    /// Build a dispatcher on the process-default callback route.
     pub fn callback_tool_dispatcher(
         &self,
         inline_tools: Vec<meerkat_core::ToolDef>,
     ) -> Option<crate::callback_dispatcher::CallbackToolDispatcher> {
-        let callback_tx = self.callback_request_tx()?;
-        let registry = self.callback_tool_registry();
-        let id_counter = self.callback_id_counter();
-        Some(match self.realm_id() {
+        let route = self.default_callback_route()?;
+        Some(self.callback_tool_dispatcher_for_route(&route, inline_tools))
+    }
+
+    /// Build a dispatcher bound to one exact callback route.
+    pub fn callback_tool_dispatcher_for_route(
+        &self,
+        route: &crate::callback_dispatcher::CallbackRoute,
+        inline_tools: Vec<meerkat_core::ToolDef>,
+    ) -> crate::callback_dispatcher::CallbackToolDispatcher {
+        match self.realm_id() {
             Some(realm_id) => {
-                crate::callback_dispatcher::CallbackToolDispatcher::from_registry_with_job_runtime(
-                    registry,
-                    callback_tx,
-                    id_counter,
+                crate::callback_dispatcher::CallbackToolDispatcher::from_route_with_job_runtime(
+                    route,
                     inline_tools,
                     realm_id.to_string(),
                     self.job_store.clone(),
                     self.blob_store(),
                 )
             }
-            None => crate::callback_dispatcher::CallbackToolDispatcher::from_registry(
-                registry,
-                callback_tx,
-                id_counter,
-                inline_tools,
-            ),
-        })
+            None => {
+                crate::callback_dispatcher::CallbackToolDispatcher::from_route(route, inline_tools)
+            }
+        }
+    }
+
+    /// Bind `session_id` to the callback route it was created on.
+    pub fn bind_session_callback_route(
+        &self,
+        session_id: SessionId,
+        route: crate::callback_dispatcher::CallbackRoute,
+    ) {
+        self.session_callback_routes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id, route);
+    }
+
+    /// The callback route `session_id` is bound to, falling back to the
+    /// process-default route for an unbound session. Never another
+    /// connection's route.
+    pub fn session_callback_route(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<crate::callback_dispatcher::CallbackRoute> {
+        self.session_callback_routes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned()
+            .or_else(|| self.default_callback_route())
+    }
+
+    fn unbind_session_callback_route(&self, session_id: &SessionId) {
+        self.session_callback_routes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id);
     }
 
     /// P1#5: attach the live adapter host so the runtime can fan out
@@ -6603,7 +6659,7 @@ impl SessionRuntime {
     pub async fn propagate_config_to_live_channels(&self) -> LiveConfigPropagationReport {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
-        self.live_orchestrator(&snapshot, cleanup)
+        self.live_orchestrator(&snapshot, cleanup, None)
             .propagate_config_to_live_channels()
             .await
     }
@@ -8894,7 +8950,7 @@ impl SessionRuntime {
         let mut request = if recovering {
             let snapshot = self.realm_context_snapshot();
             let mut request = self
-                .recovery_context(&snapshot)
+                .recovery_context(&snapshot, Some(session.id()))
                 .recovered_create_request_with_bindings(
                     session.clone(),
                     overrides,
@@ -10459,7 +10515,7 @@ impl SessionRuntime {
         session_id: &SessionId,
     ) -> Result<Option<Session>, RpcError> {
         let snapshot = self.realm_context_snapshot();
-        self.recovery_context(&snapshot)
+        self.recovery_context(&snapshot, Some(session_id))
             .load_persisted_session(session_id)
             .await
             .map_err(session_error_to_rpc)
@@ -10494,6 +10550,15 @@ impl SessionRuntime {
 
     /// Archive (remove) a session.
     pub async fn archive_session(&self, session_id: &SessionId) -> Result<(), RpcError> {
+        let archived = self.archive_session_inner(session_id).await;
+        if archived.is_ok() {
+            // An archived session has no live callback owner left to route to.
+            self.unbind_session_callback_route(session_id);
+        }
+        archived
+    }
+
+    async fn archive_session_inner(&self, session_id: &SessionId) -> Result<(), RpcError> {
         let expected_attachment = self.publication_attachment_witness(session_id);
         // Check pending sessions first.
         match self.staged_sessions.begin_archive(session_id).await {
@@ -15431,7 +15496,7 @@ mod tests {
             .unwrap();
         let snapshot = runtime.realm_context_snapshot();
         let failure = runtime
-            .recovery_context(&snapshot)
+            .recovery_context(&snapshot, None)
             .recovered_create_request_with_bindings(
                 consumed,
                 SurfaceSessionRecoveryOverrides {
@@ -18270,34 +18335,15 @@ mod tests {
     }
 
     #[cfg(feature = "mcp")]
-    fn mcp_test_server_path() -> PathBuf {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-        let workspace_root = PathBuf::from(manifest_dir)
-            .parent()
-            .and_then(std::path::Path::parent)
-            .expect("workspace root")
-            .to_path_buf();
-        workspace_root
-            .join("target")
-            .join("debug")
-            .join("mcp-test-server")
-    }
-
-    #[cfg(feature = "mcp")]
-    fn maybe_mcp_server_config(server_name: &str) -> Option<McpServerConfig> {
-        let path = mcp_test_server_path();
-        if !path.exists() {
-            eprintln!(
-                "Skipping MCP runtime boundary test: mcp-test-server not built. Run `cargo build -p mcp-test-server` first."
-            );
-            return None;
-        }
-        Some(McpServerConfig::stdio(
+    fn mcp_server_config(server_name: &str) -> McpServerConfig {
+        McpServerConfig::stdio(
             server_name,
-            path.to_string_lossy().to_string(),
+            mcp_test_server::fixture_binary()
+                .to_string_lossy()
+                .to_string(),
             Vec::new(),
             HashMap::new(),
-        ))
+        )
     }
 
     #[tokio::test]
@@ -25969,10 +26015,9 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[tokio::test]
+    #[ignore = "flaky under load (8/30): Remove event missing at the remove boundary, #1461"]
     async fn start_turn_applies_staged_mcp_remove_and_reload_at_turn_boundary() {
-        let Some(server_config) = maybe_mcp_server_config("test-server") else {
-            return;
-        };
+        let server_config = mcp_server_config("test-server");
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
@@ -26034,9 +26079,7 @@ mod tests {
     #[cfg(feature = "mcp")]
     #[tokio::test]
     async fn async_mcp_removal_timeout_is_emitted_on_next_boundary() {
-        let Some(server_config) = maybe_mcp_server_config("timeout-server") else {
-            return;
-        };
+        let server_config = mcp_server_config("timeout-server");
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
@@ -26161,14 +26204,10 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[tokio::test]
-    #[ignore = "integration-real: requires mcp-test-server binary and real process spawning"]
+    #[ignore = "flaky under load (11/30): depends on the 100 ms MCP drain poll, #1461"]
     async fn staged_ops_remain_boundary_gated_while_background_drain_runs() {
-        let Some(server1_config) = maybe_mcp_server_config("server-draining") else {
-            return;
-        };
-        let Some(server2_config) = maybe_mcp_server_config("server-staged") else {
-            return;
-        };
+        let server1_config = mcp_server_config("server-draining");
+        let server2_config = mcp_server_config("server-staged");
 
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
@@ -26311,11 +26350,9 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[tokio::test]
-    #[ignore = "integration-real: requires mcp-test-server binary and real process spawning"]
+    #[ignore = "fails under load (3/3 on 2 cores): fixed sleep on the 100 ms MCP drain poll, #1461"]
     async fn queued_lifecycle_actions_survive_boundary_apply_failure() {
-        let Some(server_config) = maybe_mcp_server_config("lossless-server") else {
-            return;
-        };
+        let server_config = mcp_server_config("lossless-server");
 
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);

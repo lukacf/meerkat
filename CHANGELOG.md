@@ -118,6 +118,56 @@ them.
   persisted IDs require an explicit validation/migration before governed use;
   this change does not silently reject or qualify them.
 
+- `meerkat_runtime::EphemeralRuntimeDriver` is no longer `UnwindSafe` or
+  `RefUnwindSafe`: it now holds the runtime admission signal added with the
+  typed admission wait (#1431). Callers that relied on these auto traits (for
+  example `std::panic::catch_unwind` around a driver reference) must wrap it in
+  `AssertUnwindSafe`.
+- `meerkat_contracts::wire::supervisor_bridge::BridgeSupervisorRotationObserve`
+  gains the public field `hold_until_terminal_ms: Option<u64>`.
+  `meerkat_contracts::wire::supervisor_bridge::BridgeCapabilities` gains the
+  public field `rotation_observe_hold: bool`. Struct literals must set them;
+  `None` and `false` keep today's behaviour. On the wire both are omitted when
+  unset, so payloads to and from members that predate them are unchanged. The
+  supervisor bridge protocol version stays V6.
+- Behaviour-only (not measured by the gate): rkat-rpc callback routing is
+  owned per connection (#1451). Over TCP, a session's callback tools route
+  only to the connection that created it, and `tools/register` changes only
+  that connection's registry.
+  - When that connection is gone, its sessions' callbacks fail with
+    `tool_unavailable` (`NotCurrentlyCallable`), not `execution_failed`.
+  - Sessions with no owning connection (for example mob member sessions over
+    TCP, where no process-default channel is initialized) get no callback
+    tools. They previously used the most recently connected client's tools.
+    Binding mob callback tools to the creating connection is tracked in #1459.
+  - Stdio and embedded servers that pre-create the channel with
+    `SessionRuntime::init_callback_channel` are unchanged.
+- Typed tool choice (see Added). Struct literals and exhaustive matches must
+  handle the new members:
+  - `meerkat_llm_core::LlmRequest` gains `tool_choice: ToolChoice` (serde
+    default `Auto`, omitted when `Auto`).
+  - `meerkat_core::service::TurnToolOverlay` and `PublicTurnToolOverlay`
+    gain `tool_choice_plan: Vec<ToolChoice>` (omitted when empty).
+  - `meerkat_core::lifecycle::run_primitive::ProviderParamsOverride` gains
+    the request-local `tool_choice: Option<ToolChoice>`. It is never
+    serialized, so a params override cannot carry or persist one.
+  - `meerkat_core::model_profile::capabilities::ModelCapabilities` gains
+    `supports_forced_tool_choice: bool`.
+  - `meerkat_llm_core::LlmError` gains `ToolChoiceUnsupported { provider,
+    choice, reason }`.
+  - `meerkat_core::service::TurnToolOverlayComposeError` and
+    `meerkat::surface::WorkGraphAttentionTurnOverlayError` gain
+    `ConflictingToolChoicePlan`.
+  - `meerkat_core::model_fallback::ModelFallbackSkipReason` gains
+    `ToolChoiceUnsupported` (wire value `tool_choice_unsupported`).
+- Behaviour-only (not measured by the gate): MCP stdio servers are killed
+  immediately after their stdin closes. rmcp gave established servers up to
+  3 s after EOF, and we now terminate immediately after EOF, so a server that
+  needs to flush state on EOF must not rely on it. This applies to
+  `McpConnection::close`, `McpProtocol::close`, `McpRouter::shutdown`, and to
+  server remove, reload and replace. On Unix the whole process group of the
+  server is killed (see Fixed).
+
 ### Added
 
 - Local governed authorization for explicitly configured native Rust embeddings:
@@ -144,17 +194,342 @@ them.
   emitted as schema roots and generated Python and TypeScript SDK types.
   Their Rust vocabulary remains available without a feature gate.
 
+- `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
+  and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
+  `RetainedUnattached { registration }`). The call waits only while a
+  session's actor-materialization claim is in flight, and reports an actor
+  retained without an executor attachment instead of waiting on it.
+- `meerkat_rpc::callback_dispatcher::CallbackRoute` (one connection's
+  callback channel, id space and tool registry), with
+  `CallbackToolDispatcher::from_route` and `from_route_with_job_runtime`.
+- `SessionRuntime::{default_callback_route, callback_tool_dispatcher_for_route,
+  bind_session_callback_route, session_callback_route}` and
+  `MethodRouter::{with_callback_route, callback_route}`.
+- Route-aware handlers: `handlers::session::{handle_create_on_route,
+  create_session_with_params_on_route}` and
+  `handlers::jobs::{handle_cancel_on_route, handle_retry_on_route}`. The
+  existing handlers keep their signatures and use the process-default route.
+- Typed tool choice on provider calls: `meerkat_core::ToolChoice` with
+  `Auto` (the default, today's behaviour), `Required`, `None` and
+  `Tool { name }`, lowered to each provider's native field:
+  - **OpenAI Responses:** `tool_choice` `"required"` / `"none"` /
+    `{type: "function", name}`. The ChatGPT backend keeps its fixed `"auto"`
+    and refuses other choices.
+  - **Chat Completions** (self-hosted and compatible): `"required"` / `"none"`
+    / `{type: "function", function: {name}}`.
+  - **Gemini:** `toolConfig.functionCallingConfig` `ANY` / `NONE` / `ANY` with
+    `allowedFunctionNames: [name]`, merged with the server-side tool flag.
+  - **Anthropic:** `tool_choice` `{type: "any" | "none" | "tool", name}`. A
+    forced call (`any` or a named tool) is refused locally in two cases:
+    - on models proven to reject one: Claude Opus 5.5 answers 400 "not
+      supported for this model" with or without thinking (catalog field
+      `supports_forced_tool_choice`);
+    - under explicit thinking, which is never switched off implicitly.
+
+    Elsewhere the forced choice is sent (live: `claude-sonnet-5` and
+    `claude-haiku-4-5-20251001` accept it), and Anthropic's own 400 rejection
+    maps to the same typed refusal.
+
+  A choice the provider, model or request cannot honour is the typed,
+  non-retryable `LlmError::ToolChoiceUnsupported` with a `ToolChoiceRefusal`
+  reason, never a silent downgrade to `Auto`. Other refusals: a named tool
+  that is not offered, a forcing choice with no tools, and the OpenAI
+  realtime text adapter.
+
+  Per turn, `tool_choice_plan` on the turn tool overlay (RPC `turn/start`
+  `turn_tool_overlay`, REST, mob flow steps, the supervisor bridge) sets the
+  choice for each model request of the run in order. Entry `k` applies to the
+  run's `k`-th provider call, and every call after the plan is exhausted is
+  `Auto`, so a script can force several steps and then let the model
+  complete. The plan is run-local: it is set and cleared with the overlay,
+  never written into session defaults or later turns, and stripped from the
+  model-fallback switch policy. Model-fallback admission probes each target
+  with the failed request's own tool choice through that target's adapter
+  lowering, so a target that cannot honour a forced choice (Claude Opus 5.5,
+  or explicit thinking) is skipped before any provider call. The
+  `ModelFallbackSkipped` event carries the reason `tool_choice_unsupported`.
+  Structured-output extraction carries no choice. Composing two different non-empty plans is a typed conflict. The
+  generated schemas and SDK types gain the `ToolChoice` union and the
+  `tool_choice_plan` field. The TypeScript SDK's public `TurnToolOverlay`
+  gains `toolChoicePlan` (typed with the generated `ToolChoice`, also
+  exported). It is serialized on the normal, streaming and mob turn paths
+  through one shared projection, so no path drops it. The Python SDK already
+  passes the generated overlay through on all three paths, now pinned by
+  payload tests.
+
+
+- `meerkat_runtime::MeerkatMachine::wait_input_admitted_by_idempotency_key`
+  waits until a live session's runtime has admitted an input for an
+  idempotency key and returns its id. The driver signals every accepted
+  input, so the wait is woken by the admission rather than re-reading on a
+  timer. It returns `Ok(None)` for a session without a live registration.
+
+
+- `meerkat_runtime::MeerkatMachine::wait_input_admitted_by_idempotency_key`
+  waits until a live session's runtime has admitted an input for an
+  idempotency key and returns its id. The driver signals every accepted
+  input, so the wait is woken by the admission rather than re-reading on a
+  timer. It returns `Ok(None)` for a session without a live registration.
+
+### Deprecated
+
+- `SessionRuntime::set_callback_channel`. It replaced the route shared by
+  every connection on the runtime. Connection-owned servers keep their route
+  on their own router; use `init_callback_channel` for the single-client
+  default route.
+
 ### Fixed
 
-- The GitHub-hosted Linux release binary jobs work again. The release
-  container marked the workspace safe for Git only after setup-rust-ci had
-  already asked Git for the repository root ("detected dubious ownership",
-  every run since 2026-08-28), and on the 16 GB runners the release build of
-  `meerkat-machine-schema` (8.7 GB peak) overlapping `meerkat-mob` (9.0 GB)
-  was OOM-killed on aarch64. The workspace is now trusted right after
-  Checkout, and the Linux build runs two jobs with the schema crate at
-  `opt-level = 1` (6.3 GB) through `--config`, so asset recovery dispatches
-  can build older tags too.
+- The machine TLA generator parenthesizes a field's pending value when a
+  later expression in the same update block reads it. A conditionally
+  updated field was spliced bare as `IF c THEN a ELSE b`, so TLA+ precedence
+  captured the surrounding operator. The shipped `meerkat_mob_seam` model
+  unwrapped `TurnRunFailed.terminal_cause_kind` with `["value"]` bound to one
+  branch only, emitting the Option record on the other; a read in an
+  equality would have aborted TLC with a non-boolean IF condition. The Rust
+  kernels were unaffected, and every existing invariant, audit and witness
+  result is unchanged on the regenerated models.
+- A prompt admitted to a session while its executor attachment was still
+  being prepared could stay queued forever. The attachment read its queue to
+  decide whether to wake its runtime loop, then handed the session mutation
+  gate to the loop for startup recovery and reacquired it afterwards. An input
+  admitted in that gap found no wake sender, so nothing ran it. This hit
+  detached council completions delivered while a mob resume was reviving the
+  convener (#1482). The attachment now re-reads the queue once it holds the
+  gate again through commit.
+- The post-restore temporary council sweep no longer ends with an outcome
+  still owed when its first pass runs before the host registers the
+  convener's mob (MobKit inserts restored mob handles after constructing the
+  state). The sweep now also waits for the managed-mob set to change and
+  delivers once the mob is registered and running.
+- A repeated `council` call that arrived just as the original run finished no
+  longer joins the finished execution and reports `replayed: false`. The
+  owned task now releases its in-flight reservation before publishing the
+  sealed outcome, so a late caller replays the durable record.
+- MeerkatMachine unregister no longer wedges after a normal live channel
+  close (follow-up to #1476). The unregister guard added in #1476 required
+  every field a close removes to be empty. But the production close order
+  (custody revoke, then the recorded close) deliberately keeps its tombstone
+  for closed replays, so a session whose staged live channel was closed
+  normally could never unregister (`GuardRejected` on `UnregisterSession`).
+  The tombstone is the pending and activation receipts, the execution
+  mode and profile, and the two capability sets.
+  - `UnregisterSession*` now requires the 32 binding and in-flight fields
+    to be empty.
+  - The six tombstone fields may remain only for channels whose close is
+    recorded. Every forward recovery a closed channel still owes must be
+    settled first (cancelled, or its replacement bound).
+  - Unregister clears the tombstone. `RevokeLiveChannelCloseCustodyClosedReplay`
+    now requires a registered session.
+  - `live_channel_state_requires_registered_session` also requires no
+    tombstone and no owed forward recovery once unregistered.
+  - A classification test fails if a field a close removes is not
+    classified as binding or tombstone.
+  - A regression test replays the production close-then-unregister sequence
+    against the generated authority.
+  - `live_unregister_cleanup_audit` gains close-first starts in every phase
+    (Idle, Attached, Running, Retired, Stopped, and Retired and Stopped with
+    a recovery owed) with abandoned admission banned. A state-graph check
+    proves every reachable state can still unregister.
+
+- A delivery whose caller left while it was parked behind a member's
+  in-flight admission no longer runs as a ghost turn. The admission lane
+  skips such a delivery by checking its reply channel, but `SubmitWork` ran
+  on a stack-relief task that held the reply receiver until its asynchronous
+  abort landed, so the lane could pop the entry while the caller still looked
+  alive. `SubmitWork` is now routed inline, so the receiver closes the moment
+  the caller drops (3/30 failures at 10 copies on two cores before, 60/60
+  after).
+- The tag release's BuildBuddy Native test-unit lane runs nextest's `ci-unit`
+  profile instead of the default one, which has no slow-timeout. On v0.8.50
+  (run 36941270028) a lib test kept that lane running past 2680 s remote
+  until the 3000 s SLO watchdog killed the batch without naming anything,
+  while the same command finishes its 12,164 tests in 356 s locally. A hung
+  test now fails after four slow periods as a named TIMEOUT in the submitter
+  log, and the lane prints its slow tests. The integration-fast lane gets the
+  same bound through a new `ci-integration` profile (fast's selection, 240 s,
+  480 s for four nested-Cargo or whole-workspace tests measured at 132-162 s).
+  nextest's `inherits` carries neither `default-filter` nor a parent's own
+  overrides, so the profile restates fast's filter and every fast override is
+  mirrored in the default profile, whose overrides apply to all profiles; that
+  also gives the existing `ci-pr` profile the overrides it was missing.
+- MeerkatMachine `UnregisterSession*` no longer leaves a session's live
+  channel state behind (#1476).
+  - Each variant is now guarded on every live channel being closed and its
+    close custody settled. Every field a channel close removes must be empty,
+    so the close transitions stay the single authority that settles live
+    obligations (result deliveries, bridge operations, staged or bound
+    execution custody). The shell already closes the session's channel
+    before unregistering.
+  - Unregister then clears the session's terminal context-preparation
+    records and any runtime stop deferred for its lifetime. Revocation
+    tombstones stay: they are durable executor evidence in the live bridge
+    recovery image.
+  - A new generated invariant, `live_channel_state_requires_registered_session`,
+    requires live channel bindings to name the registered session and leaves
+    no binding, custody or preparation state once it is unregistered.
+  - `specs/machines/meerkat_machine/live_unregister_cleanup_audit.{tla,sh}`
+    (run in the canonical TLC lane) proves unregister stays reachable through
+    the close transitions from an admitted, staged and bound channel, and
+    from a session running a turn or retired during one.
+
+- The GitHub-hosted Linux release binary jobs no longer fail in their first
+  minute with "detected dubious ownership": the release container marks the
+  workspace safe for Git before setup-rust-ci asks Git for the repository
+  root (it did so only afterwards since 2026-08-28), so the GitHub-hosted
+  release path builds Linux binaries without a BuildBuddy assets dispatch.
+  The same jobs also ran out of memory on the 16 GB runners: the release
+  build of `meerkat-machine-schema` (8.7 GB peak) overlapped `meerkat-mob`
+  (9.0 GB) and was SIGKILLed on aarch64. The catalog crate now builds at
+  `opt-level = 1` in release (6.3 GB; it is not on a hot path) and the
+  Linux build runs two jobs.
+
+- Tests that need the `mcp-test-server` fixture binary no longer pass
+  without running when it is missing. Each test hand-rolled a
+  `target/debug/mcp-test-server` lookup and returned early when nothing was
+  there. That path does not exist under the repo-cargo target layout, and PR
+  CI never set `MEERKAT_MCP_TEST_SERVER`, so the meerkat-mcp stdio tests and
+  the meerkat-rpc MCP boundary tests passed in CI without running.
+  - They now share `mcp_test_server::fixture_binary()`: `MEERKAT_MCP_TEST_SERVER`,
+    else the path `scripts/mcp-test-server-fixture` builds it to. When neither
+    resolves, the test fails with a message naming that script.
+  - The fixture-only `integration-real` tests are no longer ignored.
+  - `ci.yml`, the nightly meerkat-rpc lane and `make test-unit` export the
+    variable whenever a tested crate dev-depends on the fixture. Archived lanes
+    ship the binary (`archive.include`).
+  - Bazel gives every test target of such a crate the fixture, keyed on the
+    dev-dependency. Generation fails if one lacks it.
+  - Three meerkat-rpc MCP lifecycle tests this exposed as failing under load
+    are ignored with that reason pending #1461.
+- Explicit mob resume no longer waits forever on a member whose session
+  claim settled as an actor without an executor. If another in-process owner
+  materializes that actor after the resume's preparation step and never
+  attaches an executor, the member used to wait on
+  `materialization_claim_released`, which only resolves when the claim is
+  vacant, so the member and the mob-wide resume never completed. The member
+  now reclaims the unattached actor through the same preparation path
+  (discard the actor, release its exact registration) and re-attempts. It
+  still waits on in-flight claims. The competitor's old bindings and
+  registration witness are refused typed afterwards.
+
+- `MeerkatMachine::wait_input_terminal_receipt` resolves a directed
+  (peer-request) batch's input when its receipt is finalized, not only once
+  its interaction terminals publish. The runtime finalizes a directed
+  receipt, then publishes, then resolves completion waiters, so while a
+  transient publication failure was retried the receipt was already readable
+  but the wait stayed parked. Finalization now wakes the per-input receipt
+  observers. The Mob delivery-identity wait therefore drops its 1 s
+  defensive re-read (`REREAD_INTERVAL`) and awaits the typed wait for its
+  whole budget.
+- The Mob delivery-identity terminal wait no longer re-reads on a sleep
+  backoff while a delivery is not yet admitted on a live session. It awaits
+  the runtime's admission signal; only a session without a live registration
+  (durable evidence only) is still re-read. The
+  `host_human_input::delivery_terminal_wait` tests waited for admission by
+  repeating 200 ms delivery waits and treated the documented
+  `Unknown { NotObservedByDeadline }` (a window that ends before its first
+  evidence read) as impossible. That failed
+  `batched_autonomous_deliveries_report_one_shared_run_and_their_batch` 26/90
+  times at 30 copies per core. They now await the admission itself.
+- MCP stdio server processes are owned until their exit is observed (#1439).
+  The process is deposited in a typed custody before the handshake, so no
+  connect future exclusively owns it. `McpConnection::close`,
+  `McpProtocol::close` and a failed connect return after the server has
+  exited, and `McpRouter::shutdown` terminates the server of every connect
+  attempt it aborted and joins every close it started for remove, reload,
+  replace and rejected completions (previously detached tasks), so every
+  server has exited when shutdown returns. On Unix servers start in their own
+  process group and the whole group is killed, so a server launched through a
+  wrapper (`sh -c`, `npx`, `uvx`) no longer leaves its real server running as
+  an orphaned grandchild; EOF on the server's stdout confirms every process
+  holding it has exited, behind a 10 s hang guard for a process that left the
+  group. Elsewhere only the direct child is killed. A close that fails or
+  panics is reported through `tracing`. `meerkat-mcp` depends on `nix` on
+  Unix.
+
+### Changed
+
+- Supervisor rotation no longer polls a member for convergence. A member
+  advertising `rotation_observe_hold` answers a held
+  `ObserveSupervisorRotation` when the operation is terminal, waking on a
+  per-session rotation-progress signal; the supervisor's observation window is
+  then only a hang guard that returns the durably pending observation.
+  - The supervisor records each member's capability from its bind reply.
+  - A member whose capability is unknown (for example after a restart) is
+    offered the hold. A member that predates it rejects the unknown field with
+    the typed `Unsupported` cause, and the supervisor falls back to single-shot
+    observation.
+  - Members known not to support it keep the single-shot observation loop
+    unchanged, as the compatibility path.
+  - `test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_restart`
+    failed 16/30 under load because one 1 s polling window raced the member's
+    completion. It now converges in one call.
+- Debug worker-stack headroom (#1446): the unregister teardown saga and the
+  session registration chain no longer reserve every section's temporaries
+  in one poll frame. Their numbered phases and sections now run in boxed
+  async blocks, and the registration path's large child futures are built in
+  their own frames, with bodies unchanged. Measured on the 2 MiB stack canary
+  (debug), at the deepest machine apply:
+  - the teardown chain went from 1,487,592 B to 597,784 B (the saga's own
+    poll frame from 787,560 B to 58,584 B);
+  - the registration chain went from 1,490,216 B to 697,224 B.
+
+  The canary now also passes at 1536 KiB and 1280 KiB. No behaviour change.
+- rkat-rpc over TCP: a new connection no longer overwrites the shared
+  runtime's callback channel, id counter and tool registry (#1451). Before,
+  callbacks for an older connection's new sessions went to the newest
+  connection, its registered tools were cleared, and callback ids restarted
+  in another connection's id space. On connection close the server now fails
+  pending callbacks before its graceful request shutdown, so a session waiting
+  on a gone client gets the typed failure immediately.
+
+- Debug worker-stack headroom (#1446): the unregister teardown saga and the
+  session registration chain no longer reserve every section's temporaries
+  in one poll frame. Their numbered phases and sections now run in boxed
+  async blocks, and the registration path's large child futures are built in
+  their own frames, with bodies unchanged. Measured on the 2 MiB stack canary
+  (debug), at the deepest machine apply:
+  - the teardown chain went from 1,487,592 B to 597,784 B (the saga's own
+    poll frame from 787,560 B to 58,584 B);
+  - the registration chain went from 1,490,216 B to 697,224 B.
+
+  The canary now also passes at 1536 KiB and 1280 KiB. No behaviour change.
+- rkat-rpc over TCP: a new connection no longer overwrites the shared
+  runtime's callback channel, id counter and tool registry (#1451). Before,
+  callbacks for an older connection's new sessions went to the newest
+  connection, its registered tools were cleared, and callback ids restarted
+  in another connection's id space. On connection close the server now fails
+  pending callbacks before its graceful request shutdown, so a session waiting
+  on a gone client gets the typed failure immediately.
+- Debug worker-stack headroom (#1462): four more chains no longer reserve
+  their callees' futures and every section's temporaries in one poll frame.
+  Large child futures are built in their own boxed frames
+  (`box_in_own_frame` / the actor's `boxed_arm_future`), and the comms-drain
+  dispatchers box each command arm, with bodies unchanged:
+  - the mob spawn-provisioning chain;
+  - the mob actor loop (`run`, `wait_for_actor_wake`, `finalize_spawn_admit`);
+  - `execute_meerkat_machine_drain_command`;
+  - the comms drain task's `try_handle_supervisor_bridge_command`.
+
+  Measured on the stack canary (debug), the spawn-provisioning chain went
+  from 913,880 B to 530,824 B, and the canary now passes at 1024 KiB. The
+  next bound is the `SetPeerIngressContext` drain arm (#1466). No behaviour
+  change.
+- Debug worker-stack headroom (#1466): the comms-drain
+  `SetPeerIngressContext` arm runs each DSL staging statement and each
+  `recover_from_state` preview proof in its own boxed frame. Each of these
+  carries ~9 KiB authority snapshots by value, and the arm's poll frame held
+  about fifty such copies (465 KB). Bodies are unchanged. The comms-drain
+  chain went from 927,960 B to 550,984 B, and the stack canary (debug) now
+  passes at 896 KiB. The registration chain (702,184 B) is the next bound.
+  No behaviour change.
+- Debug worker-stack headroom (#1474): session registration
+  (`register_session_inner_impl`) stages its discarded existing-session
+  executor-exit transitions (~18 KiB each) in boxed frames, and keeps the
+  recovered authority and the prepared session entry boxed until the call
+  that consumes them, instead of copying them through two poll frames. The
+  registration chain went from 702,184 B to 410,600 B, and the stack canary
+  (debug) now passes at 768 KiB. No behaviour change.
 
 ## [0.8.50] - 2026-10-01
 

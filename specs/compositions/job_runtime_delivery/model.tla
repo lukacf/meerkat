@@ -241,7 +241,7 @@ job_ClaimQueued(arg_attempt_id, arg_worker_id, arg_claimed_at_ms, arg_lease_expi
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "AttemptClaimed", payload |-> [attempt_count |-> (job_attempt_count) + 1, attempt_id |-> packet.payload.attempt_id, fence |-> (job_current_fence) + 1, lease_expires_at_ms |-> packet.payload.lease_expires_at_ms, resume_checkpoint |-> job_checkpoint_ref], effect_id |-> (model_step_count + 1), source_transition |-> "ClaimQueued"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "AttemptClaimed", payload |-> [attempt_count |-> ((job_attempt_count) + 1), attempt_id |-> packet.payload.attempt_id, fence |-> ((job_current_fence) + 1), lease_expires_at_ms |-> packet.payload.lease_expires_at_ms, resume_checkpoint |-> job_checkpoint_ref], effect_id |-> (model_step_count + 1), source_transition |-> "ClaimQueued"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "job", transition |-> "ClaimQueued", actor |-> "job_authority", step |-> (model_step_count + 1), from_phase |-> job_phase, to_phase |-> "Running"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -274,7 +274,7 @@ job_ClaimRetryScheduled(arg_attempt_id, arg_worker_id, arg_claimed_at_ms, arg_le
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "AttemptClaimed", payload |-> [attempt_count |-> (job_attempt_count) + 1, attempt_id |-> packet.payload.attempt_id, fence |-> (job_current_fence) + 1, lease_expires_at_ms |-> packet.payload.lease_expires_at_ms, resume_checkpoint |-> job_checkpoint_ref], effect_id |-> (model_step_count + 1), source_transition |-> "ClaimRetryScheduled"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "AttemptClaimed", payload |-> [attempt_count |-> ((job_attempt_count) + 1), attempt_id |-> packet.payload.attempt_id, fence |-> ((job_current_fence) + 1), lease_expires_at_ms |-> packet.payload.lease_expires_at_ms, resume_checkpoint |-> job_checkpoint_ref], effect_id |-> (model_step_count + 1), source_transition |-> "ClaimRetryScheduled"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "job", transition |-> "ClaimRetryScheduled", actor |-> "job_authority", step |-> (model_step_count + 1), from_phase |-> job_phase, to_phase |-> "Running"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -392,13 +392,13 @@ job_EmitRunningNotification(arg_attempt_id, arg_fence, arg_notification_id, arg_
        /\ job_notification_idempotency_keys' = (job_notification_idempotency_keys \cup {packet.payload.idempotency_key})
        /\ job_notification_id_by_key' = MapSet(job_notification_id_by_key, packet.payload.idempotency_key, packet.payload.notification_id)
        /\ job_notification_delivery_ids' = MapSet(job_notification_delivery_ids, packet.payload.notification_id, packet.payload.runtime_delivery_id)
-       /\ job_notification_sequences' = MapSet(job_notification_sequences, packet.payload.notification_id, (job_delivery_sequence) + 1)
+       /\ job_notification_sequences' = MapSet(job_notification_sequences, packet.payload.notification_id, ((job_delivery_sequence) + 1))
        /\ UnchangedFrame_ad002677d77b6373
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_notification_enters_runtime_inbox", source_machine |-> "job", effect |-> "NotificationCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> packet.payload.notification_id, source_sequence |-> (job_delivery_sequence) + 1], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "EmitRunningNotification"])
+       /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_notification_enters_runtime_inbox", source_machine |-> "job", effect |-> "NotificationCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> packet.payload.notification_id, source_sequence |-> ((job_delivery_sequence) + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "EmitRunningNotification"])
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "NotificationCommitted", payload |-> [delivery_sequence |-> (job_delivery_sequence) + 1, idempotency_key |-> packet.payload.idempotency_key, notification_id |-> packet.payload.notification_id, runtime_delivery_id |-> packet.payload.runtime_delivery_id], effect_id |-> (model_step_count + 1), source_transition |-> "EmitRunningNotification"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "NotificationCommitted", payload |-> [delivery_sequence |-> ((job_delivery_sequence) + 1), idempotency_key |-> packet.payload.idempotency_key, notification_id |-> packet.payload.notification_id, runtime_delivery_id |-> packet.payload.runtime_delivery_id], effect_id |-> (model_step_count + 1), source_transition |-> "EmitRunningNotification"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "job", transition |-> "EmitRunningNotification", actor |-> "job_authority", step |-> (model_step_count + 1), from_phase |-> job_phase, to_phase |-> "Running"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -422,13 +422,13 @@ job_EmitExternalWaitNotification(arg_attempt_id, arg_fence, arg_notification_id,
        /\ job_notification_idempotency_keys' = (job_notification_idempotency_keys \cup {packet.payload.idempotency_key})
        /\ job_notification_id_by_key' = MapSet(job_notification_id_by_key, packet.payload.idempotency_key, packet.payload.notification_id)
        /\ job_notification_delivery_ids' = MapSet(job_notification_delivery_ids, packet.payload.notification_id, packet.payload.runtime_delivery_id)
-       /\ job_notification_sequences' = MapSet(job_notification_sequences, packet.payload.notification_id, (job_delivery_sequence) + 1)
+       /\ job_notification_sequences' = MapSet(job_notification_sequences, packet.payload.notification_id, ((job_delivery_sequence) + 1))
        /\ UnchangedFrame_ad002677d77b6373
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_notification_enters_runtime_inbox", source_machine |-> "job", effect |-> "NotificationCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> packet.payload.notification_id, source_sequence |-> (job_delivery_sequence) + 1], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "EmitExternalWaitNotification"])
+       /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "job_notification_enters_runtime_inbox", source_machine |-> "job", effect |-> "NotificationCommitted", target_machine |-> "runtime_delivery", target_input |-> "CommitDelivery", payload |-> [delivery_id |-> packet.payload.notification_id, source_sequence |-> ((job_delivery_sequence) + 1)], actor |-> "runtime_delivery_authority", effect_id |-> (model_step_count + 1), source_transition |-> "EmitExternalWaitNotification"])
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "NotificationCommitted", payload |-> [delivery_sequence |-> (job_delivery_sequence) + 1, idempotency_key |-> packet.payload.idempotency_key, notification_id |-> packet.payload.notification_id, runtime_delivery_id |-> packet.payload.runtime_delivery_id], effect_id |-> (model_step_count + 1), source_transition |-> "EmitExternalWaitNotification"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "job", variant |-> "NotificationCommitted", payload |-> [delivery_sequence |-> ((job_delivery_sequence) + 1), idempotency_key |-> packet.payload.idempotency_key, notification_id |-> packet.payload.notification_id, runtime_delivery_id |-> packet.payload.runtime_delivery_id], effect_id |-> (model_step_count + 1), source_transition |-> "EmitExternalWaitNotification"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "job", transition |-> "EmitExternalWaitNotification", actor |-> "job_authority", step |-> (model_step_count + 1), from_phase |-> job_phase, to_phase |-> "WaitingExternal"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -1657,16 +1657,16 @@ runtime_delivery_CommitNewDelivery(arg_delivery_id, arg_source_sequence) ==
        /\ (((packet.payload.delivery_id \in runtime_delivery_delivery_ids) = FALSE) /\ (packet.payload.source_sequence > 0) /\ (runtime_delivery_next_sequence < RustU64Max))
        /\ runtime_delivery_phase' = "Active"
        /\ runtime_delivery_delivery_ids' = (runtime_delivery_delivery_ids \cup {packet.payload.delivery_id})
-       /\ runtime_delivery_delivery_sequences' = MapSet(runtime_delivery_delivery_sequences, packet.payload.delivery_id, (runtime_delivery_next_sequence) + 1)
+       /\ runtime_delivery_delivery_sequences' = MapSet(runtime_delivery_delivery_sequences, packet.payload.delivery_id, ((runtime_delivery_next_sequence) + 1))
        /\ runtime_delivery_delivery_source_sequences' = MapSet(runtime_delivery_delivery_source_sequences, packet.payload.delivery_id, packet.payload.source_sequence)
-       /\ runtime_delivery_committed_sequences' = (runtime_delivery_committed_sequences \cup {(runtime_delivery_next_sequence) + 1})
+       /\ runtime_delivery_committed_sequences' = (runtime_delivery_committed_sequences \cup {((runtime_delivery_next_sequence) + 1)})
        /\ runtime_delivery_next_sequence' = (runtime_delivery_next_sequence) + 1
        /\ UnchangedFrame_75efcad217af2c20
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = AppendIfMissing(pending_routes, [route |-> "runtime_delivery_commit_acknowledges_job_outbox", source_machine |-> "runtime_delivery", effect |-> "DeliveryCommitted", target_machine |-> "job", target_input |-> "MarkDeliveryApplied", payload |-> [delivery_id |-> packet.payload.delivery_id, delivery_sequence |-> packet.payload.source_sequence], actor |-> "job_authority", effect_id |-> (model_step_count + 1), source_transition |-> "CommitNewDelivery"])
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_delivery", variant |-> "DeliveryCommitted", payload |-> [delivery_id |-> packet.payload.delivery_id, delivery_sequence |-> (runtime_delivery_next_sequence) + 1, source_sequence |-> packet.payload.source_sequence], effect_id |-> (model_step_count + 1), source_transition |-> "CommitNewDelivery"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_delivery", variant |-> "DeliveryCommitted", payload |-> [delivery_id |-> packet.payload.delivery_id, delivery_sequence |-> ((runtime_delivery_next_sequence) + 1), source_sequence |-> packet.payload.source_sequence], effect_id |-> (model_step_count + 1), source_transition |-> "CommitNewDelivery"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_delivery", transition |-> "CommitNewDelivery", actor |-> "runtime_delivery_authority", step |-> (model_step_count + 1), from_phase |-> runtime_delivery_phase, to_phase |-> "Active"]}
        /\ model_step_count' = model_step_count + 1
 

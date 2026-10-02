@@ -550,27 +550,24 @@ async fn silence_hold_greeting(
     Ok(greeted)
 }
 
-/// One tolerant check: journaled and printed; failures are summarized at
-/// the end of the scenario but do not fail it on their own.
-fn record_tolerant(
+/// One measurement: journaled and printed for diagnosis. It carries no
+/// verdict. A scenario's verdict comes only from its deterministic checks,
+/// each asserting a product contract (typed events, canonical rows,
+/// settlement signals); model wording and wall-clock latency are measured,
+/// never judged (scripts/turbo-s-oracle-gate rejects soft checks).
+fn record_metric(
     evidence: &Journal,
     channel: u32,
     scenario: &str,
-    check: &str,
-    passed: bool,
+    metric: &str,
     detail: String,
-    failures: &mut Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    evidence.record(EvidenceRecord::Tolerant {
+    evidence.record(EvidenceRecord::Metric {
         channel,
-        check: check.to_owned(),
-        passed,
+        metric: metric.to_owned(),
         detail: detail.clone(),
     })?;
-    println!("GPT_LIVE_{scenario}_TOLERANT check={check} passed={passed} detail={detail:?}");
-    if !passed {
-        failures.push(format!("{check}: {detail}"));
-    }
+    println!("GPT_LIVE_{scenario}_METRIC metric={metric} detail={detail:?}");
     Ok(())
 }
 
@@ -854,11 +851,10 @@ impl PublicLiveHarness {
     }
 
     /// Journal the current channel's time-to-talk breakdown (see
-    /// `Record::TimeToTalk`) and the tolerant open -> connected bound.
+    /// `Record::TimeToTalk`) and its open -> connected measurement.
     async fn record_time_to_talk(
         &mut self,
         scenario: &str,
-        tolerant_failures: &mut Vec<String>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let evidence = self
             .evidence
@@ -920,14 +916,12 @@ impl PublicLiveHarness {
                 .map(|(delta, speech)| delta as i64 - speech as i64)
         );
         let open_to_connected = delta(webrtc_connected_ms);
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             scenario,
-            "open_request_to_webrtc_connected_under_5s",
-            open_to_connected.is_some_and(|ms| ms < 5000),
+            "open_request_to_webrtc_connected_ms",
             format!("open_request_to_connected_ms={open_to_connected:?}"),
-            tolerant_failures,
         )?;
         Ok(())
     }
@@ -2496,7 +2490,7 @@ async fn s99_native_exchange(
             return Ok(s99_answer_text(&events, start));
         }
         if Instant::now() >= deadline {
-            // Tolerant evidence (cross-scenario rate): the user spoke and the
+            // Diagnosis only (cross-scenario rate): the user spoke and the
             // model produced no output at all for the whole window.
             let assistant_output = events[start..]
                 .iter()
@@ -3578,16 +3572,7 @@ fn record_allowed_backchannels(
             burst.text
         );
         println!("GPT_LIVE_{scenario}_BACKCHANNEL {detail}");
-        let mut never = Vec::new();
-        record_tolerant(
-            evidence,
-            channel,
-            scenario,
-            "allowed_backchannel",
-            true,
-            detail,
-            &mut never,
-        )?;
+        record_metric(evidence, channel, scenario, "allowed_backchannel", detail)?;
     }
     Ok(())
 }
@@ -3703,8 +3688,6 @@ const S100_FOLLOW_UP_GAP_MS: u64 = 300;
 /// user onset to the assistant going quiet; beyond this the assistant talked
 /// over the user. The measured value is always printed and journaled.
 const S100_BARGE_IN_OVERLAP_BOUND_MS: u64 = 2500;
-/// Tolerant bound on the median input_final -> first assistant audio.
-const S100_MEDIAN_LATENCY_BOUND_MS: i64 = 3000;
 /// Prefix the mob runtime renders in front of a delegated voice request
 /// (`meerkat_mob::runtime::delegation::render_live_delegation_execution_context`).
 const S100_DELEGATION_CONTEXT_PREFIX: &str = "Live delegation execution context: execute this already committed voice request (not a new user utterance).";
@@ -3805,10 +3788,9 @@ fn classify_summary_open(
         println!(
             "GPT_LIVE_{scenario}_SUMMARY_OPEN_CASE label={label} channel={channel} case={case:?}"
         );
-        evidence.record(EvidenceRecord::Tolerant {
+        evidence.record(EvidenceRecord::Metric {
             channel,
-            check: "summary_open_case".to_owned(),
-            passed: true,
+            metric: "summary_open_case".to_owned(),
             detail: format!("{label}: {case:?}"),
         })?;
     }
@@ -4618,9 +4600,8 @@ async fn answer_window(
 ///     to Closed within 20 s, and canonical transcript rows equal to the
 ///     exchange count.
 ///
-/// Tolerant (journaled, summarized, not gated): median input_final -> first
-/// audio under 3 s; the third answer window contains the planted heading
-/// token; the first answer names the file.
+/// Measured (journaled, never judged): median input_final -> first audio; the
+/// first and third answer windows.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_100_gpt_live_public_morning_standup() -> Result<(), Box<dyn std::error::Error>>
@@ -4687,7 +4668,6 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
     let result = async {
         evidence.stage(EvidenceStage::Connected)?;
@@ -4744,7 +4724,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
                     "request 1 left no markdown file inside a notes folder under the workspace; markdown files: {files_after_1:?}"
                 )
             })?;
-        live.record_time_to_talk("S100", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S100").await?;
         let answer1 = answer_window(&mut live, "request 1", &request1).await?;
         evidence.record(request1.timing.latency_record(channel, 1, Some(request1.delegation_created_ms)))?;
         let plan_stem = plan_file
@@ -4771,14 +4751,12 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
                 || (token.chars().all(|c| c.is_ascii_digit())
                     && normalized_answer1.contains(token.trim_start_matches('0')))
         };
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S100",
-            "answer_1_names_the_file",
-            !stem_tokens.is_empty() && stem_tokens.iter().all(|token| token_spoken(token)),
+            "answer_1",
             format!("file={plan_stem:?} stem_tokens={stem_tokens:?} answer={:?}", answer1.trim()),
-            &mut tolerant_failures,
         )?;
 
         // Request 2 at assistant_quiet + 300 ms: "that file" resolves through
@@ -4914,14 +4892,12 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         .await?;
         let answer3 = answer_window(&mut live, "request 3", &request3).await?;
         evidence.record(request3.timing.latency_record(channel, 4, Some(request3.delegation_created_ms)))?;
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S100",
-            "answer_3_contains_planted_second_heading_token",
-            answer3.to_lowercase().contains(S100_HEADING_TOKEN),
+            "answer_3",
             format!("token={S100_HEADING_TOKEN:?} headings={headings:?} answer={:?}", answer3.trim()),
-            &mut tolerant_failures,
         )?;
 
         // (d) Goodbye, graceful client disconnect, host close convergence.
@@ -4981,26 +4957,22 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             goodbye_start,
         )
         .is_some();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S100",
             "goodbye_input_final",
-            goodbye_input_final,
             format!("heard={goodbye_input:?}"),
-            &mut tolerant_failures,
         )?;
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S100",
             "goodbye_reply",
-            goodbye_timing.is_some(),
             format!(
                 "input_final_to_audio_ms={:?} heard={goodbye_input:?}",
                 goodbye_timing.as_ref().and_then(SpokenTurn::input_final_to_audio_ms)
             ),
-            &mut tolerant_failures,
         )?;
         if goodbye_timing.is_none() {
             // Same fields as S99's line, so one grep gives a cross-scenario
@@ -5210,7 +5182,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             }
         }
 
-        // Tolerant latency: median input_final -> first assistant audio.
+        // Measured latency: median input_final -> first assistant audio.
         let mut latencies: Vec<i64> = [
             request1.timing.input_final_to_audio_ms(),
             request2.timing.input_final_to_audio_ms(),
@@ -5223,14 +5195,12 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         .collect();
         latencies.sort_unstable();
         let median = latencies.get(latencies.len() / 2).copied();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S100",
-            "median_input_final_to_first_audio_under_3s",
-            median.is_some_and(|m| m < S100_MEDIAN_LATENCY_BOUND_MS),
+            "input_final_to_first_audio_ms",
             format!("median_ms={median:?} all_ms={latencies:?}"),
-            &mut tolerant_failures,
         )?;
 
         // Evidence and soft faults.
@@ -5245,7 +5215,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         })?;
         let faults = scenario_browser_faults(&evidence, &mut live, channel, "S100").await?;
         println!(
-            "GPT_LIVE_S100_OK total_ms={} connected_ms={connected_ms} exchanges={exchanges} greeted={greeted} r1_ms={:?} r2_ms={:?} barge_in_ms={:?} r3_ms={:?} goodbye_ms={:?} median_ms={median:?} r1_commentary_ms={:?} r2_commentary_ms={:?} r3_commentary_ms={:?} executor_done_at_ms=[{}, {}, {}] overlap_ms={overlap_ms} close_ms={close_ms:?} tolerant_failures={tolerant_failures:?} faults={faults:?} history_messages={}",
+            "GPT_LIVE_S100_OK total_ms={} connected_ms={connected_ms} exchanges={exchanges} greeted={greeted} r1_ms={:?} r2_ms={:?} barge_in_ms={:?} r3_ms={:?} goodbye_ms={:?} median_ms={median:?} r1_commentary_ms={:?} r2_commentary_ms={:?} r3_commentary_ms={:?} executor_done_at_ms=[{}, {}, {}] overlap_ms={overlap_ms} close_ms={close_ms:?} faults={faults:?} history_messages={}",
             started.elapsed().as_millis(),
             request1.timing.input_final_to_audio_ms(),
             request2.timing.input_final_to_audio_ms(),
@@ -5517,9 +5487,8 @@ impl meerkat::experimental_gpt_live::PublicGptLiveInstructionsPreface for Roster
 /// executor's canonical session, before the channel connects; the first two
 /// answers produce no delegation; the third produces exactly one, completed
 /// by the existing member with a commentary readout; the close converges.
-/// Tolerant: the second answer window names the planted member; the first
-/// answer window mentions files or the shell (the executor's tools from the
-/// preface); open request -> connected under 5 s.
+/// Measured (never judged): the first two answer windows; open request ->
+/// connected.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_102_gpt_live_public_who_are_you() -> Result<(), Box<dyn std::error::Error>> {
@@ -5599,7 +5568,6 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
     let result = async {
         evidence.stage(EvidenceStage::Connected)?;
@@ -5636,17 +5604,15 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
             PlayAt::new("whoareyou_capabilities", Anchor::Now, 0),
         )
         .await?;
-        live.record_time_to_talk("S102", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S102").await?;
         evidence.record(q1.latency_record(channel, 1, None))?;
         let lower1 = answer1.to_lowercase();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S102",
-            "answer_1_mentions_executor_tools",
-            lower1.contains("file") || lower1.contains("shell") || lower1.contains("command"),
+            "answer_1",
             format!("answer={:?}", answer1.trim()),
-            &mut tolerant_failures,
         )?;
 
         // Q2: roster, native; the planted member token is the oracle.
@@ -5661,14 +5627,12 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
         )
         .await?;
         evidence.record(q2.latency_record(channel, 2, None))?;
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S102",
-            "answer_2_names_planted_member",
-            answer2.to_lowercase().contains(S102_MEMBER_TOKEN),
+            "answer_2",
             format!("token={S102_MEMBER_TOKEN:?} answer={:?}", answer2.trim()),
-            &mut tolerant_failures,
         )?;
 
         // Q3: ask them, delegated.
@@ -5735,7 +5699,7 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S102_OK total_ms={} connected_ms={connected_ms} q1_ms={:?} q2_ms={:?} q3_ms={:?} q3_commentary_ms={:?} executor_done_at_ms={} close_ms={:?} close_converged_before_host_close={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S102_OK total_ms={} connected_ms={connected_ms} q1_ms={:?} q2_ms={:?} q3_ms={:?} q3_commentary_ms={:?} executor_done_at_ms={} close_ms={:?} close_converged_before_host_close={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             q1.input_final_to_audio_ms(),
             q2.input_final_to_audio_ms(),
@@ -5857,7 +5821,7 @@ async fn wait_for_settled(
 /// row follows its canonical row); every input final commits as a canonical
 /// spoken row. The public protocol has no response lifecycle (no interrupted
 /// or cancelled event, no truncation signal), so there is no interruption
-/// event to assert against. Tolerant: open -> connected < 5 s.
+/// event to assert against. Measured (never judged): open -> connected.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_103_gpt_live_public_interrupt_and_recover()
@@ -5923,7 +5887,6 @@ async fn run_s103_interrupt_and_recover(
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
     let result = async {
         evidence.stage(EvidenceStage::Connected)?;
@@ -5984,7 +5947,7 @@ async fn run_s103_interrupt_and_recover(
                 timeline_find(t, TimelineKind::DelegationCreated, monologue_start_ms).map(|e| e.t_ms)
             })
             .await?;
-        live.record_time_to_talk("S103", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S103").await?;
         let executor_done_at_ms = wait_executor_turn(&mut live, &mut seen_executor_turns, started).await?;
         let commentary_ms = live
             .peer
@@ -6253,7 +6216,7 @@ async fn run_s103_interrupt_and_recover(
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S103_OK total_ms={} connected_ms={connected_ms} monologue_overlap_ms={monologue_overlap_ms} barge_in_overlap_ms={barge_in_overlap_ms} correction_overlap_ms={correction_overlap_ms} onset_to_quiet_ms={assistant_quiet_after_onset_ms:?} executor_done_at_ms={executor_done_at_ms} close_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S103_OK total_ms={} connected_ms={connected_ms} monologue_overlap_ms={monologue_overlap_ms} barge_in_overlap_ms={barge_in_overlap_ms} correction_overlap_ms={correction_overlap_ms} onset_to_quiet_ms={assistant_quiet_after_onset_ms:?} executor_done_at_ms={executor_done_at_ms} close_ms={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             close.map(|c| c.ms)
         );
@@ -6309,8 +6272,8 @@ const S107_REOPEN_BOUND: Duration = Duration::from_secs(10);
 /// terminality and its executor input and answer are committed to the
 /// canonical session; a subsequent open on the same session connects within
 /// 10 s and answers a spoken question natively; the second channel closes
-/// gracefully. Tolerant: the committed answer names the poem's subject;
-/// open request -> connected under 5 s on both channels.
+/// gracefully. Measured (never judged): the committed answer; open request
+/// -> connected on both channels.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_107_gpt_live_public_stuck_close_convergence()
@@ -6375,7 +6338,6 @@ async fn run_s107_stuck_close_convergence(
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut deterministic_failures: Vec<String> = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
     let result = async {
@@ -6400,7 +6362,7 @@ async fn run_s107_stuck_close_convergence(
                 timeline_find(t, TimelineKind::DelegationCreated, request_start_ms).map(|e| e.t_ms)
             })
             .await?;
-        live.record_time_to_talk("S107", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S107").await?;
         live.record_uplink("S107").await?;
         let timeline1 = live.peer.timeline().await?;
         let request_timing = SpokenTurn::from_timeline(&timeline1, request);
@@ -6514,14 +6476,12 @@ async fn run_s107_stuck_close_convergence(
         if assistant_text.trim().is_empty() {
             deterministic_failures.push("the job's final transcript (assistant rows after the executor input) was not committed".to_owned());
         }
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S107",
-            "committed_answer_names_the_poem_subject",
-            assistant_text.to_lowercase().contains("lighthouse"),
+            "committed_answer",
             format!("assistant_after_job={:?}", assistant_text.chars().take(300).collect::<String>()),
-            &mut tolerant_failures,
         )?;
 
         live.record_workgraph_mode("S107", 1, &mut deterministic_failures).await?;
@@ -6562,7 +6522,7 @@ async fn run_s107_stuck_close_convergence(
             PlayAt::new("stuckclose_back", Anchor::Now, 0).overlap_bound_ms(60_000),
         )
         .await?;
-        live.record_time_to_talk("S107", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S107").await?;
         evidence.record(back.latency_record(channel2, 1, None))?;
         if answer_back.trim().is_empty() {
             deterministic_failures.push("the reopened channel produced no spoken answer".to_owned());
@@ -6581,7 +6541,7 @@ async fn run_s107_stuck_close_convergence(
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S107_OK total_ms={} connected_ms={connected_ms} close_ms={close_ms} close_converged={converged} executor_done_at_ms={executor_done_at_ms:?} reopen_ms={reopen_ms} back_ms={:?} close2_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S107_OK total_ms={} connected_ms={connected_ms} close_ms={close_ms} close_converged={converged} executor_done_at_ms={executor_done_at_ms:?} reopen_ms={reopen_ms} back_ms={:?} close2_ms={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             back.input_final_to_audio_ms(),
             close2.map(|c| c.ms)
@@ -6675,9 +6635,8 @@ fn s104_policy() -> LiveDelegationExecutionPolicy {
 /// answer is committed to the source (under ExistingMember also its executor
 /// input row); the typed turn commits its user and assistant rows; the reopen
 /// connects within 30 s and the first spoken question is answered natively
-/// (no delegation); the second channel closes gracefully. Tolerant: the
-/// post-reopen answer window carries the job's planted result token and the
-/// typed fact; open -> connected < 5 s per channel.
+/// (no delegation); the second channel closes gracefully. Measured (never
+/// judged): the post-reopen answer window; open -> connected per channel.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_104_gpt_live_public_handoff_voice_typed_voice()
@@ -6748,7 +6707,6 @@ async fn run_s104_handoff_voice_typed_voice(
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut deterministic_failures: Vec<String> = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
     let result = async {
@@ -6795,7 +6753,7 @@ async fn run_s104_handoff_voice_typed_voice(
                 timeline_find(t, TimelineKind::DelegationCreated, request_start_ms).map(|e| e.t_ms)
             })
             .await?;
-        live.record_time_to_talk("S104", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S104").await?;
         live.record_uplink("S104").await?;
         let timeline1 = live.peer.timeline().await?;
         println!(
@@ -6937,7 +6895,7 @@ async fn run_s104_handoff_voice_typed_voice(
             PlayAt::new("handoff_back", Anchor::Now, 0).overlap_bound_ms(60_000),
         )
         .await?;
-        live.record_time_to_talk("S104", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S104").await?;
         evidence.record(back.latency_record(channel2, 1, None))?;
         // The reopen's summary (a late one rides the thinking lane at this
         // question's first delta) and the job-result commentary land in the
@@ -7014,12 +6972,11 @@ async fn run_s104_handoff_voice_typed_voice(
                 output_transcript_text(&events_settled, start)
             })
             .unwrap_or_default();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel2,
             "S104",
             "post_reopen_answer_window",
-            true,
             format!(
                 "fixture_start_ms={back_start} audio_end_answer={:?} settled_answer={:?} commentary_ms={:?} transcript_after_commentary={:?}",
                 answer_at_audio_end.trim(),
@@ -7027,17 +6984,14 @@ async fn run_s104_handoff_voice_typed_voice(
                 commentary.map(|entry| entry.t_ms),
                 transcript_after_commentary.trim()
             ),
-            &mut tolerant_failures,
         )?;
         let lower = answer_back.to_lowercase();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel2,
             "S104",
-            "post_reopen_answer_carries_job_result_token",
-            lower.contains(S104_RESULT_TOKEN),
+            "post_reopen_answer",
             format!("token={S104_RESULT_TOKEN:?} answer={:?}", answer_back.trim()),
-            &mut tolerant_failures,
         )?;
         // The typed note was committed while the call was closed, so by the
         // reopen contract it rides the reopen's startup input verbatim. That
@@ -7152,7 +7106,7 @@ async fn run_s104_handoff_voice_typed_voice(
             }
         }
         println!(
-            "GPT_LIVE_S104_OK total_ms={} connected_ms={connected_ms} close1_ms={:?} typed_ms={typed_ms} executor_done_at_ms={executor_done_at_ms:?} back_start_ms={back_start} back_ms={:?} close2_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S104_OK total_ms={} connected_ms={connected_ms} close1_ms={:?} typed_ms={typed_ms} executor_done_at_ms={executor_done_at_ms:?} back_start_ms={back_start} back_ms={:?} close2_ms={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             close1.map(|c| c.ms),
             back.input_final_to_audio_ms(),
@@ -7254,7 +7208,6 @@ async fn s106_reopen_cycle(
     typed_prompt: Option<&str>,
     user_text: &mut Vec<String>,
     deterministic_failures: &mut Vec<String>,
-    tolerant_failures: &mut Vec<String>,
 ) -> Result<(S106Cycle, u32, Option<SeedCase>), Box<dyn std::error::Error>> {
     let before = evidence.owner_appends()?;
     let texts_before = evidence.instructions_append_attempt_texts()?.len();
@@ -7351,7 +7304,7 @@ async fn s106_reopen_cycle(
         acknowledged: cycle.acknowledged,
         greeted: cycle.greeted,
     })?;
-    live.record_time_to_talk("S106", tolerant_failures).await?;
+    live.record_time_to_talk("S106").await?;
     if greeted {
         deterministic_failures.push(format!(
             "the assistant greeted on its own after the reopen (channel {new_channel})"
@@ -7398,9 +7351,8 @@ async fn s106_reopen_cycle(
 /// and are all acknowledged; exactly one delegation per delegated exchange
 /// and none for the native ones; canonical user rows carry exactly the words
 /// of the typed turns and of every user utterance across all channels, in
-/// order; every close converges; WorkGraph parallel mode. Tolerant: the final summary
-/// window carries the three planted tokens; median input_final -> first
-/// audio under 3 s; open -> connected under 5 s per channel.
+/// order; every close converges; WorkGraph parallel mode. Measured (never
+/// judged): median input_final -> first audio; open -> connected per channel.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_106_gpt_live_public_long_haul() -> Result<(), Box<dyn std::error::Error>> {
@@ -7462,7 +7414,6 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let mut channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut deterministic_failures: Vec<String> = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
     let mut latencies: Vec<i64> = Vec::new();
@@ -7547,7 +7498,6 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             Some(S106_TYPED_PROMPT),
             &mut user_text,
             &mut deterministic_failures,
-            &mut tolerant_failures,
         )
         .await?;
         channel = channel2;
@@ -7584,7 +7534,6 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             None,
             &mut user_text,
             &mut deterministic_failures,
-            &mut tolerant_failures,
         )
         .await?;
         channel = channel3;
@@ -7735,17 +7684,15 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         );
         // The row count is evidence, not a verdict: the browser and the
         // runtime close utterances on separately ordered event streams.
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S106",
-            "canonical_row_count_matches_browser_utterances",
-            rows.spoken.len() == typed_turns + utterances,
+            "canonical_row_count",
             format!(
                 "spoken_rows={} typed={typed_turns} browser_utterances={utterances}",
                 rows.spoken.len()
             ),
-            &mut tolerant_failures,
         )?;
         if !words_match {
             deterministic_failures.push(format!(
@@ -7754,14 +7701,12 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         }
         latencies.sort_unstable();
         let median = latencies.get(latencies.len() / 2).copied();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S106",
-            "median_input_final_to_first_audio_under_3s",
-            median.is_some_and(|m| m < 3000),
+            "input_final_to_first_audio_ms",
             format!("median_ms={median:?} all_ms={latencies:?}"),
-            &mut tolerant_failures,
         )?;
         evidence.record(EvidenceRecord::Timeline { channel, entries: timeline3.clone() })?;
         let faults = scenario_browser_faults(&evidence, &mut live, channel, "S106").await?;
@@ -7774,7 +7719,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             }
         }
         println!(
-            "GPT_LIVE_S106_OK total_ms={} stages={stage_ms:?} cycle1={cycle1:?} cycle2={cycle2:?} close3_ms={:?} notes_md_bytes={notes_bytes} utterances={utterances} median_ms={median:?} delegations={delegation_windows:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S106_OK total_ms={} stages={stage_ms:?} cycle1={cycle1:?} cycle2={cycle2:?} close3_ms={:?} notes_md_bytes={notes_bytes} utterances={utterances} median_ms={median:?} delegations={delegation_windows:?} faults={faults:?}",
             started.elapsed().as_millis(),
             close3.map(|c| c.ms)
         );
@@ -7892,7 +7837,6 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut deterministic_failures: Vec<String> = Vec::new();
     let result = async {
         evidence.stage(EvidenceStage::Connected)?;
@@ -7976,7 +7920,7 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
                 &PlayAt::new("busy_job2", Anchor::Now, S101_JOB2_OFFSET_MS).overlap_bound_ms(60_000),
             )
             .await?;
-        live.record_time_to_talk("S101", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S101").await?;
 
         // Three delegations, then every executor turn terminal; the peak
         // number of simultaneously non-terminal turns is the parallelism.
@@ -8181,7 +8125,7 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S101_OK total_ms={} connected_ms={connected_ms} max_concurrent={max_concurrent} jobs_done_at_ms={jobs_done_ms} commentaries={} close_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S101_OK total_ms={} connected_ms={connected_ms} max_concurrent={max_concurrent} jobs_done_at_ms={jobs_done_ms} commentaries={} close_ms={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             commentary_times.len(),
             close.map(|c| c.ms)
@@ -8281,9 +8225,9 @@ fn s105_first_int(text: &str) -> Option<i64> {
 /// (found by content: spoken file names are rendered loosely by the
 /// recognizer);
 /// the typed turn commits; the recall is answered natively; graceful close;
-/// WorkGraph parallel mode. Tolerant: the recall window carries the corrected
-/// numbers; cache_read on the second fork is not observable over RPC here
-/// (skipped, as the design allows).
+/// WorkGraph parallel mode. Measured (never judged): the corrected files and
+/// the recall answer; cache_read on the second fork is not observable over RPC
+/// here.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_105_gpt_live_public_fork_and_merge_parallel()
@@ -8347,7 +8291,6 @@ async fn run_s105_fork_and_merge_parallel(
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut deterministic_failures: Vec<String> = Vec::new();
     let result = async {
         evidence.stage(EvidenceStage::Connected)?;
@@ -8374,7 +8317,7 @@ async fn run_s105_fork_and_merge_parallel(
             .peer
             .play_at(&PlayAt::new("fork_b", Anchor::Now, S105_B_OFFSET_MS).overlap_bound_ms(60_000))
             .await?;
-        live.record_time_to_talk("S105", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S105").await?;
         let timeline = live
             .peer
             .wait_for_timeline(Duration::from_secs(90), "two delegation_created entries", |t| {
@@ -8540,15 +8483,12 @@ async fn run_s105_fork_and_merge_parallel(
             .as_ref()
             .and_then(|name| std::fs::read_to_string(workspace.join(name)).ok());
         println!("GPT_LIVE_S105_ARTIFACTS_AFTER number={number_after:?} doubled={doubled_after:?}");
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S105",
-            "typed_correction_updated_the_files",
-            number_after.as_deref().and_then(s105_first_int) == Some(21)
-                && doubled_after.as_deref().and_then(s105_first_int) == Some(42),
+            "typed_correction_files",
             format!("number={number_after:?} doubled={doubled_after:?}"),
-            &mut tolerant_failures,
         )?;
         // The correction's own executor result is delivered on the same
         // serialized result channel. The recall asks about the corrected
@@ -8569,28 +8509,23 @@ async fn run_s105_fork_and_merge_parallel(
         .await?;
         evidence.record(recall.latency_record(channel, 3, None))?;
         let lower = normalize_words(&answer);
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S105",
-            "recall_reflects_typed_correction",
-            (lower.contains("42") || lower.contains("forty two"))
-                && (lower.contains("21") || lower.contains("twenty one")),
+            "recall_answer",
             format!("answer={:?}", answer.trim()),
-            &mut tolerant_failures,
         )?;
         let events = live.peer.events().await?;
         if events[events_before_recall..].iter().any(is_client_delegation) {
             deterministic_failures.push("the voice recall must be answered natively, not delegated".to_owned());
         }
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S105",
-            "second_fork_cache_read_skipped",
-            true,
+            "second_fork_cache_read",
             "provider usage rows are not observable over RPC in this harness; skipped as designed".to_owned(),
-            &mut tolerant_failures,
         )?;
 
         evidence.stage(EvidenceStage::Closing)?;
@@ -8611,7 +8546,7 @@ async fn run_s105_fork_and_merge_parallel(
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S105_OK total_ms={} connected_ms={connected_ms} max_concurrent={max_concurrent} number={n:?} doubled={d:?} forks_spawned={} forks_retired={} close_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S105_OK total_ms={} connected_ms={connected_ms} max_concurrent={max_concurrent} number={n:?} doubled={d:?} forks_spawned={} forks_retired={} close_ms={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             lifecycle.spawned.len(),
             lifecycle.retired.len(),

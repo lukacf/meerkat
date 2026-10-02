@@ -367,6 +367,9 @@ jobs:
       - name: Retired session-control routes stay retired
         run: make session-control-gate
 
+      - name: Turbo S scenarios carry no soft checks
+        run: make turbo-s-oracle-gate
+
       - name: Deprecated backend stays unreferenced
         run: make deprecated-backend-gate
 

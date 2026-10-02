@@ -12,10 +12,14 @@ use serde_json::value::RawValue;
 
 use meerkat_anthropic::runtime::oauth as a_oauth;
 use meerkat_contracts::{
-    BindingIdParams, CreateProfileParams, DeviceCompleteParams, DeviceStartParams,
-    LoginCompleteParams, LoginStartParams, ProvisionApiKeyParams, RealmIdParams, WireAuthProfile,
-    WireAuthStatusDetail, WireBackendProfile, WireBindingIdentity, WireDeviceCompleteResult,
-    WireProviderBinding, WireProvisionApiKeyResult, WireRealmConnectionSet,
+    AuthStatusParams, BindingIdParams, CreateProfileParams, DeviceCompleteParams,
+    DeviceStartParams, LoginCompleteParams, LoginStartParams, ProvisionApiKeyParams, RealmIdParams,
+    WireAuthProfile, WireAuthStatusDetail, WireAuthStatusResult, WireBackendProfile,
+    WireBindingIdentity, WireDeviceCompleteResult, WireLoginCompleteTarget, WireLoginReady,
+    WireLoginReadyTarget, WireLoginStart, WireLoginStartTarget, WireLoginTarget,
+    WireMcpLoginCompleteTarget, WireMcpLoginReady, WireMcpLoginStart, WireMcpLoginTarget,
+    WireProviderBinding, WireProviderLoginReady, WireProviderLoginStart, WireProvisionApiKeyResult,
+    WireRealmConnectionSet,
 };
 use meerkat_core::handles::LeaseKey;
 use meerkat_core::{
@@ -1494,6 +1498,10 @@ pub async fn handle_auth_profile_delete(
 
 // --- OAuth login ------------------------------------------------------
 
+fn invalid_mcp_target(id: Option<RpcId>, error_value: meerkat::McpOAuthError) -> RpcResponse {
+    RpcResponse::error(id, error::INVALID_PARAMS, error_value.to_string())
+}
+
 pub async fn handle_auth_login_start(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -1503,11 +1511,45 @@ pub async fn handle_auth_login_start(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
+    let service = match host_auth_service(runtime) {
+        Ok(service) => service,
+        Err(error_value) => return host_auth_error_response(id, error_value),
+    };
+    let provider_target = match parsed.target {
+        WireLoginTarget::Provider(target) => target,
+        WireLoginTarget::Mcp(WireMcpLoginTarget { mcp }) => {
+            let target = match meerkat::mcp_auth_target_from_wire(&mcp) {
+                Ok(target) => target,
+                Err(error_value) => return invalid_mcp_target(id, error_value),
+            };
+            // Discovery falls back to the server's well-known metadata.
+            let started = match service
+                .mcp_login_start(&target, &parsed.redirect_uri, None)
+                .await
+            {
+                Ok(started) => started,
+                Err(error_value) => return host_auth_error_response(id, error_value),
+            };
+            return RpcResponse::success(
+                id,
+                WireLoginStart {
+                    authorize_url: started.authorize_url,
+                    state: started.state,
+                    redirect_uri: started.redirect_uri,
+                    target: WireLoginStartTarget::Mcp(WireMcpLoginStart {
+                        mcp,
+                        client_id: started.client_id,
+                        resource_metadata_url: started.resource_metadata_url,
+                    }),
+                },
+            );
+        }
+    };
     let target = match host_auth_target(
-        parsed.provider.identity(),
-        &parsed.realm_id,
-        &parsed.binding_id,
-        parsed.profile_id.as_deref(),
+        provider_target.provider.identity(),
+        &provider_target.realm_id,
+        &provider_target.binding_id,
+        provider_target.profile_id.as_deref(),
     ) {
         Ok(target) => target,
         Err(error_value) => {
@@ -1518,10 +1560,6 @@ pub async fn handle_auth_login_start(
         Ok(config) => config,
         Err(response) => return response.with_id(id),
     };
-    let service = match host_auth_service(runtime) {
-        Ok(service) => service,
-        Err(error_value) => return host_auth_error_response(id, error_value),
-    };
     let started = match service
         .login_start(&config, &target, parsed.redirect_uri.clone())
         .await
@@ -1531,11 +1569,13 @@ pub async fn handle_auth_login_start(
     };
     RpcResponse::success(
         id,
-        meerkat_contracts::WireLoginStart {
+        WireLoginStart {
             authorize_url: started.authorize_url,
             state: started.state,
             redirect_uri: started.redirect_uri,
-            provider: parsed.provider,
+            target: WireLoginStartTarget::Provider(WireProviderLoginStart {
+                provider: provider_target.provider,
+            }),
         },
     )
 }
@@ -1549,11 +1589,64 @@ pub async fn handle_auth_login_complete(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
+    let service = match host_auth_service(runtime) {
+        Ok(service) => service,
+        Err(error_value) => return host_auth_error_response(id, error_value),
+    };
+    let provider_target = match parsed.target {
+        WireLoginCompleteTarget::Provider(target) => target,
+        WireLoginCompleteTarget::Mcp(WireMcpLoginCompleteTarget {
+            mcp,
+            client_id,
+            resource_metadata_url,
+        }) => {
+            let target = match meerkat::mcp_auth_target_from_wire(&mcp) {
+                Ok(target) => target,
+                Err(error_value) => return invalid_mcp_target(id, error_value),
+            };
+            let completed = match service
+                .mcp_login_complete(
+                    &target,
+                    meerkat::McpOAuthCallback {
+                        redirect_uri: parsed.redirect_uri,
+                        state: parsed.state,
+                        code: parsed.code,
+                        client_id,
+                        resource_metadata_url,
+                    },
+                )
+                .await
+            {
+                Ok(completed) => completed,
+                Err(error_value) => return host_auth_error_response(id, error_value),
+            };
+            tracing::info!(
+                target: "meerkat::auth::audit",
+                mcp_server = %mcp.server_name,
+                action = "login_mcp_oauth_complete",
+                has_refresh_token = %completed.has_refresh_token,
+                "MCP OAuth login completed via RPC"
+            );
+            return RpcResponse::success(
+                id,
+                WireLoginReady {
+                    state: None,
+                    target: WireLoginReadyTarget::Mcp(WireMcpLoginReady {
+                        mcp,
+                        account_id: completed.account_id,
+                    }),
+                    expires_at: completed.expires_at.map(|expires| expires.to_rfc3339()),
+                    has_refresh_token: completed.has_refresh_token,
+                    scopes: completed.scopes,
+                },
+            );
+        }
+    };
     let target = match host_auth_target(
-        parsed.provider.identity(),
-        &parsed.realm_id,
-        &parsed.binding_id,
-        parsed.profile_id.as_deref(),
+        provider_target.provider.identity(),
+        &provider_target.realm_id,
+        &provider_target.binding_id,
+        provider_target.profile_id.as_deref(),
     ) {
         Ok(target) => target,
         Err(error_value) => {
@@ -1563,10 +1656,6 @@ pub async fn handle_auth_login_complete(
     let config = match load_config(runtime).await {
         Ok(config) => config,
         Err(response) => return response.with_id(id),
-    };
-    let service = match host_auth_service(runtime) {
-        Ok(service) => service,
-        Err(error_value) => return host_auth_error_response(id, error_value),
     };
     let completed = match service
         .login_complete(
@@ -1585,17 +1674,19 @@ pub async fn handle_auth_login_complete(
         target: "meerkat::auth::audit",
         binding_key = ?completed.auth_binding,
         action = "login_oauth_complete",
-        provider = %parsed.provider,
+        provider = %provider_target.provider,
         has_refresh_token = %completed.has_refresh_token,
         "OAuth login completed via RPC"
     );
     RpcResponse::success(
         id,
-        meerkat_contracts::WireLoginReady {
+        WireLoginReady {
             state: None,
-            identity: meerkat_contracts::WireBindingIdentity::from(&completed.auth_binding),
-            profile_id: completed.profile_id,
-            provider: parsed.provider,
+            target: WireLoginReadyTarget::Provider(WireProviderLoginReady {
+                identity: WireBindingIdentity::from(&completed.auth_binding),
+                profile_id: completed.profile_id,
+                provider: provider_target.provider,
+            }),
             expires_at: completed.expires_at.map(|expires| expires.to_rfc3339()),
             has_refresh_token: completed.has_refresh_token,
             scopes: completed.scopes,
@@ -1880,9 +1971,26 @@ pub async fn handle_auth_status_get(
     params: Option<&RawValue>,
     runtime: &SessionRuntime,
 ) -> RpcResponse {
-    let parsed: BindingIdParams = match parse_params(params) {
+    let parsed: AuthStatusParams = match parse_params(params) {
         Ok(v) => v,
         Err(r) => return r.with_id(id),
+    };
+    let parsed = match parsed {
+        AuthStatusParams::Binding(parsed) => parsed,
+        AuthStatusParams::Mcp(WireMcpLoginTarget { mcp }) => {
+            let target = match meerkat::mcp_auth_target_from_wire(&mcp) {
+                Ok(target) => target,
+                Err(error_value) => return invalid_mcp_target(id, error_value),
+            };
+            let service = match host_auth_service(runtime) {
+                Ok(service) => service,
+                Err(error_value) => return host_auth_error_response(id, error_value),
+            };
+            return match service.mcp_status(&target).await {
+                Ok(status) => RpcResponse::success(id, WireAuthStatusResult::Mcp(status.to_wire())),
+                Err(error_value) => host_auth_error_response(id, error_value),
+            };
+        }
     };
     let (auth_binding, binding, auth_profile) = match resolve_binding_identity_for_read(
         runtime,
@@ -2015,7 +2123,7 @@ pub async fn handle_auth_status_get(
     let tokens = projection.tokens;
     RpcResponse::success(
         id,
-        WireAuthStatusDetail {
+        WireAuthStatusResult::Binding(WireAuthStatusDetail {
             identity: WireBindingIdentity::from(&auth_binding),
             profile_id: auth_profile.id,
             provider: auth_profile.provider.as_str().to_string(),
@@ -2025,7 +2133,7 @@ pub async fn handle_auth_status_get(
             last_refresh_at: tokens.and_then(|t| t.last_refresh.map(|e| e.to_rfc3339())),
             account_id: tokens.and_then(|t| t.account_id.clone()),
             has_refresh_token: tokens.map(|t| t.refresh_token.is_some()).unwrap_or(false),
-        },
+        }),
     )
 }
 

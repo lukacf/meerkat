@@ -59,12 +59,16 @@ pub use config::{
     WireLiveHotSwapSkipReason, WireLiveRefreshFailure, WireLiveSwapFailure,
 };
 pub use connection::{
-    BindingIdParams, CreateProfileParams, DeviceCompleteParams, DeviceStartParams,
-    LoginCompleteParams, LoginStartParams, ProvisionApiKeyParams, RealmIdParams,
+    AuthStatusParams, BindingIdParams, CreateProfileParams, DeviceCompleteParams,
+    DeviceStartParams, LoginCompleteParams, LoginStartParams, ProvisionApiKeyParams, RealmIdParams,
     WireAuthBindingRef, WireAuthError, WireAuthProfile, WireAuthProfileCleared,
     WireAuthProfileCreated, WireAuthProfileDetail, WireAuthProfilesList, WireAuthStatus,
-    WireAuthStatusDetail, WireBackendProfile, WireBindingIdentity, WireDeviceCompleteResult,
-    WireDeviceStart, WireLoginReady, WireLoginStart, WireOAuthProvider, WireProviderBinding,
+    WireAuthStatusDetail, WireAuthStatusResult, WireBackendProfile, WireBindingIdentity,
+    WireDeviceCompleteResult, WireDeviceStart, WireLoginCompleteTarget, WireLoginReady,
+    WireLoginReadyTarget, WireLoginStart, WireLoginStartTarget, WireLoginTarget, WireMcpAuthPhase,
+    WireMcpAuthStatus, WireMcpAuthTarget, WireMcpLoginCompleteTarget, WireMcpLoginReady,
+    WireMcpLoginStart, WireMcpLoginTarget, WireOAuthProvider, WireProviderBinding,
+    WireProviderLoginReady, WireProviderLoginStart, WireProviderLoginTarget,
     WireProvisionApiKeyResult, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
 };
 pub use rpc_surface::{

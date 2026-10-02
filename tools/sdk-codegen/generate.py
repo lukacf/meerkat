@@ -385,8 +385,6 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "ListSessionTranscriptRevisionsParams",
     "ListSessionsParams",
     "ListSessionsResult",
-    "LoginCompleteParams",
-    "LoginStartParams",
     "ProvisionApiKeyParams",
     "ReadInstructionActivationsParams",
     "ReadSessionHistoryParams",
@@ -429,7 +427,19 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireRunStopCompletion",
     "WireInputTerminalOutcome",
     "WireDeviceCompleteResult",
+    "AuthStatusParams",
+    "LoginCompleteParams",
+    "LoginStartParams",
+    "WireAuthStatusResult",
 ]
+
+# Request unions (serde-untagged, flattened targets) whose schemas live in the
+# params roster rather than the wire roster.
+PARAMS_UNION_ALIAS_TYPES = {
+    "AuthStatusParams",
+    "LoginCompleteParams",
+    "LoginStartParams",
+}
 
 MCP_LIVE_CONTRACT_TYPES = [
     "McpAddParams",
@@ -1195,6 +1205,46 @@ def _expand_flattened_object_variants(
     return expanded
 
 
+UNTAGGED_UNION_DISCRIMINATOR = ""
+
+
+def _untagged_object_variants(
+    variants: list[dict[str, Any]],
+    labels: list[str],
+) -> tuple[str, list[tuple[str, dict[str, Any]]]] | None:
+    """Name the arms of a serde-untagged union of disjoint objects.
+
+    Untagged unions carry no shared const discriminator. When every arm is a
+    named (`$ref`) object with at least one required field no other arm
+    requires, the arms are distinguishable and each becomes a variant named
+    after its referenced type. The returned discriminator is
+    `UNTAGGED_UNION_DISCRIMINATOR`; parser emitters refuse it rather than
+    generate a discriminator switch.
+    """
+    if len(variants) < 2 or len(set(labels)) != len(labels) or not all(labels):
+        return None
+    required_sets = [set(variant.get("required", []) or []) for variant in variants]
+    for index, required in enumerate(required_sets):
+        others = set().union(*(r for i, r in enumerate(required_sets) if i != index))
+        if not required - others:
+            return None
+    return (
+        UNTAGGED_UNION_DISCRIMINATOR,
+        [
+            (_snake_case_type_name(_strip_wire_prefix(label)), variant)
+            for label, variant in zip(labels, variants, strict=True)
+        ],
+    )
+
+
+def _strip_wire_prefix(name: str) -> str:
+    return name[len("Wire"):] if name.startswith("Wire") and len(name) > 4 else name
+
+
+def _snake_case_type_name(name: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
 def _one_of_typed_dict_variants(
     root: dict[str, Any],
     schema: Any,
@@ -1203,6 +1253,9 @@ def _one_of_typed_dict_variants(
         return None
 
     expanded_variants: list[dict[str, Any]] = []
+    # Branch label per expanded variant: the `$ref` name of its oneOf arm.
+    # Used only for untagged unions (no shared const discriminator).
+    branch_labels: list[str] = []
     outer_object = {
         key: value for key, value in schema.items() if key not in {"oneOf", "$defs"}
     }
@@ -1213,9 +1266,20 @@ def _one_of_typed_dict_variants(
     for variant in schema["oneOf"]:
         if not isinstance(variant, dict):
             return None
+        label = (
+            _resolve_schema_ref_name(str(variant["$ref"])) if "$ref" in variant else None
+        )
+        if merge_outer and label is not None:
+            # Resolve a named arm before merging the flattened outer fields;
+            # the merge itself drops `$ref`.
+            variant = _merge_ref_variant(root, variant)
         if merge_outer:
             variant = _merge_object_variant_schemas(outer_object, variant)
-        expanded_variants.extend(_expand_flattened_object_variants(root, variant))
+        expanded = _expand_flattened_object_variants(root, variant)
+        expanded_variants.extend(expanded)
+        branch_labels.extend(
+            [label or ""] if len(expanded) == 1 else [f"{label or ''}{i}" for i in range(len(expanded))]
+        )
 
     const_fields_by_variant: list[dict[str, str]] = []
     for variant in expanded_variants:
@@ -1239,7 +1303,7 @@ def _one_of_typed_dict_variants(
     for const_fields in const_fields_by_variant[1:]:
         common_discriminators.intersection_update(const_fields)
     if not common_discriminators:
-        return None
+        return _untagged_object_variants(expanded_variants, branch_labels)
     # Prefer the common const field that distinguishes the most arms. Stable
     # lexical tie-breaking keeps generation byte deterministic.
     discriminator = min(
@@ -1905,7 +1969,7 @@ def _python_alias_parsers(
             )
             continue
         typed = _one_of_typed_dict_variants(schema_root, schema)
-        if typed is None:
+        if typed is None or typed[0] == UNTAGGED_UNION_DISCRIMINATOR:
             raise KeyError(f"cannot emit fail-closed Python parser for union `{name}`")
         discriminator, variants = typed
         lines = [
@@ -2172,7 +2236,7 @@ def _typescript_alias_parser(
         )
     local_defs = set(schema.get("$defs", {}).keys())
     typed = _one_of_typed_dict_variants(schema_root, schema)
-    if typed is None:
+    if typed is None or typed[0] == UNTAGGED_UNION_DISCRIMINATOR:
         raise KeyError(f"cannot emit fail-closed TypeScript parser for union `{name}`")
     discriminator, variants = typed
     lines = [
@@ -3637,8 +3701,13 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     # `config/set` accepts a bare config object or a wrapped
     # `{config, expected_generation}` envelope (untagged union).
     append_python_alias("ConfigSetParams", wire_schema, "Request payload for config/set.")
+    # Auth target unions reference the MCP target by name.
+    append_python_dataclass(
+        "WireMcpAuthTarget", wire_schema, "MCP server target for auth/login/* and auth/status/get."
+    )
     for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
-        append_python_alias(name, wire_schema, f"Wire payload for {name}.")
+        alias_root = params_schema if name in PARAMS_UNION_ALIAS_TYPES else wire_schema
+        append_python_alias(name, alias_root, f"Wire payload for {name}.")
     for name in PUBLIC_RPC_CATALOG_OBJECT_TYPES:
         append_python_contract_dataclass(name)
     for name in JOBS_RPC_CONTRACT_ALIAS_TYPES:
@@ -3924,8 +3993,10 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("WireAuthProfileCreated", wire_schema, "Response payload for auth/profile/create.")
     append_python_dataclass("WireAuthProfileDetail", wire_schema, "Response payload for auth/profile/get.")
     append_python_dataclass("WireAuthProfileCleared", wire_schema, "Response payload for auth/profile/delete and auth/logout.")
-    append_python_dataclass("WireLoginStart", wire_schema, "Response payload for auth/login/start.")
-    append_python_dataclass("WireLoginReady", wire_schema, "Ready response payload for auth login completion.")
+    append_python_dataclass("WireMcpAuthTarget", wire_schema, "MCP server target for auth/login/* and auth/status/get.")
+    append_python_dataclass("WireMcpAuthStatus", wire_schema, "Authorization status of an MCP server target.")
+    append_python_alias("WireLoginStart", wire_schema, "Response payload for auth/login/start.")
+    append_python_alias("WireLoginReady", wire_schema, "Ready response payload for auth login completion.")
     append_python_dataclass("WireDeviceStart", wire_schema, "Response payload for auth/login/device_start.")
     append_python_dataclass("WireRealmSummary", wire_schema, "Realm summary returned by realm/list.")
     append_python_dataclass("WireRealmList", wire_schema, "Response payload for realm/list.")
@@ -4403,8 +4474,11 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     for name in K20_CATALOG_CONTRACT_TYPES:
         append_typescript_contract_interface(name)
     append_typescript_alias("ConfigSetParams", wire_schema)
+    # Auth target unions reference the MCP target by name.
+    append_typescript_interface("WireMcpAuthTarget", wire_schema)
     for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
-        append_typescript_alias(name, wire_schema)
+        alias_root = params_schema if name in PARAMS_UNION_ALIAS_TYPES else wire_schema
+        append_typescript_alias(name, alias_root)
     for name in PUBLIC_RPC_CATALOG_OBJECT_TYPES:
         append_typescript_contract_interface(name)
     for name in JOBS_RPC_CONTRACT_ALIAS_TYPES:
@@ -4595,8 +4669,10 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("WireAuthProfileCreated", wire_schema)
     append_typescript_interface("WireAuthProfileDetail", wire_schema)
     append_typescript_interface("WireAuthProfileCleared", wire_schema)
-    append_typescript_interface("WireLoginStart", wire_schema)
-    append_typescript_interface("WireLoginReady", wire_schema)
+    append_typescript_interface("WireMcpAuthTarget", wire_schema)
+    append_typescript_interface("WireMcpAuthStatus", wire_schema)
+    append_typescript_alias("WireLoginStart", wire_schema)
+    append_typescript_alias("WireLoginReady", wire_schema)
     append_typescript_interface("WireDeviceStart", wire_schema)
     append_typescript_interface("WireRealmSummary", wire_schema)
     append_typescript_interface("WireRealmList", wire_schema)
@@ -5844,17 +5920,42 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  secret: string;",
             "}",
             "",
-            "export interface LoginStartParams extends BindingIdParams {",
+            "/** MCP server addressed by auth/login/* and auth/status/get. */",
+            "export interface WireMcpAuthTarget {",
+            "  server_name: string;",
+            "  server_url: string;",
+            "  oauth_account?: string | null;",
+            "}",
+            "",
+            "export interface ProviderLoginStartParams extends BindingIdParams {",
             "  provider: WireOAuthProvider;",
             "  redirect_uri: string;",
             "}",
             "",
-            "export interface LoginCompleteParams extends BindingIdParams {",
+            "export interface McpLoginStartParams {",
+            "  mcp: WireMcpAuthTarget;",
+            "  redirect_uri: string;",
+            "}",
+            "",
+            "export type LoginStartParams = ProviderLoginStartParams | McpLoginStartParams;",
+            "",
+            "export interface ProviderLoginCompleteParams extends BindingIdParams {",
             "  provider: WireOAuthProvider;",
             "  code: string;",
             "  state: string;",
             "  redirect_uri: string;",
             "}",
+            "",
+            "export interface McpLoginCompleteParams {",
+            "  mcp: WireMcpAuthTarget;",
+            "  client_id: string;",
+            "  resource_metadata_url?: string | null;",
+            "  code: string;",
+            "  state: string;",
+            "  redirect_uri: string;",
+            "}",
+            "",
+            "export type LoginCompleteParams = ProviderLoginCompleteParams | McpLoginCompleteParams;",
             "",
             "export interface DeviceStartParams extends BindingIdParams {",
             "  provider: WireOAuthProvider;",
@@ -5931,20 +6032,51 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  cleared: boolean;",
             "}",
             "",
-            "export interface WireLoginStart {",
+            "export interface WireProviderLoginStart {",
             "  authorize_url: string;",
             "  state: string;",
             "  redirect_uri: string;",
             "  provider: WireOAuthProvider;",
             "}",
             "",
-            "export interface WireLoginReady extends WireBindingIdentity {",
+            "/** Host-channel data: never pass to an agent, tool result, transcript or log. */",
+            "export interface WireMcpLoginStart {",
+            "  authorize_url: string;",
+            "  state: string;",
+            "  redirect_uri: string;",
+            "  mcp: WireMcpAuthTarget;",
+            "  client_id: string;",
+            "  resource_metadata_url: string;",
+            "}",
+            "",
+            "export type WireLoginStart = WireProviderLoginStart | WireMcpLoginStart;",
+            "",
+            "export interface WireProviderLoginReady extends WireBindingIdentity {",
             "  state?: typeof WIRE_LOGIN_READY_STATE | null;",
             "  profile_id: string;",
             "  provider: WireOAuthProvider;",
             "  expires_at?: string | null;",
             "  has_refresh_token: boolean;",
             "  scopes: string[];",
+            "}",
+            "",
+            "export interface WireMcpLoginReady {",
+            "  mcp: WireMcpAuthTarget;",
+            "  account_id?: string | null;",
+            "  expires_at?: string | null;",
+            "  has_refresh_token: boolean;",
+            "  scopes: string[];",
+            "}",
+            "",
+            "export type WireLoginReady = WireProviderLoginReady | WireMcpLoginReady;",
+            "",
+            "export type WireMcpAuthPhase = 'authorized' | 'reauth_required' | 'authorization_required';",
+            "",
+            "export interface WireMcpAuthStatus {",
+            "  mcp: WireMcpAuthTarget;",
+            "  phase: WireMcpAuthPhase;",
+            "  expires_at?: string | null;",
+            "  account_id?: string | null;",
             "}",
             "",
             "export interface WireDeviceStart {",
@@ -5961,7 +6093,7 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "export type WireDeviceCompleteSlowDown = { state: \"slow_down\" };",
             "export type WireDeviceCompleteAccessDenied = { state: \"access_denied\" };",
             "export type WireDeviceCompleteExpired = { state: \"expired\" };",
-            "export type WireDeviceCompleteReady = WireLoginReady & { state: typeof WIRE_LOGIN_READY_STATE };",
+            "export type WireDeviceCompleteReady = WireProviderLoginReady & { state: typeof WIRE_LOGIN_READY_STATE };",
             "export type WireDeviceCompleteResult =",
             "  | WireDeviceCompletePending",
             "  | WireDeviceCompleteSlowDown",
@@ -6289,16 +6421,33 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  return value as WireAuthProfileCleared;",
             "}",
             "",
+            "export function parseWireMcpAuthTarget(value: unknown, path = 'mcp'): WireMcpAuthTarget {",
+            "  const record = expectRecord(value, path);",
+            "  expectString(record.server_name, `${path}.server_name`);",
+            "  expectString(record.server_url, `${path}.server_url`);",
+            "  optionalString(record, 'oauth_account', `${path}.oauth_account`);",
+            "  return value as WireMcpAuthTarget;",
+            "}",
+            "",
             "export function parseWireLoginStart(value: unknown, path = 'login_start'): WireLoginStart {",
             "  const record = expectRecord(value, path);",
             "  expectString(record.authorize_url, `${path}.authorize_url`);",
             "  expectString(record.state, `${path}.state`);",
             "  expectString(record.redirect_uri, `${path}.redirect_uri`);",
+            "  if (hasOwn(record, 'mcp')) {",
+            "    parseWireMcpAuthTarget(record.mcp, `${path}.mcp`);",
+            "    expectString(record.client_id, `${path}.client_id`);",
+            "    expectString(record.resource_metadata_url, `${path}.resource_metadata_url`);",
+            "    return value as WireMcpLoginStart;",
+            "  }",
             "  parseWireOAuthProvider(record.provider, `${path}.provider`);",
-            "  return value as WireLoginStart;",
+            "  return value as WireProviderLoginStart;",
             "}",
             "",
-            "export function parseWireLoginReady(value: unknown, path = 'login_ready'): WireLoginReady {",
+            "export function parseWireProviderLoginReady(",
+            "  value: unknown,",
+            "  path = 'login_ready',",
+            "): WireProviderLoginReady {",
             "  const record = expectRecord(value, path);",
             "  if (hasOwn(record, 'state') && record.state !== null && record.state !== undefined) {",
             "    parseLiteral(record.state, [WIRE_LOGIN_READY_STATE], `${path}.state`, 'wire login ready state');",
@@ -6309,7 +6458,34 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  optionalString(record, 'expires_at', `${path}.expires_at`);",
             "  expectBoolean(record.has_refresh_token, `${path}.has_refresh_token`);",
             "  expectStringArray(record.scopes, `${path}.scopes`);",
-            "  return value as WireLoginReady;",
+            "  return value as WireProviderLoginReady;",
+            "}",
+            "",
+            "export function parseWireLoginReady(value: unknown, path = 'login_ready'): WireLoginReady {",
+            "  const record = expectRecord(value, path);",
+            "  if (!hasOwn(record, 'mcp')) {",
+            "    return parseWireProviderLoginReady(value, path);",
+            "  }",
+            "  parseWireMcpAuthTarget(record.mcp, `${path}.mcp`);",
+            "  optionalString(record, 'account_id', `${path}.account_id`);",
+            "  optionalString(record, 'expires_at', `${path}.expires_at`);",
+            "  expectBoolean(record.has_refresh_token, `${path}.has_refresh_token`);",
+            "  expectStringArray(record.scopes, `${path}.scopes`);",
+            "  return value as WireMcpLoginReady;",
+            "}",
+            "",
+            "export function parseWireMcpAuthStatus(value: unknown, path = 'mcp_auth_status'): WireMcpAuthStatus {",
+            "  const record = expectRecord(value, path);",
+            "  parseWireMcpAuthTarget(record.mcp, `${path}.mcp`);",
+            "  parseLiteral(",
+            "    record.phase,",
+            "    ['authorized', 'reauth_required', 'authorization_required'],",
+            "    `${path}.phase`,",
+            "    'MCP auth phase',",
+            "  );",
+            "  optionalString(record, 'expires_at', `${path}.expires_at`);",
+            "  optionalString(record, 'account_id', `${path}.account_id`);",
+            "  return value as WireMcpAuthStatus;",
             "}",
             "",
             "export function parseWireDeviceStart(value: unknown, path = 'device_start'): WireDeviceStart {",
@@ -6331,7 +6507,7 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  const record = expectRecord(value, path);",
             "  const state = parseLiteral(record.state, WIRE_DEVICE_COMPLETE_STATES, `${path}.state`, 'wire device complete state');",
             "  if (state === WIRE_LOGIN_READY_STATE) {",
-            "    parseWireLoginReady(value, path);",
+            "    parseWireProviderLoginReady(value, path);",
             "  }",
             "  return value as WireDeviceCompleteResult;",
             "}",
@@ -6446,6 +6622,12 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "",
             "export function parseLoginStartParams(params: LoginStartParams): LoginStartParams {",
             "  const record = expectRecord(params, 'login_start.params');",
+            "  if (hasOwn(record, 'mcp')) {",
+            "    rejectProviderTargetFields(record, 'login_start.params');",
+            "    parseWireMcpAuthTarget(record.mcp, 'login_start.params.mcp');",
+            "    expectString(record.redirect_uri, 'login_start.params.redirect_uri');",
+            "    return params;",
+            "  }",
             "  parseWireOAuthProvider(record.provider, 'login_start.params.provider');",
             "  expectString(record.redirect_uri, 'login_start.params.redirect_uri');",
             "  expectString(record.realm_id, 'login_start.params.realm_id');",
@@ -6454,8 +6636,26 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  return params;",
             "}",
             "",
+            "function rejectProviderTargetFields(record: Record<string, unknown>, path: string): void {",
+            "  for (const field of ['provider', 'realm_id', 'binding_id', 'profile_id']) {",
+            "    if (hasOwn(record, field)) {",
+            "      throw new WebAuthContractError(`${path}.${field}: not allowed with an mcp target`);",
+            "    }",
+            "  }",
+            "}",
+            "",
             "export function parseLoginCompleteParams(params: LoginCompleteParams): LoginCompleteParams {",
             "  const record = expectRecord(params, 'login_complete.params');",
+            "  expectString(record.code, 'login_complete.params.code');",
+            "  expectString(record.state, 'login_complete.params.state');",
+            "  expectString(record.redirect_uri, 'login_complete.params.redirect_uri');",
+            "  if (hasOwn(record, 'mcp')) {",
+            "    rejectProviderTargetFields(record, 'login_complete.params');",
+            "    parseWireMcpAuthTarget(record.mcp, 'login_complete.params.mcp');",
+            "    expectString(record.client_id, 'login_complete.params.client_id');",
+            "    optionalString(record, 'resource_metadata_url', 'login_complete.params.resource_metadata_url');",
+            "    return params;",
+            "  }",
             "  parseWireOAuthProvider(record.provider, 'login_complete.params.provider');",
             "  expectString(record.code, 'login_complete.params.code');",
             "  expectString(record.state, 'login_complete.params.state');",

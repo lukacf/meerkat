@@ -140195,6 +140195,215 @@
     "title": "WireAuthStatusDetail",
     "type": "object"
   },
+  "WireAuthStatusResult": {
+    "$defs": {
+      "AuthStatusPhase": {
+        "description": "Public auth status phase shared by REST, RPC, CLI, and generated SDK wire\npayloads.\n\nThis is the compatibility projection of typed auth lease truth. Surfaces\nshould map to this enum first and only then emit [`Self::as_public_str`].",
+        "oneOf": [
+          {
+            "enum": [
+              "valid",
+              "expiring",
+              "expired",
+              "reauth_required",
+              "refresh_failed"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "released",
+            "description": "The lease was explicitly released (credential lifecycle torn down).",
+            "type": "string"
+          },
+          {
+            "const": "absent",
+            "description": "No lease phase is tracked at all for this binding.",
+            "type": "string"
+          },
+          {
+            "const": "missing_credential",
+            "description": "A lease may exist but holds no live credential material.",
+            "type": "string"
+          }
+        ]
+      },
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
+      "ProfileId": {
+        "description": "Opaque slug identifying an auth profile override on a connection.",
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
+        "type": "string"
+      },
+      "WireAuthBindingRef": {
+        "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
+        "properties": {
+          "binding": {
+            "$ref": "#/$defs/BindingId"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "realm": {
+            "$ref": "#/$defs/RealmId"
+          }
+        },
+        "required": [
+          "realm",
+          "binding"
+        ],
+        "type": "object"
+      },
+      "WireAuthStatusDetail": {
+        "description": "`GET /auth/bindings/{binding_id}/status` success body. Richer than\n[`WireAuthStatus`] — also carries `realm_id` / `binding_id` /\n`auth_binding` / `has_refresh_token` so the caller can key by\nbinding directly.",
+        "properties": {
+          "account_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "auth_binding": {
+            "$ref": "#/$defs/WireAuthBindingRef"
+          },
+          "auth_method": {
+            "type": "string"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "has_refresh_token": {
+            "type": "boolean"
+          },
+          "last_refresh_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profile_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/AuthStatusPhase"
+          }
+        },
+        "required": [
+          "realm_id",
+          "binding_id",
+          "auth_binding",
+          "profile_id",
+          "provider",
+          "auth_method",
+          "state",
+          "has_refresh_token"
+        ],
+        "type": "object"
+      },
+      "WireMcpAuthPhase": {
+        "description": "Secret-free authorization phase of an MCP server target.",
+        "oneOf": [
+          {
+            "enum": [
+              "authorized",
+              "reauth_required"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "authorization_required",
+            "description": "No usable credential: awaiting human authorization through the host.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireMcpAuthStatus": {
+        "description": "`auth/status/get` result for an MCP server target.",
+        "properties": {
+          "account_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mcp": {
+            "$ref": "#/$defs/WireMcpAuthTarget"
+          },
+          "phase": {
+            "$ref": "#/$defs/WireMcpAuthPhase"
+          }
+        },
+        "required": [
+          "mcp",
+          "phase"
+        ],
+        "type": "object"
+      },
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`auth/status/get` result: a provider binding status or an MCP status.",
+    "oneOf": [
+      {
+        "$ref": "#/$defs/WireAuthStatusDetail"
+      },
+      {
+        "$ref": "#/$defs/WireMcpAuthStatus"
+      }
+    ],
+    "title": "WireAuthStatusResult"
+  },
   "WireBackendProfile": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Wire projection of [`meerkat_core::BackendProfile`].",
@@ -156224,6 +156433,47 @@
         ],
         "type": "object"
       },
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      },
+      "WireMcpLoginReady": {
+        "description": "MCP arm of [`WireLoginReadyTarget`].",
+        "properties": {
+          "account_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mcp": {
+            "$ref": "#/$defs/WireMcpAuthTarget"
+          }
+        },
+        "required": [
+          "mcp"
+        ],
+        "type": "object"
+      },
       "WireOAuthProvider": {
         "description": "Canonical OAuth issuer identity carried by login request/response contracts.\n\nDeserialization accepts the CLI-compatible aliases owned by\n[`meerkat_core::OAuthProviderIdentity`], while serialization always emits\none canonical wire value.",
         "enum": [
@@ -156233,17 +156483,47 @@
           "copilot"
         ],
         "type": "string"
+      },
+      "WireProviderLoginReady": {
+        "description": "Provider arm of [`WireLoginReadyTarget`].",
+        "properties": {
+          "auth_binding": {
+            "$ref": "#/$defs/WireAuthBindingRef"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/WireOAuthProvider"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "binding_id",
+          "auth_binding",
+          "profile_id",
+          "provider"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "`POST /auth/login/complete` / ready leg of device-code success body.\n\nThe optional `state` field distinguishes the flat `POST\n/auth/login/complete` response (no `state` set) from the device-code\nready leg (`state = \"ready\"`) which is part of the pending/slow_down/\naccess_denied/expired/ready tagged protocol.",
+    "oneOf": [
+      {
+        "$ref": "#/$defs/WireProviderLoginReady"
+      },
+      {
+        "$ref": "#/$defs/WireMcpLoginReady"
+      }
+    ],
     "properties": {
-      "auth_binding": {
-        "$ref": "#/$defs/WireAuthBindingRef"
-      },
-      "binding_id": {
-        "type": "string"
-      },
       "expires_at": {
         "type": [
           "string",
@@ -156252,15 +156532,6 @@
       },
       "has_refresh_token": {
         "type": "boolean"
-      },
-      "profile_id": {
-        "type": "string"
-      },
-      "provider": {
-        "$ref": "#/$defs/WireOAuthProvider"
-      },
-      "realm_id": {
-        "type": "string"
       },
       "scopes": {
         "items": {
@@ -156276,11 +156547,6 @@
       }
     },
     "required": [
-      "realm_id",
-      "binding_id",
-      "auth_binding",
-      "profile_id",
-      "provider",
       "has_refresh_token",
       "scopes"
     ],
@@ -156289,6 +156555,50 @@
   },
   "WireLoginStart": {
     "$defs": {
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      },
+      "WireMcpLoginStart": {
+        "additionalProperties": false,
+        "description": "MCP arm of [`WireLoginStartTarget`]: the public values to echo on\n`auth/login/complete`.",
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "mcp": {
+            "$ref": "#/$defs/WireMcpAuthTarget"
+          },
+          "resource_metadata_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mcp",
+          "client_id",
+          "resource_metadata_url"
+        ],
+        "type": "object"
+      },
       "WireOAuthProvider": {
         "description": "Canonical OAuth issuer identity carried by login request/response contracts.\n\nDeserialization accepts the CLI-compatible aliases owned by\n[`meerkat_core::OAuthProviderIdentity`], while serialization always emits\none canonical wire value.",
         "enum": [
@@ -156298,16 +156608,34 @@
           "copilot"
         ],
         "type": "string"
+      },
+      "WireProviderLoginStart": {
+        "additionalProperties": false,
+        "description": "Provider arm of [`WireLoginStartTarget`].",
+        "properties": {
+          "provider": {
+            "$ref": "#/$defs/WireOAuthProvider"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "`POST /auth/login/start` success body.",
+    "description": "`POST /auth/login/start` success body. Host-channel data: the\nauthorize URL and state must never reach an agent, tool result,\ntranscript or log.",
+    "oneOf": [
+      {
+        "$ref": "#/$defs/WireProviderLoginStart"
+      },
+      {
+        "$ref": "#/$defs/WireMcpLoginStart"
+      }
+    ],
     "properties": {
       "authorize_url": {
         "type": "string"
-      },
-      "provider": {
-        "$ref": "#/$defs/WireOAuthProvider"
       },
       "redirect_uri": {
         "type": "string"
@@ -156319,10 +156647,106 @@
     "required": [
       "authorize_url",
       "state",
-      "redirect_uri",
-      "provider"
+      "redirect_uri"
     ],
     "title": "WireLoginStart",
+    "type": "object"
+  },
+  "WireMcpAuthStatus": {
+    "$defs": {
+      "WireMcpAuthPhase": {
+        "description": "Secret-free authorization phase of an MCP server target.",
+        "oneOf": [
+          {
+            "enum": [
+              "authorized",
+              "reauth_required"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "authorization_required",
+            "description": "No usable credential: awaiting human authorization through the host.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`auth/status/get` result for an MCP server target.",
+    "properties": {
+      "account_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "expires_at": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "mcp": {
+        "$ref": "#/$defs/WireMcpAuthTarget"
+      },
+      "phase": {
+        "$ref": "#/$defs/WireMcpAuthPhase"
+      }
+    },
+    "required": [
+      "mcp",
+      "phase"
+    ],
+    "title": "WireMcpAuthStatus",
+    "type": "object"
+  },
+  "WireMcpAuthTarget": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+    "properties": {
+      "oauth_account": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "server_name": {
+        "type": "string"
+      },
+      "server_url": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "server_name",
+      "server_url"
+    ],
+    "title": "WireMcpAuthTarget",
     "type": "object"
   },
   "WireMemberHealthClass": {

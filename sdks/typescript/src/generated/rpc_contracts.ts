@@ -17,6 +17,7 @@ import type {
   ArtifactRecord,
   AttentionListRequest,
   AttentionListResult,
+  AuthStatusParams,
   BindingIdParams,
   BlobGetParams,
   BlobPayload,
@@ -258,7 +259,7 @@ import type {
   WireAuthProfileCreated,
   WireAuthProfileDetail,
   WireAuthProfilesList,
-  WireAuthStatusDetail,
+  WireAuthStatusResult,
   WireDeviceCompleteResult,
   WireDeviceStart,
   WireLoginReady,
@@ -515,8 +516,8 @@ export interface RpcMethodContracts {
     result: (WireProvisionApiKeyResult) & Record<string, unknown>;
   };
   "auth/status/get": {
-    params: BindingIdParams;
-    result: (WireAuthStatusDetail) & Record<string, unknown>;
+    params: AuthStatusParams;
+    result: (WireAuthStatusResult) & Record<string, unknown>;
   };
   "auth/logout": {
     params: BindingIdParams;

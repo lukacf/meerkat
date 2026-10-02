@@ -145,6 +145,47 @@ pub struct HostMcpAuthStatus {
     pub account_id: Option<String>,
 }
 
+impl HostMcpAuthStatus {
+    /// Wire projection for `auth/status/get`.
+    pub fn to_wire(&self) -> meerkat_contracts::WireMcpAuthStatus {
+        meerkat_contracts::WireMcpAuthStatus {
+            mcp: mcp_auth_target_to_wire(&self.target),
+            phase: match self.phase {
+                HostMcpAuthPhase::Authorized => meerkat_contracts::WireMcpAuthPhase::Authorized,
+                HostMcpAuthPhase::ReauthRequired => {
+                    meerkat_contracts::WireMcpAuthPhase::ReauthRequired
+                }
+                HostMcpAuthPhase::AuthorizationRequired => {
+                    meerkat_contracts::WireMcpAuthPhase::AuthorizationRequired
+                }
+            },
+            expires_at: self.expires_at.map(|at| at.to_rfc3339()),
+            account_id: self.account_id.clone(),
+        }
+    }
+}
+
+/// Parse a wire MCP target (`auth/login/*`, `auth/status/get`) into the
+/// native identity, validating the selected account at the boundary.
+pub fn mcp_auth_target_from_wire(
+    target: &meerkat_contracts::WireMcpAuthTarget,
+) -> Result<McpServerIdentity, McpOAuthError> {
+    let identity = McpServerIdentity::from_server_config(&target.server_name, &target.server_url);
+    match target.oauth_account.as_deref() {
+        Some(account) => identity.with_expected_account(account),
+        None => Ok(identity),
+    }
+}
+
+/// Wire projection of a native MCP target.
+pub fn mcp_auth_target_to_wire(target: &McpServerIdentity) -> meerkat_contracts::WireMcpAuthTarget {
+    meerkat_contracts::WireMcpAuthTarget {
+        server_name: target.server_name().to_owned(),
+        server_url: target.server_url().to_owned(),
+        oauth_account: target.expected_account().map(str::to_owned),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HostAuthError {
     #[error(transparent)]

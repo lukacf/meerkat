@@ -202,17 +202,42 @@ export interface CreateProfileParams extends BindingIdParams {
   secret: string;
 }
 
-export interface LoginStartParams extends BindingIdParams {
+/** MCP server addressed by auth/login/* and auth/status/get. */
+export interface WireMcpAuthTarget {
+  server_name: string;
+  server_url: string;
+  oauth_account?: string | null;
+}
+
+export interface ProviderLoginStartParams extends BindingIdParams {
   provider: WireOAuthProvider;
   redirect_uri: string;
 }
 
-export interface LoginCompleteParams extends BindingIdParams {
+export interface McpLoginStartParams {
+  mcp: WireMcpAuthTarget;
+  redirect_uri: string;
+}
+
+export type LoginStartParams = ProviderLoginStartParams | McpLoginStartParams;
+
+export interface ProviderLoginCompleteParams extends BindingIdParams {
   provider: WireOAuthProvider;
   code: string;
   state: string;
   redirect_uri: string;
 }
+
+export interface McpLoginCompleteParams {
+  mcp: WireMcpAuthTarget;
+  client_id: string;
+  resource_metadata_url?: string | null;
+  code: string;
+  state: string;
+  redirect_uri: string;
+}
+
+export type LoginCompleteParams = ProviderLoginCompleteParams | McpLoginCompleteParams;
 
 export interface DeviceStartParams extends BindingIdParams {
   provider: WireOAuthProvider;
@@ -289,20 +314,51 @@ export interface WireAuthProfileCleared extends WireBindingIdentity {
   cleared: boolean;
 }
 
-export interface WireLoginStart {
+export interface WireProviderLoginStart {
   authorize_url: string;
   state: string;
   redirect_uri: string;
   provider: WireOAuthProvider;
 }
 
-export interface WireLoginReady extends WireBindingIdentity {
+/** Host-channel data: never pass to an agent, tool result, transcript or log. */
+export interface WireMcpLoginStart {
+  authorize_url: string;
+  state: string;
+  redirect_uri: string;
+  mcp: WireMcpAuthTarget;
+  client_id: string;
+  resource_metadata_url: string;
+}
+
+export type WireLoginStart = WireProviderLoginStart | WireMcpLoginStart;
+
+export interface WireProviderLoginReady extends WireBindingIdentity {
   state?: typeof WIRE_LOGIN_READY_STATE | null;
   profile_id: string;
   provider: WireOAuthProvider;
   expires_at?: string | null;
   has_refresh_token: boolean;
   scopes: string[];
+}
+
+export interface WireMcpLoginReady {
+  mcp: WireMcpAuthTarget;
+  account_id?: string | null;
+  expires_at?: string | null;
+  has_refresh_token: boolean;
+  scopes: string[];
+}
+
+export type WireLoginReady = WireProviderLoginReady | WireMcpLoginReady;
+
+export type WireMcpAuthPhase = 'authorized' | 'reauth_required' | 'authorization_required';
+
+export interface WireMcpAuthStatus {
+  mcp: WireMcpAuthTarget;
+  phase: WireMcpAuthPhase;
+  expires_at?: string | null;
+  account_id?: string | null;
 }
 
 export interface WireDeviceStart {
@@ -319,7 +375,7 @@ export type WireDeviceCompletePending = { state: "pending" };
 export type WireDeviceCompleteSlowDown = { state: "slow_down" };
 export type WireDeviceCompleteAccessDenied = { state: "access_denied" };
 export type WireDeviceCompleteExpired = { state: "expired" };
-export type WireDeviceCompleteReady = WireLoginReady & { state: typeof WIRE_LOGIN_READY_STATE };
+export type WireDeviceCompleteReady = WireProviderLoginReady & { state: typeof WIRE_LOGIN_READY_STATE };
 export type WireDeviceCompleteResult =
   | WireDeviceCompletePending
   | WireDeviceCompleteSlowDown
@@ -647,16 +703,33 @@ export function parseWireAuthProfileCleared(
   return value as WireAuthProfileCleared;
 }
 
+export function parseWireMcpAuthTarget(value: unknown, path = 'mcp'): WireMcpAuthTarget {
+  const record = expectRecord(value, path);
+  expectString(record.server_name, `${path}.server_name`);
+  expectString(record.server_url, `${path}.server_url`);
+  optionalString(record, 'oauth_account', `${path}.oauth_account`);
+  return value as WireMcpAuthTarget;
+}
+
 export function parseWireLoginStart(value: unknown, path = 'login_start'): WireLoginStart {
   const record = expectRecord(value, path);
   expectString(record.authorize_url, `${path}.authorize_url`);
   expectString(record.state, `${path}.state`);
   expectString(record.redirect_uri, `${path}.redirect_uri`);
+  if (hasOwn(record, 'mcp')) {
+    parseWireMcpAuthTarget(record.mcp, `${path}.mcp`);
+    expectString(record.client_id, `${path}.client_id`);
+    expectString(record.resource_metadata_url, `${path}.resource_metadata_url`);
+    return value as WireMcpLoginStart;
+  }
   parseWireOAuthProvider(record.provider, `${path}.provider`);
-  return value as WireLoginStart;
+  return value as WireProviderLoginStart;
 }
 
-export function parseWireLoginReady(value: unknown, path = 'login_ready'): WireLoginReady {
+export function parseWireProviderLoginReady(
+  value: unknown,
+  path = 'login_ready',
+): WireProviderLoginReady {
   const record = expectRecord(value, path);
   if (hasOwn(record, 'state') && record.state !== null && record.state !== undefined) {
     parseLiteral(record.state, [WIRE_LOGIN_READY_STATE], `${path}.state`, 'wire login ready state');
@@ -667,7 +740,34 @@ export function parseWireLoginReady(value: unknown, path = 'login_ready'): WireL
   optionalString(record, 'expires_at', `${path}.expires_at`);
   expectBoolean(record.has_refresh_token, `${path}.has_refresh_token`);
   expectStringArray(record.scopes, `${path}.scopes`);
-  return value as WireLoginReady;
+  return value as WireProviderLoginReady;
+}
+
+export function parseWireLoginReady(value: unknown, path = 'login_ready'): WireLoginReady {
+  const record = expectRecord(value, path);
+  if (!hasOwn(record, 'mcp')) {
+    return parseWireProviderLoginReady(value, path);
+  }
+  parseWireMcpAuthTarget(record.mcp, `${path}.mcp`);
+  optionalString(record, 'account_id', `${path}.account_id`);
+  optionalString(record, 'expires_at', `${path}.expires_at`);
+  expectBoolean(record.has_refresh_token, `${path}.has_refresh_token`);
+  expectStringArray(record.scopes, `${path}.scopes`);
+  return value as WireMcpLoginReady;
+}
+
+export function parseWireMcpAuthStatus(value: unknown, path = 'mcp_auth_status'): WireMcpAuthStatus {
+  const record = expectRecord(value, path);
+  parseWireMcpAuthTarget(record.mcp, `${path}.mcp`);
+  parseLiteral(
+    record.phase,
+    ['authorized', 'reauth_required', 'authorization_required'],
+    `${path}.phase`,
+    'MCP auth phase',
+  );
+  optionalString(record, 'expires_at', `${path}.expires_at`);
+  optionalString(record, 'account_id', `${path}.account_id`);
+  return value as WireMcpAuthStatus;
 }
 
 export function parseWireDeviceStart(value: unknown, path = 'device_start'): WireDeviceStart {
@@ -689,7 +789,7 @@ export function parseWireDeviceCompleteResult(
   const record = expectRecord(value, path);
   const state = parseLiteral(record.state, WIRE_DEVICE_COMPLETE_STATES, `${path}.state`, 'wire device complete state');
   if (state === WIRE_LOGIN_READY_STATE) {
-    parseWireLoginReady(value, path);
+    parseWireProviderLoginReady(value, path);
   }
   return value as WireDeviceCompleteResult;
 }
@@ -804,6 +904,12 @@ export function parseCreateProfileParams(params: CreateProfileParams): CreatePro
 
 export function parseLoginStartParams(params: LoginStartParams): LoginStartParams {
   const record = expectRecord(params, 'login_start.params');
+  if (hasOwn(record, 'mcp')) {
+    rejectProviderTargetFields(record, 'login_start.params');
+    parseWireMcpAuthTarget(record.mcp, 'login_start.params.mcp');
+    expectString(record.redirect_uri, 'login_start.params.redirect_uri');
+    return params;
+  }
   parseWireOAuthProvider(record.provider, 'login_start.params.provider');
   expectString(record.redirect_uri, 'login_start.params.redirect_uri');
   expectString(record.realm_id, 'login_start.params.realm_id');
@@ -812,8 +918,26 @@ export function parseLoginStartParams(params: LoginStartParams): LoginStartParam
   return params;
 }
 
+function rejectProviderTargetFields(record: Record<string, unknown>, path: string): void {
+  for (const field of ['provider', 'realm_id', 'binding_id', 'profile_id']) {
+    if (hasOwn(record, field)) {
+      throw new WebAuthContractError(`${path}.${field}: not allowed with an mcp target`);
+    }
+  }
+}
+
 export function parseLoginCompleteParams(params: LoginCompleteParams): LoginCompleteParams {
   const record = expectRecord(params, 'login_complete.params');
+  expectString(record.code, 'login_complete.params.code');
+  expectString(record.state, 'login_complete.params.state');
+  expectString(record.redirect_uri, 'login_complete.params.redirect_uri');
+  if (hasOwn(record, 'mcp')) {
+    rejectProviderTargetFields(record, 'login_complete.params');
+    parseWireMcpAuthTarget(record.mcp, 'login_complete.params.mcp');
+    expectString(record.client_id, 'login_complete.params.client_id');
+    optionalString(record, 'resource_metadata_url', 'login_complete.params.resource_metadata_url');
+    return params;
+  }
   parseWireOAuthProvider(record.provider, 'login_complete.params.provider');
   expectString(record.code, 'login_complete.params.code');
   expectString(record.state, 'login_complete.params.state');

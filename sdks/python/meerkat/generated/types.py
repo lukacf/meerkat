@@ -531,6 +531,21 @@ class WorkItemsResult:
 # config or wrapped with an optimistic-concurrency generation).
 ConfigSetParams = dict[str, Any]
 
+@dataclass
+class WireMcpAuthTarget:
+    """OAuth-protected MCP server addressed by `auth/login/*` and
+`auth/status/get` instead of a provider binding.
+
+`server_name` and `server_url` identify the configured server;
+`oauth_account` is the selected account the login must prove (the OIDC
+subject for the default account strategy). Login is host-driven: the
+authorize URL and state are host-channel data and must never reach an
+agent, tool result, transcript or log."""
+    server_name: str
+    server_url: str
+    oauth_account: Optional[str] = None
+
+
 # Wire payload for InstructionActivationDisposition.
 InstructionActivationDisposition = Any
 
@@ -653,6 +668,75 @@ class WireDeviceCompleteResultReady(TypedDict, total=False):
     state: Required[Literal['ready']]
 
 WireDeviceCompleteResult = WireDeviceCompleteResultPending | WireDeviceCompleteResultSlowDown | WireDeviceCompleteResultAccessDenied | WireDeviceCompleteResultExpired | WireDeviceCompleteResultReady
+
+# Request payload for `auth/status/get`: a provider binding (the original
+# flat fields) or an MCP server (`{"mcp": {...}}`).
+class AuthStatusParamsBindingIdParams(TypedDict, total=False):
+    binding_id: Required[str]
+    profile_id: NotRequired[Optional[str]]
+    realm_id: Required[str]
+
+class AuthStatusParamsMcpLoginTarget(TypedDict, total=False):
+    mcp: Required[WireMcpAuthTarget]
+
+AuthStatusParams = AuthStatusParamsBindingIdParams | AuthStatusParamsMcpLoginTarget
+
+# Request payload for `auth/login/complete`. `Debug` redacts `code` and
+# `state`.
+class LoginCompleteParamsProviderLoginTarget(TypedDict, total=False):
+    code: Required[str]
+    redirect_uri: Required[str]
+    state: Required[str]
+    binding_id: Required[str]
+    profile_id: NotRequired[Optional[str]]
+    provider: Required[Literal['anthropic', 'openai', 'google', 'copilot']]
+    realm_id: Required[str]
+
+class LoginCompleteParamsMcpLoginCompleteTarget(TypedDict, total=False):
+    code: Required[str]
+    redirect_uri: Required[str]
+    state: Required[str]
+    client_id: Required[str]
+    mcp: Required[WireMcpAuthTarget]
+    resource_metadata_url: NotRequired[Optional[str]]
+
+LoginCompleteParams = LoginCompleteParamsProviderLoginTarget | LoginCompleteParamsMcpLoginCompleteTarget
+
+# Request payload for `auth/login/start`.
+class LoginStartParamsProviderLoginTarget(TypedDict, total=False):
+    redirect_uri: Required[str]
+    binding_id: Required[str]
+    profile_id: NotRequired[Optional[str]]
+    provider: Required[Literal['anthropic', 'openai', 'google', 'copilot']]
+    realm_id: Required[str]
+
+class LoginStartParamsMcpLoginTarget(TypedDict, total=False):
+    redirect_uri: Required[str]
+    mcp: Required[WireMcpAuthTarget]
+
+LoginStartParams = LoginStartParamsProviderLoginTarget | LoginStartParamsMcpLoginTarget
+
+# `auth/status/get` result: a provider binding status or an MCP status.
+class WireAuthStatusResultAuthStatusDetail(TypedDict, total=False):
+    account_id: NotRequired[Optional[str]]
+    auth_binding: Required[WireAuthBindingRef]
+    auth_method: Required[str]
+    binding_id: Required[str]
+    expires_at: NotRequired[Optional[str]]
+    has_refresh_token: Required[bool]
+    last_refresh_at: NotRequired[Optional[str]]
+    profile_id: Required[str]
+    provider: Required[str]
+    realm_id: Required[str]
+    state: Required[Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed'] | Literal['released'] | Literal['absent'] | Literal['missing_credential']]
+
+class WireAuthStatusResultMcpAuthStatus(TypedDict, total=False):
+    account_id: NotRequired[Optional[str]]
+    expires_at: NotRequired[Optional[str]]
+    mcp: Required[WireMcpAuthTarget]
+    phase: Required[Literal['authorized', 'reauth_required'] | Literal['authorization_required']]
+
+WireAuthStatusResult = WireAuthStatusResultAuthStatusDetail | WireAuthStatusResultMcpAuthStatus
 
 @dataclass
 class ActivateInstructionParams:
@@ -1098,28 +1182,6 @@ class ListSessionsParams:
 class ListSessionsResult:
     """Result for `session/list`."""
     sessions: list[dict[str, Any]]
-
-
-@dataclass
-class LoginCompleteParams:
-    """Request payload for `auth/login/complete`."""
-    binding_id: str
-    code: str
-    provider: Literal['anthropic', 'openai', 'google', 'copilot']
-    realm_id: str
-    redirect_uri: str
-    state: str
-    profile_id: Optional[str] = None
-
-
-@dataclass
-class LoginStartParams:
-    """Request payload for `auth/login/start`."""
-    binding_id: str
-    provider: Literal['anthropic', 'openai', 'google', 'copilot']
-    realm_id: str
-    redirect_uri: str
-    profile_id: Optional[str] = None
 
 
 @dataclass
@@ -5836,32 +5898,59 @@ class WireAuthProfileCleared:
 
 
 @dataclass
-class WireLoginStart:
-    """`POST /auth/login/start` success body."""
-    authorize_url: str
-    provider: Literal['anthropic', 'openai', 'google', 'copilot']
-    redirect_uri: str
-    state: str
-
-
-@dataclass
-class WireLoginReady:
-    """`POST /auth/login/complete` / ready leg of device-code success body.
-
-The optional `state` field distinguishes the flat `POST
-/auth/login/complete` response (no `state` set) from the device-code
-ready leg (`state = "ready"`) which is part of the pending/slow_down/
-access_denied/expired/ready tagged protocol."""
-    auth_binding: WireAuthBindingRef
-    binding_id: str
-    has_refresh_token: bool
-    profile_id: str
-    provider: Literal['anthropic', 'openai', 'google', 'copilot']
-    realm_id: str
-    scopes: list[str]
+class WireMcpAuthStatus:
+    """`auth/status/get` result for an MCP server target."""
+    mcp: WireMcpAuthTarget
+    phase: Literal['authorized', 'reauth_required'] | Literal['authorization_required']
+    account_id: Optional[str] = None
     expires_at: Optional[str] = None
-    state: Optional[str] = None
 
+
+# `POST /auth/login/start` success body. Host-channel data: the
+# authorize URL and state must never reach an agent, tool result,
+# transcript or log.
+class WireLoginStartProviderLoginStart(TypedDict, total=False):
+    authorize_url: Required[str]
+    redirect_uri: Required[str]
+    state: Required[str]
+    provider: Required[Literal['anthropic', 'openai', 'google', 'copilot']]
+
+class WireLoginStartMcpLoginStart(TypedDict, total=False):
+    authorize_url: Required[str]
+    redirect_uri: Required[str]
+    state: Required[str]
+    client_id: Required[str]
+    mcp: Required[WireMcpAuthTarget]
+    resource_metadata_url: Required[str]
+
+WireLoginStart = WireLoginStartProviderLoginStart | WireLoginStartMcpLoginStart
+
+# `POST /auth/login/complete` / ready leg of device-code success body.
+#
+# The optional `state` field distinguishes the flat `POST
+# /auth/login/complete` response (no `state` set) from the device-code
+# ready leg (`state = "ready"`) which is part of the pending/slow_down/
+# access_denied/expired/ready tagged protocol.
+class WireLoginReadyProviderLoginReady(TypedDict, total=False):
+    expires_at: NotRequired[Optional[str]]
+    has_refresh_token: Required[bool]
+    scopes: Required[list[str]]
+    state: NotRequired[Optional[str]]
+    auth_binding: Required[WireAuthBindingRef]
+    binding_id: Required[str]
+    profile_id: Required[str]
+    provider: Required[Literal['anthropic', 'openai', 'google', 'copilot']]
+    realm_id: Required[str]
+
+class WireLoginReadyMcpLoginReady(TypedDict, total=False):
+    expires_at: NotRequired[Optional[str]]
+    has_refresh_token: Required[bool]
+    scopes: Required[list[str]]
+    state: NotRequired[Optional[str]]
+    account_id: NotRequired[Optional[str]]
+    mcp: Required[WireMcpAuthTarget]
+
+WireLoginReady = WireLoginReadyProviderLoginReady | WireLoginReadyMcpLoginReady
 
 @dataclass
 class WireDeviceStart:

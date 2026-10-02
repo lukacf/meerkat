@@ -10534,24 +10534,17 @@
         "type": "object"
       },
       "LoginCompleteParams": {
-        "description": "Request payload for `auth/login/complete`.",
+        "description": "Request payload for `auth/login/complete`. `Debug` redacts `code` and\n`state`.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/WireProviderLoginTarget"
+          },
+          {
+            "$ref": "#/components/schemas/WireMcpLoginCompleteTarget"
+          }
+        ],
         "properties": {
-          "binding_id": {
-            "type": "string"
-          },
           "code": {
-            "type": "string"
-          },
-          "profile_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "provider": {
-            "$ref": "#/components/schemas/WireOAuthProvider"
-          },
-          "realm_id": {
             "type": "string"
           },
           "redirect_uri": {
@@ -10562,43 +10555,30 @@
           }
         },
         "required": [
-          "provider",
           "code",
           "state",
-          "redirect_uri",
-          "realm_id",
-          "binding_id"
+          "redirect_uri"
         ],
         "title": "LoginCompleteParams",
         "type": "object"
       },
       "LoginStartParams": {
         "description": "Request payload for `auth/login/start`.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/WireProviderLoginTarget"
+          },
+          {
+            "$ref": "#/components/schemas/WireMcpLoginTarget"
+          }
+        ],
         "properties": {
-          "binding_id": {
-            "type": "string"
-          },
-          "profile_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "provider": {
-            "$ref": "#/components/schemas/WireOAuthProvider"
-          },
-          "realm_id": {
-            "type": "string"
-          },
           "redirect_uri": {
             "type": "string"
           }
         },
         "required": [
-          "provider",
-          "redirect_uri",
-          "realm_id",
-          "binding_id"
+          "redirect_uri"
         ],
         "title": "LoginStartParams",
         "type": "object"
@@ -21456,13 +21436,15 @@
       },
       "WireLoginReady": {
         "description": "`POST /auth/login/complete` / ready leg of device-code success body.\n\nThe optional `state` field distinguishes the flat `POST\n/auth/login/complete` response (no `state` set) from the device-code\nready leg (`state = \"ready\"`) which is part of the pending/slow_down/\naccess_denied/expired/ready tagged protocol.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/WireProviderLoginReady"
+          },
+          {
+            "$ref": "#/components/schemas/WireMcpLoginReady"
+          }
+        ],
         "properties": {
-          "auth_binding": {
-            "$ref": "#/components/schemas/WireAuthBindingRef"
-          },
-          "binding_id": {
-            "type": "string"
-          },
           "expires_at": {
             "type": [
               "string",
@@ -21471,15 +21453,6 @@
           },
           "has_refresh_token": {
             "type": "boolean"
-          },
-          "profile_id": {
-            "type": "string"
-          },
-          "provider": {
-            "$ref": "#/components/schemas/WireOAuthProvider"
-          },
-          "realm_id": {
-            "type": "string"
           },
           "scopes": {
             "items": {
@@ -21495,11 +21468,6 @@
           }
         },
         "required": [
-          "realm_id",
-          "binding_id",
-          "auth_binding",
-          "profile_id",
-          "provider",
           "has_refresh_token",
           "scopes"
         ],
@@ -21507,13 +21475,18 @@
         "type": "object"
       },
       "WireLoginStart": {
-        "description": "`POST /auth/login/start` success body.",
+        "description": "`POST /auth/login/start` success body. Host-channel data: the\nauthorize URL and state must never reach an agent, tool result,\ntranscript or log.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/WireProviderLoginStart"
+          },
+          {
+            "$ref": "#/components/schemas/WireMcpLoginStart"
+          }
+        ],
         "properties": {
           "authorize_url": {
             "type": "string"
-          },
-          "provider": {
-            "$ref": "#/components/schemas/WireOAuthProvider"
           },
           "redirect_uri": {
             "type": "string"
@@ -21525,10 +21498,107 @@
         "required": [
           "authorize_url",
           "state",
-          "redirect_uri",
-          "provider"
+          "redirect_uri"
         ],
         "title": "WireLoginStart",
+        "type": "object"
+      },
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      },
+      "WireMcpLoginCompleteTarget": {
+        "additionalProperties": false,
+        "description": "MCP arm of [`WireLoginCompleteTarget`].",
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "mcp": {
+            "$ref": "#/components/schemas/WireMcpAuthTarget"
+          },
+          "resource_metadata_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "mcp",
+          "client_id"
+        ],
+        "type": "object"
+      },
+      "WireMcpLoginReady": {
+        "description": "MCP arm of [`WireLoginReadyTarget`].",
+        "properties": {
+          "account_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mcp": {
+            "$ref": "#/components/schemas/WireMcpAuthTarget"
+          }
+        },
+        "required": [
+          "mcp"
+        ],
+        "type": "object"
+      },
+      "WireMcpLoginStart": {
+        "additionalProperties": false,
+        "description": "MCP arm of [`WireLoginStartTarget`]: the public values to echo on\n`auth/login/complete`.",
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "mcp": {
+            "$ref": "#/components/schemas/WireMcpAuthTarget"
+          },
+          "resource_metadata_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mcp",
+          "client_id",
+          "resource_metadata_url"
+        ],
+        "type": "object"
+      },
+      "WireMcpLoginTarget": {
+        "additionalProperties": false,
+        "description": "MCP arm of [`WireLoginTarget`].",
+        "properties": {
+          "mcp": {
+            "$ref": "#/components/schemas/WireMcpAuthTarget"
+          }
+        },
+        "required": [
+          "mcp"
+        ],
         "type": "object"
       },
       "WireMemberHistoryPageBody": {
@@ -22256,6 +22326,74 @@
           "id",
           "backend_profile",
           "auth_profile"
+        ],
+        "type": "object"
+      },
+      "WireProviderLoginReady": {
+        "description": "Provider arm of [`WireLoginReadyTarget`].",
+        "properties": {
+          "auth_binding": {
+            "$ref": "#/components/schemas/WireAuthBindingRef"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/WireOAuthProvider"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "binding_id",
+          "auth_binding",
+          "profile_id",
+          "provider"
+        ],
+        "type": "object"
+      },
+      "WireProviderLoginStart": {
+        "additionalProperties": false,
+        "description": "Provider arm of [`WireLoginStartTarget`].",
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/WireOAuthProvider"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "type": "object"
+      },
+      "WireProviderLoginTarget": {
+        "additionalProperties": false,
+        "description": "Provider binding addressed by `auth/login/*`.",
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "$ref": "#/components/schemas/WireOAuthProvider"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "realm_id",
+          "binding_id"
         ],
         "type": "object"
       },

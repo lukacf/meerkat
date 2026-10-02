@@ -331,6 +331,8 @@ import type {
   WireAuthProfileDetail as RpcWireAuthProfileDetail,
   WireAuthProfilesList as RpcWireAuthProfilesList,
   WireAuthStatusDetail as RpcWireAuthStatusDetail,
+  WireAuthStatusResultMcpAuthStatus as RpcWireAuthStatusResultMcpAuthStatus,
+  WireMcpAuthTarget as RpcWireMcpAuthTarget,
   WireDeviceStart as RpcWireDeviceStart,
   WireLoginReady as RpcWireLoginReady,
   WireLoginStart as RpcWireLoginStart,
@@ -4422,12 +4424,40 @@ export class MeerkatClient {
     return this.request("auth/profile/delete", params);
   }
 
+  /**
+   * Begin an OAuth login for a provider binding or an MCP server
+   * (`{ mcp: { server_name, server_url, oauth_account? }, redirect_uri }`).
+   * The authorize URL and state are host-channel data: open the URL only in
+   * a browser no agent tool can observe, and never pass these values to an
+   * agent, tool result, transcript or log.
+   */
   async authLoginStart(params: RpcLoginStartParams): Promise<RpcWireLoginStart> {
     return this.request("auth/login/start", params);
   }
 
+  /**
+   * Finish an OAuth login. For an MCP target (`{ mcp, client_id, ... }`)
+   * pass the loopback callback's `code`/`state` plus the `client_id` and
+   * `resource_metadata_url` returned by `authLoginStart`.
+   */
   async authLoginComplete(params: RpcLoginCompleteParams): Promise<RpcWireLoginReady> {
     return this.request("auth/login/complete", params);
+  }
+
+  /**
+   * Authorization status of an MCP server target via `auth/status/get`.
+   */
+  async authMcpStatus(
+    mcp: RpcWireMcpAuthTarget,
+  ): Promise<RpcWireAuthStatusResultMcpAuthStatus> {
+    const result = await this.request("auth/status/get", { mcp });
+    if (!("phase" in result) || !("mcp" in result)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "auth/status/get returned a binding status for an MCP target",
+      );
+    }
+    return result as RpcWireAuthStatusResultMcpAuthStatus;
   }
 
   async authLoginDeviceStart(

@@ -334,7 +334,7 @@ pub use factory::{
 pub use host_auth::{
     HostAuthDevicePoll, HostAuthDeviceStart, HostAuthError, HostAuthLoginComplete,
     HostAuthLoginStart, HostAuthService, HostAuthStatus, HostAuthTarget, HostMcpAuthPhase,
-    HostMcpAuthStatus,
+    HostMcpAuthStatus, mcp_auth_target_from_wire, mcp_auth_target_to_wire,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_providers::auth_store::{ProviderAuthPersistence, TokenStoreBackend};

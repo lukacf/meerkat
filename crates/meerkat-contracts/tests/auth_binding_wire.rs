@@ -295,3 +295,161 @@ mod schema_emission {
         assert!(props.get("has_refresh_token").is_some());
     }
 }
+
+// --- MCP server target on auth/login/* and auth/status/get -------------
+
+mod mcp_login_target {
+    use meerkat_contracts::{
+        AuthStatusParams, LoginCompleteParams, LoginStartParams, WireLoginCompleteTarget,
+        WireLoginReady, WireLoginReadyTarget, WireLoginStart, WireLoginStartTarget,
+        WireLoginTarget, WireMcpAuthTarget, WireMcpLoginReady, WireMcpLoginStart,
+        WireOAuthProvider,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn provider_login_json_keeps_its_flat_shape() {
+        let legacy = json!({
+            "provider": "openai",
+            "redirect_uri": "http://127.0.0.1:1/callback",
+            "realm_id": "dev",
+            "binding_id": "default_openai",
+        });
+        let parsed: LoginStartParams = serde_json::from_value(legacy.clone()).unwrap();
+        let WireLoginTarget::Provider(target) = &parsed.target else {
+            panic!("legacy JSON must stay a provider target");
+        };
+        assert_eq!(target.provider, WireOAuthProvider::OpenAi);
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), legacy);
+
+        let complete: LoginCompleteParams = serde_json::from_value(json!({
+            "provider": "anthropic",
+            "code": "c",
+            "state": "s",
+            "redirect_uri": "http://127.0.0.1:1/callback",
+            "realm_id": "dev",
+            "binding_id": "b",
+            "profile_id": "p",
+        }))
+        .unwrap();
+        assert!(matches!(
+            complete.target,
+            WireLoginCompleteTarget::Provider(_)
+        ));
+    }
+
+    #[test]
+    fn mcp_login_target_parses_and_mixed_targets_are_refused() {
+        let start: LoginStartParams = serde_json::from_value(json!({
+            "mcp": {
+                "server_name": "glean",
+                "server_url": "https://glean.example/mcp",
+                "oauth_account": "subject-7",
+            },
+            "redirect_uri": "http://127.0.0.1:1/mcp/oauth/callback",
+        }))
+        .unwrap();
+        let WireLoginTarget::Mcp(target) = &start.target else {
+            panic!("expected an MCP target");
+        };
+        assert_eq!(target.mcp.oauth_account.as_deref(), Some("subject-7"));
+
+        for mixed in [
+            json!({
+                "provider": "openai",
+                "realm_id": "dev",
+                "binding_id": "default_openai",
+                "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
+                "redirect_uri": "http://127.0.0.1:1/callback",
+            }),
+            json!({
+                "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
+                "realm_id": "dev",
+                "redirect_uri": "http://127.0.0.1:1/callback",
+            }),
+            json!({
+                "mcp": {"server_name": "glean", "server_url": "u", "authorize_url": "x"},
+                "redirect_uri": "http://127.0.0.1:1/callback",
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<LoginStartParams>(mixed.clone()).is_err(),
+                "ambiguous target must be refused: {mixed}"
+            );
+        }
+
+        let complete: LoginCompleteParams = serde_json::from_value(json!({
+            "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
+            "client_id": "client-123",
+            "resource_metadata_url": "https://glean.example/.well-known/oauth-protected-resource/mcp",
+            "code": "fixture-code",
+            "state": "fixture-state",
+            "redirect_uri": "http://127.0.0.1:1/mcp/oauth/callback",
+        }))
+        .unwrap();
+        assert!(matches!(complete.target, WireLoginCompleteTarget::Mcp(_)));
+
+        let status: AuthStatusParams = serde_json::from_value(json!({
+            "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
+        }))
+        .unwrap();
+        assert!(matches!(status, AuthStatusParams::Mcp(_)));
+        let binding: AuthStatusParams =
+            serde_json::from_value(json!({"realm_id": "dev", "binding_id": "b"})).unwrap();
+        assert!(matches!(binding, AuthStatusParams::Binding(_)));
+    }
+
+    #[test]
+    fn login_debug_redacts_bearer_material() {
+        let complete: LoginCompleteParams = serde_json::from_value(json!({
+            "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
+            "client_id": "client-123",
+            "code": "code-canary",
+            "state": "state-canary",
+            "redirect_uri": "http://127.0.0.1:1/mcp/oauth/callback",
+        }))
+        .unwrap();
+        let start = WireLoginStart {
+            authorize_url: "https://idp.example/authorize?state=state-canary".into(),
+            state: "state-canary".into(),
+            redirect_uri: "http://127.0.0.1:1/mcp/oauth/callback".into(),
+            target: WireLoginStartTarget::Mcp(WireMcpLoginStart {
+                mcp: WireMcpAuthTarget {
+                    server_name: "glean".into(),
+                    server_url: "https://glean.example/mcp".into(),
+                    oauth_account: None,
+                },
+                client_id: "client-123".into(),
+                resource_metadata_url: "https://glean.example/.well-known/x".into(),
+            }),
+        };
+        let rendered = format!("{complete:?} {start:?}");
+        for canary in ["code-canary", "state-canary", "idp.example/authorize"] {
+            assert!(!rendered.contains(canary), "{canary} leaked: {rendered}");
+        }
+    }
+
+    #[test]
+    fn mcp_login_ready_is_secret_free_and_distinct_from_provider_ready() {
+        let ready = WireLoginReady {
+            state: None,
+            target: WireLoginReadyTarget::Mcp(WireMcpLoginReady {
+                mcp: WireMcpAuthTarget {
+                    server_name: "glean".into(),
+                    server_url: "https://glean.example/mcp".into(),
+                    oauth_account: Some("subject-7".into()),
+                },
+                account_id: Some("subject-7".into()),
+            }),
+            expires_at: None,
+            has_refresh_token: true,
+            scopes: vec!["openid".into()],
+        };
+        let value = serde_json::to_value(&ready).unwrap();
+        assert_eq!(value["mcp"]["server_name"], "glean");
+        assert_eq!(value["account_id"], "subject-7");
+        assert!(value.get("provider").is_none());
+        let back: WireLoginReady = serde_json::from_value(value).unwrap();
+        assert!(matches!(back.target, WireLoginReadyTarget::Mcp(_)));
+    }
+}

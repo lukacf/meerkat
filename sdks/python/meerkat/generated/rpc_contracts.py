@@ -25,6 +25,7 @@ from .types import (
     ArtifactRecord,
     AttentionListRequest,
     AttentionListResult,
+    AuthStatusParams,
     BindingIdParams,
     BlobGetParams,
     BlobPayload,
@@ -266,7 +267,7 @@ from .types import (
     WireAuthProfileCreated,
     WireAuthProfileDetail,
     WireAuthProfilesList,
-    WireAuthStatusDetail,
+    WireAuthStatusResult,
     WireDeviceCompleteResult,
     WireDeviceStart,
     WireLoginReady,
@@ -759,9 +760,9 @@ class RpcRequest(Protocol):
     def __call__(
         self,
         method: Literal["auth/status/get"],
-        params: BindingIdParams,
+        params: AuthStatusParams,
         /,
-    ) -> Awaitable[WireAuthStatusDetail]: ...
+    ) -> Awaitable[WireAuthStatusResult]: ...
 
     @overload
     def __call__(

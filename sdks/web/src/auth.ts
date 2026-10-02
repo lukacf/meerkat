@@ -38,6 +38,7 @@ import {
   parseWireDeviceStart,
   parseWireLoginReady,
   parseWireLoginStart,
+  parseWireMcpAuthStatus,
   parseWireProvisionApiKeyResult,
 } from './generated/auth.js';
 import type {
@@ -65,11 +66,20 @@ import type {
   WireDeviceStart,
   WireLoginReady,
   WireLoginStart,
+  WireMcpAuthStatus,
+  WireMcpAuthTarget,
   WireProvisionApiKeyResult,
 } from './generated/auth.js';
 import type { AuthBindingRef, SessionConfig } from './types.js';
 
 export type {
+  McpLoginCompleteParams,
+  McpLoginStartParams,
+  WireMcpAuthPhase,
+  WireMcpAuthStatus,
+  WireMcpAuthTarget,
+  WireMcpLoginReady,
+  WireMcpLoginStart,
   WireAuthMethod,
   WireAuthProvider,
   WireOAuthProvider,
@@ -224,7 +234,12 @@ export class Auth {
     return parseWireAuthProfileCleared(result);
   }
 
-  /** Begin an OAuth browser flow. */
+  /**
+   * Begin an OAuth browser flow for a provider binding or an MCP server
+   * (`{ mcp, redirect_uri }`). The authorize URL and state are host-channel
+   * data: open the URL only in a browser context no agent tool can observe,
+   * and never pass these values to an agent, tool result, transcript or log.
+   */
   async loginStart(params: LoginStartParams): Promise<OAuthLoginStart> {
     const result = await this.transport.request<LoginStartParams, WireLoginStart>(
       AUTH_RPC_METHODS.loginStart,
@@ -289,6 +304,15 @@ export class Auth {
       params,
     );
     return parseWireAuthStatusDetail(result);
+  }
+
+  /** Authorization status of an MCP server target. */
+  async mcpStatus(mcp: WireMcpAuthTarget): Promise<WireMcpAuthStatus> {
+    const result = await this.transport.request<{ mcp: WireMcpAuthTarget }, WireMcpAuthStatus>(
+      AUTH_RPC_METHODS.statusGet,
+      { mcp },
+    );
+    return parseWireMcpAuthStatus(result);
   }
 
   /** Revoke and delete credentials for a binding. */

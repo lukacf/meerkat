@@ -20877,24 +20877,18 @@ impl MobActor {
             )));
         }
         // The mob runs again: release the run starts its Stop held (#1500),
-        // so input admitted before the stop runs now.
-        let released = self.release_all_member_run_starts().await;
-        // The orchestrator's first turn after the pause learns of it. Lifecycle
-        // delivery is a real fault, not best-effort.
-        let notified = self
-            .notify_orchestrator_lifecycle(format!(
-                "Mob '{}' resumed after stop.",
-                self.definition.id
-            ))
-            .await;
-        if let Err(error) = &notified {
+        // so input admitted before the stop runs now. The release at resume
+        // begin did the same; this covers members materialized by the resume.
+        // A member that cannot be released yet (a peer-only member not bound
+        // again yet) is logged per member; the committed resume stands.
+        if let Err(error) = self.release_all_member_run_starts().await {
             tracing::warn!(
                 mob_id = %self.definition.id,
                 error = %error,
-                "resume encountered orchestrator lifecycle delivery error"
+                "resume could not release every member's run-start hold"
             );
         }
-        released.and(notified)
+        Ok(())
     }
 
     /// Release every member's run-start hold (#1500). Every member is

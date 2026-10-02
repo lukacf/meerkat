@@ -53883,12 +53883,12 @@ async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
         MobState::Stopped,
         "stop should transition mob to Stopped"
     );
-    // Stop notifies the orchestrator (autonomous lead) via inject (+1).
-    // Total inject count: 0 (no spawn inject) + 1 (stop notification) = 1.
+    // Stop pauses the orchestrator with the rest of the mob (#1500), so it
+    // sends no lifecycle notice; Resume notifies it.
     assert_eq!(
         service.inject_call_count(),
-        1,
-        "stop should have notified the orchestrator via inject"
+        0,
+        "stop sends the orchestrator no lifecycle notice"
     );
 
     // A fail-closed service discard can remove the exact actor while leaving
@@ -53957,7 +53957,7 @@ async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
     // contract does inject one informational coordinator notification.
     assert_eq!(
         service.inject_call_count(),
-        2,
+        1,
         "resume should add exactly one coordinator lifecycle notification"
     );
 }
@@ -55517,7 +55517,7 @@ async fn whole_crew_resume_repoint_moves_parent_owned_worker_to_successor_sessio
 }
 
 #[tokio::test]
-async fn test_stop_notifies_every_active_orchestrator_profile_member() {
+async fn test_lifecycle_notice_reaches_every_active_orchestrator_profile_member() {
     let (handle, service) = create_test_mob(sample_definition()).await;
 
     for identity in ["lead-one", "lead-two"] {
@@ -55537,14 +55537,19 @@ async fn test_stop_notifies_every_active_orchestrator_profile_member() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let baseline = service.inject_call_count();
 
-    handle.stop().await.expect("stop");
+    // Stop sends no lifecycle notice (#1500); lifecycle delivery itself
+    // still fans out to every active orchestrator-profile member.
+    handle
+        .debug_lifecycle_notification_burst(1, "lifecycle notice")
+        .await
+        .expect("lifecycle notice");
     tokio::time::timeout(Duration::from_secs(2), async {
         while service.inject_call_count() < baseline + 2 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("stop notification should reach every active orchestrator-profile member");
+    .expect("lifecycle notification should reach every active orchestrator-profile member");
 
     assert_eq!(
         service.inject_call_count(),
@@ -68460,14 +68465,7 @@ async fn test_reset_failure_from_stopped_stays_stopped() {
 /// the pause happened.
 #[tokio::test]
 async fn test_resume_tells_the_orchestrator_about_the_stop_and_stop_does_not() {
-    let mut def = sample_definition();
-    if let Some(profile) = def
-        .profiles
-        .get_mut(&ProfileName::from("lead"))
-        .and_then(|b| b.as_inline_mut())
-    {
-        profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
-    }
+    let def = sample_definition();
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
     let handle = MobBuilder::new(def, MobStorage::in_memory())
@@ -68479,34 +68477,20 @@ async fn test_resume_tells_the_orchestrator_about_the_stop_and_stop_does_not() {
         .spawn(ProfileName::from("lead"), AgentIdentity::from("l-1"), None)
         .await
         .expect("spawn lead");
-    let mob_id = handle.definition().id.clone();
 
+    let baseline_injects = service.inject_call_count();
     handle.stop().await.expect("stop");
-    let baseline_start_turn_calls = service.start_turn_call_count();
-    assert!(
-        !service
-            .recorded_prompts()
-            .await
-            .iter()
-            .any(|(_, prompt)| prompt.contains("is stopping")),
-        "Stop sends no lifecycle notice"
+    assert_eq!(
+        service.inject_call_count(),
+        baseline_injects,
+        "Stop sends the orchestrator no lifecycle notice"
     );
 
     handle.resume().await.expect("resume");
-    wait_for_start_turn_call_count(
-        service.as_ref(),
-        baseline_start_turn_calls + 1,
-        "the resume notice reaches the orchestrator",
-    )
-    .await;
-    let expected = format!("Mob '{mob_id}' resumed after stop.");
-    assert!(
-        service
-            .recorded_prompts()
-            .await
-            .iter()
-            .any(|(_, prompt)| prompt.contains(&expected)),
-        "the orchestrator is told the pause happened"
+    assert_eq!(
+        service.inject_call_count(),
+        baseline_injects + 1,
+        "Resume tells the orchestrator the mob resumed"
     );
     handle.shutdown().await.expect("shutdown");
 }
@@ -68539,17 +68523,20 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
         .await
         .expect("spawn lead");
 
-    // Stop pauses the mob without notifying the orchestrator (#1500); Resume
-    // notifies it. Make start_turn hang for 10 minutes (a stuck backend) so
-    // the resume notice is a lifecycle task that does not finish on its own.
-    handle.stop().await.expect("stop");
+    // Make start_turn hang for 10 minutes (a stuck backend), then fire a
+    // lifecycle notification: it is spawned onto the JoinSet, so it becomes a
+    // lifecycle task that does not finish on its own. (Stop no longer sends
+    // one, #1500, and Resume awaits its own notice.)
     service.set_start_turn_delay_ms(600_000);
     let baseline_start_turn_calls = service.start_turn_call_count();
-    handle.resume().await.expect("resume");
+    handle
+        .debug_lifecycle_notification_burst(1, "lifecycle notice")
+        .await
+        .expect("fire the lifecycle notice");
     wait_for_start_turn_call_count(
         service.as_ref(),
         baseline_start_turn_calls + 1,
-        "stuck resume lifecycle notification must enter start_turn before shutdown",
+        "stuck lifecycle notification must enter start_turn before shutdown",
     )
     .await;
 

@@ -17213,6 +17213,9 @@ impl MobActor {
                     agent_identity = %agent_identity,
                     "skipping parked delivery whose caller dropped its reply receiver"
                 );
+                #[cfg(test)]
+                self.member_admission_backlog
+                    .record_abandoned_skip(agent_identity);
                 continue;
             }
             next = Some(parked);

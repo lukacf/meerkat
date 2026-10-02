@@ -156,6 +156,14 @@ them.
 
 ### Fixed
 
+- A delivery whose caller left while it was parked behind a member's
+  in-flight admission no longer runs as a ghost turn. The admission lane
+  skips such a delivery by checking its reply channel, but `SubmitWork` ran
+  on a stack-relief task that held the reply receiver until its asynchronous
+  abort landed, so the lane could pop the entry while the caller still looked
+  alive. `SubmitWork` is now routed inline, so the receiver closes the moment
+  the caller drops (3/30 failures at 10 copies on two cores before, 60/60
+  after).
 - Tests that need the `mcp-test-server` fixture binary no longer pass
   without running when it is missing. Each test hand-rolled a
   `target/debug/mcp-test-server` lookup and returned early when nothing was

@@ -335,14 +335,16 @@ pub use host_auth::{
     HostAuthDevicePoll, HostAuthDeviceStart, HostAuthError, HostAuthLoginComplete,
     HostAuthLoginStart, HostAuthService, HostAuthStatus, HostAuthTarget, HostMcpAuthPhase,
     HostMcpAuthStatus, mcp_auth_target_from_wire, mcp_auth_target_to_wire,
+    mcp_login_disposition_to_wire,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_providers::auth_store::{ProviderAuthPersistence, TokenStoreBackend};
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_providers::mcp_oauth::{
     MCP_INTERACTIVE_LOGIN_TIMEOUT, MCP_OAUTH_CALLBACK_PATH, McpOAuthAccountStrategy,
-    McpOAuthAuthority, McpOAuthCallback, McpOAuthCeremonyContext, McpOAuthError,
-    McpOAuthLoginComplete, McpOAuthLoginStart, McpServerIdentity, OidcUserInfoAccountStrategy,
+    McpOAuthAuthority, McpOAuthBrowserLaunch, McpOAuthCallback, McpOAuthCeremonyContext,
+    McpOAuthError, McpOAuthLoginComplete, McpOAuthLoginDisposition, McpOAuthLoginStart,
+    McpOAuthLoopbackBegin, McpOAuthPendingLogin, McpServerIdentity, OidcUserInfoAccountStrategy,
 };
 
 pub mod help;

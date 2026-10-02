@@ -1287,6 +1287,9 @@ pub async fn start_login(
                             mcp,
                             client_id: started.client_id,
                             resource_metadata_url: started.resource_metadata_url,
+                            disposition: meerkat::mcp_login_disposition_to_wire(
+                                started.disposition,
+                            ),
                         }),
                     }),
                 )

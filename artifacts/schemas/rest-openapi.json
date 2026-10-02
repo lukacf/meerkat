@@ -21549,6 +21549,14 @@
         ],
         "type": "object"
       },
+      "WireMcpLoginDisposition": {
+        "description": "Whether `auth/login/start` admitted a new MCP attempt or returned the one\nalready pending for the target (no second attempt is ever admitted).",
+        "enum": [
+          "started",
+          "joined"
+        ],
+        "type": "string"
+      },
       "WireMcpLoginReady": {
         "description": "MCP arm of [`WireLoginReadyTarget`].",
         "properties": {
@@ -21574,6 +21582,9 @@
           "client_id": {
             "type": "string"
           },
+          "disposition": {
+            "$ref": "#/components/schemas/WireMcpLoginDisposition"
+          },
           "mcp": {
             "$ref": "#/components/schemas/WireMcpAuthTarget"
           },
@@ -21584,7 +21595,8 @@
         "required": [
           "mcp",
           "client_id",
-          "resource_metadata_url"
+          "resource_metadata_url",
+          "disposition"
         ],
         "type": "object"
       },

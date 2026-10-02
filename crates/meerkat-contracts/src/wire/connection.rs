@@ -645,6 +645,17 @@ pub struct WireMcpLoginStart {
     pub mcp: WireMcpAuthTarget,
     pub client_id: String,
     pub resource_metadata_url: String,
+    pub disposition: WireMcpLoginDisposition,
+}
+
+/// Whether `auth/login/start` admitted a new MCP attempt or returned the one
+/// already pending for the target (no second attempt is ever admitted).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMcpLoginDisposition {
+    Started,
+    Joined,
 }
 
 /// `POST /auth/login/complete` / ready leg of device-code success body.

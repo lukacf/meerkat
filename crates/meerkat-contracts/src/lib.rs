@@ -502,6 +502,7 @@ pub use wire::{
     WireMcpAuthStatus,
     WireMcpAuthTarget,
     WireMcpLoginCompleteTarget,
+    WireMcpLoginDisposition,
     WireMcpLoginReady,
     WireMcpLoginStart,
     WireMcpLoginTarget,

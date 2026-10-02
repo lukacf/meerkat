@@ -329,6 +329,7 @@ export interface WireMcpLoginStart {
   mcp: WireMcpAuthTarget;
   client_id: string;
   resource_metadata_url: string;
+  disposition: 'started' | 'joined';
 }
 
 export type WireLoginStart = WireProviderLoginStart | WireMcpLoginStart;
@@ -720,6 +721,7 @@ export function parseWireLoginStart(value: unknown, path = 'login_start'): WireL
     parseWireMcpAuthTarget(record.mcp, `${path}.mcp`);
     expectString(record.client_id, `${path}.client_id`);
     expectString(record.resource_metadata_url, `${path}.resource_metadata_url`);
+    parseLiteral(record.disposition, ['started', 'joined'], `${path}.disposition`, 'MCP login disposition');
     return value as WireMcpLoginStart;
   }
   parseWireOAuthProvider(record.provider, `${path}.provider`);

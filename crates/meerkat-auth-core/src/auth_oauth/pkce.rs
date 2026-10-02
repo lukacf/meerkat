@@ -34,6 +34,20 @@ impl PkcePair {
     }
 }
 
+impl PkceChallenge {
+    /// The S256 challenge of an existing verifier, for re-projecting an
+    /// admitted attempt without minting a new one.
+    pub fn s256_for_verifier(verifier: &str) -> Self {
+        let challenge = PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(
+            verifier.to_owned(),
+        ));
+        Self {
+            code: challenge.as_str().to_owned(),
+            method: "S256",
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -45,6 +59,14 @@ mod tests {
         assert!(!pair.verifier.secret().is_empty());
         assert!(!pair.challenge.code.is_empty());
         assert_eq!(pair.challenge.method, "S256");
+    }
+
+    #[test]
+    fn challenge_for_verifier_matches_generated_pair() {
+        let pair = PkcePair::generate_s256();
+        let again = PkceChallenge::s256_for_verifier(pair.verifier.secret());
+        assert_eq!(again.code, pair.challenge.code);
+        assert_eq!(again.method, "S256");
     }
 
     #[test]

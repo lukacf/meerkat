@@ -1530,6 +1530,26 @@ impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
 }
 
 impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
+    fn pending_connector_browser_attempt(
+        &self,
+        target: &AuthCredentialIdentity,
+    ) -> Result<Option<(String, OAuthFlowRecord)>, OAuthFlowError> {
+        let _payload_guard = self
+            .payload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.sync_persisted_payloads("pending_oauth_browser_flow")?;
+        let Some((state, record)) = self.registry.pending_connector_browser_attempt(target) else {
+            return Ok(None);
+        };
+        // The machine owns liveness: a projection it no longer admits is not
+        // a pending attempt, and the caller starts a fresh one.
+        match self.verify_browser(target, &state, &record.provider, &record.redirect_uri) {
+            Ok(()) => Ok(Some((state, record))),
+            Err(_) => Ok(None),
+        }
+    }
+
     fn generated_credential_lifecycle(
         &self,
     ) -> Option<meerkat_core::handles::GeneratedAuthLeaseHandle> {

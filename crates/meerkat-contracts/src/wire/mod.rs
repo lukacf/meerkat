@@ -66,9 +66,9 @@ pub use connection::{
     WireAuthStatusDetail, WireAuthStatusResult, WireBackendProfile, WireBindingIdentity,
     WireDeviceCompleteResult, WireDeviceStart, WireLoginCompleteTarget, WireLoginReady,
     WireLoginReadyTarget, WireLoginStart, WireLoginStartTarget, WireLoginTarget, WireMcpAuthPhase,
-    WireMcpAuthStatus, WireMcpAuthTarget, WireMcpLoginCompleteTarget, WireMcpLoginReady,
-    WireMcpLoginStart, WireMcpLoginTarget, WireOAuthProvider, WireProviderBinding,
-    WireProviderLoginReady, WireProviderLoginStart, WireProviderLoginTarget,
+    WireMcpAuthStatus, WireMcpAuthTarget, WireMcpLoginCompleteTarget, WireMcpLoginDisposition,
+    WireMcpLoginReady, WireMcpLoginStart, WireMcpLoginTarget, WireOAuthProvider,
+    WireProviderBinding, WireProviderLoginReady, WireProviderLoginStart, WireProviderLoginTarget,
     WireProvisionApiKeyResult, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
 };
 pub use rpc_surface::{

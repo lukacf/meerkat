@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::auth_oauth::{
-    OAuthEndpoints, OAuthTokenRequestFormat, OAuthTokenResult, PkcePair,
-    exchange_authorization_code_with_state, exchange_refresh_token, oauth_refresh_observation,
+    LoopbackHandle, OAuthEndpoints, OAuthTokenRequestFormat, OAuthTokenResult, PkceChallenge,
+    PkcePair, bind_loopback_callback, exchange_authorization_code_with_state,
+    exchange_refresh_token, oauth_refresh_observation,
 };
 use crate::auth_store::{
     CredentialMutationError, PersistedAuthMode, PersistedTokens, ProviderAuthPersistence,
@@ -276,8 +277,15 @@ impl Default for OidcUserInfoAccountStrategy {
 }
 
 impl OidcUserInfoAccountStrategy {
+    /// The bearer token is only ever sent to the validated issuer's
+    /// `userinfo_endpoint`, so this client follows no redirects.
     pub fn new() -> Self {
-        Self::with_http(Client::new())
+        Self::with_http(
+            Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap_or_default(),
+        )
     }
 
     pub fn with_http(http: Client) -> Self {
@@ -390,6 +398,123 @@ impl McpOAuthAccountStrategy for OidcUserInfoAccountStrategy {
     }
 }
 
+/// Result of [`McpOAuthAuthority::begin_loopback_login`].
+pub enum McpOAuthLoopbackBegin {
+    /// This host admitted the attempt and owns its callback binding.
+    Started(McpOAuthPendingLogin),
+    /// An attempt was already pending for the target, owned by another
+    /// listener. No second attempt was admitted.
+    Joined(McpOAuthLoginStart),
+}
+
+/// Outcome of an advisory browser launch. It never retries, cancels or
+/// completes the attempt: the attempt ends only by completion, an explicit
+/// [`McpOAuthPendingLogin::cancel`], or expiry of the admitted attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpOAuthBrowserLaunch {
+    Launched,
+    /// The opener reported failure (it may still have navigated). The
+    /// failure detail is not kept, so no URL can leak through it.
+    Failed,
+}
+
+/// One admitted host loopback login: the attempt and its callback binding.
+///
+/// [`complete`](Self::complete) waits for the callback and finishes the
+/// login; [`cancel`](Self::cancel) retires the callback binding and the flow
+/// attempt through their owners. Dropping it does the same without waiting
+/// for the listener to drain.
+pub struct McpOAuthPendingLogin {
+    authority: McpOAuthAuthority,
+    start: McpOAuthLoginStart,
+    callback: Option<LoopbackHandle>,
+}
+
+impl McpOAuthPendingLogin {
+    /// Host-only browser navigation for this attempt (see
+    /// [`McpOAuthLoginStart`]).
+    pub fn start(&self) -> &McpOAuthLoginStart {
+        &self.start
+    }
+
+    /// Launch the browser with `open` on the blocking pool, never on the
+    /// async runtime. Advisory only.
+    pub async fn launch_browser<F>(&self, open: F) -> McpOAuthBrowserLaunch
+    where
+        F: FnOnce(String) -> std::io::Result<()> + Send + 'static,
+    {
+        let url = self.start.authorize_url.clone();
+        match tokio::task::spawn_blocking(move || open(url)).await {
+            Ok(Ok(())) => McpOAuthBrowserLaunch::Launched,
+            Ok(Err(_)) | Err(_) => McpOAuthBrowserLaunch::Failed,
+        }
+    }
+
+    /// [`launch_browser`](Self::launch_browser) with the system browser.
+    pub async fn launch_system_browser(&self) -> McpOAuthBrowserLaunch {
+        self.launch_browser(|url| webbrowser::open(&url)).await
+    }
+
+    /// Wait for the loopback callback within `timeout`, then complete the
+    /// login. A timeout or callback failure retires the attempt.
+    pub async fn complete(
+        mut self,
+        timeout: Duration,
+    ) -> Result<McpOAuthLoginComplete, McpOAuthError> {
+        let server_name = self.start.target.server_name().to_owned();
+        let Some(callback) = self.callback.take() else {
+            return Err(McpOAuthError::HumanAuthorizationRequired { server_name });
+        };
+        let outcome = match callback.wait(timeout).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let _ = self.authority.login_cancel(&self.start.target, &self.start);
+                return Err(McpOAuthError::TokenExchangeFailed {
+                    server_name,
+                    reason: match error {
+                        crate::auth_oauth::OAuthError::Timeout => {
+                            "timeout waiting for the authorization callback".into()
+                        }
+                        other => other.to_string(),
+                    },
+                });
+            }
+        };
+        let start = self.start.clone();
+        self.authority
+            .login_complete(
+                &start.target,
+                McpOAuthCallback {
+                    redirect_uri: start.redirect_uri.clone(),
+                    state: outcome.state,
+                    code: outcome.code,
+                    client_id: start.client_id.clone(),
+                    resource_metadata_url: Some(start.resource_metadata_url.clone()),
+                },
+            )
+            .await
+    }
+
+    /// Typed cancel: retire the callback binding (awaiting its drain) and
+    /// the admitted attempt through its flow owner.
+    pub async fn cancel(mut self) -> Result<(), McpOAuthError> {
+        if let Some(callback) = self.callback.take() {
+            let _ = callback.cancel().await;
+        }
+        self.authority.login_cancel(&self.start.target, &self.start)
+    }
+}
+
+impl Drop for McpOAuthPendingLogin {
+    fn drop(&mut self) {
+        if let Some(callback) = self.callback.take() {
+            // Dropping the handle signals the listener to terminate.
+            drop(callback);
+            let _ = self.authority.login_cancel(&self.start.target, &self.start);
+        }
+    }
+}
+
 /// Host-only browser navigation for one admitted MCP OAuth attempt.
 ///
 /// This is a host-channel projection. It must never be placed in a tool
@@ -408,9 +533,22 @@ pub struct McpOAuthLoginStart {
     /// Non-secret discovery hint, echoed back on completion. Completion
     /// re-validates everything it finds against the admitted attempt.
     pub resource_metadata_url: String,
+    /// Whether this call admitted the attempt or joined one already pending
+    /// for the target.
+    pub disposition: McpOAuthLoginDisposition,
     /// Admitted attempt identity, constructible only by `login_start`, used
     /// to retire an abandoned attempt through its flow owner.
     identity: OAuthBrowserFlowIdentity,
+}
+
+/// How [`McpOAuthAuthority::login_start`] produced its projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpOAuthLoginDisposition {
+    /// A new attempt was admitted.
+    Started,
+    /// An attempt was already pending for the target; this is its
+    /// projection. No second attempt exists.
+    Joined,
 }
 
 impl std::fmt::Debug for McpOAuthLoginStart {
@@ -420,6 +558,7 @@ impl std::fmt::Debug for McpOAuthLoginStart {
             .field("authorize_url", &"<redacted>")
             .field("state", &"<redacted>")
             .field("redirect_uri", &self.redirect_uri)
+            .field("disposition", &self.disposition)
             .finish_non_exhaustive()
     }
 }
@@ -689,6 +828,21 @@ impl McpOAuthAuthority {
             .interactive
             .as_ref()
             .ok_or(ConnectorOAuthRefusal::VerificationUnavailable)?;
+        let credential_identity: meerkat_core::AuthCredentialIdentity =
+            target.auth_binding_ref()?.into();
+        if let Some((state, record)) = authority
+            .pending_connector_browser_attempt(&credential_identity)
+            .map_err(McpOAuthError::Flow)?
+        {
+            // `None`: the pending attempt no longer matches the server and
+            // could never complete; it was retired, so admit a fresh one.
+            if let Some(joined) = self
+                .join_pending_attempt(target, expected_account, www_authenticate, &state, record)
+                .await?
+            {
+                return Ok(joined);
+            }
+        }
         let mut discovery = self
             .discover(target, www_authenticate, redirect_uri)
             .await?;
@@ -722,7 +876,7 @@ impl McpOAuthAuthority {
         let identity: OAuthBrowserFlowIdentity = descriptor.clone().into();
         let state = authority
             .start(
-                target.auth_binding_ref()?.into(),
+                credential_identity,
                 identity.clone(),
                 redirect_uri.to_owned(),
                 pkce.verifier.secret().to_owned(),
@@ -737,8 +891,100 @@ impl McpOAuthAuthority {
             redirect_uri: redirect_uri.to_owned(),
             client_id: client.client_id,
             resource_metadata_url: discovery.resource_metadata_url,
+            disposition: McpOAuthLoginDisposition::Started,
             identity,
         })
+    }
+
+    /// Re-project the attempt already pending for `target`. Discovery is
+    /// repeated (no client registration) and must still match the admitted
+    /// descriptor; a stale attempt is retired and `None` returned.
+    async fn join_pending_attempt(
+        &self,
+        target: &McpServerIdentity,
+        expected_account: &str,
+        www_authenticate: Option<&str>,
+        state: &str,
+        record: crate::oauth_flow::OAuthFlowRecord,
+    ) -> Result<Option<McpOAuthLoginStart>, McpOAuthError> {
+        let OAuthBrowserFlowIdentity::Connector { connector } = &record.provider else {
+            return Ok(None);
+        };
+        let facts = connector.parameters();
+        let mut discovery = self
+            .discover(target, www_authenticate, &record.redirect_uri)
+            .await?;
+        if facts.expected_account != expected_account
+            || facts.issuer != discovery.authorization_server
+            || facts.resource != discovery.resource
+            || facts.redirect_uri != record.redirect_uri
+        {
+            if let Some((authority, _)) = self.interactive.as_ref() {
+                let _ = authority.expire(
+                    state,
+                    &record.target,
+                    record.provider.clone(),
+                    &record.redirect_uri,
+                );
+            }
+            return Ok(None);
+        }
+        discovery.scopes = facts.scopes.iter().cloned().collect();
+        let client = StoredMcpOAuthClient {
+            client_id: facts.client.clone(),
+            client_secret: None,
+            token_endpoint_auth_method: "none".to_owned(),
+            redirect_uri: record.redirect_uri.clone(),
+        };
+        let challenge = PkceChallenge::s256_for_verifier(&record.pkce_verifier);
+        let authorize_url =
+            mcp_oauth_endpoints(&discovery, &client).authorize_url_with_pkce(&challenge, state);
+        Ok(Some(McpOAuthLoginStart {
+            target: target.clone(),
+            authorize_url,
+            state: state.to_owned(),
+            redirect_uri: record.redirect_uri,
+            client_id: client.client_id,
+            resource_metadata_url: discovery.resource_metadata_url,
+            disposition: McpOAuthLoginDisposition::Joined,
+            identity: record.provider,
+        }))
+    }
+
+    /// Host loopback login: bind the callback listener, then admit (or join)
+    /// the attempt. A joined attempt is bound to another host's listener, so
+    /// this binding is retired and the joined projection returned instead.
+    pub async fn begin_loopback_login(
+        &self,
+        target: &McpServerIdentity,
+        www_authenticate: Option<&str>,
+    ) -> Result<McpOAuthLoopbackBegin, McpOAuthError> {
+        let binding = bind_loopback_callback(MCP_OAUTH_CALLBACK_PATH)
+            .await
+            .map_err(|_| McpOAuthError::TokenExchangeFailed {
+                server_name: target.server_name().to_owned(),
+                reason: "loopback callback listener could not be bound".into(),
+            })?;
+        let start = match self
+            .login_start(target, &binding.redirect_url, www_authenticate)
+            .await
+        {
+            Ok(start) => start,
+            Err(error) => {
+                let _ = binding.cancel().await;
+                return Err(error);
+            }
+        };
+        if start.disposition == McpOAuthLoginDisposition::Joined {
+            let _ = binding.cancel().await;
+            return Ok(McpOAuthLoopbackBegin::Joined(start));
+        }
+        let callback = binding.expect_state(start.state.clone());
+        Ok(McpOAuthLoopbackBegin::Started(McpOAuthPendingLogin {
+            authority: self.clone(),
+            start,
+            callback: Some(callback),
+        }))
     }
 
     /// Complete one admitted attempt from the host's loopback callback.

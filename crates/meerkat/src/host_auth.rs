@@ -45,7 +45,8 @@ use meerkat_providers::auth_store::{
 };
 use meerkat_providers::mcp_oauth::{
     McpOAuthAccountStrategy, McpOAuthAuthority, McpOAuthCallback, McpOAuthError,
-    McpOAuthLoginComplete, McpOAuthLoginStart, McpServerIdentity, OidcUserInfoAccountStrategy,
+    McpOAuthLoginComplete, McpOAuthLoginStart, McpOAuthLoopbackBegin, McpServerIdentity,
+    OidcUserInfoAccountStrategy,
 };
 use meerkat_providers::oauth_flow::{
     OAuthFlowError, OAuthTargetValidationError, oauth_provider_resolution,
@@ -165,6 +166,20 @@ impl HostMcpAuthStatus {
     }
 }
 
+/// Wire projection of an MCP login start disposition.
+pub fn mcp_login_disposition_to_wire(
+    disposition: meerkat_providers::mcp_oauth::McpOAuthLoginDisposition,
+) -> meerkat_contracts::WireMcpLoginDisposition {
+    match disposition {
+        meerkat_providers::mcp_oauth::McpOAuthLoginDisposition::Started => {
+            meerkat_contracts::WireMcpLoginDisposition::Started
+        }
+        meerkat_providers::mcp_oauth::McpOAuthLoginDisposition::Joined => {
+            meerkat_contracts::WireMcpLoginDisposition::Joined
+        }
+    }
+}
+
 /// Parse a wire MCP target (`auth/login/*`, `auth/status/get`) into the
 /// native identity, validating the selected account at the boundary.
 pub fn mcp_auth_target_from_wire(
@@ -271,7 +286,9 @@ impl HostAuthService {
     /// Admit one host-driven MCP OAuth attempt. The returned projection is
     /// host-only (see the module docs): open its authorize URL in an
     /// unobservable browser context and deliver the loopback callback to
-    /// [`Self::mcp_login_complete`].
+    /// [`Self::mcp_login_complete`]. If an attempt is already pending for the
+    /// target, its projection is returned with `disposition = Joined`; no
+    /// second attempt is admitted.
     pub async fn mcp_login_start(
         &self,
         target: &McpServerIdentity,
@@ -281,6 +298,21 @@ impl HostAuthService {
         Ok(self
             .mcp_oauth_authority()?
             .login_start(target, redirect_uri, www_authenticate)
+            .await?)
+    }
+
+    /// Host loopback login: bind the callback listener and admit the attempt
+    /// (or report the one already pending for the target). The returned
+    /// pending login launches the browser off the async runtime (advisory
+    /// only), completes from its own callback, and has a typed cancel.
+    pub async fn mcp_begin_loopback_login(
+        &self,
+        target: &McpServerIdentity,
+        www_authenticate: Option<&str>,
+    ) -> Result<McpOAuthLoopbackBegin, HostAuthError> {
+        Ok(self
+            .mcp_oauth_authority()?
+            .begin_loopback_login(target, www_authenticate)
             .await?)
     }
 

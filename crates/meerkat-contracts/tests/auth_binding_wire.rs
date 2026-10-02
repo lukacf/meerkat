@@ -421,6 +421,7 @@ mod mcp_login_target {
                 },
                 client_id: "client-123".into(),
                 resource_metadata_url: "https://glean.example/.well-known/x".into(),
+                disposition: meerkat_contracts::WireMcpLoginDisposition::Joined,
             }),
         };
         let rendered = format!("{complete:?} {start:?}");

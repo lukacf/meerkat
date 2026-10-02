@@ -5920,6 +5920,7 @@ class WireLoginStartMcpLoginStart(TypedDict, total=False):
     redirect_uri: Required[str]
     state: Required[str]
     client_id: Required[str]
+    disposition: Required[Literal['started', 'joined']]
     mcp: Required[WireMcpAuthTarget]
     resource_metadata_url: Required[str]
 

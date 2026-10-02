@@ -222,6 +222,46 @@ them.
   reference or a video URI is now refused with `InvalidArguments` before anything is
   created; previously such input was accepted.
 - `meerkat_contracts::wire` now re-exports `WireImageData` and `WireVideoData`.
+- MCP OAuth login is host-driven (security batch). The native authority no
+  longer binds a listener or opens a browser:
+  - `meerkat_auth_core::BrowserOpener`, `meerkat_auth_core::SystemBrowserOpener`
+    and `McpOAuthAuthority::interactive_login` are removed. Use
+    `McpOAuthAuthority::login_start` / `login_complete` / `login_cancel`, or
+    `meerkat::HostAuthService::mcp_login_start` / `mcp_login_complete` /
+    `mcp_login_cancel`.
+  - `McpOAuthAuthority::new` is now `new(persistence, auth_lease)` and
+    `McpOAuthAuthority::with_http` is now `with_http(persistence, http,
+    auth_lease)`; the browser parameter is gone.
+  - `McpOAuthError::Browser` and `McpOAuthError::InteractiveRequiresTty` are
+    removed; `McpOAuthError` gains `HumanAuthorizationRequired { server_name }`.
+  - `meerkat_mcp::McpError` gains `AuthorizationRequired { target }`.
+  - Behaviour-only (not measured by the gate): the `McpAuthResolver` impl for
+    `McpOAuthAuthority` returns `HumanAuthorizationRequired` from
+    `interactive_login` instead of opening a browser.
+  - `meerkat::AgentBuildConfig` gains the public field `mcp_auth_resolver`
+    (feature `mcp`, native only); struct literals must set it (`None` keeps
+    today's behaviour).
+  - `meerkat::HostAuthError` gains `McpOAuth(McpOAuthError)`.
+- `auth/login/start`, `auth/login/complete` and `auth/status/get` accept an MCP
+  server target. Provider JSON is unchanged, but the Rust and SDK types change:
+  - `meerkat_contracts::LoginStartParams` replaces `provider`, `realm_id`,
+    `binding_id` and `profile_id` with `target: WireLoginTarget`.
+  - `meerkat_contracts::LoginCompleteParams` replaces the same fields with
+    `target: WireLoginCompleteTarget`; its `Debug` now redacts `code` and
+    `state`.
+  - `meerkat_contracts::WireLoginStart` replaces `provider` with
+    `target: WireLoginStartTarget`; its `Debug` now redacts `authorize_url` and
+    `state`.
+  - `meerkat_contracts::WireLoginReady` replaces `identity`, `profile_id` and
+    `provider` with `target: WireLoginReadyTarget`.
+  - `auth/status/get` is catalogued as `AuthStatusParams` ->
+    `WireAuthStatusResult` (was `BindingIdParams` -> `WireAuthStatusDetail`).
+  - Generated Python and TypeScript `LoginStartParams`, `LoginCompleteParams`,
+    `WireLoginStart`, `WireLoginReady`, `AuthStatusParams` and
+    `WireAuthStatusResult` are unions of a provider and an MCP variant. The
+    Python generated types are no longer constructible dataclasses; the client
+    wrappers build the request dicts.
+  - Behaviour-only: a request mixing provider fields with `mcp` is refused.
 
 ### Added
 
@@ -243,6 +283,52 @@ them.
   level-triggered wait for a member's explicit-resume lifecycle operation
   (the operation a `LifecycleOperationPending { "explicit_resume member ..." }`
   names) to end.
+- Host-driven MCP OAuth. `McpOAuthAuthority::login_start` admits an attempt
+  through the AuthMachine OAuth flow owner (PKCE and one-time state) and
+  returns the host-only `McpOAuthLoginStart`. `login_complete` verifies the
+  host's `McpOAuthCallback` against the admitted attempt, exchanges the code
+  and persists the credential, returning the secret-free
+  `McpOAuthLoginComplete`. `login_cancel` retires an abandoned attempt. Login
+  start, callback and completion types redact secrets in `Debug`.
+  - A start for a target that already has a pending attempt returns that
+    attempt's projection with `McpOAuthLoginDisposition::Joined`; no second
+    attempt is admitted. The flow owner answers through the read-only
+    `OAuthFlowAuthority::pending_connector_browser_attempt` (default `None`).
+  - `McpOAuthAuthority::begin_loopback_login` binds the host's loopback
+    callback and returns `McpOAuthLoopbackBegin::Started(McpOAuthPendingLogin)`
+    or `Joined`. `McpOAuthPendingLogin::cancel` (and drop) retire the callback
+    binding and the attempt; `complete` waits for the callback;
+    `launch_browser` / `launch_system_browser` open the browser on the
+    blocking pool and return the advisory `McpOAuthBrowserLaunch`, which never
+    retries or cancels the attempt.
+  - `PkceChallenge::s256_for_verifier`.
+- `meerkat_auth_core::OidcUserInfoAccountStrategy`: the production MCP
+  account strategy. It requests `openid`, calls the issuer's UserInfo
+  endpoint with the new access token and binds `sub` to the server's
+  `oauth_account`.
+- `meerkat::HostAuthService::mcp_begin_loopback_login`, `mcp_login_start`,
+  `mcp_login_complete`,
+  `mcp_login_cancel`, `mcp_status`, `mcp_oauth_authority` and
+  `with_mcp_account_strategy`; `meerkat::HostMcpAuthStatus` and
+  `HostMcpAuthPhase`; `meerkat::mcp_auth_target_from_wire`,
+  `mcp_auth_target_to_wire` and `mcp_login_disposition_to_wire`. The facade re-exports the MCP OAuth host types.
+  The `host_auth` docs state the host obligation: the browser context must be
+  unobservable by agent tools.
+- `meerkat::AgentFactory::mcp_auth_resolver` installs the default MCP
+  credential source for factory builds.
+- Typed host status for MCP servers awaiting human authorization:
+  `McpRouter::servers_awaiting_authorization` and
+  `McpRouterAdapter::servers_awaiting_authorization`. This is not an agent
+  event.
+- `McpOAuthError::is_refusal` classifies MCP OAuth errors for surfaces.
+- Wire: `WireMcpAuthTarget`, `WireMcpAuthStatus`, `WireMcpAuthPhase`,
+  `WireMcpLoginDisposition` (`started` / `joined` on the MCP login start) and
+  the target enums above. Python: `auth_mcp_login_start`,
+  `auth_mcp_login_complete`, `auth_mcp_status`. TypeScript:
+  `authMcpStatus`. Web: `Auth.mcpStatus`.
+- `rkat mcp login` and `rkat run --mcp-auth interactive` drive the host split
+  (the CLI owns the loopback callback and the browser). They require the
+  server's `oauth_account`.
 
 - `meerkat_machine_schema::SymbolRef::parse` is a public constructor for a
   coverage anchor path, so a crate outside Meerkat can build a coverage

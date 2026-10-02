@@ -9626,7 +9626,7 @@ impl meerkat_mcp::McpAuthResolver for CliMcpHostAuthResolver {
                 server_name: target.server_name().to_owned(),
             });
         }
-        cli_mcp_browser_login(&self.service, target, www_authenticate, false)
+        cli_mcp_browser_login(&self.service, target, www_authenticate)
             .await
             .map_err(|error| match error {
                 meerkat::HostAuthError::McpOAuth(error) => error,
@@ -9640,65 +9640,45 @@ impl meerkat_mcp::McpAuthResolver for CliMcpHostAuthResolver {
 }
 
 /// The CLI's host role for one MCP OAuth attempt: bind the loopback
-/// callback, admit, open the user's browser, await the callback and
-/// complete. The authorize URL is shown on the terminal only when
-/// `show_url_fallback` is set (explicit `rkat mcp login`), never logged.
+/// callback, admit, launch the user's browser off the async runtime and
+/// complete from the callback. The launch is advisory: on failure the URL is
+/// shown on the terminal and the attempt keeps waiting until completion or
+/// expiry. An attempt already pending for the server is not duplicated.
 #[cfg(feature = "mcp")]
 async fn cli_mcp_browser_login(
     service: &meerkat::HostAuthService,
     target: &meerkat::McpServerIdentity,
     www_authenticate: Option<&str>,
-    show_url_fallback: bool,
 ) -> Result<meerkat::McpOAuthLoginComplete, meerkat::HostAuthError> {
-    use meerkat_providers::auth_oauth::bind_loopback_callback;
-
-    let binding = bind_loopback_callback(meerkat::MCP_OAUTH_CALLBACK_PATH).await?;
-    let start = match service
-        .mcp_login_start(target, &binding.redirect_url, www_authenticate)
-        .await
+    let pending = match service
+        .mcp_begin_loopback_login(target, www_authenticate)
+        .await?
     {
-        Ok(start) => start,
-        Err(error) => {
-            let _ = binding.cancel().await;
-            return Err(error);
-        }
-    };
-    let callback = binding.expect_state(start.state.clone());
-    eprintln!(
-        "Authorize MCP server '{}' in your browser. Waiting for the callback...",
-        target.server_name()
-    );
-    if webbrowser::open(&start.authorize_url).is_err() {
-        if show_url_fallback {
-            eprintln!("Open this URL to continue:\n  {}", start.authorize_url);
-        } else {
-            let _ = callback.cancel().await;
-            let _ = service.mcp_login_cancel(target, &start);
+        meerkat::McpOAuthLoopbackBegin::Started(pending) => pending,
+        meerkat::McpOAuthLoopbackBegin::Joined(_) => {
+            eprintln!(
+                "An authorization for MCP server '{}' is already pending; finish it in the browser window already opened, or wait for it to expire.",
+                target.server_name()
+            );
             return Err(meerkat::McpOAuthError::HumanAuthorizationRequired {
                 server_name: target.server_name().to_owned(),
             }
             .into());
         }
-    }
-    let outcome = match callback.wait(meerkat::MCP_INTERACTIVE_LOGIN_TIMEOUT).await {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            let _ = service.mcp_login_cancel(target, &start);
-            return Err(error.into());
-        }
     };
-    service
-        .mcp_login_complete(
-            target,
-            meerkat::McpOAuthCallback {
-                redirect_uri: start.redirect_uri.clone(),
-                state: outcome.state,
-                code: outcome.code,
-                client_id: start.client_id.clone(),
-                resource_metadata_url: Some(start.resource_metadata_url.clone()),
-            },
-        )
-        .await
+    eprintln!(
+        "Authorize MCP server '{}' in your browser. Waiting for the callback...",
+        target.server_name()
+    );
+    if pending.launch_system_browser().await == meerkat::McpOAuthBrowserLaunch::Failed {
+        eprintln!(
+            "Could not open a browser. Open this URL to continue:\n  {}",
+            pending.start().authorize_url
+        );
+    }
+    Ok(pending
+        .complete(meerkat::MCP_INTERACTIVE_LOGIN_TIMEOUT)
+        .await?)
 }
 
 #[cfg(feature = "mcp")]
@@ -16126,7 +16106,7 @@ async fn login_mcp_server(
         .mcp_oauth_authority()?
         .validate_interactive_selection(&target)?;
     let www_authenticate = preflight_mcp_auth_challenge(&http.url).await;
-    let completed = cli_mcp_browser_login(&service, &target, www_authenticate.as_deref(), true)
+    let completed = cli_mcp_browser_login(&service, &target, www_authenticate.as_deref())
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     match completed.account_id.as_deref() {

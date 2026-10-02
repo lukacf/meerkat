@@ -68326,7 +68326,7 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
     }
 
     let service = Arc::new(MockSessionService::new());
-    let _ = service.enable_runtime_adapter();
+    let runtime_adapter = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(def, storage)
         .with_session_service(service.clone())
@@ -68342,18 +68342,17 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
 
     // Make start_turn hang for 10 minutes — simulates a stuck backend.
     service.set_start_turn_delay_ms(600_000);
-    let baseline_start_turn_calls = service.start_turn_call_count();
 
-    // Stop the mob. This fires a lifecycle notification that will hang
-    // in start_turn due to the delay. The notification is spawned onto
-    // the JoinSet, so stop itself returns immediately.
+    // Stop the mob. This fires a lifecycle notification on the JoinSet, so
+    // stop itself returns immediately. The stop holds the orchestrator's run
+    // starts (#1500), so the notification's turn is admitted and then parked
+    // until a Resume: a lifecycle task that does not finish on its own.
+    let mut parks = runtime_adapter.run_start_held_parks();
     handle.stop().await.expect("stop");
-    wait_for_start_turn_call_count(
-        service.as_ref(),
-        baseline_start_turn_calls + 1,
-        "stuck lifecycle notification must enter start_turn before shutdown",
-    )
-    .await;
+    tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+        .await
+        .expect("the stopping notification is parked behind the hold")
+        .expect("park signal");
 
     // Shutdown must complete quickly despite the stuck notification task.
     // abort_all cancels in-flight tasks instead of awaiting them.
@@ -82718,6 +82717,113 @@ async fn dispatch_handles_bind_their_authority_lanes() {
     handle.shutdown().await.expect("shutdown test mob");
 }
 
+/// #1500: the stop's exact-run cancel can find its run already over; that is a
+/// typed `RunEndedBeforeCancel`, never a failed stop.
+#[test]
+fn a_stop_cancel_that_finds_its_run_over_reports_it_ended() {
+    use super::provisioner::classify_stop_member_cancel;
+    use crate::MemberStopRun;
+    let run_id = meerkat_core::lifecycle::RunId::new();
+    assert_eq!(
+        classify_stop_member_cancel(Ok(true), run_id.clone()).unwrap(),
+        MemberStopRun::CancelledAtBoundary {
+            run_id: run_id.clone()
+        }
+    );
+    for ended in [
+        Ok(false),
+        Err(meerkat_runtime::RuntimeDriverError::StaleAuthority {
+            reason: "attachment replaced".to_string(),
+        }),
+        Err(meerkat_runtime::RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Idle,
+        }),
+    ] {
+        assert_eq!(
+            classify_stop_member_cancel(ended, run_id.clone()).unwrap(),
+            MemberStopRun::RunEndedBeforeCancel {
+                run_id: run_id.clone()
+            }
+        );
+    }
+    assert!(
+        classify_stop_member_cancel(
+            Err(meerkat_runtime::RuntimeDriverError::Internal(
+                "boom".to_string()
+            )),
+            run_id,
+        )
+        .is_err(),
+        "a real cancel failure stays an error"
+    );
+}
+
+/// #1500: a turn-driven member's running turn is not cancelled by Stop; the
+/// report names that run, and the member's run starts are held.
+#[tokio::test]
+async fn test_stop_reports_a_turn_driven_members_running_turn_left_running() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-running-at-stop");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn turn-driven lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    service.set_block_runtime_turns(true);
+    let started = service.runtime_turn_started.notified();
+    tokio::pin!(started);
+    started.as_mut().enable();
+    let member = handle.member(&identity).await.expect("member handle");
+    let turn = member
+        .start_turn(
+            ContentInput::Text("running when the stop lands".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("admit the input");
+    tokio::time::timeout(Duration::from_secs(30), started)
+        .await
+        .expect("the turn is running");
+    let running = service
+        .runtime_adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("member runtime snapshot")
+        .control
+        .current_run_id
+        .expect("the member has a current run");
+
+    let report = handle.stop().await.expect("stop the mob");
+    assert_eq!(
+        report.members.get(&identity),
+        Some(&crate::MemberStopOutcome {
+            run: crate::MemberStopRun::LeftRunning { run_id: running },
+            starts: crate::MemberRunStarts::Held,
+        }),
+        "{report:?}"
+    );
+
+    // The turn finishes normally.
+    service.set_block_runtime_turns(false);
+    service.release_runtime_turns();
+    tokio::time::timeout(Duration::from_secs(30), turn.wait())
+        .await
+        .expect("the running turn finishes")
+        .expect("its turn completes");
+}
+
 /// #1500: an input admitted to a member's runtime before a mob Stop, but not
 /// yet prepared into a run, must not start a run while the mob is Stopped.
 /// Stop is a pause: the input stays queued and runs once after Resume.
@@ -82741,15 +82847,13 @@ async fn test_stop_holds_an_admitted_member_input_until_resume() {
         .expect("session-backed")
         .clone();
 
-    // Runs report their start (and block) so a leaked run is observable.
-    service.set_block_runtime_turns(true);
     // Admit an input, then hold the member's runtime loop before it takes
     // the input into a run: the input is queued and unprepared.
     let (queue_gap_entered, queue_gap_release) = service
         .runtime_adapter
         .arm_runtime_loop_before_queue_authority_test_hook(session_id.clone());
     let member = handle.member(&identity).await.expect("member handle");
-    let _turn = member
+    let turn = member
         .start_turn(
             ContentInput::Text("admitted before the stop".into()),
             HandlingMode::Queue,
@@ -82792,23 +82896,23 @@ async fn test_stop_holds_an_admitted_member_input_until_resume() {
     );
 
     // Resume releases the hold: the queued input runs now.
-    let started = service.runtime_turn_started.notified();
-    tokio::pin!(started);
-    started.as_mut().enable();
     handle.resume().await.expect("resume the mob");
-    tokio::time::timeout(Duration::from_secs(30), started)
+    tokio::time::timeout(Duration::from_secs(30), turn.wait())
         .await
-        .expect("the queued input runs after resume");
+        .expect("the queued input runs after resume")
+        .expect("its turn completes");
+    // Resume runs the member's own revival turns too; the held input must
+    // have run exactly once among them.
+    let applied: Vec<_> = service
+        .applied_runtime_contributing_input_ids(&session_id)
+        .await
+        .concat();
+    let unique: std::collections::HashSet<_> = applied.iter().collect();
     assert_eq!(
-        service
-            .applied_runtime_contributing_input_ids(&session_id)
-            .await
-            .len(),
-        1,
-        "exactly one run, for the input admitted before the stop"
+        applied.len(),
+        unique.len(),
+        "no input runs twice: {applied:?}"
     );
-    service.set_block_runtime_turns(false);
-    service.release_runtime_turns();
 }
 
 // Runtime-backed tracked-turn LLM identity and terminal-event regressions.

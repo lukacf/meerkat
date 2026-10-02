@@ -18864,6 +18864,40 @@ impl MobActor {
         self.apply_dsl_input(input(attempt), context)
     }
 
+    /// A resume that released the members' run-start holds and then failed
+    /// leaves the mob Stopped: hold them again (#1500), so their queued input
+    /// still waits for a resume that succeeds.
+    async fn rehold_member_run_starts_after_failed_resume(&mut self) {
+        if self.state() != MobState::Stopped {
+            return;
+        }
+        let entries = {
+            let roster = self.roster.read().await;
+            roster.list().cloned().collect::<Vec<_>>()
+        };
+        for entry in &entries {
+            let held = match self.autonomous_stop_interrupt_incarnation(entry) {
+                Ok(incarnation) => self
+                    .provisioner
+                    .stop_member_runtime(
+                        &incarnation.member_ref,
+                        incarnation.expected_member.as_ref(),
+                        false,
+                    )
+                    .await
+                    .map(|_| ()),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = held {
+                tracing::warn!(
+                    agent_identity = %entry.agent_identity,
+                    error = %error,
+                    "re-holding a member's run starts after a failed resume failed"
+                );
+            }
+        }
+    }
+
     fn finish_explicit_resume_attempt(
         &mut self,
         result: Result<(), MobError>,
@@ -18920,6 +18954,16 @@ impl MobActor {
         }
         // Re-enable checkpointers cancelled during stop.
         self.provisioner.rearm_all_checkpointers().await;
+        // Resume is what releases the run starts its Stop held (#1500). The
+        // member rebuild below needs each member's runtime to make progress,
+        // so the release comes first.
+        if let Err(error) = self.release_all_member_run_starts().await {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "resume could not release every member's run-start hold"
+            );
+        }
 
         let candidates = match self.explicit_resume_candidates().await {
             Ok(candidates) => candidates,
@@ -18930,6 +18974,7 @@ impl MobActor {
                     "settle_undispatched_resume_preparation",
                 );
                 let result = settled.and_then(|()| self.finish_explicit_resume_attempt(Err(error)));
+                self.rehold_member_run_starts_after_failed_resume().await;
                 let _ = reply_tx.send(result);
                 return;
             }
@@ -18942,6 +18987,7 @@ impl MobActor {
                     "settle_undispatched_resume_preparation",
                 );
                 let result = settled.and_then(|()| self.finish_explicit_resume_attempt(Err(error)));
+                self.rehold_member_run_starts_after_failed_resume().await;
                 let _ = reply_tx.send(result);
                 return;
             }
@@ -19009,6 +19055,7 @@ impl MobActor {
                 self.finish_explicit_resume_attempt(Err(MobError::LifecycleOperationPending {
                     intent: "explicit_resume superseded by lifecycle control".to_string(),
                 }));
+            self.rehold_member_run_starts_after_failed_resume().await;
             let _ = reply_tx.send(result);
             return;
         }
@@ -19017,6 +19064,7 @@ impl MobActor {
             Err(error) => {
                 self.provisioner.cancel_all_checkpointers().await;
                 let result = self.finish_explicit_resume_attempt(Err(error));
+                self.rehold_member_run_starts_after_failed_resume().await;
                 let _ = reply_tx.send(result);
                 return;
             }
@@ -19027,6 +19075,7 @@ impl MobActor {
             "resume_preparation_resolved_admission",
         ) {
             let result = self.finish_explicit_resume_attempt(Err(error));
+            self.rehold_member_run_starts_after_failed_resume().await;
             let _ = reply_tx.send(result);
             return;
         }
@@ -19248,6 +19297,7 @@ impl MobActor {
             }
             self.provisioner.cancel_all_checkpointers().await;
             let result = self.finish_explicit_resume_attempt(Err(error));
+            self.rehold_member_run_starts_after_failed_resume().await;
             let _ = reply_tx.send(result);
             return;
         }
@@ -19362,6 +19412,7 @@ impl MobActor {
             Ok(attempt) => attempt,
             Err(error) => {
                 let result = self.finish_explicit_resume_attempt(Err(error));
+                self.rehold_member_run_starts_after_failed_resume().await;
                 let _ = reply_tx.send(result);
                 return;
             }

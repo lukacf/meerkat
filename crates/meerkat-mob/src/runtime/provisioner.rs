@@ -1380,6 +1380,27 @@ impl MemberRegistrationReload {
     }
 }
 
+/// What an exact-run stop cancel did to the run a run-start hold found
+/// current (#1500). The run can end on its own between the hold and the
+/// cancel; that is reported, not treated as a failed stop.
+pub(super) fn classify_stop_member_cancel(
+    cancelled: Result<bool, meerkat_runtime::RuntimeDriverError>,
+    run_id: meerkat_core::lifecycle::RunId,
+) -> Result<super::stop_report::MemberStopRun, meerkat_runtime::RuntimeDriverError> {
+    use super::stop_report::MemberStopRun;
+    match cancelled {
+        Ok(true) => Ok(MemberStopRun::CancelledAtBoundary { run_id }),
+        Ok(false) => Ok(MemberStopRun::RunEndedBeforeCancel { run_id }),
+        // The run's attachment was replaced or the runtime left Running
+        // between the hold and the cancel: the run is over.
+        Err(
+            meerkat_runtime::RuntimeDriverError::StaleAuthority { .. }
+            | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+        ) => Ok(MemberStopRun::RunEndedBeforeCancel { run_id }),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait MobProvisioner: Send + Sync {
@@ -12627,24 +12648,17 @@ impl MobProvisioner for SessionBackend {
         let run = match hold.current_run {
             None => MemberStopRun::NoRun,
             Some(run_id) if !cancel_current_run => MemberStopRun::LeftRunning { run_id },
-            Some(run_id) => match adapter
-                .cancel_after_boundary_run_if_current(&session_id, &run_id)
-                .await
-            {
-                Ok(true) => MemberStopRun::CancelledAtBoundary { run_id },
-                Ok(false) => MemberStopRun::RunEndedBeforeCancel { run_id },
-                // The run's attachment was replaced or the runtime left
-                // Running between the hold and the cancel: the run is over.
-                Err(
-                    meerkat_runtime::RuntimeDriverError::StaleAuthority { .. }
-                    | meerkat_runtime::RuntimeDriverError::NotReady { .. },
-                ) => MemberStopRun::RunEndedBeforeCancel { run_id },
-                Err(error) => {
-                    return Err(MobError::Internal(format!(
-                        "cancelling run {run_id} of '{session_id}' failed: {error}"
-                    )));
-                }
-            },
+            Some(run_id) => classify_stop_member_cancel(
+                adapter
+                    .cancel_after_boundary_run_if_current(&session_id, &run_id)
+                    .await,
+                run_id,
+            )
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "cancelling a run of '{session_id}' failed: {error}"
+                ))
+            })?,
         };
         Ok(MemberStopOutcome {
             run,

@@ -37,6 +37,11 @@ them.
 
 ### Breaking
 
+- `meerkat_runtime::EphemeralRuntimeDriver` is no longer `UnwindSafe` or
+  `RefUnwindSafe`: it now holds the runtime admission signal added with the
+  typed admission wait (#1431). Callers that relied on these auto traits (for
+  example `std::panic::catch_unwind` around a driver reference) must wrap it in
+  `AssertUnwindSafe`.
 - Behaviour-only (not measured by the gate): rkat-rpc callback routing is
   owned per connection (#1451). Over TCP, a session's callback tools route
   only to the connection that created it, and `tools/register` changes only

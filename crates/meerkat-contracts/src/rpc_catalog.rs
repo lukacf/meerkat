@@ -401,7 +401,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         ),
         RpcMethodDescriptor::typed(
             "auth/login/start",
-            "Begin an OAuth login; returns authorize_url, state, redirect_uri, and provider (PKCE verifier stays server-side)",
+            "Begin an OAuth login for a provider binding or an MCP server; returns authorize_url, state, redirect_uri and the target echo (PKCE verifier stays server-side). Host-channel data: never pass it to an agent",
             "LoginStartParams",
             "WireLoginStart",
         ),
@@ -410,6 +410,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "Finish an OAuth login by exchanging an authorization code",
             "LoginCompleteParams",
             "WireLoginReady",
+        ),
+        RpcMethodDescriptor::typed(
+            "auth/login/cancel",
+            "Retire a pending MCP OAuth attempt by its state",
+            "LoginCancelParams",
+            "WireLoginCancelled",
         ),
         RpcMethodDescriptor::typed(
             "auth/login/device_start",
@@ -431,9 +437,9 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         ),
         RpcMethodDescriptor::typed(
             "auth/status/get",
-            "Get binding-resolved auth status with an optional profile override",
-            "BindingIdParams",
-            "WireAuthStatusDetail",
+            "Get binding-resolved auth status with an optional profile override, or the authorization status of an MCP server target",
+            "AuthStatusParams",
+            "WireAuthStatusResult",
         ),
         RpcMethodDescriptor::typed(
             "auth/logout",
@@ -1528,8 +1534,9 @@ mod tests {
             ("auth/profile/delete", "WireAuthProfileCleared"),
             ("auth/login/start", "WireLoginStart"),
             ("auth/login/complete", "WireLoginReady"),
+            ("auth/login/cancel", "WireLoginCancelled"),
             ("auth/login/device_start", "WireDeviceStart"),
-            ("auth/status/get", "WireAuthStatusDetail"),
+            ("auth/status/get", "WireAuthStatusResult"),
             ("auth/logout", "WireAuthProfileCleared"),
             ("realm/list", "WireRealmList"),
             ("realm/get", "WireRealmConnectionSet"),
@@ -1581,6 +1588,11 @@ mod tests {
                 Some("WireLoginReady"),
             ),
             (
+                "auth/login/cancel",
+                Some("LoginCancelParams"),
+                Some("WireLoginCancelled"),
+            ),
+            (
                 "auth/login/device_start",
                 Some("DeviceStartParams"),
                 Some("WireDeviceStart"),
@@ -1597,8 +1609,8 @@ mod tests {
             ),
             (
                 "auth/status/get",
-                Some("BindingIdParams"),
-                Some("WireAuthStatusDetail"),
+                Some("AuthStatusParams"),
+                Some("WireAuthStatusResult"),
             ),
             (
                 "auth/logout",

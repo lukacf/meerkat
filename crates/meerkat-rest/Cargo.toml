@@ -79,6 +79,8 @@ workgraph = ["meerkat/workgraph"]
 integration-real-tests = []
 
 [dev-dependencies]
+# OAuth-protected MCP fixture for the MCP OAuth canaries (test-only).
+meerkat = { workspace = true, features = ["test-mcp-oauth-fixtures"] }
 hyper = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = { workspace = true }

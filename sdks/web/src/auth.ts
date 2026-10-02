@@ -26,6 +26,7 @@ import {
   parseCreateProfileParams,
   parseDeviceCompleteParams,
   parseDeviceStartParams,
+  parseLoginCancelParams,
   parseLoginCompleteParams,
   parseLoginStartParams,
   parseProvisionApiKeyParams,
@@ -36,8 +37,10 @@ import {
   parseWireAuthStatusDetail,
   parseWireDeviceCompleteResult,
   parseWireDeviceStart,
+  parseWireLoginCancelled,
   parseWireLoginReady,
   parseWireLoginStart,
+  parseWireMcpAuthStatus,
   parseWireProvisionApiKeyResult,
 } from './generated/auth.js';
 import type {
@@ -46,6 +49,7 @@ import type {
   CreateProfileParams,
   DeviceCompleteParams,
   DeviceStartParams,
+  LoginCancelParams,
   LoginCompleteParams,
   LoginStartParams,
   ProvisionApiKeyParams,
@@ -63,13 +67,25 @@ import type {
   WireBindingIdentity,
   WireDeviceCompleteResult,
   WireDeviceStart,
+  WireLoginCancelled,
   WireLoginReady,
   WireLoginStart,
+  WireMcpAuthStatus,
+  WireMcpAuthTarget,
   WireProvisionApiKeyResult,
 } from './generated/auth.js';
 import type { AuthBindingRef, SessionConfig } from './types.js';
 
 export type {
+  LoginCancelParams,
+  McpLoginCompleteParams,
+  WireLoginCancelled,
+  McpLoginStartParams,
+  WireMcpAuthPhase,
+  WireMcpAuthStatus,
+  WireMcpAuthTarget,
+  WireMcpLoginReady,
+  WireMcpLoginStart,
   WireAuthMethod,
   WireAuthProvider,
   WireOAuthProvider,
@@ -224,7 +240,12 @@ export class Auth {
     return parseWireAuthProfileCleared(result);
   }
 
-  /** Begin an OAuth browser flow. */
+  /**
+   * Begin an OAuth browser flow for a provider binding or an MCP server
+   * (`{ mcp, redirect_uri }`). The authorize URL and state are host-channel
+   * data: open the URL only in a browser context no agent tool can observe,
+   * and never pass these values to an agent, tool result, transcript or log.
+   */
   async loginStart(params: LoginStartParams): Promise<OAuthLoginStart> {
     const result = await this.transport.request<LoginStartParams, WireLoginStart>(
       AUTH_RPC_METHODS.loginStart,
@@ -240,6 +261,15 @@ export class Auth {
       parseLoginCompleteParams(params),
     );
     return parseWireLoginReady(result);
+  }
+
+  /** Retire a pending MCP OAuth attempt by its `state`. */
+  async loginCancel(params: LoginCancelParams): Promise<WireLoginCancelled> {
+    const result = await this.transport.request<LoginCancelParams, WireLoginCancelled>(
+      AUTH_RPC_METHODS.loginCancel,
+      parseLoginCancelParams(params),
+    );
+    return parseWireLoginCancelled(result);
   }
 
   /** Start a device-code flow for keyboardless hosts. */
@@ -289,6 +319,15 @@ export class Auth {
       params,
     );
     return parseWireAuthStatusDetail(result);
+  }
+
+  /** Authorization status of an MCP server target. */
+  async mcpStatus(mcp: WireMcpAuthTarget): Promise<WireMcpAuthStatus> {
+    const result = await this.transport.request<{ mcp: WireMcpAuthTarget }, WireMcpAuthStatus>(
+      AUTH_RPC_METHODS.statusGet,
+      { mcp },
+    );
+    return parseWireMcpAuthStatus(result);
   }
 
   /** Revoke and delete credentials for a binding. */

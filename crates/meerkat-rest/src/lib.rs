@@ -2416,6 +2416,10 @@ pub fn router(state: AppState) -> Router {
             post(crate::auth_endpoints::complete_login),
         )
         .route(
+            "/auth/login/cancel",
+            post(crate::auth_endpoints::cancel_login),
+        )
+        .route(
             "/auth/login/device/start",
             post(crate::auth_endpoints::start_device_login),
         )

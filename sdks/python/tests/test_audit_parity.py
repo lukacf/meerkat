@@ -37,6 +37,7 @@ RPC_PUBLIC_WRAPPERS: dict[str, tuple[type, str]] = {
     "auth/profile/delete": (MeerkatClient, "delete_auth_profile"),
     "auth/login/start": (MeerkatClient, "auth_login_start"),
     "auth/login/complete": (MeerkatClient, "auth_login_complete"),
+    "auth/login/cancel": (MeerkatClient, "auth_mcp_login_cancel"),
     "auth/login/device_start": (MeerkatClient, "auth_login_device_start"),
     "auth/login/device_complete": (MeerkatClient, "auth_login_device_complete"),
     "auth/login/provision_api_key": (MeerkatClient, "auth_provision_api_key"),

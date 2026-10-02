@@ -17,6 +17,7 @@ import type {
   ArtifactRecord,
   AttentionListRequest,
   AttentionListResult,
+  AuthStatusParams,
   BindingIdParams,
   BlobGetParams,
   BlobPayload,
@@ -94,6 +95,7 @@ import type {
   LiveTruncateResult,
   LiveWebrtcAnswerParams,
   LiveWebrtcAnswerResult,
+  LoginCancelParams,
   LoginCompleteParams,
   LoginStartParams,
   McpAddParams,
@@ -258,9 +260,10 @@ import type {
   WireAuthProfileCreated,
   WireAuthProfileDetail,
   WireAuthProfilesList,
-  WireAuthStatusDetail,
+  WireAuthStatusResult,
   WireDeviceCompleteResult,
   WireDeviceStart,
+  WireLoginCancelled,
   WireLoginReady,
   WireLoginStart,
   WireProvisionApiKeyResult,
@@ -502,6 +505,10 @@ export interface RpcMethodContracts {
     params: LoginCompleteParams;
     result: (WireLoginReady) & Record<string, unknown>;
   };
+  "auth/login/cancel": {
+    params: LoginCancelParams;
+    result: (WireLoginCancelled) & Record<string, unknown>;
+  };
   "auth/login/device_start": {
     params: DeviceStartParams;
     result: (WireDeviceStart) & Record<string, unknown>;
@@ -515,8 +522,8 @@ export interface RpcMethodContracts {
     result: (WireProvisionApiKeyResult) & Record<string, unknown>;
   };
   "auth/status/get": {
-    params: BindingIdParams;
-    result: (WireAuthStatusDetail) & Record<string, unknown>;
+    params: AuthStatusParams;
+    result: (WireAuthStatusResult) & Record<string, unknown>;
   };
   "auth/logout": {
     params: BindingIdParams;

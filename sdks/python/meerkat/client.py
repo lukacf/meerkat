@@ -102,7 +102,6 @@ from .generated.types import (
     LiveRefreshResult,
     LiveRefreshStatus,
     LiveStatusResult,
-    LoginStartParams,
     McpServerConfig,
     MobBindHostParams,
     MobBindHostResult,
@@ -450,6 +449,15 @@ def _wire_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_wire_value(item) for item in value]
     return value
+
+
+def _mcp_auth_target(
+    server_name: str, server_url: str, oauth_account: str | None
+) -> dict[str, Any]:
+    target: dict[str, Any] = {"server_name": server_name, "server_url": server_url}
+    if oauth_account is not None:
+        target["oauth_account"] = oauth_account
+    return target
 
 
 def _wire_params(value: Any) -> dict[str, Any]:
@@ -923,14 +931,15 @@ class MeerkatClient:
         `auth/login/start`. Returns `{authorize_url, state}`; client directs
         user to the URL then calls `auth_login_complete` once the redirect
         carries a code."""
-        params = LoginStartParams(
-            binding_id=binding_id,
-            provider=provider,
-            realm_id=realm_id,
-            redirect_uri=redirect_uri,
-            profile_id=profile_id,
-        )
-        return await self._request("auth/login/start", _wire_params(params))
+        params: dict[str, Any] = {
+            "provider": provider,
+            "realm_id": realm_id,
+            "binding_id": binding_id,
+            "redirect_uri": redirect_uri,
+        }
+        if profile_id is not None:
+            params["profile_id"] = profile_id
+        return await self._request("auth/login/start", params)
 
     async def auth_login_complete(
         self,
@@ -957,6 +966,90 @@ class MeerkatClient:
         if profile_id is not None:
             params["profile_id"] = profile_id
         return await self._request("auth/login/complete", params)
+
+    async def auth_mcp_login_start(
+        self,
+        server_name: str,
+        server_url: str,
+        redirect_uri: str,
+        *,
+        oauth_account: str | None = None,
+    ) -> dict[str, Any]:
+        """Start host-driven OAuth for an MCP server via `auth/login/start`.
+
+        Returns `{authorize_url, state, redirect_uri, mcp, disposition}`;
+        `disposition` is `"joined"` when an attempt was already pending for the
+        server (its URL and state are returned; no second attempt exists).
+        `redirect_uri` must be an http loopback URL you bind yourself. The
+        authorize URL and state are host-channel data: open the URL only in a
+        browser no agent tool can observe, and never pass these values to an
+        agent, tool result, transcript or log. Finish with
+        `auth_mcp_login_complete`, or retire the attempt with
+        `auth_mcp_login_cancel`.
+        """
+        return await self._request(
+            "auth/login/start",
+            {
+                "mcp": _mcp_auth_target(server_name, server_url, oauth_account),
+                "redirect_uri": redirect_uri,
+            },
+        )
+
+    async def auth_mcp_login_complete(
+        self,
+        server_name: str,
+        server_url: str,
+        *,
+        code: str,
+        state: str,
+        redirect_uri: str,
+        oauth_account: str | None = None,
+    ) -> dict[str, Any]:
+        """Complete host-driven MCP OAuth via `auth/login/complete` with the
+        loopback callback's `code` and `state`. Issuer, client and resource
+        come from the admitted attempt. Returns a secret-free summary."""
+        return await self._request(
+            "auth/login/complete",
+            {
+                "mcp": _mcp_auth_target(server_name, server_url, oauth_account),
+                "code": code,
+                "state": state,
+                "redirect_uri": redirect_uri,
+            },
+        )
+
+    async def auth_mcp_login_cancel(
+        self,
+        server_name: str,
+        server_url: str,
+        state: str,
+        *,
+        oauth_account: str | None = None,
+    ) -> dict[str, Any]:
+        """Retire a pending MCP OAuth attempt by its `state` via
+        `auth/login/cancel` (for example after losing the loopback listener)."""
+        return await self._request(
+            "auth/login/cancel",
+            {
+                "mcp": _mcp_auth_target(server_name, server_url, oauth_account),
+                "state": state,
+            },
+        )
+
+    async def auth_mcp_status(
+        self,
+        server_name: str,
+        server_url: str,
+        *,
+        oauth_account: str | None = None,
+    ) -> dict[str, Any]:
+        """Authorization status of an MCP server via `auth/status/get`:
+        `{mcp, phase: "authorized" | "reauth_required" |
+        "authorization_required", ...}`."""
+        return await self._request(
+            "auth/status/get",
+            {"mcp": _mcp_auth_target(server_name, server_url, oauth_account)},
+        )
 
     async def auth_login_device_start(
         self,

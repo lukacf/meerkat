@@ -853,6 +853,7 @@ test_suite(
         "//crates/meerkat:job_delivery_projector_test",
         "//crates/meerkat:job_surface_test",
         "//crates/meerkat:live_pipeline_unit_test",
+        "//crates/meerkat:mcp_oauth_host_canary_test",
         "//crates/meerkat:meerkat_unit_test",
         "//crates/meerkat:persistence_contract_test",
         "//crates/meerkat:predicate_schedule_test",

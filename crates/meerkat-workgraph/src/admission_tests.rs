@@ -327,6 +327,18 @@ async fn unkeyed_items_and_keyed_items_coexist() {
         .expect("classify"),
         WorkAdmissionReplayKind::KeyMismatch
     );
+    // An admission that was never bound (Absent) is a key mismatch too: the
+    // classify input is total in every phase, never a guard rejection.
+    assert_eq!(
+        WorkGraphMachine::classify_admission_replay(
+            &plain.id,
+            crate::machines::work_item_admission::WorkItemAdmissionMachineAuthority::new().state(),
+            &key("setup-1"),
+            "sha256:digest",
+        )
+        .expect("classify absent"),
+        WorkAdmissionReplayKind::KeyMismatch
+    );
 }
 
 #[tokio::test]

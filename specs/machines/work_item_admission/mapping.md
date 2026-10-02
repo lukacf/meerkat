@@ -11,7 +11,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `work_item_admission` (machine `WorkItemAdmissionMachine`): `crates/meerkat-workgraph/src/machine.rs` — WorkItemAdmissionMachine owner of a work item's exact keyed admission identity: BindKeyed and BindUnkeyed record (or decline) the identity delivered by the lifecycle Created route, and ClassifyAdmissionReplayExact, ClassifyAdmissionReplayConflict and ClassifyAdmissionReplayKeyMismatch decide, over the recovered identity, whether a keyed create that found an existing item is an exact replay, a typed conflict, or a store-index mismatch; effects Bound, AdmissionReplayClassified; invariants admitted_has_identity, non_admitted_has_no_identity
 
 ### Scenarios
-- `work_item_admission_replay` — a keyed create binds its identity once; an exact replay under the same key and digest is Replayed, the same key with another digest is Conflict, and another key (or an unkeyed item) is KeyMismatch, in either bound phase
+- `work_item_admission_replay` — a keyed create binds its identity once; an exact replay under the same key and digest is Replayed, the same key with another digest is Conflict, and another key (or an unkeyed or never-bound item) is KeyMismatch, in every phase
 
 ### Transitions
 - `BindKeyed`
@@ -30,6 +30,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `work_item_admission`
   - scenarios: `work_item_admission_replay`
 - `ClassifyAdmissionReplayConflictAdmitted`
+  - anchors: `work_item_admission`
+  - scenarios: `work_item_admission_replay`
+- `ClassifyAdmissionReplayKeyMismatchAbsent`
   - anchors: `work_item_admission`
   - scenarios: `work_item_admission_replay`
 - `ClassifyAdmissionReplayKeyMismatchUnkeyed`

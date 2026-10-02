@@ -7540,6 +7540,26 @@ admission_ClassifyAdmissionReplayConflictAdmitted(arg_requested_admission_key, a
        /\ model_step_count' = model_step_count + 1
 
 
+admission_ClassifyAdmissionReplayKeyMismatchAbsent(arg_requested_admission_key, arg_requested_request_digest) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "admission"
+       /\ packet.variant = "ClassifyAdmissionReplay"
+       /\ packet.payload.requested_admission_key = arg_requested_admission_key
+       /\ packet.payload.requested_request_digest = arg_requested_request_digest
+       /\ ~HigherPriorityReady("admission_authority")
+       /\ admission_phase = "Absent"
+       /\ (admission_admission_key # Some(packet.payload.requested_admission_key))
+       /\ admission_phase' = "Absent"
+       /\ UnchangedFrame_0cc14d477c087f31
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "admission", variant |-> "AdmissionReplayClassified", payload |-> [admission |-> "KeyMismatch"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAdmissionReplayKeyMismatchAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "admission", transition |-> "ClassifyAdmissionReplayKeyMismatchAbsent", actor |-> "admission_authority", step |-> (model_step_count + 1), from_phase |-> admission_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 admission_ClassifyAdmissionReplayKeyMismatchUnkeyed(arg_requested_admission_key, arg_requested_request_digest) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "admission"
@@ -7990,6 +8010,7 @@ EntryPacketAdmissible_admission(packet) ==
     \/ /\ (packet.variant = "ClassifyAdmissionReplay") /\ (admission_phase = "Admitted") /\ (((admission_admission_key = Some(packet.payload.requested_admission_key)) /\ (admission_request_digest = Some(packet.payload.requested_request_digest))))
     \/ /\ (packet.variant = "ClassifyAdmissionReplay") /\ (admission_phase = "Unkeyed") /\ (((admission_admission_key = Some(packet.payload.requested_admission_key)) /\ (admission_request_digest # Some(packet.payload.requested_request_digest))))
     \/ /\ (packet.variant = "ClassifyAdmissionReplay") /\ (admission_phase = "Admitted") /\ (((admission_admission_key = Some(packet.payload.requested_admission_key)) /\ (admission_request_digest # Some(packet.payload.requested_request_digest))))
+    \/ /\ (packet.variant = "ClassifyAdmissionReplay") /\ (admission_phase = "Absent") /\ ((admission_admission_key # Some(packet.payload.requested_admission_key)))
     \/ /\ (packet.variant = "ClassifyAdmissionReplay") /\ (admission_phase = "Unkeyed") /\ ((admission_admission_key # Some(packet.payload.requested_admission_key)))
     \/ /\ (packet.variant = "ClassifyAdmissionReplay") /\ (admission_phase = "Admitted") /\ ((admission_admission_key # Some(packet.payload.requested_admission_key)))
 
@@ -8507,6 +8528,7 @@ CoreNext ==
     \/ \E arg_requested_admission_key \in WorkAdmissionKeyRefValues : \E arg_requested_request_digest \in WorkAdmissionDigestRefValues : admission_ClassifyAdmissionReplayExactAdmitted(arg_requested_admission_key, arg_requested_request_digest)
     \/ \E arg_requested_admission_key \in WorkAdmissionKeyRefValues : \E arg_requested_request_digest \in WorkAdmissionDigestRefValues : admission_ClassifyAdmissionReplayConflictUnkeyed(arg_requested_admission_key, arg_requested_request_digest)
     \/ \E arg_requested_admission_key \in WorkAdmissionKeyRefValues : \E arg_requested_request_digest \in WorkAdmissionDigestRefValues : admission_ClassifyAdmissionReplayConflictAdmitted(arg_requested_admission_key, arg_requested_request_digest)
+    \/ \E arg_requested_admission_key \in WorkAdmissionKeyRefValues : \E arg_requested_request_digest \in WorkAdmissionDigestRefValues : admission_ClassifyAdmissionReplayKeyMismatchAbsent(arg_requested_admission_key, arg_requested_request_digest)
     \/ \E arg_requested_admission_key \in WorkAdmissionKeyRefValues : \E arg_requested_request_digest \in WorkAdmissionDigestRefValues : admission_ClassifyAdmissionReplayKeyMismatchUnkeyed(arg_requested_admission_key, arg_requested_request_digest)
     \/ \E arg_requested_admission_key \in WorkAdmissionKeyRefValues : \E arg_requested_request_digest \in WorkAdmissionDigestRefValues : admission_ClassifyAdmissionReplayKeyMismatchAdmitted(arg_requested_admission_key, arg_requested_request_digest)
     \/ QuiescentStutter

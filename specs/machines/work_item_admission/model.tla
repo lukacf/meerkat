@@ -87,6 +87,14 @@ ClassifyAdmissionReplayConflictAdmitted(requested_admission_key, requested_reque
     /\ UnchangedFrame_fe66b5913fc82c17
 
 
+ClassifyAdmissionReplayKeyMismatchAbsent(requested_admission_key, requested_request_digest) ==
+    /\ phase = "Absent"
+    /\ (admission_key # Some(requested_admission_key))
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_fe66b5913fc82c17
+
+
 ClassifyAdmissionReplayKeyMismatchUnkeyed(requested_admission_key, requested_request_digest) ==
     /\ phase = "Unkeyed"
     /\ (admission_key # Some(requested_admission_key))
@@ -110,6 +118,7 @@ Next ==
     \/ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayExactAdmitted(requested_admission_key, requested_request_digest)
     \/ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayConflictUnkeyed(requested_admission_key, requested_request_digest)
     \/ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayConflictAdmitted(requested_admission_key, requested_request_digest)
+    \/ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayKeyMismatchAbsent(requested_admission_key, requested_request_digest)
     \/ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayKeyMismatchUnkeyed(requested_admission_key, requested_request_digest)
     \/ \E requested_admission_key \in WorkAdmissionKeyRefValues : \E requested_request_digest \in WorkAdmissionDigestRefValues : ClassifyAdmissionReplayKeyMismatchAdmitted(requested_admission_key, requested_request_digest)
 

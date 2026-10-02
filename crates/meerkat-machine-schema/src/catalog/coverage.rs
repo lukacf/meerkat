@@ -2229,6 +2229,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "ClassifyAdmissionReplayExactAdmitted",
                         "ClassifyAdmissionReplayConflictUnkeyed",
                         "ClassifyAdmissionReplayConflictAdmitted",
+                        "ClassifyAdmissionReplayKeyMismatchAbsent",
                         "ClassifyAdmissionReplayKeyMismatchUnkeyed",
                         "ClassifyAdmissionReplayKeyMismatchAdmitted",
                     ])
@@ -2237,7 +2238,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             )],
             &[scenario(
                 "work_item_admission_replay",
-                "a keyed create binds its identity once; an exact replay under the same key and digest is Replayed, the same key with another digest is Conflict, and another key (or an unkeyed item) is KeyMismatch, in either bound phase",
+                "a keyed create binds its identity once; an exact replay under the same key and digest is Replayed, the same key with another digest is Conflict, and another key (or an unkeyed or never-bound item) is KeyMismatch, in every phase",
                 CoverageClaims::none()
                     .transitions(&[
                         "BindKeyed",
@@ -2246,6 +2247,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "ClassifyAdmissionReplayExactAdmitted",
                         "ClassifyAdmissionReplayConflictUnkeyed",
                         "ClassifyAdmissionReplayConflictAdmitted",
+                        "ClassifyAdmissionReplayKeyMismatchAbsent",
                         "ClassifyAdmissionReplayKeyMismatchUnkeyed",
                         "ClassifyAdmissionReplayKeyMismatchAdmitted",
                     ])

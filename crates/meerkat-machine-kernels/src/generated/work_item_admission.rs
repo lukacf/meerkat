@@ -215,6 +215,7 @@ pub enum TransitionId {
     ClassifyAdmissionReplayExactAdmitted,
     ClassifyAdmissionReplayConflictUnkeyed,
     ClassifyAdmissionReplayConflictAdmitted,
+    ClassifyAdmissionReplayKeyMismatchAbsent,
     ClassifyAdmissionReplayKeyMismatchUnkeyed,
     ClassifyAdmissionReplayKeyMismatchAdmitted,
 }

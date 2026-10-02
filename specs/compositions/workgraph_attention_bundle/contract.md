@@ -25,11 +25,11 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `(none)`
 
 ## Structural Requirements
-- `work_item_create_routes_to_admission_bind` — every work item create obligates the admission bind for that create's identity, so a keyed item never exists without its Admitted identity
+- `work_item_create_routes_to_admission_bind` — structural: the work item Created effect is routed to the admission Bind input for that create's identity. This is not a delivery or atomicity proof; "no keyed item without its Admitted identity" rests on Immediate delivery plus the single-transaction WorkGraphStore::insert_item_admitted (transactional_create_binds_admission) and its crash-between-writes test
 - `closed_work_item_routes_to_attention_stop` — terminal WorkGraph item closure stops co-resident attention bindings through the canonical WorkGraph-to-attention route
 
 ## Behavioral Invariants
-- `admission_bind_originates_from_work_item_create` — an admission identity is bound only by a work item create, so there is no orphan admission
+- `admission_bind_originates_from_work_item_create` — observed provenance: every admission Bind observed in a run originates from a work item Created effect over work_item_create_binds_admission, so the model admits no orphan admission; durable atomicity is the store transaction's job, not this check's
 - `attention_stop_originates_from_work_item_close` — attention stop on terminal item closure is not ad hoc service-only mutation; it originates from the WorkGraph Closed effect route
 
 ## Coverage

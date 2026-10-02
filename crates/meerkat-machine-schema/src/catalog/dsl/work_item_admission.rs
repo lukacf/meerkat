@@ -129,8 +129,9 @@ machine! {
         // nothing to classify), so the three guards are mutually exclusive and
         // total over the recorded identity: the recorded key must equal the
         // requested key for any replay verdict, and only an identical recorded
-        // request digest is an exact replay. An unkeyed item is always a key
-        // mismatch.
+        // request digest is an exact replay. An unkeyed item, and an item whose
+        // admission was never bound (Absent), is always a key mismatch, so the
+        // input is total in every phase and never a guard rejection.
 
         transition ClassifyAdmissionReplayExact {
             per_phase [Unkeyed, Admitted]
@@ -157,7 +158,7 @@ machine! {
         }
 
         transition ClassifyAdmissionReplayKeyMismatch {
-            per_phase [Unkeyed, Admitted]
+            per_phase [Absent, Unkeyed, Admitted]
             on input ClassifyAdmissionReplay { requested_admission_key, requested_request_digest }
             guard "admission_replay_key_mismatch" {
                 self.admission_key != Some(requested_admission_key)

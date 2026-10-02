@@ -875,6 +875,17 @@ impl McpOAuthAuthority {
         {
             Ok(refreshed) => refreshed,
             Err(error) => {
+                // Host-side diagnostics only. The response body may echo the
+                // refresh grant, so it is never logged or rendered; its size
+                // is enough to tell an empty refusal from a verbose one.
+                if let crate::auth_oauth::OAuthError::TokenEndpoint { status, body } = &error {
+                    tracing::debug!(
+                        server_name = target.server_name(),
+                        status,
+                        body_bytes = body.len(),
+                        "MCP OAuth token endpoint refused the refresh"
+                    );
+                }
                 let observation = oauth_refresh_observation(&error);
                 let disposition = self
                     .close_refresh_failure(key, &lease_key, &observation)

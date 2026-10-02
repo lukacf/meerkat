@@ -142,6 +142,20 @@ WitnessInit_expiring_refresh ==
     /\ witness_current_script_input = [machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:expiring_refresh:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]
     /\ witness_remaining_script_inputs = <<[machine |-> "auth_machine", variant |-> "ObserveCredentialFreshness", payload |-> [now_ts |-> 1, refresh_window_secs |-> 2], source_kind |-> "entry", source_route |-> "witness:expiring_refresh:2", source_machine |-> "external_entry", source_effect |-> "ObserveCredentialFreshness", effect_id |-> 0], [machine |-> "auth_machine", variant |-> "BeginRefresh", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "witness:expiring_refresh:3", source_machine |-> "external_entry", source_effect |-> "BeginRefresh", effect_id |-> 0], [machine |-> "auth_machine", variant |-> "CompleteRefresh", payload |-> [credential_published_at_millis |-> 2, new_expires_at |-> Some(2), now_ts |-> 1], source_kind |-> "entry", source_route |-> "witness:expiring_refresh:4", source_machine |-> "external_entry", source_effect |-> "CompleteRefresh", effect_id |-> 0]>>
 
+WitnessInit_release_drains_oauth_flow ==
+    /\ BaseInit
+    /\ pending_inputs = <<[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]>>
+    /\ observed_inputs = {[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]}
+    /\ witness_current_script_input = [machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]
+    /\ witness_remaining_script_inputs = <<[machine |-> "auth_machine", variant |-> "AdmitOAuthBrowserFlow", payload |-> [expires_at_millis |-> 2, flow_id |-> "flow_1", max_outstanding_flows |-> 1, observed_global_outstanding_flows |-> 0, provider |-> "provider_1", redirect_uri |-> "uri_1"], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_flow:2", source_machine |-> "external_entry", source_effect |-> "AdmitOAuthBrowserFlow", effect_id |-> 0], [machine |-> "auth_machine", variant |-> "BeginRelease", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_flow:3", source_machine |-> "external_entry", source_effect |-> "BeginRelease", effect_id |-> 0], [machine |-> "auth_machine", variant |-> "Release", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_flow:4", source_machine |-> "external_entry", source_effect |-> "Release", effect_id |-> 0]>>
+
+WitnessInit_release_drains_oauth_device_flow ==
+    /\ BaseInit
+    /\ pending_inputs = <<[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_device_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]>>
+    /\ observed_inputs = {[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_device_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]}
+    /\ witness_current_script_input = [machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_device_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]
+    /\ witness_remaining_script_inputs = <<[machine |-> "auth_machine", variant |-> "AdmitOAuthDeviceFlow", payload |-> [expires_at_millis |-> 2, flow_id |-> "flow_1", max_outstanding_flows |-> 1, observed_global_outstanding_flows |-> 0, provider |-> "provider_1"], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_device_flow:2", source_machine |-> "external_entry", source_effect |-> "AdmitOAuthDeviceFlow", effect_id |-> 0], [machine |-> "auth_machine", variant |-> "BeginRelease", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_device_flow:3", source_machine |-> "external_entry", source_effect |-> "BeginRelease", effect_id |-> 0], [machine |-> "auth_machine", variant |-> "Release", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_device_flow:4", source_machine |-> "external_entry", source_effect |-> "Release", effect_id |-> 0]>>
+
 auth_machine_Acquire(arg_expires_at_ts, arg_credential_published_at_millis) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
@@ -4683,6 +4697,40 @@ WitnessInjectNext_expiring_refresh ==
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_55ac2e7c2bf5dba1
 
+WitnessInjectNext_release_drains_oauth_flow ==
+    LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input
+        next_remaining_script_inputs == IF Len(witness_remaining_script_inputs) > 0 THEN Tail(witness_remaining_script_inputs) ELSE <<>>
+    IN
+    /\ witness_current_script_input # None
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ EntryPacketAdmissible(next_script_input)
+    /\ Len(pending_inputs) = 0
+    /\ Len(pending_routes) = 0
+    /\ Len(witness_remaining_script_inputs) > 0
+    /\ pending_inputs' = Append(pending_inputs, next_script_input)
+    /\ observed_inputs' = observed_inputs \cup {next_script_input}
+    /\ witness_current_script_input' = next_script_input
+    /\ witness_remaining_script_inputs' = next_remaining_script_inputs
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_55ac2e7c2bf5dba1
+
+WitnessInjectNext_release_drains_oauth_device_flow ==
+    LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input
+        next_remaining_script_inputs == IF Len(witness_remaining_script_inputs) > 0 THEN Tail(witness_remaining_script_inputs) ELSE <<>>
+    IN
+    /\ witness_current_script_input # None
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ EntryPacketAdmissible(next_script_input)
+    /\ Len(pending_inputs) = 0
+    /\ Len(pending_routes) = 0
+    /\ Len(witness_remaining_script_inputs) > 0
+    /\ pending_inputs' = Append(pending_inputs, next_script_input)
+    /\ observed_inputs' = observed_inputs \cup {next_script_input}
+    /\ witness_current_script_input' = next_script_input
+    /\ witness_remaining_script_inputs' = next_remaining_script_inputs
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_55ac2e7c2bf5dba1
+
 WitnessScriptComplete_freshness_expiry ==
     /\ Len(witness_remaining_script_inputs) = 0
     /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
@@ -4705,12 +4753,46 @@ WitnessScriptComplete_expiring_refresh ==
     /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "ObserveCredentialFreshnessExpiringFromValid" /\ later.machine = "auth_machine" /\ later.transition = "BeginRefreshFromExpiring" /\ earlier.step < later.step)
     /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "BeginRefreshFromExpiring" /\ later.machine = "auth_machine" /\ later.transition = "CompleteRefresh" /\ earlier.step < later.step)
 
+WitnessScriptComplete_release_drains_oauth_flow ==
+    /\ Len(witness_remaining_script_inputs) = 0
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ Len(pending_routes) = 0
+    /\ (auth_machine_phase = "Released")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "Acquire")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "AdmitOAuthBrowserFlowValid")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "BeginReleaseDrainingOAuthFlowsValid")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "ExpireOAuthBrowserFlowValid")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "Release")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "BeginReleaseDrainingOAuthFlowsValid" /\ later.machine = "auth_machine" /\ later.transition = "ExpireOAuthBrowserFlowValid" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "ExpireOAuthBrowserFlowValid" /\ later.machine = "auth_machine" /\ later.transition = "Release" /\ earlier.step < later.step)
+
+WitnessScriptComplete_release_drains_oauth_device_flow ==
+    /\ Len(witness_remaining_script_inputs) = 0
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ Len(pending_routes) = 0
+    /\ (auth_machine_phase = "Released")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "Acquire")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "AdmitOAuthDeviceFlowValid")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "BeginReleaseDrainingOAuthFlowsValid")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "ExpireOAuthDeviceFlowValid")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "Release")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "BeginReleaseDrainingOAuthFlowsValid" /\ later.machine = "auth_machine" /\ later.transition = "ExpireOAuthDeviceFlowValid" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "ExpireOAuthDeviceFlowValid" /\ later.machine = "auth_machine" /\ later.transition = "Release" /\ earlier.step < later.step)
+
 WitnessNoPrematureStutter_freshness_expiry ==
     \/ WitnessScriptComplete_freshness_expiry
     \/ model_step_count' # model_step_count
 
 WitnessNoPrematureStutter_expiring_refresh ==
     \/ WitnessScriptComplete_expiring_refresh
+    \/ model_step_count' # model_step_count
+
+WitnessNoPrematureStutter_release_drains_oauth_flow ==
+    \/ WitnessScriptComplete_release_drains_oauth_flow
+    \/ model_step_count' # model_step_count
+
+WitnessNoPrematureStutter_release_drains_oauth_device_flow ==
+    \/ WitnessScriptComplete_release_drains_oauth_device_flow
     \/ model_step_count' # model_step_count
 
 WitnessSatisfiedStutter_freshness_expiry ==
@@ -4733,17 +4815,41 @@ WitnessSatisfiedStutter_expiring_refresh ==
     /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "BeginRefreshFromExpiring" /\ later.machine = "auth_machine" /\ later.transition = "CompleteRefresh" /\ earlier.step < later.step)
     /\ UNCHANGED vars
 
+WitnessSatisfiedStutter_release_drains_oauth_flow ==
+    /\ WitnessScriptComplete_release_drains_oauth_flow
+    /\ (auth_machine_phase = "Released")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "Acquire")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "AdmitOAuthBrowserFlowValid")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "BeginReleaseDrainingOAuthFlowsValid")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "ExpireOAuthBrowserFlowValid")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "Release")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "BeginReleaseDrainingOAuthFlowsValid" /\ later.machine = "auth_machine" /\ later.transition = "ExpireOAuthBrowserFlowValid" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "ExpireOAuthBrowserFlowValid" /\ later.machine = "auth_machine" /\ later.transition = "Release" /\ earlier.step < later.step)
+    /\ UNCHANGED vars
+
+WitnessSatisfiedStutter_release_drains_oauth_device_flow ==
+    /\ WitnessScriptComplete_release_drains_oauth_device_flow
+    /\ (auth_machine_phase = "Released")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "Acquire")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "AdmitOAuthDeviceFlowValid")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "BeginReleaseDrainingOAuthFlowsValid")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "ExpireOAuthDeviceFlowValid")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "Release")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "BeginReleaseDrainingOAuthFlowsValid" /\ later.machine = "auth_machine" /\ later.transition = "ExpireOAuthDeviceFlowValid" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "ExpireOAuthDeviceFlowValid" /\ later.machine = "auth_machine" /\ later.transition = "Release" /\ earlier.step < later.step)
+    /\ UNCHANGED vars
+
 \* Liveness: eventual feedback: release_lease discharges the drain by firing a terminal Expire* feedback per drained flow id before committing `Release`; the Release guard `oauth_release_drained` is the machine-side completion witness
 OwnerFeedback_auth_machine_auth_release_oauth_flow_drain_ExpireOAuthBrowserFlow ==
     /\ obligation_auth_machine_auth_release_oauth_flow_drain /= {}
     /\ \E token \in obligation_auth_machine_auth_release_oauth_flow_drain :
-        /\ \E owner_ctx_browser_flow_id \in StringValues : (/\ pending_inputs' = Append(pending_inputs, [machine |-> "auth_machine", variant |-> "ExpireOAuthBrowserFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token.effect_id, payload |-> [flow_id |-> owner_ctx_browser_flow_id]]) /\ observed_inputs' = observed_inputs \cup {[machine |-> "auth_machine", variant |-> "ExpireOAuthBrowserFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token.effect_id, payload |-> [flow_id |-> owner_ctx_browser_flow_id]]} /\ obligation_auth_machine_auth_release_oauth_flow_drain' = obligation_auth_machine_auth_release_oauth_flow_drain \ {token} /\ model_step_count' = model_step_count + 1)
+        /\ \E member_browser_flow_ids \in token.browser_flow_ids : (/\ pending_inputs' = Append(pending_inputs, [machine |-> "auth_machine", variant |-> "ExpireOAuthBrowserFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token.effect_id, payload |-> [flow_id |-> member_browser_flow_ids]]) /\ observed_inputs' = observed_inputs \cup {[machine |-> "auth_machine", variant |-> "ExpireOAuthBrowserFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token.effect_id, payload |-> [flow_id |-> member_browser_flow_ids]]} /\ obligation_auth_machine_auth_release_oauth_flow_drain' = (IF [token EXCEPT !.browser_flow_ids = @ \ {member_browser_flow_ids}].browser_flow_ids = {} /\ [token EXCEPT !.browser_flow_ids = @ \ {member_browser_flow_ids}].device_flow_ids = {} THEN obligation_auth_machine_auth_release_oauth_flow_drain \ {token} ELSE (obligation_auth_machine_auth_release_oauth_flow_drain \ {token}) \cup {[token EXCEPT !.browser_flow_ids = @ \ {member_browser_flow_ids}]}) /\ model_step_count' = model_step_count + 1)
     /\ UnchangedFrame_33a078928811255f
 
 OwnerFeedback_auth_machine_auth_release_oauth_flow_drain_ExpireOAuthDeviceFlow ==
     /\ obligation_auth_machine_auth_release_oauth_flow_drain /= {}
     /\ \E token \in obligation_auth_machine_auth_release_oauth_flow_drain :
-        /\ \E owner_ctx_device_flow_id \in StringValues : (/\ pending_inputs' = Append(pending_inputs, [machine |-> "auth_machine", variant |-> "ExpireOAuthDeviceFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token.effect_id, payload |-> [flow_id |-> owner_ctx_device_flow_id]]) /\ observed_inputs' = observed_inputs \cup {[machine |-> "auth_machine", variant |-> "ExpireOAuthDeviceFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token.effect_id, payload |-> [flow_id |-> owner_ctx_device_flow_id]]} /\ obligation_auth_machine_auth_release_oauth_flow_drain' = obligation_auth_machine_auth_release_oauth_flow_drain \ {token} /\ model_step_count' = model_step_count + 1)
+        /\ \E member_device_flow_ids \in token.device_flow_ids : (/\ pending_inputs' = Append(pending_inputs, [machine |-> "auth_machine", variant |-> "ExpireOAuthDeviceFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token.effect_id, payload |-> [flow_id |-> member_device_flow_ids]]) /\ observed_inputs' = observed_inputs \cup {[machine |-> "auth_machine", variant |-> "ExpireOAuthDeviceFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token.effect_id, payload |-> [flow_id |-> member_device_flow_ids]]} /\ obligation_auth_machine_auth_release_oauth_flow_drain' = (IF [token EXCEPT !.device_flow_ids = @ \ {member_device_flow_ids}].browser_flow_ids = {} /\ [token EXCEPT !.device_flow_ids = @ \ {member_device_flow_ids}].device_flow_ids = {} THEN obligation_auth_machine_auth_release_oauth_flow_drain \ {token} ELSE (obligation_auth_machine_auth_release_oauth_flow_drain \ {token}) \cup {[token EXCEPT !.device_flow_ids = @ \ {member_device_flow_ids}]}) /\ model_step_count' = model_step_count + 1)
     /\ UnchangedFrame_33a078928811255f
 
 CoreNext ==
@@ -4945,12 +5051,31 @@ WitnessNext_expiring_refresh ==
     \/ WitnessSatisfiedStutter_expiring_refresh
     \/ WitnessInjectNext_expiring_refresh
 
+WitnessNext_release_drains_oauth_flow ==
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "Acquire" /\ auth_machine_Acquire(witness_packet.payload.expires_at_ts, witness_packet.payload.credential_published_at_millis)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "AdmitOAuthBrowserFlow" /\ auth_machine_AdmitOAuthBrowserFlowValid(witness_packet.payload.flow_id, witness_packet.payload.provider, witness_packet.payload.redirect_uri, witness_packet.payload.expires_at_millis, witness_packet.payload.max_outstanding_flows, witness_packet.payload.observed_global_outstanding_flows)
+    \/ auth_machine_BeginReleaseDrainingOAuthFlowsValid
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "ExpireOAuthBrowserFlow" /\ auth_machine_ExpireOAuthBrowserFlowValid(witness_packet.payload.flow_id)
+    \/ auth_machine_Release
+    \/ OwnerFeedback_auth_machine_auth_release_oauth_flow_drain_ExpireOAuthBrowserFlow
+    \/ WitnessSatisfiedStutter_release_drains_oauth_flow
+    \/ WitnessInjectNext_release_drains_oauth_flow
+
+WitnessNext_release_drains_oauth_device_flow ==
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "Acquire" /\ auth_machine_Acquire(witness_packet.payload.expires_at_ts, witness_packet.payload.credential_published_at_millis)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "AdmitOAuthDeviceFlow" /\ auth_machine_AdmitOAuthDeviceFlowValid(witness_packet.payload.flow_id, witness_packet.payload.provider, witness_packet.payload.expires_at_millis, witness_packet.payload.max_outstanding_flows, witness_packet.payload.observed_global_outstanding_flows)
+    \/ auth_machine_BeginReleaseDrainingOAuthFlowsValid
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "ExpireOAuthDeviceFlow" /\ auth_machine_ExpireOAuthDeviceFlowValid(witness_packet.payload.flow_id)
+    \/ auth_machine_Release
+    \/ OwnerFeedback_auth_machine_auth_release_oauth_flow_drain_ExpireOAuthDeviceFlow
+    \/ WitnessSatisfiedStutter_release_drains_oauth_device_flow
+    \/ WitnessInjectNext_release_drains_oauth_device_flow
+
 
 auth_release_oauth_flow_drain_protocol_covered == TRUE
 auth_lease_lifecycle_publication_protocol_covered == TRUE
 
 NoOpenObligationsOnTerminal_auth_machine_auth_release_oauth_flow_drain == (auth_machine_phase = "Released") => obligation_auth_machine_auth_release_oauth_flow_drain = {}
-NoOpenObligationsOnTerminal_auth_machine_auth_lease_lifecycle_publication == (auth_machine_phase = "Released") => obligation_auth_machine_auth_lease_lifecycle_publication = {}
 OwnerFeedbackHasProtocolProvenance ==
     \A input_packet \in observed_inputs :
         input_packet.source_kind /= "owner"
@@ -4962,6 +5087,8 @@ CiStateConstraint == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Car
 DeepStateConstraint == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 12 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 2 /\ Cardinality(emitted_effects) <= 2 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(auth_machine_oauth_browser_flow_ids) <= 2 /\ Cardinality(DOMAIN auth_machine_oauth_browser_flow_providers) <= 2 /\ Cardinality(DOMAIN auth_machine_oauth_browser_flow_redirect_uris) <= 2 /\ Cardinality(DOMAIN auth_machine_oauth_browser_flow_expires_at_millis) <= 2 /\ Cardinality(auth_machine_oauth_device_flow_ids) <= 2 /\ Cardinality(DOMAIN auth_machine_oauth_device_flow_providers) <= 2 /\ Cardinality(DOMAIN auth_machine_oauth_device_flow_expires_at_millis) <= 2 /\ Cardinality(auth_machine_oauth_device_poll_ids) <= 2
 WitnessStateConstraint_freshness_expiry == /\ model_step_count <= 6 /\ Len(pending_inputs) <= 3 /\ Cardinality(observed_inputs) <= 5 /\ Len(pending_routes) <= 0 /\ Cardinality(delivered_routes) <= 0 /\ Cardinality(emitted_effects) <= 4 /\ Cardinality(observed_transitions) <= 6 /\ Cardinality(auth_machine_oauth_browser_flow_ids) <= 0 /\ Cardinality(DOMAIN auth_machine_oauth_browser_flow_providers) <= 0 /\ Cardinality(DOMAIN auth_machine_oauth_browser_flow_redirect_uris) <= 0 /\ Cardinality(DOMAIN auth_machine_oauth_browser_flow_expires_at_millis) <= 0 /\ Cardinality(auth_machine_oauth_device_flow_ids) <= 0 /\ Cardinality(DOMAIN auth_machine_oauth_device_flow_providers) <= 0 /\ Cardinality(DOMAIN auth_machine_oauth_device_flow_expires_at_millis) <= 0 /\ Cardinality(auth_machine_oauth_device_poll_ids) <= 0
 WitnessStateConstraint_expiring_refresh == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 4 /\ Cardinality(observed_inputs) <= 6 /\ Len(pending_routes) <= 0 /\ Cardinality(delivered_routes) <= 0 /\ Cardinality(emitted_effects) <= 5 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(auth_machine_oauth_browser_flow_ids) <= 0 /\ Cardinality(DOMAIN auth_machine_oauth_browser_flow_providers) <= 0 /\ Cardinality(DOMAIN auth_machine_oauth_browser_flow_redirect_uris) <= 0 /\ Cardinality(DOMAIN auth_machine_oauth_browser_flow_expires_at_millis) <= 0 /\ Cardinality(auth_machine_oauth_device_flow_ids) <= 0 /\ Cardinality(DOMAIN auth_machine_oauth_device_flow_providers) <= 0 /\ Cardinality(DOMAIN auth_machine_oauth_device_flow_expires_at_millis) <= 0 /\ Cardinality(auth_machine_oauth_device_poll_ids) <= 0
+WitnessStateConstraint_release_drains_oauth_flow == /\ model_step_count <= 9 /\ Len(pending_inputs) <= 4 /\ Cardinality(observed_inputs) <= 6 /\ Len(pending_routes) <= 0 /\ Cardinality(delivered_routes) <= 0 /\ Cardinality(emitted_effects) <= 7 /\ Cardinality(observed_transitions) <= 9 /\ Cardinality(auth_machine_oauth_browser_flow_ids) <= 2 /\ Cardinality(DOMAIN auth_machine_oauth_browser_flow_providers) <= 2 /\ Cardinality(DOMAIN auth_machine_oauth_browser_flow_redirect_uris) <= 2 /\ Cardinality(DOMAIN auth_machine_oauth_browser_flow_expires_at_millis) <= 2 /\ Cardinality(auth_machine_oauth_device_flow_ids) <= 2 /\ Cardinality(DOMAIN auth_machine_oauth_device_flow_providers) <= 2 /\ Cardinality(DOMAIN auth_machine_oauth_device_flow_expires_at_millis) <= 2 /\ Cardinality(auth_machine_oauth_device_poll_ids) <= 2
+WitnessStateConstraint_release_drains_oauth_device_flow == /\ model_step_count <= 9 /\ Len(pending_inputs) <= 4 /\ Cardinality(observed_inputs) <= 6 /\ Len(pending_routes) <= 0 /\ Cardinality(delivered_routes) <= 0 /\ Cardinality(emitted_effects) <= 7 /\ Cardinality(observed_transitions) <= 9 /\ Cardinality(auth_machine_oauth_browser_flow_ids) <= 2 /\ Cardinality(DOMAIN auth_machine_oauth_browser_flow_providers) <= 2 /\ Cardinality(DOMAIN auth_machine_oauth_browser_flow_redirect_uris) <= 2 /\ Cardinality(DOMAIN auth_machine_oauth_browser_flow_expires_at_millis) <= 2 /\ Cardinality(auth_machine_oauth_device_flow_ids) <= 2 /\ Cardinality(DOMAIN auth_machine_oauth_device_flow_providers) <= 2 /\ Cardinality(DOMAIN auth_machine_oauth_device_flow_expires_at_millis) <= 2 /\ Cardinality(auth_machine_oauth_device_poll_ids) <= 2
 
 Spec ==
     /\ Init
@@ -4975,6 +5102,14 @@ WitnessSpec_expiring_refresh ==
     /\ WitnessInit_expiring_refresh
     /\ [] [WitnessNext_expiring_refresh]_vars
 
+WitnessSpec_release_drains_oauth_flow ==
+    /\ WitnessInit_release_drains_oauth_flow
+    /\ [] [WitnessNext_release_drains_oauth_flow]_vars
+
+WitnessSpec_release_drains_oauth_device_flow ==
+    /\ WitnessInit_release_drains_oauth_device_flow
+    /\ [] [WitnessNext_release_drains_oauth_device_flow]_vars
+
 WitnessStateObserved_freshness_expiry_1 == WitnessScriptComplete_freshness_expiry => (auth_machine_phase = "Expired")
 WitnessTransitionObserved_freshness_expiry_auth_machine_Acquire == WitnessScriptComplete_freshness_expiry => (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "Acquire")
 WitnessTransitionObserved_freshness_expiry_auth_machine_ObserveCredentialFreshnessValid == WitnessScriptComplete_freshness_expiry => (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "ObserveCredentialFreshnessValid")
@@ -4987,6 +5122,22 @@ WitnessTransitionObserved_expiring_refresh_auth_machine_BeginRefreshFromExpiring
 WitnessTransitionObserved_expiring_refresh_auth_machine_CompleteRefresh == WitnessScriptComplete_expiring_refresh => (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "CompleteRefresh")
 WitnessTransitionOrder_expiring_refresh_1 == WitnessScriptComplete_expiring_refresh => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "ObserveCredentialFreshnessExpiringFromValid" /\ later.machine = "auth_machine" /\ later.transition = "BeginRefreshFromExpiring" /\ earlier.step < later.step)
 WitnessTransitionOrder_expiring_refresh_2 == WitnessScriptComplete_expiring_refresh => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "BeginRefreshFromExpiring" /\ later.machine = "auth_machine" /\ later.transition = "CompleteRefresh" /\ earlier.step < later.step)
+WitnessStateObserved_release_drains_oauth_flow_1 == WitnessScriptComplete_release_drains_oauth_flow => (auth_machine_phase = "Released")
+WitnessTransitionObserved_release_drains_oauth_flow_auth_machine_Acquire == WitnessScriptComplete_release_drains_oauth_flow => (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "Acquire")
+WitnessTransitionObserved_release_drains_oauth_flow_auth_machine_AdmitOAuthBrowserFlowValid == WitnessScriptComplete_release_drains_oauth_flow => (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "AdmitOAuthBrowserFlowValid")
+WitnessTransitionObserved_release_drains_oauth_flow_auth_machine_BeginReleaseDrainingOAuthFlowsValid == WitnessScriptComplete_release_drains_oauth_flow => (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "BeginReleaseDrainingOAuthFlowsValid")
+WitnessTransitionObserved_release_drains_oauth_flow_auth_machine_ExpireOAuthBrowserFlowValid == WitnessScriptComplete_release_drains_oauth_flow => (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "ExpireOAuthBrowserFlowValid")
+WitnessTransitionObserved_release_drains_oauth_flow_auth_machine_Release == WitnessScriptComplete_release_drains_oauth_flow => (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "Release")
+WitnessTransitionOrder_release_drains_oauth_flow_1 == WitnessScriptComplete_release_drains_oauth_flow => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "BeginReleaseDrainingOAuthFlowsValid" /\ later.machine = "auth_machine" /\ later.transition = "ExpireOAuthBrowserFlowValid" /\ earlier.step < later.step)
+WitnessTransitionOrder_release_drains_oauth_flow_2 == WitnessScriptComplete_release_drains_oauth_flow => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "ExpireOAuthBrowserFlowValid" /\ later.machine = "auth_machine" /\ later.transition = "Release" /\ earlier.step < later.step)
+WitnessStateObserved_release_drains_oauth_device_flow_1 == WitnessScriptComplete_release_drains_oauth_device_flow => (auth_machine_phase = "Released")
+WitnessTransitionObserved_release_drains_oauth_device_flow_auth_machine_Acquire == WitnessScriptComplete_release_drains_oauth_device_flow => (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "Acquire")
+WitnessTransitionObserved_release_drains_oauth_device_flow_auth_machine_AdmitOAuthDeviceFlowValid == WitnessScriptComplete_release_drains_oauth_device_flow => (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "AdmitOAuthDeviceFlowValid")
+WitnessTransitionObserved_release_drains_oauth_device_flow_auth_machine_BeginReleaseDrainingOAuthFlowsValid == WitnessScriptComplete_release_drains_oauth_device_flow => (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "BeginReleaseDrainingOAuthFlowsValid")
+WitnessTransitionObserved_release_drains_oauth_device_flow_auth_machine_ExpireOAuthDeviceFlowValid == WitnessScriptComplete_release_drains_oauth_device_flow => (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "ExpireOAuthDeviceFlowValid")
+WitnessTransitionObserved_release_drains_oauth_device_flow_auth_machine_Release == WitnessScriptComplete_release_drains_oauth_device_flow => (\E packet \in observed_transitions : /\ packet.machine = "auth_machine" /\ packet.transition = "Release")
+WitnessTransitionOrder_release_drains_oauth_device_flow_1 == WitnessScriptComplete_release_drains_oauth_device_flow => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "BeginReleaseDrainingOAuthFlowsValid" /\ later.machine = "auth_machine" /\ later.transition = "ExpireOAuthDeviceFlowValid" /\ earlier.step < later.step)
+WitnessTransitionOrder_release_drains_oauth_device_flow_2 == WitnessScriptComplete_release_drains_oauth_device_flow => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "auth_machine" /\ earlier.transition = "ExpireOAuthDeviceFlowValid" /\ later.machine = "auth_machine" /\ later.transition = "Release" /\ earlier.step < later.step)
 
 THEOREM Spec => []auth_release_oauth_flow_drain_protocol_covered
 THEOREM Spec => []auth_lease_lifecycle_publication_protocol_covered
@@ -4994,7 +5145,6 @@ THEOREM Spec => []auth_machine_oauth_flow_membership_consistent
 THEOREM Spec => []auth_machine_released_oauth_membership_drained
 THEOREM Spec => []auth_machine_released_not_release_draining
 THEOREM Spec => []NoOpenObligationsOnTerminal_auth_machine_auth_release_oauth_flow_drain
-THEOREM Spec => []NoOpenObligationsOnTerminal_auth_machine_auth_lease_lifecycle_publication
 THEOREM Spec => []OwnerFeedbackHasProtocolProvenance
 
 =============================================================================

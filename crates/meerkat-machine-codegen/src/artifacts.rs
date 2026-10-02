@@ -1526,7 +1526,7 @@ fn render_composition_ci_cfg_from_catalog(
         );
         if machine_by_instance
             .get(protocol.producer_instance.as_str())
-            .is_some_and(|machine| !machine.state.terminal_phases.is_empty())
+            .is_some_and(|machine| terminal_closure_required(protocol, machine))
         {
             obligation_invariants.push(format!("NoOpenObligationsOnTerminal_{suffix}"));
         }
@@ -1717,7 +1717,7 @@ fn render_composition_witness_cfg_from_catalog(
         );
         if machine_by_instance
             .get(protocol.producer_instance.as_str())
-            .is_some_and(|machine| !machine.state.terminal_phases.is_empty())
+            .is_some_and(|machine| terminal_closure_required(protocol, machine))
         {
             obligation_invariants.push(format!("NoOpenObligationsOnTerminal_{suffix}"));
         }
@@ -5890,6 +5890,31 @@ fn domain_dependency_depth(ty: &TypeRef) -> usize {
     }
 }
 
+/// The rendered payload of one owner feedback input.
+struct FeedbackPayload {
+    payload_expr: String,
+    quantifiers: Vec<String>,
+    /// `(obligation field, bound member variable)` per `ObligationMember`.
+    members: Vec<(String, String)>,
+}
+
+/// Whether `NoOpenObligationsOnTerminal_<protocol>` applies: the producer has
+/// terminal phases and the protocol is `AckRequired`, so only owner feedback
+/// closes its obligations. Under `AckOrAbort` and `TerminalClosure` the
+/// terminal phase is itself the closure, and a `PublicationOnly` protocol has
+/// no feedback (the publication closes it), so for those the invariant would be
+/// unsatisfiable once the producer reaches a terminal phase.
+fn terminal_closure_required(
+    protocol: &meerkat_machine_schema::EffectHandoffProtocol,
+    producer: &MachineSchema,
+) -> bool {
+    !producer.state.terminal_phases.is_empty()
+        && matches!(
+            protocol.closure_policy,
+            meerkat_machine_schema::ClosurePolicy::AckRequired
+        )
+}
+
 fn render_type_domain_expr(ty: &TypeRef) -> String {
     match ty {
         TypeRef::Bool => "BOOLEAN".into(),
@@ -6998,14 +7023,19 @@ impl<'a> CompositionTlaCompiler<'a> {
             })
     }
 
+    /// The feedback input's payload record, the quantifiers over the values it
+    /// leaves open, and the obligation members it names. An `ObligationMember`
+    /// value ranges over that set field of the obligation token, so the owner
+    /// can only name a member the obligation actually carries.
     fn feedback_payload_expr(
         &self,
         feedback: &FeedbackInputRef,
         token_var: &str,
-    ) -> std::result::Result<(String, Vec<String>), String> {
+    ) -> std::result::Result<FeedbackPayload, String> {
         let variant = self.feedback_variant(feedback)?;
         let mut owner_context_quantifiers = Vec::new();
         let mut payload_fields = Vec::new();
+        let mut members = Vec::new();
 
         for field in &variant.fields {
             let binding = feedback
@@ -7016,6 +7046,15 @@ impl<'a> CompositionTlaCompiler<'a> {
             let expr = match &binding.source {
                 FeedbackFieldSource::ObligationField(source_field) => {
                     format!("{token_var}.{}", tla_ident(source_field))
+                }
+                FeedbackFieldSource::ObligationMember(source_field) => {
+                    let var_name = format!("member_{}", tla_ident(source_field));
+                    owner_context_quantifiers.push(format!(
+                        "{var_name} \\in {token_var}.{}",
+                        tla_ident(source_field)
+                    ));
+                    members.push((tla_ident(source_field), var_name.clone()));
+                    var_name
                 }
                 FeedbackFieldSource::OwnerContext(name) => {
                     let var_name = format!("owner_ctx_{}", tla_ident(name));
@@ -7033,7 +7072,27 @@ impl<'a> CompositionTlaCompiler<'a> {
             format!("[{}]", payload_fields.join(", "))
         };
 
-        Ok((payload_expr, owner_context_quantifiers))
+        Ok(FeedbackPayload {
+            payload_expr,
+            quantifiers: owner_context_quantifiers,
+            members,
+        })
+    }
+
+    /// Obligation fields some feedback input of `protocol` names members of.
+    /// The obligation token stays open while any of them is non-empty.
+    fn protocol_member_fields(
+        protocol: &meerkat_machine_schema::EffectHandoffProtocol,
+    ) -> BTreeSet<String> {
+        protocol
+            .allowed_feedback_inputs
+            .iter()
+            .flat_map(|feedback| feedback.field_bindings.iter())
+            .filter_map(|binding| match &binding.source {
+                FeedbackFieldSource::ObligationMember(field) => Some(tla_ident(field)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Renders obligation closure invariants into the TLA+ output.
@@ -7062,8 +7121,13 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .map(meerkat_machine_schema::identity::PhaseId::as_str)
                 .collect();
 
-            // NoOpenObligationsOnTerminal: terminal phase => obligation set is empty
-            if !terminal_phases.is_empty() {
+            // NoOpenObligationsOnTerminal: terminal phase => obligation set is
+            // empty. Only an AckRequired protocol needs owner feedback to close
+            // its obligations; under AckOrAbort and TerminalClosure the terminal
+            // phase is itself the closure, and a PublicationOnly protocol has no
+            // feedback (the publication closes it), so for those the invariant
+            // would be unsatisfiable once the producer reaches a terminal phase.
+            if terminal_closure_required(protocol, machine) {
                 let inv_name = format!("NoOpenObligationsOnTerminal_{}", suffix);
                 let terminal_disjuncts: Vec<String> = terminal_phases
                     .iter()
@@ -7144,8 +7208,11 @@ impl<'a> CompositionTlaCompiler<'a> {
 
             for feedback in &protocol.allowed_feedback_inputs {
                 let action_name = self.owner_feedback_action_name(protocol, feedback);
-                let (payload_expr, owner_context_quantifiers) =
-                    self.feedback_payload_expr(feedback, "token")?;
+                let FeedbackPayload {
+                    payload_expr,
+                    quantifiers: owner_context_quantifiers,
+                    members,
+                } = self.feedback_payload_expr(feedback, "token")?;
                 let input_expr = format!(
                     "[machine |-> {}, variant |-> {}, source_kind |-> \"owner\", source_machine |-> {}, source_effect |-> {}, source_route |-> \"none\", effect_id |-> token.effect_id, payload |-> {}]",
                     tla_string(&feedback.machine_instance),
@@ -7163,9 +7230,34 @@ impl<'a> CompositionTlaCompiler<'a> {
                 } else {
                     format!("\\E {} : ", owner_context_quantifiers.join(", "))
                 };
+                // Feedback naming obligation members discharges only those
+                // members; the token closes once every member-bearing field of
+                // the protocol is empty. Other feedback closes the token.
+                let obligation_update = if members.is_empty() {
+                    format!("{var}' = {var} \\ {{token}}")
+                } else {
+                    let residual = format!(
+                        "[token EXCEPT {}]",
+                        members
+                            .iter()
+                            .map(|(field, member)| format!("!.{field} = @ \\ {{{member}}}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    let drained = Self::protocol_member_fields(protocol)
+                        .iter()
+                        .map(|field| format!("{residual}.{field} = {{}}"))
+                        .collect::<Vec<_>>()
+                        .join(" /\\ ");
+                    // Parenthesised: an unbracketed ELSE would swallow the
+                    // conjuncts that follow it in the action.
+                    format!(
+                        "{var}' = (IF {drained} THEN {var} \\ {{token}} ELSE ({var} \\ {{token}}) \\cup {{{residual}}})"
+                    )
+                };
                 writeln!(
                     out,
-                    "        /\\ {quantifier_prefix}(/\\ pending_inputs' = Append(pending_inputs, {input_expr}) /\\ observed_inputs' = observed_inputs \\cup {{{input_expr}}} /\\ {var}' = {var} \\ {{token}} /\\ model_step_count' = model_step_count + 1)"
+                    "        /\\ {quantifier_prefix}(/\\ pending_inputs' = Append(pending_inputs, {input_expr}) /\\ observed_inputs' = observed_inputs \\cup {{{input_expr}}} /\\ {obligation_update} /\\ model_step_count' = model_step_count + 1)"
                 )
                 .expect("write to string");
 

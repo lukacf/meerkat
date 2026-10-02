@@ -595,6 +595,7 @@ impl BrowserPeer {
     /// schedule id; the browser records `scheduled`, `anchor_fired`,
     /// `fixture_start`, and `fixture_end` timeline entries as it happens.
     pub async fn play_at(&mut self, spec: &PlayAt) -> Result<u64, Box<dyn std::error::Error>> {
+        self.provider_step(&format!("play_at:{}", spec.name));
         let mut command = serde_json::to_value(spec)?;
         command["type"] = json!("play_at");
         let result = self.call(command).await?;
@@ -609,6 +610,8 @@ impl BrowserPeer {
         &mut self,
         items: &[PlayAt],
     ) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+        let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
+        self.provider_step(&format!("queue:{}", names.join(",")));
         let result = self.call(json!({"type":"queue","items":items})).await?;
         Ok(serde_json::from_value(result["scheduled"].clone())?)
     }
@@ -626,7 +629,20 @@ impl BrowserPeer {
         &mut self,
         mode: DisconnectMode,
     ) -> Result<Value, Box<dyn std::error::Error>> {
+        let mode_name = serde_json::to_value(mode)?;
+        self.provider_step(&format!(
+            "disconnect:{}",
+            mode_name.as_str().unwrap_or("unknown")
+        ));
         self.call(json!({"type":"disconnect","mode":mode})).await
+    }
+
+    /// Mark a browser action in the channel's provider stream before it
+    /// happens: provider frames it causes are recorded after the marker.
+    fn provider_step(&self, step: &str) {
+        if let Some((journal, channel)) = &self.evidence {
+            journal.provider_step(*channel, step);
+        }
     }
 
     pub async fn timeline(&mut self) -> Result<Vec<TimelineEntry>, Box<dyn std::error::Error>> {

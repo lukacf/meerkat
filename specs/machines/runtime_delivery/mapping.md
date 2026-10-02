@@ -40,6 +40,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdvanceOverAcknowledgedDelivery`
   - anchors: `runtime_delivery_authority`
   - scenarios: `runtime_delivery_out_of_band_acknowledgement`
+- `AdvanceAcknowledgedPrefixNothingParked`
+  - anchors: `runtime_delivery_authority`
+  - scenarios: `runtime_delivery_out_of_band_acknowledgement`
 
 ### Effects
 - `DeliveryCommitted`
@@ -55,6 +58,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `runtime_delivery_authority`
   - scenarios: `runtime_delivery_out_of_band_acknowledgement`
 - `AcknowledgedPrefixAdvanced`
+  - anchors: `runtime_delivery_authority`
+  - scenarios: `runtime_delivery_out_of_band_acknowledgement`
+- `AcknowledgedPrefixAtRest`
   - anchors: `runtime_delivery_authority`
   - scenarios: `runtime_delivery_out_of_band_acknowledgement`
 

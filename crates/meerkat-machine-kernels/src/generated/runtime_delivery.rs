@@ -116,6 +116,10 @@ pub mod effects {
     pub struct AcknowledgedPrefixAdvanced {
         pub delivery_sequence: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AcknowledgedPrefixAtRest {
+        pub applied_cursor: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -125,6 +129,7 @@ pub enum Effect {
     DeliveryApplied(effects::DeliveryApplied),
     DeliveryAcknowledged(effects::DeliveryAcknowledged),
     AcknowledgedPrefixAdvanced(effects::AcknowledgedPrefixAdvanced),
+    AcknowledgedPrefixAtRest(effects::AcknowledgedPrefixAtRest),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -133,6 +138,7 @@ pub enum EffectKind {
     DeliveryApplied,
     DeliveryAcknowledged,
     AcknowledgedPrefixAdvanced,
+    AcknowledgedPrefixAtRest,
 }
 
 #[allow(non_camel_case_types)]
@@ -146,6 +152,7 @@ pub enum TransitionId {
     AcknowledgeAheadOfCursor,
     ObserveAlreadyAppliedAcknowledgement,
     AdvanceOverAcknowledgedDelivery,
+    AdvanceAcknowledgedPrefixNothingParked,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

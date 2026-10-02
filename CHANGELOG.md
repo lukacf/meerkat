@@ -393,7 +393,9 @@ them.
     acknowledgement ahead of the cursor in generated `RuntimeDeliveryMachine`
     authority (new `AcknowledgeDelivery` / `AdvanceAcknowledgedPrefix`
     inputs). The cursor still moves strictly in order and advances over the
-    contiguous acknowledged prefix.
+    contiguous acknowledged prefix. `AdvanceAcknowledgedPrefix` is total: with
+    nothing parked at the cursor the machine reports the prefix at rest
+    (`AcknowledgedPrefixAtRest`), so the shell never decides when to stop.
   - The job applier marks acknowledged rows applied without re-running their
     sinks. `RuntimeDeliveryInbox::acknowledged_pending_sequences` and
     `RuntimeDeliveryAcknowledgement` are new.

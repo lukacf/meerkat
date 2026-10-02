@@ -56,7 +56,10 @@ machine! {
                 delivery_sequence: u64,
             },
             // Advance the cursor over the next sequence when it was already
-            // acknowledged. The shell drives this while it is enabled.
+            // acknowledged. Total in Active: when nothing is parked at the
+            // cursor it is a typed no-op, so the shell drives it until the
+            // machine reports the prefix at rest and never pre-checks the
+            // guard itself.
             AdvanceAcknowledgedPrefix {},
         }
 
@@ -81,6 +84,9 @@ machine! {
             },
             AcknowledgedPrefixAdvanced {
                 delivery_sequence: u64,
+            },
+            AcknowledgedPrefixAtRest {
+                applied_cursor: u64,
             },
         }
 
@@ -109,6 +115,7 @@ machine! {
         disposition DeliveryApplied => local seam OwnerRealizationOnly,
         disposition DeliveryAcknowledged => local seam OwnerRealizationOnly,
         disposition AcknowledgedPrefixAdvanced => local seam OwnerRealizationOnly,
+        disposition AcknowledgedPrefixAtRest => local seam OwnerRealizationOnly,
 
         transition CommitNewDelivery {
             on input CommitDelivery { delivery_id, source_sequence }
@@ -254,6 +261,23 @@ machine! {
             to Active
             emit AcknowledgedPrefixAdvanced {
                 delivery_sequence: self.applied_cursor
+            }
+        }
+
+        // The exact complement of AdvanceOverAcknowledgedDelivery in Active:
+        // no acknowledged delivery is parked at the cursor, so the prefix is
+        // at rest and nothing changes.
+        transition AdvanceAcknowledgedPrefixNothingParked {
+            on input AdvanceAcknowledgedPrefix {}
+            guard {
+                self.lifecycle_phase == Phase::Active
+                    && (self.applied_cursor >= self.next_sequence
+                        || !self.acknowledged_sequences.contains(self.applied_cursor + 1))
+            }
+            update {}
+            to Active
+            emit AcknowledgedPrefixAtRest {
+                applied_cursor: self.applied_cursor
             }
         }
     }

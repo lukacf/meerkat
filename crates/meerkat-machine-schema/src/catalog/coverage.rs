@@ -1464,6 +1464,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "AcknowledgeAheadOfCursor",
                         "ObserveAlreadyAppliedAcknowledgement",
                         "AdvanceOverAcknowledgedDelivery",
+                        "AdvanceAcknowledgedPrefixNothingParked",
                     ])
                     .effects(&[
                         "DeliveryCommitted",
@@ -1471,6 +1472,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "DeliveryApplied",
                         "DeliveryAcknowledged",
                         "AcknowledgedPrefixAdvanced",
+                        "AcknowledgedPrefixAtRest",
                     ])
                     .invariants(&[
                         "applied_cursor_does_not_pass_committed_sequence",
@@ -1507,11 +1509,13 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "AcknowledgeAheadOfCursor",
                             "ObserveAlreadyAppliedAcknowledgement",
                             "AdvanceOverAcknowledgedDelivery",
+                            "AdvanceAcknowledgedPrefixNothingParked",
                         ])
                         .effects(&[
                             "DeliveryApplied",
                             "DeliveryAcknowledged",
                             "AcknowledgedPrefixAdvanced",
+                            "AcknowledgedPrefixAtRest",
                         ])
                         .invariants(&["applied_cursor_is_never_acknowledged_pending"]),
                 ),

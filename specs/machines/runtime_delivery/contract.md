@@ -29,6 +29,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DeliveryApplied`(delivery_id: String, delivery_sequence: u64)
 - `DeliveryAcknowledged`(delivery_id: String, delivery_sequence: u64)
 - `AcknowledgedPrefixAdvanced`(delivery_sequence: u64)
+- `AcknowledgedPrefixAtRest`(applied_cursor: u64)
 
 ## Invariants
 - `applied_cursor_does_not_pass_committed_sequence`
@@ -100,6 +101,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `AcknowledgedPrefixAdvanced`
+- To: `Active`
+
+### `AdvanceAcknowledgedPrefixNothingParked`
+- From: `Active`
+- On: `AdvanceAcknowledgedPrefix`()
+- Guards:
+  - ``
+- Emits: `AcknowledgedPrefixAtRest`
 - To: `Active`
 
 ## Coverage

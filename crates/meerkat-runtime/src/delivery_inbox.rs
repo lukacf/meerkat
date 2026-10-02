@@ -880,42 +880,45 @@ fn classify_commit_effects(
     Ok(first)
 }
 
-/// Drive `AdvanceAcknowledgedPrefix` while the generated machine enables it:
-/// the cursor moves over each next sequence that was acknowledged out of band.
+/// Drive `AdvanceAcknowledgedPrefix` until the generated machine reports the
+/// prefix at rest: each advance either carries the cursor over the next
+/// sequence that was acknowledged out of band, or is the typed no-op. The
+/// machine decides which; exactly one matching effect is required.
 fn advance_acknowledged_prefix(
     authority: &mut dsl::RuntimeDeliveryMachineAuthority,
 ) -> Result<(), RuntimeDeliveryError> {
     loop {
-        let state = authority.state();
-        let Some(next) = state.applied_cursor.checked_add(1) else {
-            return Ok(());
-        };
-        if state.applied_cursor >= state.next_sequence
-            || !state.acknowledged_sequences.contains(&next)
-        {
-            return Ok(());
-        }
+        let cursor = authority.state().applied_cursor;
         let transition = dsl::RuntimeDeliveryMachineMutator::apply(
             authority,
             dsl::RuntimeDeliveryInput::AdvanceAcknowledgedPrefix {},
         )
         .map_err(|error| RuntimeDeliveryError::Authority(format!("{error:?}")))?;
-        let advanced = transition
-            .effects()
-            .iter()
-            .filter(|effect| {
-                matches!(
-                    effect,
-                    dsl::RuntimeDeliveryEffect::AcknowledgedPrefixAdvanced {
-                        delivery_sequence
-                    } if *delivery_sequence == next
-                )
-            })
-            .count();
-        if advanced != 1 {
-            return Err(RuntimeDeliveryError::Authority(format!(
-                "generated prefix advance emitted {advanced} matching advances for sequence {next}"
-            )));
+        let mut advanced = 0usize;
+        let mut at_rest = 0usize;
+        for effect in transition.effects() {
+            match effect {
+                dsl::RuntimeDeliveryEffect::AcknowledgedPrefixAdvanced { delivery_sequence }
+                    if cursor.checked_add(1) == Some(*delivery_sequence) =>
+                {
+                    advanced += 1;
+                }
+                dsl::RuntimeDeliveryEffect::AcknowledgedPrefixAtRest { applied_cursor }
+                    if *applied_cursor == cursor =>
+                {
+                    at_rest += 1;
+                }
+                _ => {}
+            }
+        }
+        match (advanced, at_rest) {
+            (1, 0) => {}
+            (0, 1) => return Ok(()),
+            _ => {
+                return Err(RuntimeDeliveryError::Authority(format!(
+                    "generated prefix advance at cursor {cursor} emitted {advanced} advances and {at_rest} at-rest reports"
+                )));
+            }
         }
     }
 }

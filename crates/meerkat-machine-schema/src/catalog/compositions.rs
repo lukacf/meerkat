@@ -3016,7 +3016,9 @@ fn runtime_delivery_cursor_at(cursor: u64) -> CompositionWitnessState {
 
 /// Two committed deliveries acknowledged out of order through every
 /// acknowledgement arm: the second is acknowledged ahead of the cursor and
-/// parked, the first is acknowledged at the cursor, the prefix advance
+/// parked, a prefix advance with nothing parked at the cursor is a typed
+/// no-op (so an advance that ignores containment fails the witness), the
+/// first is acknowledged at the cursor, the prefix advance
 /// carries the cursor over the parked one, and a late acknowledgement of the
 /// first observes it already applied. Witness expectations hold on every
 /// behavior that completes the script, so a guard that lets one
@@ -3025,6 +3027,7 @@ fn runtime_delivery_out_of_order_acknowledgement_witness() -> CompositionWitness
     let mut preload_inputs = runtime_delivery_two_commit_inputs();
     preload_inputs.extend([
         runtime_delivery_ack("AcknowledgeDelivery", "terminal", 2),
+        runtime_delivery_input("AdvanceAcknowledgedPrefix", vec![]),
         runtime_delivery_ack("AcknowledgeDelivery", RUNTIME_DELIVERY_NOTIFICATION_KEY, 1),
         runtime_delivery_input("AdvanceAcknowledgedPrefix", vec![]),
         runtime_delivery_ack("AcknowledgeDelivery", RUNTIME_DELIVERY_NOTIFICATION_KEY, 1),
@@ -3032,6 +3035,7 @@ fn runtime_delivery_out_of_order_acknowledgement_witness() -> CompositionWitness
     let mut expected_transitions = runtime_delivery_two_commit_transitions();
     expected_transitions.extend([
         witness_transition("runtime_delivery", "AcknowledgeAheadOfCursor"),
+        witness_transition("runtime_delivery", "AdvanceAcknowledgedPrefixNothingParked"),
         witness_transition("runtime_delivery", "AcknowledgeNextDelivery"),
         witness_transition("runtime_delivery", "AdvanceOverAcknowledgedDelivery"),
         witness_transition("runtime_delivery", "ObserveAlreadyAppliedAcknowledgement"),
@@ -3047,7 +3051,14 @@ fn runtime_delivery_out_of_order_acknowledgement_witness() -> CompositionWitness
         expected_states: vec![runtime_delivery_cursor_at(2)],
         expected_transitions,
         expected_transition_order: vec![
-            runtime_delivery_order("AcknowledgeAheadOfCursor", "AcknowledgeNextDelivery"),
+            runtime_delivery_order(
+                "AcknowledgeAheadOfCursor",
+                "AdvanceAcknowledgedPrefixNothingParked",
+            ),
+            runtime_delivery_order(
+                "AdvanceAcknowledgedPrefixNothingParked",
+                "AcknowledgeNextDelivery",
+            ),
             runtime_delivery_order("AcknowledgeNextDelivery", "AdvanceOverAcknowledgedDelivery"),
             runtime_delivery_order(
                 "AdvanceOverAcknowledgedDelivery",

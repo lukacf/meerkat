@@ -122,6 +122,14 @@ AdvanceOverAcknowledgedDelivery ==
     /\ UnchangedFrame_364cfd98cff75537
 
 
+AdvanceAcknowledgedPrefixNothingParked ==
+    /\ phase = "Active"
+    /\ (IF (applied_cursor >= next_sequence) THEN TRUE ELSE ~(((applied_cursor + 1) \in acknowledged_sequences)))
+    /\ phase' = "Active"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_bec69f2261ebda40
+
+
 Next ==
     \/ \E delivery_id \in StringValues : \E source_sequence \in 0..2 : CommitNewDelivery(delivery_id, source_sequence)
     \/ \E delivery_id \in StringValues : \E source_sequence \in 0..2 : ReuseCommittedDelivery(delivery_id, source_sequence)
@@ -131,6 +139,7 @@ Next ==
     \/ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : AcknowledgeAheadOfCursor(delivery_id, delivery_sequence)
     \/ \E delivery_id \in StringValues : \E delivery_sequence \in 0..2 : ObserveAlreadyAppliedAcknowledgement(delivery_id, delivery_sequence)
     \/ AdvanceOverAcknowledgedDelivery
+    \/ AdvanceAcknowledgedPrefixNothingParked
 
 applied_cursor_does_not_pass_committed_sequence == (applied_cursor <= next_sequence)
 empty_delivery_set_has_zero_sequence == (IF (Cardinality(delivery_ids) # 0) THEN TRUE ELSE (next_sequence = 0))

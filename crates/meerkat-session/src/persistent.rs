@@ -2521,6 +2521,17 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// Wakes projections parked on a held turn boundary when a channel is
     /// released so they can return `Busy` without waiting for the turn.
     live_projection_release_changed: tokio::sync::Notify,
+    /// Wakes waiters when a live transcript held ahead of the store can stop
+    /// being refused: a runtime turn's boundary commit was acknowledged, a
+    /// full persist landed, or the live actor was synchronized from or
+    /// discarded for durable authority. See
+    /// [`PersistentSessionService::live_authority_advanced`].
+    live_authority_advanced: tokio::sync::Notify,
+    /// Sessions whose live transcript is held ahead of the store by a runtime
+    /// turn that ended with an error: no boundary commit is coming for that
+    /// image until the next turn resyncs it. Cleared whenever live authority
+    /// advances for the session or a new runtime turn starts.
+    live_uncommitted_terminal_sessions: std::sync::Mutex<HashSet<SessionId>>,
     /// Typed faults recorded by detached event-projection tasks that halted on
     /// a durable append failure. Replay reads fail closed on these instead of
     /// serving an event stream with a silent sequence hole.
@@ -5314,6 +5325,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             reason = reason.trace_label(),
             "synchronized live session snapshot from durable realtime authority"
         );
+        self.note_live_authority_advanced(id);
         Ok(())
     }
 
@@ -7155,6 +7167,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if discarded {
             self.checkpointer_gates.lock().await.remove(id);
             self.live_checkpointers.lock().await.remove(id);
+            self.note_live_authority_advanced(id);
         }
         Ok(discarded)
     }
@@ -7165,6 +7178,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let result = self.inner.discard_live_session(id).await;
         self.checkpointer_gates.lock().await.remove(id);
         self.live_checkpointers.lock().await.remove(id);
+        self.note_live_authority_advanced(id);
         result
     }
 
@@ -8541,6 +8555,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             turn_finalization_gates: Mutex::new(HashMap::new()),
             live_projection_released_channels: std::sync::Mutex::new(HashMap::new()),
             live_projection_release_changed: tokio::sync::Notify::new(),
+            live_authority_advanced: tokio::sync::Notify::new(),
+            live_uncommitted_terminal_sessions: std::sync::Mutex::new(HashSet::new()),
             event_projection_faults: Arc::new(Mutex::new(HashMap::new())),
             event_projection_gates: Arc::new(Mutex::new(HashMap::new())),
             event_projection_drains: Arc::new(Mutex::new(HashMap::new())),
@@ -10267,7 +10283,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<(), SessionError> {
         let _projection_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
         self.checkpoint_committed_runtime_session_snapshot_with_recovery_gate(id, session_snapshot)
-            .await
+            .await?;
+        self.note_live_authority_advanced(id);
+        Ok(())
     }
 
     /// Acknowledge one exact store-issued session boundary while the runtime
@@ -10749,7 +10767,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         lease: &LiveSessionActorTurnBoundaryLease,
     ) -> Result<bool, SessionError> {
-        self.inner.discard_live_session_actor(lease.witness()).await
+        let discarded = self
+            .inner
+            .discard_live_session_actor(lease.witness())
+            .await?;
+        if discarded {
+            self.note_live_authority_advanced(lease.witness().session_id());
+        }
+        Ok(discarded)
     }
 
     /// Runtime callback variant for the generated executor contract whose
@@ -10760,7 +10785,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         witness: &LiveSessionActorWitness,
     ) -> Result<bool, SessionError> {
-        self.inner.discard_live_session_actor(witness).await
+        let discarded = self.inner.discard_live_session_actor(witness).await?;
+        if discarded {
+            self.note_live_authority_advanced(witness.session_id());
+        }
+        Ok(discarded)
     }
 
     async fn live_persist_mutation_guard(
@@ -10814,6 +10843,46 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .or_default()
             .insert(channel_id.clone());
         self.live_projection_release_changed.notify_waiters();
+    }
+
+    /// Completes at the next point where a live mutation refused with
+    /// [`SessionError::Busy`] because the live transcript is ahead of the
+    /// store can succeed: a runtime turn's boundary commit was acknowledged,
+    /// a full persist landed, or the live actor was synchronized from or
+    /// discarded for durable authority.
+    ///
+    /// `notify_waiters` keeps no permit. Create and `enable` the future
+    /// before the attempt that may be refused, then await it after the
+    /// refusal, so an advance landing in between is not lost. A wakeup is a
+    /// reason to retry, not a promise the retry succeeds.
+    pub fn live_authority_advanced(&self) -> tokio::sync::futures::Notified<'_> {
+        self.live_authority_advanced.notified()
+    }
+
+    /// Whether the live transcript held ahead of the store belongs to a
+    /// runtime turn that ended with an error. No boundary commit is coming for
+    /// that image until the next runtime turn resyncs it, so a caller refused
+    /// with [`SessionError::Busy`] for a live transcript ahead of the store
+    /// should not wait for one. Becomes `true` together with a
+    /// [`Self::live_authority_advanced`] wakeup.
+    #[must_use]
+    pub fn live_transcript_awaits_no_boundary_commit(&self, id: &SessionId) -> bool {
+        self.live_uncommitted_terminal_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(id)
+    }
+
+    fn note_live_authority_advanced(&self, id: &SessionId) {
+        self.clear_live_uncommitted_terminal(id);
+        self.live_authority_advanced.notify_waiters();
+    }
+
+    fn clear_live_uncommitted_terminal(&self, id: &SessionId) {
+        self.live_uncommitted_terminal_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id);
     }
 
     /// Undo [`Self::release_live_projection_turn_boundary_waiters`] for one
@@ -11353,6 +11422,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 )))
             })? = Some(authority);
         }
+        self.note_live_authority_advanced(id);
         Ok(())
     }
 
@@ -11450,6 +11520,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .map_err(SessionError::Agent)?;
             }
         }
+        self.note_live_authority_advanced(id);
         Ok(())
     }
 
@@ -11469,6 +11540,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 committed_boundary.authority_token.clone(),
             )
             .await?;
+        self.note_live_authority_advanced(id);
         Ok(())
     }
 
@@ -11627,6 +11699,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner
             .discard_uncommitted_boundary_deliveries(id, run_id)
             .await;
+        // No boundary commit is coming for this image: tell waiters refused on
+        // a live transcript ahead of the store, so they stop waiting for one.
+        self.live_uncommitted_terminal_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.clone());
+        self.live_authority_advanced.notify_waiters();
     }
 
     async fn apply_runtime_turn_with_recoverable_reserved_admission_inner(
@@ -11651,6 +11730,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .discard_stale_live_session_if_needed(id)
             .await
             .map_err(|error| (error, None))?;
+        // A new runtime turn owns the live image from here; its boundary
+        // commit may be coming again.
+        self.clear_live_uncommitted_terminal(id);
         let execution = self
             .inner
             .start_runtime_turn_execution_with_admission_recovering_not_found(id, req, admission)
@@ -11761,6 +11843,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _turn_guard = recovery_gate.lock().await;
         let _ = self.discard_stale_live_session_if_needed(id).await?;
+        // A new runtime turn owns the live image from here; its boundary
+        // commit may be coming again.
+        self.clear_live_uncommitted_terminal(id);
         let execution = match admission {
             Some(admission) => self
                 .inner
@@ -15260,6 +15345,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         "failed to digest persisted transcript for checkpoint seed: {err}"
                     )))
                 })?;
+                self.note_live_authority_advanced(id);
                 Ok((message_count, revision))
             }
             RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
@@ -29486,6 +29572,220 @@ mod tests {
                 .expect("live-session status should succeed"),
             "read() must not discard the live handle that owns mechanical capabilities"
         );
+    }
+
+    /// A runtime-backed session whose live actor holds a runtime turn the
+    /// store has not committed: the live transcript is ahead of the store.
+    async fn session_with_live_transcript_ahead_of_store()
+    -> (PersistentSessionService<DummyBuilder>, SessionId) {
+        let (service, id, _runtime_store, _output) =
+            session_with_live_transcript_ahead_of_store_and_output().await;
+        (service, id)
+    }
+
+    async fn session_with_live_transcript_ahead_of_store_and_output() -> (
+        PersistentSessionService<DummyBuilder>,
+        SessionId,
+        Arc<InMemoryRuntimeStore>,
+        CoreApplyOutput,
+    ) {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let output = service
+            .apply_runtime_turn(
+                &created.session_id,
+                RunId::new(),
+                runtime_content_turn_request("turn whose commit has not landed"),
+                RunApplyBoundary::Immediate,
+                vec![InputId::new()],
+            )
+            .await
+            .expect("runtime apply builds output without committing authority");
+        (service, created.session_id, runtime_store, output)
+    }
+
+    #[tokio::test]
+    async fn close_settlement_refused_ahead_of_the_store_retries_when_the_turn_commit_lands() {
+        let (service, id, runtime_store, output) =
+            session_with_live_transcript_ahead_of_store_and_output().await;
+        let channel = meerkat_core::LiveChannelId::new("settle-after-commit");
+        let advanced = service.live_authority_advanced();
+        tokio::pin!(advanced);
+        advanced.as_mut().enable();
+        assert!(matches!(
+            service
+                .resolve_live_assistant_playback_on_channel_close_within(
+                    &id,
+                    channel.clone(),
+                    std::time::Duration::from_secs(5),
+                )
+                .await,
+            Err(SessionError::Busy { .. })
+        ));
+        assert!(
+            !service.live_transcript_awaits_no_boundary_commit(&id),
+            "a turn whose commit is pending still has a boundary commit coming"
+        );
+        assert!(futures::poll!(advanced.as_mut()).is_pending());
+
+        machine_commit_runtime_output(&service, runtime_store.as_ref(), &id, &output)
+            .await
+            .expect("commit and acknowledge the runtime turn's boundary");
+        assert!(
+            futures::poll!(advanced.as_mut()).is_ready(),
+            "the acknowledged boundary commit advances live authority"
+        );
+        service
+            .resolve_live_assistant_playback_on_channel_close_within(
+                &id,
+                channel,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect("the retry after the commit lands settles");
+    }
+
+    #[tokio::test]
+    async fn an_errored_runtime_turn_marks_that_no_boundary_commit_is_coming() {
+        let (service, id) = session_with_live_transcript_ahead_of_store().await;
+        let advanced = service.live_authority_advanced();
+        tokio::pin!(advanced);
+        advanced.as_mut().enable();
+        assert!(!service.live_transcript_awaits_no_boundary_commit(&id));
+
+        service
+            .apply_runtime_turn(
+                &id,
+                RunId::new(),
+                start_turn_request(""),
+                RunApplyBoundary::RunStart,
+                vec![InputId::new()],
+            )
+            .await
+            .expect_err("a runtime turn without an execution kind ends with an error");
+        assert!(
+            futures::poll!(advanced.as_mut()).is_ready(),
+            "the errored turn wakes waiters"
+        );
+        assert!(
+            service.live_transcript_awaits_no_boundary_commit(&id),
+            "no boundary commit is coming for the errored turn's live image"
+        );
+        assert!(matches!(
+            service
+                .resolve_live_assistant_playback_on_channel_close_within(
+                    &id,
+                    meerkat_core::LiveChannelId::new("settle-after-error"),
+                    std::time::Duration::from_secs(5),
+                )
+                .await,
+            Err(SessionError::Busy { .. })
+        ));
+
+        service
+            .discard_live_session(&id)
+            .await
+            .expect("discard the stale live actor");
+        assert!(
+            !service.live_transcript_awaits_no_boundary_commit(&id),
+            "discarding the live image clears the marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_settlement_refused_ahead_of_the_store_retries_when_the_live_actor_is_discarded()
+    {
+        let (service, id) = session_with_live_transcript_ahead_of_store().await;
+        let channel = meerkat_core::LiveChannelId::new("settle-after-discard");
+        let advanced = service.live_authority_advanced();
+        tokio::pin!(advanced);
+        advanced.as_mut().enable();
+
+        let refused = service
+            .resolve_live_assistant_playback_on_channel_close_within(
+                &id,
+                channel.clone(),
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(SessionError::Busy { .. })),
+            "a live transcript ahead of the store refuses close settlement: {refused:?}"
+        );
+        assert!(
+            futures::poll!(advanced.as_mut()).is_pending(),
+            "nothing advanced live authority yet"
+        );
+
+        service
+            .discard_live_session(&id)
+            .await
+            .expect("discard the live actor");
+        assert!(
+            futures::poll!(advanced.as_mut()).is_ready(),
+            "discarding the live actor advances live authority"
+        );
+        // With the actor gone there is no live playback row left to settle:
+        // the retry is no longer refused, and the deferred settlement resolves
+        // its deferral on this outcome.
+        let retried = service
+            .resolve_live_assistant_playback_on_channel_close_within(
+                &id,
+                channel,
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+        assert!(
+            !matches!(retried, Err(SessionError::Busy { .. })),
+            "the retry after the advance is not refused: {retried:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_settlement_refused_ahead_of_the_store_retries_when_the_live_session_persists() {
+        let (service, id) = session_with_live_transcript_ahead_of_store().await;
+        let channel = meerkat_core::LiveChannelId::new("settle-after-persist");
+        let advanced = service.live_authority_advanced();
+        tokio::pin!(advanced);
+        advanced.as_mut().enable();
+        assert!(matches!(
+            service
+                .resolve_live_assistant_playback_on_channel_close_within(
+                    &id,
+                    channel.clone(),
+                    std::time::Duration::from_secs(5),
+                )
+                .await,
+            Err(SessionError::Busy { .. })
+        ));
+
+        service
+            .persist_live_session_now(&id)
+            .await
+            .expect("persist the live session");
+        assert!(
+            futures::poll!(advanced.as_mut()).is_ready(),
+            "a full persist advances live authority"
+        );
+        service
+            .resolve_live_assistant_playback_on_channel_close_within(
+                &id,
+                channel,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect("the retry after the persist settles");
     }
 
     #[tokio::test]

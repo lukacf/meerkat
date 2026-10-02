@@ -288,8 +288,6 @@ async fn host_login(
                 redirect_uri: start.redirect_uri.clone(),
                 state: outcome.state,
                 code: outcome.code,
-                client_id: start.client_id.clone(),
-                resource_metadata_url: Some(start.resource_metadata_url.clone()),
             },
         )
         .await?;

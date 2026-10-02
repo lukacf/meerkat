@@ -546,16 +546,14 @@ export interface LoginCompleteParamsProviderLoginTarget {
   realm_id: string;
 }
 
-export interface LoginCompleteParamsMcpLoginCompleteTarget {
+export interface LoginCompleteParamsMcpLoginTarget {
   code: string;
   redirect_uri: string;
   state: string;
-  client_id: string;
   mcp: WireMcpAuthTarget;
-  resource_metadata_url?: string | null;
 }
 
-export type LoginCompleteParams = LoginCompleteParamsProviderLoginTarget | LoginCompleteParamsMcpLoginCompleteTarget;
+export type LoginCompleteParams = LoginCompleteParamsProviderLoginTarget | LoginCompleteParamsMcpLoginTarget;
 
 export interface LoginStartParamsProviderLoginTarget {
   redirect_uri: string;
@@ -594,6 +592,16 @@ export interface WireAuthStatusResultMcpAuthStatus {
 }
 
 export type WireAuthStatusResult = WireAuthStatusResultAuthStatusDetail | WireAuthStatusResultMcpAuthStatus;
+
+export interface LoginCancelParams {
+  mcp: WireMcpAuthTarget;
+  state: string;
+}
+
+export interface WireLoginCancelled {
+  cancelled: boolean;
+  mcp: WireMcpAuthTarget;
+}
 
 export interface ActivateInstructionParams {
   activation: Record<string, unknown>;
@@ -6055,10 +6063,8 @@ export interface WireLoginStartMcpLoginStart {
   authorize_url: string;
   redirect_uri: string;
   state: string;
-  client_id: string;
   disposition: "started" | "joined";
   mcp: WireMcpAuthTarget;
-  resource_metadata_url: string;
 }
 
 export type WireLoginStart = WireLoginStartProviderLoginStart | WireLoginStartMcpLoginStart;

@@ -226,37 +226,14 @@ pub struct LoginStartParams {
     pub redirect_uri: String,
 }
 
-/// Completion target for `auth/login/complete`. The MCP arm echoes the
-/// public `client_id` and `resource_metadata_url` returned by
-/// `auth/login/start`; completion re-validates both against the admitted
-/// attempt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(untagged)]
-#[cfg_attr(feature = "schema", schemars(transform = untagged_target_one_of))]
-pub enum WireLoginCompleteTarget {
-    Provider(WireProviderLoginTarget),
-    Mcp(WireMcpLoginCompleteTarget),
-}
-
-/// MCP arm of [`WireLoginCompleteTarget`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct WireMcpLoginCompleteTarget {
-    pub mcp: WireMcpAuthTarget,
-    pub client_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource_metadata_url: Option<String>,
-}
-
-/// Request payload for `auth/login/complete`. `Debug` redacts `code` and
-/// `state`.
+/// Request payload for `auth/login/complete`. For an MCP target, issuer,
+/// client and resource come from the admitted attempt named by `state`;
+/// nothing else is echoed. `Debug` redacts `code` and `state`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LoginCompleteParams {
     #[serde(flatten)]
-    pub target: WireLoginCompleteTarget,
+    pub target: WireLoginTarget,
     pub code: String,
     pub state: String,
     pub redirect_uri: String,
@@ -271,6 +248,33 @@ impl std::fmt::Debug for LoginCompleteParams {
             .field("redirect_uri", &self.redirect_uri)
             .finish()
     }
+}
+
+/// Request payload for `auth/login/cancel`: retire the pending MCP attempt
+/// admitted under `state` for this configured server. `Debug` redacts `state`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct LoginCancelParams {
+    pub mcp: WireMcpAuthTarget,
+    pub state: String,
+}
+
+impl std::fmt::Debug for LoginCancelParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginCancelParams")
+            .field("mcp", &self.mcp)
+            .field("state", &"<redacted>")
+            .finish()
+    }
+}
+
+/// `auth/login/cancel` success body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireLoginCancelled {
+    pub mcp: WireMcpAuthTarget,
+    pub cancelled: bool,
 }
 
 /// Request payload for `auth/status/get`: a provider binding (the original
@@ -636,15 +640,14 @@ pub struct WireProviderLoginStart {
     pub provider: WireOAuthProvider,
 }
 
-/// MCP arm of [`WireLoginStartTarget`]: the public values to echo on
-/// `auth/login/complete`.
+/// MCP arm of [`WireLoginStartTarget`]. A joined start returns the pending
+/// attempt's authorize URL and state: wire callers are host-privileged by
+/// contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct WireMcpLoginStart {
     pub mcp: WireMcpAuthTarget,
-    pub client_id: String,
-    pub resource_metadata_url: String,
     pub disposition: WireMcpLoginDisposition,
 }
 
@@ -843,6 +846,36 @@ pub enum WireAuthStatusResult {
 /// member selects the MCP arm, anything else the provider/binding arm. Each
 /// arm then reports its own precise errors (`missing field ...`,
 /// `unknown field ...`) instead of serde's generic untagged mismatch.
+/// `auth/status/get` params: selected by the presence of `mcp`, like the
+/// login targets. The binding arm keeps tolerating unrelated extra fields (as
+/// `BindingIdParams` always has), but a case-variant `mcp` key is refused so a
+/// misspelled MCP target cannot fall back to a binding status.
+impl<'de> Deserialize<'de> for AuthStatusParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let Some(object) = value.as_object() else {
+            return Err(D::Error::custom("auth/status/get params must be an object"));
+        };
+        if object.contains_key("mcp") {
+            return serde_json::from_value(value)
+                .map(Self::Mcp)
+                .map_err(D::Error::custom);
+        }
+        if let Some(misspelled) = object.keys().find(|key| key.eq_ignore_ascii_case("mcp")) {
+            return Err(D::Error::custom(format!(
+                "unknown field `{misspelled}`, expected `mcp`"
+            )));
+        }
+        serde_json::from_value(value)
+            .map(Self::Binding)
+            .map_err(D::Error::custom)
+    }
+}
+
 macro_rules! target_by_mcp_member {
     ($name:ident, $mcp:ident, $other:ident) => {
         impl<'de> Deserialize<'de> for $name {
@@ -867,8 +900,6 @@ macro_rules! target_by_mcp_member {
 }
 
 target_by_mcp_member!(WireLoginTarget, Mcp, Provider);
-target_by_mcp_member!(WireLoginCompleteTarget, Mcp, Provider);
-target_by_mcp_member!(AuthStatusParams, Mcp, Binding);
 target_by_mcp_member!(WireLoginStartTarget, Mcp, Provider);
 target_by_mcp_member!(WireLoginReadyTarget, Mcp, Provider);
 target_by_mcp_member!(WireAuthStatusResult, Mcp, Binding);

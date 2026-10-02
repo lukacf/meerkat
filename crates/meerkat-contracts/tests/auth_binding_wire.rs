@@ -300,10 +300,9 @@ mod schema_emission {
 
 mod mcp_login_target {
     use meerkat_contracts::{
-        AuthStatusParams, LoginCompleteParams, LoginStartParams, WireLoginCompleteTarget,
-        WireLoginReady, WireLoginReadyTarget, WireLoginStart, WireLoginStartTarget,
-        WireLoginTarget, WireMcpAuthTarget, WireMcpLoginReady, WireMcpLoginStart,
-        WireOAuthProvider,
+        AuthStatusParams, LoginCancelParams, LoginCompleteParams, LoginStartParams, WireLoginReady,
+        WireLoginReadyTarget, WireLoginStart, WireLoginStartTarget, WireLoginTarget,
+        WireMcpAuthTarget, WireMcpLoginReady, WireMcpLoginStart, WireOAuthProvider,
     };
     use serde_json::json;
 
@@ -332,10 +331,7 @@ mod mcp_login_target {
             "profile_id": "p",
         }))
         .unwrap();
-        assert!(matches!(
-            complete.target,
-            WireLoginCompleteTarget::Provider(_)
-        ));
+        assert!(matches!(complete.target, WireLoginTarget::Provider(_)));
     }
 
     #[test]
@@ -380,14 +376,12 @@ mod mcp_login_target {
 
         let complete: LoginCompleteParams = serde_json::from_value(json!({
             "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
-            "client_id": "client-123",
-            "resource_metadata_url": "https://glean.example/.well-known/oauth-protected-resource/mcp",
             "code": "fixture-code",
             "state": "fixture-state",
             "redirect_uri": "http://127.0.0.1:1/mcp/oauth/callback",
         }))
         .unwrap();
-        assert!(matches!(complete.target, WireLoginCompleteTarget::Mcp(_)));
+        assert!(matches!(complete.target, WireLoginTarget::Mcp(_)));
 
         let status: AuthStatusParams = serde_json::from_value(json!({
             "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
@@ -403,7 +397,6 @@ mod mcp_login_target {
     fn login_debug_redacts_bearer_material() {
         let complete: LoginCompleteParams = serde_json::from_value(json!({
             "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
-            "client_id": "client-123",
             "code": "code-canary",
             "state": "state-canary",
             "redirect_uri": "http://127.0.0.1:1/mcp/oauth/callback",
@@ -419,8 +412,6 @@ mod mcp_login_target {
                     server_url: "https://glean.example/mcp".into(),
                     oauth_account: None,
                 },
-                client_id: "client-123".into(),
-                resource_metadata_url: "https://glean.example/.well-known/x".into(),
                 disposition: meerkat_contracts::WireMcpLoginDisposition::Joined,
             }),
         };
@@ -452,5 +443,69 @@ mod mcp_login_target {
         assert!(value.get("provider").is_none());
         let back: WireLoginReady = serde_json::from_value(value).unwrap();
         assert!(matches!(back.target, WireLoginReadyTarget::Mcp(_)));
+    }
+
+    #[test]
+    fn completion_refuses_echoed_discovery_or_client_fields() {
+        for echoed in [
+            json!({"resource_metadata_url": "http://169.254.169.254/latest/meta-data"}),
+            json!({"client_id": "attacker-client"}),
+        ] {
+            let mut body = json!({
+                "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
+                "code": "c",
+                "state": "s",
+                "redirect_uri": "http://127.0.0.1:1/mcp/oauth/callback",
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(echoed.as_object().unwrap().clone());
+            assert!(
+                serde_json::from_value::<LoginCompleteParams>(body).is_err(),
+                "completion must not accept caller-supplied discovery or client data"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_or_misspelled_mcp_targets_never_fall_back() {
+        for bad in [
+            json!({"mcp": null, "redirect_uri": "http://127.0.0.1:1/cb"}),
+            json!({"mcp": {}, "redirect_uri": "http://127.0.0.1:1/cb"}),
+            json!({"MCP": {"server_name": "g", "server_url": "u"}, "redirect_uri": "http://127.0.0.1:1/cb"}),
+            json!({}),
+        ] {
+            assert!(
+                serde_json::from_value::<LoginStartParams>(bad.clone()).is_err(),
+                "must be refused: {bad}"
+            );
+        }
+        for bad in [
+            json!({"realm_id": "dev", "binding_id": "b", "MCP": {"server_name": "g"}}),
+            json!({"mcp": null}),
+        ] {
+            assert!(
+                serde_json::from_value::<AuthStatusParams>(bad.clone()).is_err(),
+                "must be refused: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn cancel_params_are_strict_and_redact_state() {
+        let cancel: LoginCancelParams = serde_json::from_value(json!({
+            "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
+            "state": "state-canary",
+        }))
+        .unwrap();
+        assert!(!format!("{cancel:?}").contains("state-canary"));
+        assert!(
+            serde_json::from_value::<LoginCancelParams>(json!({
+                "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
+                "state": "s",
+                "code": "c",
+            }))
+            .is_err()
+        );
     }
 }

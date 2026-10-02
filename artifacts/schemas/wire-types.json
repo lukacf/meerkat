@@ -156393,6 +156393,49 @@
     ],
     "title": "WireLiveTransportBootstrap"
   },
+  "WireLoginCancelled": {
+    "$defs": {
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`auth/login/cancel` success body.",
+    "properties": {
+      "cancelled": {
+        "type": "boolean"
+      },
+      "mcp": {
+        "$ref": "#/$defs/WireMcpAuthTarget"
+      }
+    },
+    "required": [
+      "mcp",
+      "cancelled"
+    ],
+    "title": "WireLoginCancelled",
+    "type": "object"
+  },
   "WireLoginReady": {
     "$defs": {
       "BindingId": {
@@ -156588,25 +156631,17 @@
       },
       "WireMcpLoginStart": {
         "additionalProperties": false,
-        "description": "MCP arm of [`WireLoginStartTarget`]: the public values to echo on\n`auth/login/complete`.",
+        "description": "MCP arm of [`WireLoginStartTarget`]. A joined start returns the pending\nattempt's authorize URL and state: wire callers are host-privileged by\ncontract.",
         "properties": {
-          "client_id": {
-            "type": "string"
-          },
           "disposition": {
             "$ref": "#/$defs/WireMcpLoginDisposition"
           },
           "mcp": {
             "$ref": "#/$defs/WireMcpAuthTarget"
-          },
-          "resource_metadata_url": {
-            "type": "string"
           }
         },
         "required": [
           "mcp",
-          "client_id",
-          "resource_metadata_url",
           "disposition"
         ],
         "type": "object"

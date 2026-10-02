@@ -273,17 +273,21 @@ ask its user.
   callback binding and the attempt. Opening the browser is advisory: a
   failed launch never retries or cancels the attempt, which ends only by
   completion, cancel or expiry.
-- **RPC and REST hosts** use the existing `auth/login/start`,
-  `auth/login/complete` and (RPC) `auth/status/get` methods with an MCP
-  target instead of a provider binding:
+- **RPC and REST hosts** use `auth/login/start`, `auth/login/complete`,
+  `auth/login/cancel` and (RPC) `auth/status/get` with an MCP target instead
+  of a provider binding:
 
   ```json
   {"mcp": {"server_name": "remote-oauth", "server_url": "https://mcp.example.com/api", "oauth_account": "subject-id"},
    "redirect_uri": "http://127.0.0.1:53682/mcp/oauth/callback"}
   ```
 
-  Completion echoes the `client_id` and `resource_metadata_url` returned by
-  start, together with the callback's `code` and `state`. The server must be
+  `redirect_uri` must be an http loopback URL. Completion sends only the
+  callback's `code` and `state` (and the same `redirect_uri`): issuer, client
+  and resource come from the admitted attempt, and nothing network-facing
+  happens until `state` is proven. Cancel takes `{mcp, state}`. A joined start
+  returns the pending attempt's URL and state, because wire callers are
+  host-privileged by contract. The server must be
   configured (project or user `mcp.toml` of the host): `server_url` must equal
   its configured URL and `oauth_account`, if given, its configured account.
   Anything else is refused before any network request.

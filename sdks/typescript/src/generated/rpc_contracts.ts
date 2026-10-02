@@ -95,6 +95,7 @@ import type {
   LiveTruncateResult,
   LiveWebrtcAnswerParams,
   LiveWebrtcAnswerResult,
+  LoginCancelParams,
   LoginCompleteParams,
   LoginStartParams,
   McpAddParams,
@@ -262,6 +263,7 @@ import type {
   WireAuthStatusResult,
   WireDeviceCompleteResult,
   WireDeviceStart,
+  WireLoginCancelled,
   WireLoginReady,
   WireLoginStart,
   WireProvisionApiKeyResult,
@@ -502,6 +504,10 @@ export interface RpcMethodContracts {
   "auth/login/complete": {
     params: LoginCompleteParams;
     result: (WireLoginReady) & Record<string, unknown>;
+  };
+  "auth/login/cancel": {
+    params: LoginCancelParams;
+    result: (WireLoginCancelled) & Record<string, unknown>;
   };
   "auth/login/device_start": {
     params: DeviceStartParams;

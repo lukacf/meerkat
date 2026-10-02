@@ -172,6 +172,7 @@ export const AUTH_RPC_METHODS = {
   profileDelete: "auth/profile/delete",
   loginStart: "auth/login/start",
   loginComplete: "auth/login/complete",
+  loginCancel: "auth/login/cancel",
   loginDeviceStart: "auth/login/device_start",
   loginDeviceComplete: "auth/login/device_complete",
   loginProvisionApiKey: "auth/login/provision_api_key",
@@ -230,14 +231,17 @@ export interface ProviderLoginCompleteParams extends BindingIdParams {
 
 export interface McpLoginCompleteParams {
   mcp: WireMcpAuthTarget;
-  client_id: string;
-  resource_metadata_url?: string | null;
   code: string;
   state: string;
   redirect_uri: string;
 }
 
 export type LoginCompleteParams = ProviderLoginCompleteParams | McpLoginCompleteParams;
+
+export interface LoginCancelParams {
+  mcp: WireMcpAuthTarget;
+  state: string;
+}
 
 export interface DeviceStartParams extends BindingIdParams {
   provider: WireOAuthProvider;
@@ -327,8 +331,6 @@ export interface WireMcpLoginStart {
   state: string;
   redirect_uri: string;
   mcp: WireMcpAuthTarget;
-  client_id: string;
-  resource_metadata_url: string;
   disposition: 'started' | 'joined';
 }
 
@@ -352,6 +354,11 @@ export interface WireMcpLoginReady {
 }
 
 export type WireLoginReady = WireProviderLoginReady | WireMcpLoginReady;
+
+export interface WireLoginCancelled {
+  mcp: WireMcpAuthTarget;
+  cancelled: boolean;
+}
 
 export type WireMcpAuthPhase = 'authorized' | 'reauth_required' | 'authorization_required';
 
@@ -719,8 +726,6 @@ export function parseWireLoginStart(value: unknown, path = 'login_start'): WireL
   expectString(record.redirect_uri, `${path}.redirect_uri`);
   if (hasOwn(record, 'mcp')) {
     parseWireMcpAuthTarget(record.mcp, `${path}.mcp`);
-    expectString(record.client_id, `${path}.client_id`);
-    expectString(record.resource_metadata_url, `${path}.resource_metadata_url`);
     parseLiteral(record.disposition, ['started', 'joined'], `${path}.disposition`, 'MCP login disposition');
     return value as WireMcpLoginStart;
   }
@@ -756,6 +761,20 @@ export function parseWireLoginReady(value: unknown, path = 'login_ready'): WireL
   expectBoolean(record.has_refresh_token, `${path}.has_refresh_token`);
   expectStringArray(record.scopes, `${path}.scopes`);
   return value as WireMcpLoginReady;
+}
+
+export function parseLoginCancelParams(params: LoginCancelParams): LoginCancelParams {
+  const record = expectRecord(params, 'login_cancel.params');
+  parseWireMcpAuthTarget(record.mcp, 'login_cancel.params.mcp');
+  expectString(record.state, 'login_cancel.params.state');
+  return params;
+}
+
+export function parseWireLoginCancelled(value: unknown, path = 'login_cancelled'): WireLoginCancelled {
+  const record = expectRecord(value, path);
+  parseWireMcpAuthTarget(record.mcp, `${path}.mcp`);
+  expectBoolean(record.cancelled, `${path}.cancelled`);
+  return value as WireLoginCancelled;
 }
 
 export function parseWireMcpAuthStatus(value: unknown, path = 'mcp_auth_status'): WireMcpAuthStatus {
@@ -936,8 +955,6 @@ export function parseLoginCompleteParams(params: LoginCompleteParams): LoginComp
   if (hasOwn(record, 'mcp')) {
     rejectProviderTargetFields(record, 'login_complete.params');
     parseWireMcpAuthTarget(record.mcp, 'login_complete.params.mcp');
-    expectString(record.client_id, 'login_complete.params.client_id');
-    optionalString(record, 'resource_metadata_url', 'login_complete.params.resource_metadata_url');
     return params;
   }
   parseWireOAuthProvider(record.provider, 'login_complete.params.provider');

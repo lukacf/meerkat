@@ -396,7 +396,13 @@ pub mod session_runtime;
 // Explicitly-featured deterministic test fixtures (ADJ-P6B-4). Native-only:
 // the scripted realtime fakes park on tokio sync primitives the wasm alias
 // does not expose, and no wasm lane consumes them.
-#[cfg(all(feature = "test-realtime-fixtures", not(target_arch = "wasm32")))]
+#[cfg(all(
+    any(
+        feature = "test-realtime-fixtures",
+        feature = "test-mcp-oauth-fixtures"
+    ),
+    not(target_arch = "wasm32")
+))]
 pub mod test_fixtures;
 
 // Session service

@@ -412,6 +412,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "WireLoginReady",
         ),
         RpcMethodDescriptor::typed(
+            "auth/login/cancel",
+            "Retire a pending MCP OAuth attempt by its state",
+            "LoginCancelParams",
+            "WireLoginCancelled",
+        ),
+        RpcMethodDescriptor::typed(
             "auth/login/device_start",
             "Begin a device-code OAuth login; returns user-code + verification URL",
             "DeviceStartParams",
@@ -1528,6 +1534,7 @@ mod tests {
             ("auth/profile/delete", "WireAuthProfileCleared"),
             ("auth/login/start", "WireLoginStart"),
             ("auth/login/complete", "WireLoginReady"),
+            ("auth/login/cancel", "WireLoginCancelled"),
             ("auth/login/device_start", "WireDeviceStart"),
             ("auth/status/get", "WireAuthStatusResult"),
             ("auth/logout", "WireAuthProfileCleared"),
@@ -1579,6 +1586,11 @@ mod tests {
                 "auth/login/complete",
                 Some("LoginCompleteParams"),
                 Some("WireLoginReady"),
+            ),
+            (
+                "auth/login/cancel",
+                Some("LoginCancelParams"),
+                Some("WireLoginCancelled"),
             ),
             (
                 "auth/login/device_start",

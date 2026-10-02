@@ -27,6 +27,10 @@
 //!
 //! Login start, callback and completion types redact these values in `Debug`;
 //! completion projections are secret-free.
+//!
+//! Wire callers (RPC, REST) are host-privileged by contract: a start that
+//! joins an attempt already pending for the same configured server returns
+//! that attempt's authorize URL and state to the caller.
 
 use chrono::{DateTime, Utc};
 use meerkat_core::connection::{WriteOwnerError, resolve_write_owner};
@@ -345,10 +349,12 @@ impl HostAuthService {
     /// The native MCP OAuth authority bound to this service's persistence,
     /// AuthMachine lease and flow owner. Use it as the factory's
     /// `McpAuthResolver` so agent connections share the host's credentials.
+    ///
+    /// It uses its own HTTP client, which follows no redirects, rather than
+    /// [`Self::with_http_client`]'s.
     pub fn mcp_oauth_authority(&self) -> Result<McpOAuthAuthority, HostAuthError> {
-        Ok(McpOAuthAuthority::with_http(
+        Ok(McpOAuthAuthority::new(
             self.persistence.clone(),
-            self.http.clone(),
             self.authority.generated_auth_lease_handle(),
         )
         .with_interactive_strategy(
@@ -411,6 +417,16 @@ impl HostAuthService {
         start: &McpOAuthLoginStart,
     ) -> Result<(), HostAuthError> {
         Ok(self.mcp_oauth_authority()?.login_cancel(target, start)?)
+    }
+
+    /// Typed cancel by `state` for hosts without a start projection (wire
+    /// callers): retire the attempt admitted under `state` for `target`.
+    pub fn mcp_login_cancel_by_state(
+        &self,
+        target: &McpServerIdentity,
+        state: &str,
+    ) -> Result<(), HostAuthError> {
+        Ok(self.mcp_oauth_authority()?.cancel_attempt(target, state)?)
     }
 
     /// Secret-free authorization status of one MCP target, projected from

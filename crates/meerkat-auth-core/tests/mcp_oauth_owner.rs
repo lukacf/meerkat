@@ -96,8 +96,6 @@ async fn host_login(
                 redirect_uri: start.redirect_uri,
                 state: outcome.state,
                 code: outcome.code,
-                client_id: start.client_id,
-                resource_metadata_url: Some(start.resource_metadata_url),
             },
         )
         .await?;
@@ -306,6 +304,9 @@ struct TestState {
     userinfo_sub: Mutex<Option<String>>,
     omit_userinfo_endpoint: Mutex<bool>,
     userinfo_endpoint_override: Mutex<Option<String>>,
+    request_paths: Mutex<Vec<String>>,
+    redirect_authorization_metadata: AtomicBool,
+    redirect_token: AtomicBool,
     userinfo_requests: Mutex<Vec<Option<String>>>,
     pause_refresh: AtomicBool,
     refresh_started: Notify,
@@ -492,6 +493,11 @@ async fn spawn_oauth_fixture() -> (String, Arc<TestState>) {
             get(openid_configuration),
         )
         .route("/userinfo", get(userinfo))
+        .route("/redirected", get(redirected).post(redirected))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            record_request,
+        ))
         .with_state(Arc::clone(&state));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -499,6 +505,22 @@ async fn spawn_oauth_fixture() -> (String, Arc<TestState>) {
         axum::serve(listener, app).await.unwrap();
     });
     (format!("http://{addr}"), state)
+}
+
+async fn record_request(
+    State(state): State<Arc<TestState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    state
+        .request_paths
+        .lock()
+        .push(request.uri().path().to_owned());
+    next.run(request).await
+}
+
+async fn redirected() -> impl IntoResponse {
+    (StatusCode::OK, "redirect target must never be reached")
 }
 
 async fn mcp_endpoint(headers: HeaderMap) -> impl IntoResponse {
@@ -547,7 +569,10 @@ async fn protected_resource(
 async fn authorization_metadata(
     State(state): State<Arc<TestState>>,
     headers: HeaderMap,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if state.redirect_authorization_metadata.load(Ordering::SeqCst) {
+        return Redirect::temporary("/redirected").into_response();
+    }
     let host = headers
         .get("host")
         .and_then(|value| value.to_str().ok())
@@ -566,7 +591,7 @@ async fn authorization_metadata(
     if *state.include_registration_endpoint.lock() {
         body["registration_endpoint"] = serde_json::json!("/register");
     }
-    Json(body)
+    Json(body).into_response()
 }
 
 async fn register_client(
@@ -623,6 +648,9 @@ async fn token(
         .token_requests
         .lock()
         .push(serde_json::to_value(&body).unwrap());
+    if state.redirect_token.load(Ordering::SeqCst) {
+        return Redirect::temporary("/redirected").into_response();
+    }
     if body.get("grant_type").map(String::as_str) == Some("refresh_token")
         && state.pause_refresh.load(Ordering::SeqCst)
     {
@@ -2675,7 +2703,7 @@ fn split_authority(state: &Arc<TestState>, store: Arc<EphemeralTokenStore>) -> F
     FixtureAuthority::with_test_http(
         store,
         recording_browser(Arc::clone(state)),
-        Client::new(),
+        no_redirect_client(),
         test_auth_lease(),
     )
 }
@@ -2691,8 +2719,6 @@ fn split_callback(start: &McpOAuthLoginStart, state: &str) -> McpOAuthCallback {
         redirect_uri: start.redirect_uri.clone(),
         state: state.to_owned(),
         code: "fixture-code".to_owned(),
-        client_id: start.client_id.clone(),
-        resource_metadata_url: Some(start.resource_metadata_url.clone()),
     }
 }
 
@@ -2709,7 +2735,6 @@ async fn split_start_is_host_only_and_completion_summary_is_secret_free() {
         .expect("admission succeeds");
     assert_eq!(start.target, target);
     assert_eq!(start.redirect_uri, SPLIT_REDIRECT);
-    assert_eq!(start.client_id, "client-123");
     assert!(
         start
             .authorize_url
@@ -2847,13 +2872,10 @@ async fn split_completion_refuses_substituted_echo_before_exchange() {
         .await
         .unwrap();
 
-    let mut other_client = split_callback(&start, &start.state);
-    other_client.client_id = "attacker-client".to_owned();
     let mut other_redirect = split_callback(&start, &start.state);
     other_redirect.redirect_uri = "http://127.0.0.1:10/mcp/oauth/callback".to_owned();
     let other_target = split_target(&base, "some-other-server");
     for (target, callback) in [
-        (&target, other_client),
         (&target, other_redirect),
         (&other_target, split_callback(&start, &start.state)),
     ] {
@@ -2877,13 +2899,18 @@ async fn split_completion_refuses_issuer_drift_after_start() {
         .login_start(&target, SPLIT_REDIRECT, None)
         .await
         .unwrap();
-    *state.resource_override.lock() = Some(format!("{base}/other"));
+    *state.issuer_override.lock() = Some(format!("{base}/drifted"));
     let drifted = authority
         .login_complete(&target, split_callback(&start, &start.state))
         .await;
-    assert!(drifted.is_err(), "rediscovered drift must be refused");
+    assert!(
+        matches!(drifted, Err(McpOAuthError::DiscoveryFailed { .. })),
+        "issuer drift must be refused, got {drifted:?}"
+    );
     assert!(state.token_requests.lock().is_empty());
     assert!(store.list().await.unwrap().is_empty());
+    *state.issuer_override.lock() = None;
+    assert_attempt_retired(&authority, &target, &start).await;
 }
 
 #[tokio::test]
@@ -3067,7 +3094,6 @@ async fn split_second_start_joins_the_pending_attempt() {
     assert_eq!(joined.state, first.state);
     assert_eq!(joined.authorize_url, first.authorize_url);
     assert_eq!(joined.redirect_uri, first.redirect_uri);
-    assert_eq!(joined.client_id, first.client_id);
     assert_eq!(
         state.registration_requests.lock().len(),
         1,
@@ -3270,4 +3296,305 @@ async fn oidc_userinfo_endpoint_must_be_https_or_loopback_from_issuer_metadata()
         "the bearer token is never sent to a non-loopback http endpoint"
     );
     assert!(store.list().await.unwrap().is_empty());
+}
+
+// --- Review fixes: state first, retirement on every failure, drop guard ---
+
+fn no_redirect_client() -> Client {
+    Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+}
+
+/// A retired attempt cannot complete, even with the right callback.
+async fn assert_attempt_retired(
+    authority: &McpOAuthAuthority,
+    target: &McpServerIdentity,
+    start: &McpOAuthLoginStart,
+) {
+    assert!(
+        matches!(
+            authority
+                .login_complete(target, split_callback(start, &start.state))
+                .await,
+            Err(McpOAuthError::Flow(_))
+        ),
+        "the failed completion must have retired the attempt"
+    );
+}
+
+#[tokio::test]
+async fn completion_with_unknown_state_makes_no_network_call() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "no-network");
+    let start = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    let before = state.request_paths.lock().len();
+    let forged = authority
+        .login_complete(&target, split_callback(&start, "forged-state"))
+        .await;
+    assert!(
+        matches!(forged, Err(McpOAuthError::Flow(_))),
+        "got {forged:?}"
+    );
+    assert_eq!(
+        state.request_paths.lock().len(),
+        before,
+        "an unproven state must cause no network request at all"
+    );
+}
+
+#[tokio::test]
+async fn completion_fetches_only_the_recorded_issuer_metadata() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = split_authority(&state, store.clone());
+    let target = split_target(&base, "issuer-only");
+    let start = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    state.request_paths.lock().clear();
+    authority
+        .login_complete(&target, split_callback(&start, &start.state))
+        .await
+        .unwrap();
+    let paths = state.request_paths.lock().clone();
+    assert_eq!(
+        paths,
+        vec![
+            "/.well-known/oauth-authorization-server".to_owned(),
+            "/token".to_owned()
+        ],
+        "completion takes the issuer, resource and client from the admitted attempt"
+    );
+}
+
+#[tokio::test]
+async fn every_completion_failure_stage_retires_the_attempt() {
+    // Redirect mismatch (owner verification).
+    {
+        let (base, state) = spawn_oauth_fixture().await;
+        let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+        let target = split_target(&base, "fail-verify");
+        let start = authority
+            .login_start(&target, SPLIT_REDIRECT, None)
+            .await
+            .unwrap();
+        let mut wrong = split_callback(&start, &start.state);
+        wrong.redirect_uri = "http://127.0.0.1:10/mcp/oauth/callback".to_owned();
+        assert!(authority.login_complete(&target, wrong).await.is_err());
+        assert_attempt_retired(&authority, &target, &start).await;
+    }
+    // Authorization-server metadata unavailable.
+    {
+        let (base, state) = spawn_oauth_fixture().await;
+        let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+        let target = split_target(&base, "fail-discovery");
+        let start = authority
+            .login_start(&target, SPLIT_REDIRECT, None)
+            .await
+            .unwrap();
+        state
+            .redirect_authorization_metadata
+            .store(true, Ordering::SeqCst);
+        assert!(matches!(
+            authority
+                .login_complete(&target, split_callback(&start, &start.state))
+                .await,
+            Err(McpOAuthError::DiscoveryFailed { .. })
+        ));
+        state
+            .redirect_authorization_metadata
+            .store(false, Ordering::SeqCst);
+        assert_attempt_retired(&authority, &target, &start).await;
+    }
+    // Token exchange failure.
+    {
+        let (base, state) = spawn_oauth_fixture().await;
+        let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+        let target = split_target(&base, "fail-exchange");
+        let start = authority
+            .login_start(&target, SPLIT_REDIRECT, None)
+            .await
+            .unwrap();
+        *state.token_fails.lock() = true;
+        assert!(matches!(
+            authority
+                .login_complete(&target, split_callback(&start, &start.state))
+                .await,
+            Err(McpOAuthError::TokenExchangeFailed { .. })
+        ));
+        *state.token_fails.lock() = false;
+        assert_attempt_retired(&authority, &target, &start).await;
+    }
+    // Persistence failure in the commit.
+    {
+        let (base, state) = spawn_oauth_fixture().await;
+        let store = Arc::new(FailNextSaveStore {
+            inner: Arc::new(EphemeralTokenStore::new()),
+            fail_next_save: AtomicBool::new(true),
+        });
+        let authority = FixtureAuthority::with_fixture_http(
+            ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
+            recording_browser(Arc::clone(&state)),
+            no_redirect_client(),
+            test_auth_lease(),
+        );
+        let target = split_target(&base, "fail-persist");
+        let start = authority
+            .login_start(&target, SPLIT_REDIRECT, None)
+            .await
+            .unwrap();
+        assert!(
+            authority
+                .login_complete(&target, split_callback(&start, &start.state))
+                .await
+                .is_err()
+        );
+        assert_attempt_retired(&authority, &target, &start).await;
+    }
+}
+
+#[tokio::test]
+async fn dropping_complete_mid_wait_retires_binding_and_attempt() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "drop-mid-wait");
+    let McpOAuthLoopbackBegin::Started(pending) =
+        authority.begin_loopback_login(&target, None).await.unwrap()
+    else {
+        panic!("first loopback login admits the attempt");
+    };
+    let start = pending.start().clone();
+    let waiting = tokio::spawn(pending.complete(MCP_INTERACTIVE_LOGIN_TIMEOUT));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while Client::new()
+        .get(format!(
+            "{}?code=x&state={}",
+            start.redirect_uri, start.state
+        ))
+        .send()
+        .await
+        .is_ok()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the callback binding was not retired"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_attempt_retired(&authority, &target, &start).await;
+}
+
+#[tokio::test]
+async fn concurrent_starts_admit_one_attempt_with_one_registration() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "concurrent");
+    let (a, b) = tokio::join!(
+        authority.login_start(&target, SPLIT_REDIRECT, None),
+        authority.login_start(&target, "http://127.0.0.1:10/mcp/oauth/callback", None)
+    );
+    let (a, b) = (a.unwrap(), b.unwrap());
+    let mut dispositions = [a.disposition, b.disposition];
+    dispositions.sort_by_key(|d| *d == McpOAuthLoginDisposition::Joined);
+    assert_eq!(
+        dispositions,
+        [
+            McpOAuthLoginDisposition::Started,
+            McpOAuthLoginDisposition::Joined
+        ]
+    );
+    assert_eq!(a.state, b.state);
+    assert_eq!(state.registration_requests.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn redirects_from_discovery_and_token_endpoints_are_refused() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    state
+        .redirect_authorization_metadata
+        .store(true, Ordering::SeqCst);
+    assert!(matches!(
+        authority
+            .login_start(
+                &split_target(&base, "redirect-discovery"),
+                SPLIT_REDIRECT,
+                None
+            )
+            .await,
+        Err(McpOAuthError::DiscoveryFailed { .. })
+    ));
+    state
+        .redirect_authorization_metadata
+        .store(false, Ordering::SeqCst);
+
+    let target = split_target(&base, "redirect-token");
+    let start = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    state.redirect_token.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        authority
+            .login_complete(&target, split_callback(&start, &start.state))
+            .await,
+        Err(McpOAuthError::TokenExchangeFailed { .. })
+    ));
+    assert!(
+        !state
+            .request_paths
+            .lock()
+            .iter()
+            .any(|path| path == "/redirected"),
+        "no redirect may be followed"
+    );
+}
+
+#[tokio::test]
+async fn non_loopback_redirect_is_refused_before_any_network() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    for redirect in [
+        "https://app.example/callback",
+        "http://192.0.2.1:8080/callback",
+        "not a url",
+    ] {
+        assert!(matches!(
+            authority
+                .login_start(&split_target(&base, "bad-redirect"), redirect, None)
+                .await,
+            Err(McpOAuthError::Verification(
+                ConnectorOAuthRefusal::InvalidDescriptor
+            ))
+        ));
+    }
+    assert!(state.request_paths.lock().is_empty());
+}
+
+#[tokio::test]
+async fn wire_style_cancel_by_state_retires_the_attempt() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "cancel-by-state");
+    let start = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        authority.cancel_attempt(&target, "unknown-state"),
+        Err(McpOAuthError::Flow(_))
+    ));
+    authority.cancel_attempt(&target, &start.state).unwrap();
+    assert_attempt_retired(&authority, &target, &start).await;
 }

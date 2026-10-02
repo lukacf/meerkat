@@ -26,6 +26,7 @@ import {
   parseCreateProfileParams,
   parseDeviceCompleteParams,
   parseDeviceStartParams,
+  parseLoginCancelParams,
   parseLoginCompleteParams,
   parseLoginStartParams,
   parseProvisionApiKeyParams,
@@ -36,6 +37,7 @@ import {
   parseWireAuthStatusDetail,
   parseWireDeviceCompleteResult,
   parseWireDeviceStart,
+  parseWireLoginCancelled,
   parseWireLoginReady,
   parseWireLoginStart,
   parseWireMcpAuthStatus,
@@ -47,6 +49,7 @@ import type {
   CreateProfileParams,
   DeviceCompleteParams,
   DeviceStartParams,
+  LoginCancelParams,
   LoginCompleteParams,
   LoginStartParams,
   ProvisionApiKeyParams,
@@ -64,6 +67,7 @@ import type {
   WireBindingIdentity,
   WireDeviceCompleteResult,
   WireDeviceStart,
+  WireLoginCancelled,
   WireLoginReady,
   WireLoginStart,
   WireMcpAuthStatus,
@@ -73,7 +77,9 @@ import type {
 import type { AuthBindingRef, SessionConfig } from './types.js';
 
 export type {
+  LoginCancelParams,
   McpLoginCompleteParams,
+  WireLoginCancelled,
   McpLoginStartParams,
   WireMcpAuthPhase,
   WireMcpAuthStatus,
@@ -255,6 +261,15 @@ export class Auth {
       parseLoginCompleteParams(params),
     );
     return parseWireLoginReady(result);
+  }
+
+  /** Retire a pending MCP OAuth attempt by its `state`. */
+  async loginCancel(params: LoginCancelParams): Promise<WireLoginCancelled> {
+    const result = await this.transport.request<LoginCancelParams, WireLoginCancelled>(
+      AUTH_RPC_METHODS.loginCancel,
+      parseLoginCancelParams(params),
+    );
+    return parseWireLoginCancelled(result);
   }
 
   /** Start a device-code flow for keyboardless hosts. */

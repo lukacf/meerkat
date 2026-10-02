@@ -418,16 +418,58 @@ pub enum McpOAuthBrowserLaunch {
     Failed,
 }
 
+/// Open `url` in the system browser without logging it.
+///
+/// The URL is passed as one process argument (no shell) to the platform
+/// opener (`open`, `xdg-open`, or `rundll32 url.dll,FileProtocolHandler`),
+/// whose output is discarded. Nothing here logs the command line, so the
+/// authorize URL and state never reach `log` or `tracing` records.
+pub fn open_system_browser(url: &str) -> std::io::Result<()> {
+    use std::process::{Command, Stdio};
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("rundll32");
+        command.arg("url.dll,FileProtocolHandler").arg(url);
+        command
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    let status = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "browser opener exited unsuccessfully",
+        ))
+    }
+}
+
 /// One admitted host loopback login: the attempt and its callback binding.
 ///
-/// [`complete`](Self::complete) waits for the callback and finishes the
-/// login; [`cancel`](Self::cancel) retires the callback binding and the flow
-/// attempt through their owners. Dropping it does the same without waiting
-/// for the listener to drain.
+/// It stays armed until the login completed or was explicitly cancelled:
+/// dropping an armed pending login, including the future of an unfinished
+/// [`complete`](Self::complete), retires the callback binding and the flow
+/// attempt through their owners. [`cancel`](Self::cancel) does the same and
+/// awaits the listener's drain.
 pub struct McpOAuthPendingLogin {
     authority: McpOAuthAuthority,
     start: McpOAuthLoginStart,
     callback: Option<LoopbackHandle>,
+    armed: bool,
 }
 
 impl McpOAuthPendingLogin {
@@ -450,13 +492,15 @@ impl McpOAuthPendingLogin {
         }
     }
 
-    /// [`launch_browser`](Self::launch_browser) with the system browser.
+    /// [`launch_browser`](Self::launch_browser) with
+    /// [`open_system_browser`].
     pub async fn launch_system_browser(&self) -> McpOAuthBrowserLaunch {
-        self.launch_browser(|url| webbrowser::open(&url)).await
+        self.launch_browser(|url| open_system_browser(&url)).await
     }
 
-    /// Wait for the loopback callback within `timeout`, then complete the
-    /// login. A timeout or callback failure retires the attempt.
+    /// Wait for the loopback callback, bounded by both `timeout` and the
+    /// admitted attempt's own expiry, then complete the login. Every failure
+    /// retires the attempt; so does dropping this future before it finishes.
     pub async fn complete(
         mut self,
         timeout: Duration,
@@ -465,39 +509,44 @@ impl McpOAuthPendingLogin {
         let Some(callback) = self.callback.take() else {
             return Err(McpOAuthError::HumanAuthorizationRequired { server_name });
         };
-        let outcome = match callback.wait(timeout).await {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                let _ = self.authority.login_cancel(&self.start.target, &self.start);
-                return Err(McpOAuthError::TokenExchangeFailed {
-                    server_name,
-                    reason: match error {
-                        crate::auth_oauth::OAuthError::Timeout => {
-                            "timeout waiting for the authorization callback".into()
-                        }
-                        other => other.to_string(),
-                    },
-                });
-            }
-        };
+        // `self` stays armed across both awaits. If this future is dropped,
+        // the wait future drops the callback handle (retiring the binding)
+        // and `Drop` retires the attempt.
+        let window = timeout.min(self.start.remaining());
+        let outcome = callback
+            .wait(window)
+            .await
+            .map_err(|error| McpOAuthError::Callback {
+                server_name,
+                reason: match error {
+                    crate::auth_oauth::OAuthError::Timeout => {
+                        "timeout waiting for the authorization callback".into()
+                    }
+                    other => other.to_string(),
+                },
+            })?;
         let start = self.start.clone();
-        self.authority
+        let completed = self
+            .authority
             .login_complete(
                 &start.target,
                 McpOAuthCallback {
                     redirect_uri: start.redirect_uri.clone(),
                     state: outcome.state,
                     code: outcome.code,
-                    client_id: start.client_id.clone(),
-                    resource_metadata_url: Some(start.resource_metadata_url.clone()),
                 },
             )
-            .await
+            .await;
+        // `login_complete` consumed the attempt on success and retired it on
+        // every failure.
+        self.armed = false;
+        completed
     }
 
     /// Typed cancel: retire the callback binding (awaiting its drain) and
     /// the admitted attempt through its flow owner.
     pub async fn cancel(mut self) -> Result<(), McpOAuthError> {
+        self.armed = false;
         if let Some(callback) = self.callback.take() {
             let _ = callback.cancel().await;
         }
@@ -507,9 +556,9 @@ impl McpOAuthPendingLogin {
 
 impl Drop for McpOAuthPendingLogin {
     fn drop(&mut self) {
-        if let Some(callback) = self.callback.take() {
+        if self.armed {
             // Dropping the handle signals the listener to terminate.
-            drop(callback);
+            drop(self.callback.take());
             let _ = self.authority.login_cancel(&self.start.target, &self.start);
         }
     }
@@ -528,17 +577,22 @@ pub struct McpOAuthLoginStart {
     pub authorize_url: String,
     pub state: String,
     pub redirect_uri: String,
-    /// Public registered client identifier, echoed back on completion.
-    pub client_id: String,
-    /// Non-secret discovery hint, echoed back on completion. Completion
-    /// re-validates everything it finds against the admitted attempt.
-    pub resource_metadata_url: String,
     /// Whether this call admitted the attempt or joined one already pending
     /// for the target.
     pub disposition: McpOAuthLoginDisposition,
     /// Admitted attempt identity, constructible only by `login_start`, used
     /// to retire an abandoned attempt through its flow owner.
     identity: OAuthBrowserFlowIdentity,
+    /// When the admitted attempt expires.
+    expires_at: std::time::Instant,
+}
+
+impl McpOAuthLoginStart {
+    /// Time left before the admitted attempt expires.
+    pub fn remaining(&self) -> Duration {
+        self.expires_at
+            .saturating_duration_since(std::time::Instant::now())
+    }
 }
 
 /// How [`McpOAuthAuthority::login_start`] produced its projection.
@@ -563,16 +617,14 @@ impl std::fmt::Debug for McpOAuthLoginStart {
     }
 }
 
-/// The host's loopback callback for [`McpOAuthAuthority::login_complete`].
-/// `redirect_uri`, `client_id` and `resource_metadata_url` are the values
-/// returned by `login_start`; `state` and `code` come from the callback.
+/// The host's loopback callback for [`McpOAuthAuthority::login_complete`]:
+/// the `redirect_uri` returned by `login_start`, and the callback's `state`
+/// and `code`. Everything else is taken from the admitted attempt.
 #[derive(Clone, PartialEq, Eq)]
 pub struct McpOAuthCallback {
     pub redirect_uri: String,
     pub state: String,
     pub code: String,
-    pub client_id: String,
-    pub resource_metadata_url: Option<String>,
 }
 
 impl std::fmt::Debug for McpOAuthCallback {
@@ -581,8 +633,40 @@ impl std::fmt::Debug for McpOAuthCallback {
             .field("redirect_uri", &self.redirect_uri)
             .field("state", &"<redacted>")
             .field("code", &"<redacted>")
-            .finish_non_exhaustive()
+            .finish()
     }
+}
+
+/// Retires an admitted attempt through its flow owner unless disarmed: every
+/// non-success exit from `login_complete` passes through its `Drop`.
+struct AttemptRetireGuard {
+    authority: Arc<dyn OAuthFlowAuthority>,
+    state: String,
+    target: meerkat_core::AuthCredentialIdentity,
+    identity: OAuthBrowserFlowIdentity,
+    redirect_uri: String,
+    armed: bool,
+}
+
+impl Drop for AttemptRetireGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.authority.expire(
+                &self.state,
+                &self.target,
+                self.identity.clone(),
+                &self.redirect_uri,
+            );
+        }
+    }
+}
+
+/// Authorization-server endpoints validated for one issuer.
+struct AuthorizationServerEndpoints {
+    authorization_metadata_url: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    registration_endpoint: String,
 }
 
 /// Secret-free result of a completed MCP OAuth login.
@@ -616,6 +700,9 @@ pub enum McpOAuthError {
     /// this refusal never carries an authorize URL, state or code.
     #[error("MCP server '{server_name}' is awaiting human authorization")]
     HumanAuthorizationRequired { server_name: String },
+    /// The host's loopback callback could not be bound, failed, or timed out.
+    #[error("MCP OAuth callback failed for '{server_name}': {reason}")]
+    Callback { server_name: String, reason: String },
     #[error("MCP OAuth discovery failed for '{server_name}': {reason}")]
     DiscoveryFailed { server_name: String, reason: String },
     #[error("MCP OAuth dynamic client registration failed for '{server_name}': {reason}")]
@@ -652,7 +739,8 @@ impl McpOAuthError {
             | Self::HumanAuthorizationRequired { .. }
             | Self::ReauthRequired { .. }
             | Self::TokenKey { .. } => true,
-            Self::DiscoveryFailed { .. }
+            Self::Callback { .. }
+            | Self::DiscoveryFailed { .. }
             | Self::RegistrationFailed { .. }
             | Self::TokenExchangeFailed { .. }
             | Self::RefreshFailed { .. }
@@ -681,13 +769,17 @@ pub struct McpOAuthAuthority {
 }
 
 impl McpOAuthAuthority {
+    /// The default HTTP client follows no redirects: metadata, client
+    /// registration and token requests go only to validated endpoints.
     pub fn new(
         provider_auth_persistence: ProviderAuthPersistence,
         auth_lease: GeneratedAuthLeaseHandle,
     ) -> Self {
-        Self::with_http(provider_auth_persistence, Client::new(), auth_lease)
+        Self::with_http(provider_auth_persistence, no_redirect_client(), auth_lease)
     }
 
+    /// `http` must not follow redirects (reqwest `redirect::Policy::none()`);
+    /// a redirect answer to discovery or registration is refused.
     pub fn with_http(
         provider_auth_persistence: ProviderAuthPersistence,
         http: Client,
@@ -818,13 +910,17 @@ impl McpOAuthAuthority {
     /// Admit one host-driven browser attempt for `target`.
     ///
     /// The host owns the loopback listener and the browser: it binds the
-    /// callback (for example with [`crate::auth_oauth::bind_loopback_callback`]),
-    /// passes the redirect URI here, opens the returned authorize URL in a
+    /// callback (for example with [`Self::begin_loopback_login`]), passes the
+    /// loopback redirect URI here, opens the returned authorize URL in a
     /// browser context that no agent-drivable tool can observe or control, and
     /// feeds the callback to [`Self::login_complete`]. This method performs
     /// discovery, dynamic client registration and the account strategy's
     /// descriptor, then admits PKCE/state through the AuthMachine-owned flow
     /// authority. It opens no listener and launches no browser.
+    ///
+    /// Start-or-join is serialized per target: while an attempt is pending
+    /// for the target, its projection is returned with
+    /// [`McpOAuthLoginDisposition::Joined`] and no second attempt is admitted.
     pub async fn login_start(
         &self,
         target: &McpServerIdentity,
@@ -839,8 +935,10 @@ impl McpOAuthAuthority {
             .interactive
             .as_ref()
             .ok_or(ConnectorOAuthRefusal::VerificationUnavailable)?;
+        require_loopback_redirect(redirect_uri)?;
         let credential_identity: meerkat_core::AuthCredentialIdentity =
             target.auth_binding_ref()?.into();
+        let _admission = acquire_admission_lock(target.binding_slug()).await;
         if let Some((state, record)) = authority
             .pending_connector_browser_attempt(&credential_identity)
             .map_err(McpOAuthError::Flow)?
@@ -848,7 +946,7 @@ impl McpOAuthAuthority {
             // `None`: the pending attempt no longer matches the server and
             // could never complete; it was retired, so admit a fresh one.
             if let Some(joined) = self
-                .join_pending_attempt(target, expected_account, www_authenticate, &state, record)
+                .join_pending_attempt(target, expected_account, &state, record)
                 .await?
             {
                 return Ok(joined);
@@ -893,6 +991,7 @@ impl McpOAuthAuthority {
                 pkce.verifier.secret().to_owned(),
             )
             .map_err(McpOAuthError::Flow)?;
+        let expires_at = std::time::Instant::now() + MCP_INTERACTIVE_LOGIN_TIMEOUT;
         let authorize_url = mcp_oauth_endpoints(&discovery, &client)
             .authorize_url_with_pkce(&pkce.challenge, &state);
         Ok(McpOAuthLoginStart {
@@ -900,21 +999,20 @@ impl McpOAuthAuthority {
             authorize_url,
             state,
             redirect_uri: redirect_uri.to_owned(),
-            client_id: client.client_id,
-            resource_metadata_url: discovery.resource_metadata_url,
             disposition: McpOAuthLoginDisposition::Started,
             identity,
+            expires_at,
         })
     }
 
-    /// Re-project the attempt already pending for `target`. Discovery is
-    /// repeated (no client registration) and must still match the admitted
-    /// descriptor; a stale attempt is retired and `None` returned.
+    /// Re-project the attempt already pending for `target` from its admitted
+    /// descriptor. Only the recorded issuer's authorization-server metadata
+    /// is fetched (no client registration). A stale attempt is retired and
+    /// `None` returned.
     async fn join_pending_attempt(
         &self,
         target: &McpServerIdentity,
         expected_account: &str,
-        www_authenticate: Option<&str>,
         state: &str,
         record: crate::oauth_flow::OAuthFlowRecord,
     ) -> Result<Option<McpOAuthLoginStart>, McpOAuthError> {
@@ -922,14 +1020,7 @@ impl McpOAuthAuthority {
             return Ok(None);
         };
         let facts = connector.parameters();
-        let mut discovery = self
-            .discover(target, www_authenticate, &record.redirect_uri)
-            .await?;
-        if facts.expected_account != expected_account
-            || facts.issuer != discovery.authorization_server
-            || facts.resource != discovery.resource
-            || facts.redirect_uri != record.redirect_uri
-        {
+        if facts.expected_account != expected_account || facts.resource != target.server_url() {
             if let Some((authority, _)) = self.interactive.as_ref() {
                 let _ = authority.expire(
                     state,
@@ -940,7 +1031,10 @@ impl McpOAuthAuthority {
             }
             return Ok(None);
         }
-        discovery.scopes = facts.scopes.iter().cloned().collect();
+        let endpoints = self
+            .discover_authorization_server(target, &facts.issuer)
+            .await?;
+        let discovery = completion_discovery(target, facts, endpoints)?;
         let client = StoredMcpOAuthClient {
             client_id: facts.client.clone(),
             client_secret: None,
@@ -955,10 +1049,9 @@ impl McpOAuthAuthority {
             authorize_url,
             state: state.to_owned(),
             redirect_uri: record.redirect_uri,
-            client_id: client.client_id,
-            resource_metadata_url: discovery.resource_metadata_url,
             disposition: McpOAuthLoginDisposition::Joined,
             identity: record.provider,
+            expires_at: record.created_at + MCP_INTERACTIVE_LOGIN_TIMEOUT,
         }))
     }
 
@@ -972,7 +1065,7 @@ impl McpOAuthAuthority {
     ) -> Result<McpOAuthLoopbackBegin, McpOAuthError> {
         let binding = bind_loopback_callback(MCP_OAUTH_CALLBACK_PATH)
             .await
-            .map_err(|_| McpOAuthError::TokenExchangeFailed {
+            .map_err(|_| McpOAuthError::Callback {
                 server_name: target.server_name().to_owned(),
                 reason: "loopback callback listener could not be bound".into(),
             })?;
@@ -995,19 +1088,22 @@ impl McpOAuthAuthority {
             authority: self.clone(),
             start,
             callback: Some(callback),
+            armed: true,
         }))
     }
 
     /// Complete one admitted attempt from the host's loopback callback.
     ///
-    /// The flow owner's admitted attempt is the trust anchor. Discovery is
-    /// repeated, the account strategy rebuilds the exact descriptor from it
-    /// and the echoed public client id, and the flow owner verifies that the
-    /// rebuilt descriptor, state and redirect equal the admitted attempt
-    /// before any token request. The exchange uses the PKCE verifier retained
-    /// by the flow owner. Account verification, persistence and AuthMachine
-    /// publication are the existing canonical commit. A failed completion
-    /// retires the attempt; a consumed attempt cannot be replayed.
+    /// Before any network I/O, the flow owner must name a live attempt
+    /// admitted under `state` for this exact target, and verify it against
+    /// the callback's redirect URI. Issuer, client, resource and scopes then
+    /// come only from that admitted descriptor; the only network fetch before
+    /// the token exchange is the recorded issuer's authorization-server
+    /// metadata (whose issuer must still match). The exchange uses the PKCE
+    /// verifier retained by the flow owner. Account verification,
+    /// persistence and AuthMachine publication are the existing canonical
+    /// commit. Every non-success exit retires the attempt; a consumed attempt
+    /// cannot be replayed.
     pub async fn login_complete(
         &self,
         target: &McpServerIdentity,
@@ -1022,84 +1118,84 @@ impl McpOAuthAuthority {
             redirect_uri,
             state,
             code,
-            client_id,
-            resource_metadata_url,
         } = callback;
         let credential_identity: meerkat_core::AuthCredentialIdentity =
             target.auth_binding_ref()?.into();
-        let mut discovery = self
-            .rediscover_for_completion(target, resource_metadata_url.as_deref(), &redirect_uri)
-            .await?;
-        let descriptor = strategy.descriptor(
-            target,
-            &McpOAuthCeremonyContext {
-                issuer: &discovery.authorization_server,
-                client: &client_id,
-                resource: &discovery.resource,
-                redirect_uri: &redirect_uri,
-            },
-        )?;
-        let identity: OAuthBrowserFlowIdentity = descriptor.clone().into();
+        let admitted = authority
+            .admitted_connector_browser_attempt(&state, &credential_identity)
+            .map_err(McpOAuthError::Flow)?
+            .ok_or(McpOAuthError::Flow(OAuthFlowError::Missing))?;
+        let mut retire = AttemptRetireGuard {
+            authority: Arc::clone(authority),
+            state: state.clone(),
+            target: credential_identity.clone(),
+            identity: admitted.provider.clone(),
+            redirect_uri: admitted.redirect_uri.clone(),
+            armed: true,
+        };
         let record = authority
             .verify(
                 &state,
                 &credential_identity,
-                identity.clone(),
+                admitted.provider.clone(),
                 &redirect_uri,
             )
             .map_err(McpOAuthError::Flow)?;
-        let completed = async {
-            let facts = descriptor.parameters();
-            if target.expected_account() != Some(facts.expected_account.as_str()) {
-                return Err(ConnectorOAuthRefusal::AccountMismatch.into());
-            }
-            if facts.issuer != discovery.authorization_server
-                || facts.client != client_id
-                || facts.resource != discovery.resource
-                || facts.redirect_uri != redirect_uri
-            {
-                return Err(McpOAuthError::Verification(
-                    ConnectorOAuthRefusal::DescriptorMismatch,
-                ));
-            }
-            discovery.scopes = facts.scopes.iter().cloned().collect();
-            let client = StoredMcpOAuthClient {
-                client_id: client_id.clone(),
-                client_secret: None,
-                token_endpoint_auth_method: "none".to_owned(),
-                redirect_uri: redirect_uri.clone(),
-            };
-            let token = exchange_authorization_code_with_state(
-                &self.http,
-                &mcp_oauth_endpoints(&discovery, &client),
-                &code,
-                &record.pkce_verifier,
-                None,
-                Some(&state),
-            )
-            .await
-            .map_err(|_| McpOAuthError::TokenExchangeFailed {
-                server_name: target.server_name().to_owned(),
-                reason: "authorization-code exchange failed".into(),
-            })?;
-            let evidence = descriptor
-                .verify_account(strategy.observe_account(&descriptor, &token).await?, &token)?;
-            let mut persisted =
-                persisted_tokens_from_result(&token, &discovery, &client, target, Utc::now())?;
-            persisted.account_id = Some(evidence.account().to_owned());
-            persisted.scopes = evidence.granted_scopes().iter().cloned().collect();
-            Ok((persisted, evidence))
-        }
-        .await;
-        let (persisted, evidence) = match completed {
-            Ok(completed) => completed,
-            Err(error) => {
-                // The authorization response cannot be reused once exchange or
-                // verification failed; retire the exact attempt now.
-                let _ = authority.expire(&state, &credential_identity, identity, &redirect_uri);
-                return Err(error);
-            }
+        let OAuthBrowserFlowIdentity::Connector { connector } = &record.provider else {
+            return Err(McpOAuthError::Flow(OAuthFlowError::BrowserIdentityMismatch));
         };
+        let facts = connector.parameters();
+        if target.expected_account() != Some(facts.expected_account.as_str()) {
+            return Err(ConnectorOAuthRefusal::AccountMismatch.into());
+        }
+        if facts.resource != target.server_url() {
+            return Err(McpOAuthError::Verification(
+                ConnectorOAuthRefusal::DescriptorMismatch,
+            ));
+        }
+        let descriptor = strategy.descriptor(
+            target,
+            &McpOAuthCeremonyContext {
+                issuer: &facts.issuer,
+                client: &facts.client,
+                resource: &facts.resource,
+                redirect_uri: &facts.redirect_uri,
+            },
+        )?;
+        if descriptor != **connector {
+            return Err(McpOAuthError::Verification(
+                ConnectorOAuthRefusal::DescriptorMismatch,
+            ));
+        }
+        let endpoints = self
+            .discover_authorization_server(target, &facts.issuer)
+            .await?;
+        let discovery = completion_discovery(target, facts, endpoints)?;
+        let client = StoredMcpOAuthClient {
+            client_id: facts.client.clone(),
+            client_secret: None,
+            token_endpoint_auth_method: "none".to_owned(),
+            redirect_uri: record.redirect_uri.clone(),
+        };
+        let token = exchange_authorization_code_with_state(
+            &self.http,
+            &mcp_oauth_endpoints(&discovery, &client),
+            &code,
+            &record.pkce_verifier,
+            None,
+            Some(&state),
+        )
+        .await
+        .map_err(|_| McpOAuthError::TokenExchangeFailed {
+            server_name: target.server_name().to_owned(),
+            reason: "authorization-code exchange failed".into(),
+        })?;
+        let evidence = descriptor
+            .verify_account(strategy.observe_account(&descriptor, &token).await?, &token)?;
+        let mut persisted =
+            persisted_tokens_from_result(&token, &discovery, &client, target, Utc::now())?;
+        persisted.account_id = Some(evidence.account().to_owned());
+        persisted.scopes = evidence.granted_scopes().iter().cloned().collect();
         let committed = save_oauth_tokens_and_consume_browser_flow(
             self.provider_auth_persistence.clone(),
             self.auth_lease.clone(),
@@ -1109,11 +1205,13 @@ impl McpOAuthAuthority {
                 authority: authority.clone(),
                 state,
                 completion: evidence.into(),
-                redirect_uri,
+                redirect_uri: record.redirect_uri.clone(),
             },
         )
         .await
         .map_err(|error| map_coordinated_login_error(target, error))?;
+        // The commit consumed the attempt.
+        retire.armed = false;
         if committed.primary_secret.is_none() {
             return Err(McpOAuthError::AuthLifecycle {
                 server_name: target.server_name().to_owned(),
@@ -1151,18 +1249,32 @@ impl McpOAuthAuthority {
             .map_err(McpOAuthError::Flow)
     }
 
-    /// Rebuild discovery for completion. The caller compares the result with
-    /// the flow owner's admitted descriptor before any token request.
-    async fn rediscover_for_completion(
+    /// Typed cancel by `state` for hosts that keep no start projection (for
+    /// example wire callers): retire the attempt admitted under `state` for
+    /// this exact target. Local only; an unknown state is refused.
+    pub fn cancel_attempt(
         &self,
         target: &McpServerIdentity,
-        resource_metadata_url: Option<&str>,
-        redirect_uri: &str,
-    ) -> Result<StoredMcpOAuthDiscovery, McpOAuthError> {
-        let challenge = resource_metadata_url
-            .map(|url| format!("Bearer resource_metadata=\"{}\"", url.replace('"', "")));
-        self.discover(target, challenge.as_deref(), redirect_uri)
-            .await
+        state: &str,
+    ) -> Result<(), McpOAuthError> {
+        let (authority, _) = self
+            .interactive
+            .as_ref()
+            .ok_or(ConnectorOAuthRefusal::VerificationUnavailable)?;
+        let credential_identity: meerkat_core::AuthCredentialIdentity =
+            target.auth_binding_ref()?.into();
+        let record = authority
+            .admitted_connector_browser_attempt(state, &credential_identity)
+            .map_err(McpOAuthError::Flow)?
+            .ok_or(McpOAuthError::Flow(OAuthFlowError::Missing))?;
+        authority
+            .expire(
+                state,
+                &credential_identity,
+                record.provider,
+                &record.redirect_uri,
+            )
+            .map_err(McpOAuthError::Flow)
     }
 
     /// Load one durable MCP credential through its marker, AuthMachine
@@ -1636,10 +1748,10 @@ impl McpOAuthAuthority {
                 server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             })?
-            .error_for_status()
+            .error_for_status_refusing_redirects()
             .map_err(|error| McpOAuthError::DiscoveryFailed {
                 server_name: target.server_name().to_string(),
-                reason: error.to_string(),
+                reason: error,
             })?
             .json()
             .await
@@ -1665,6 +1777,30 @@ impl McpOAuthAuthority {
                 server_name: target.server_name().to_string(),
                 reason: "protected resource metadata has no authorization_servers".to_string(),
             })?;
+        let endpoints = self
+            .discover_authorization_server(target, &auth_server)
+            .await?;
+        Ok(StoredMcpOAuthDiscovery {
+            resource: resource.resource,
+            resource_metadata_url,
+            authorization_server: auth_server,
+            authorization_metadata_url: endpoints.authorization_metadata_url,
+            authorization_endpoint: endpoints.authorization_endpoint,
+            token_endpoint: endpoints.token_endpoint,
+            registration_endpoint: endpoints.registration_endpoint,
+            scopes: Vec::new(),
+        })
+    }
+
+    /// Fetch and validate the authorization-server metadata of `auth_server`
+    /// (RFC 8414): exact issuer match, PKCE S256, and https (or loopback)
+    /// endpoints. Redirects are refused.
+    async fn discover_authorization_server(
+        &self,
+        target: &McpServerIdentity,
+        auth_server: &str,
+    ) -> Result<AuthorizationServerEndpoints, McpOAuthError> {
+        let auth_server = auth_server.to_owned();
         require_https_or_loopback(target, &auth_server, "authorization server issuer")?;
         let authorization_metadata_url = authorization_server_metadata_url(&auth_server)?;
         let auth: AuthorizationServerMetadata = self
@@ -1676,10 +1812,10 @@ impl McpOAuthAuthority {
                 server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             })?
-            .error_for_status()
+            .error_for_status_refusing_redirects()
             .map_err(|error| McpOAuthError::DiscoveryFailed {
                 server_name: target.server_name().to_string(),
-                reason: error.to_string(),
+                reason: error,
             })?
             .json()
             .await
@@ -1736,15 +1872,11 @@ impl McpOAuthAuthority {
         require_https_or_loopback(target, &authorization_endpoint, "authorization endpoint")?;
         require_https_or_loopback(target, &token_endpoint, "token endpoint")?;
         require_https_or_loopback(target, &registration_endpoint, "registration endpoint")?;
-        Ok(StoredMcpOAuthDiscovery {
-            resource: resource.resource,
-            resource_metadata_url,
-            authorization_server: auth_server,
+        Ok(AuthorizationServerEndpoints {
             authorization_metadata_url,
             authorization_endpoint,
             token_endpoint,
             registration_endpoint,
-            scopes: Vec::new(),
         })
     }
 
@@ -1789,10 +1921,10 @@ impl McpOAuthAuthority {
                 server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             })?
-            .error_for_status()
+            .error_for_status_refusing_redirects()
             .map_err(|error| McpOAuthError::RegistrationFailed {
                 server_name: target.server_name().to_string(),
-                reason: error.to_string(),
+                reason: error,
             })?
             .json()
             .await
@@ -1851,6 +1983,83 @@ fn verify_stored_account(
         return Err(ConnectorOAuthRefusal::AccountMismatch.into());
     }
     Ok(())
+}
+
+/// Serializes start-or-join per MCP target within this process, so a target
+/// has at most one admitted attempt. Only admission takes this lock: the
+/// credential lifecycle (refresh, use, commit) keeps its own guard.
+async fn acquire_admission_lock(binding_slug: String) -> tokio::sync::OwnedMutexGuard<()> {
+    static ADMISSION: std::sync::OnceLock<
+        parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let lock = {
+        let mut locks = ADMISSION
+            .get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+            .lock();
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        Arc::clone(locks.entry(binding_slug).or_default())
+    };
+    lock.lock_owned().await
+}
+
+/// HTTP client for MCP OAuth endpoints: follows no redirects.
+fn no_redirect_client() -> Client {
+    Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default()
+}
+
+trait RefuseRedirect {
+    /// `error_for_status` that also refuses any 3xx answer explicitly.
+    fn error_for_status_refusing_redirects(self) -> Result<reqwest::Response, String>;
+}
+
+impl RefuseRedirect for reqwest::Response {
+    fn error_for_status_refusing_redirects(self) -> Result<reqwest::Response, String> {
+        if self.status().is_redirection() {
+            return Err(format!(
+                "unexpected redirect ({}); redirects are refused",
+                self.status()
+            ));
+        }
+        self.error_for_status().map_err(|error| error.to_string())
+    }
+}
+
+/// RFC 8252 section 7.3: the redirect must be an http loopback address.
+fn require_loopback_redirect(redirect_uri: &str) -> Result<(), McpOAuthError> {
+    let url = reqwest::Url::parse(redirect_uri)
+        .map_err(|_| McpOAuthError::Verification(ConnectorOAuthRefusal::InvalidDescriptor))?;
+    if url.scheme() != "http" || !is_loopback_url(&url) {
+        return Err(McpOAuthError::Verification(
+            ConnectorOAuthRefusal::InvalidDescriptor,
+        ));
+    }
+    Ok(())
+}
+
+/// Discovery for an admitted attempt, built only from its descriptor and the
+/// recorded issuer's validated endpoints.
+fn completion_discovery(
+    target: &McpServerIdentity,
+    facts: &crate::connector_oauth::ConnectorOAuthParameters,
+    endpoints: AuthorizationServerEndpoints,
+) -> Result<StoredMcpOAuthDiscovery, McpOAuthError> {
+    let resource_metadata_url = protected_resource_well_known_candidates(target.server_url())?
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    Ok(StoredMcpOAuthDiscovery {
+        resource: facts.resource.clone(),
+        resource_metadata_url,
+        authorization_server: facts.issuer.clone(),
+        authorization_metadata_url: endpoints.authorization_metadata_url,
+        authorization_endpoint: endpoints.authorization_endpoint,
+        token_endpoint: endpoints.token_endpoint,
+        registration_endpoint: endpoints.registration_endpoint,
+        scopes: facts.scopes.iter().cloned().collect(),
+    })
 }
 
 fn mcp_oauth_endpoints(

@@ -996,6 +996,17 @@ pub trait OAuthFlowAuthority: Send + Sync {
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError>;
 
+    /// The live connector browser attempt admitted under `state` for
+    /// `target`. Read-only and local: no network, no admission, no retirement.
+    /// Owners that cannot answer report `None`.
+    fn admitted_connector_browser_attempt(
+        &self,
+        _state: &str,
+        _target: &AuthCredentialIdentity,
+    ) -> Result<Option<OAuthFlowRecord>, OAuthFlowError> {
+        Ok(None)
+    }
+
     /// The newest live connector browser attempt admitted for `target`, as
     /// `(state, record)`. Read-only: it admits, extends, consumes or retires
     /// nothing. Owners that cannot answer report `None`, so callers start a
@@ -1109,6 +1120,24 @@ impl OAuthFlowRegistry {
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError> {
         <Self as OAuthFlowAuthority>::consume(self, state, target, provider.into(), redirect_uri)
+    }
+
+    /// The unexpired connector browser attempt admitted under `state` for
+    /// `target`.
+    pub fn admitted_connector_browser_attempt(
+        &self,
+        state: &str,
+        target: &AuthCredentialIdentity,
+    ) -> Option<OAuthFlowRecord> {
+        let mut flows = self.flows.lock();
+        prune_expired_locked(&mut flows, self.ttl);
+        flows
+            .get(state)
+            .filter(|record| {
+                &record.target == target
+                    && matches!(record.provider, OAuthBrowserFlowIdentity::Connector { .. })
+            })
+            .cloned()
     }
 
     /// The newest unexpired connector browser attempt for `target`.
@@ -1435,6 +1464,16 @@ impl Default for OAuthFlowRegistry {
 }
 
 impl OAuthFlowAuthority for OAuthFlowRegistry {
+    fn admitted_connector_browser_attempt(
+        &self,
+        state: &str,
+        target: &AuthCredentialIdentity,
+    ) -> Result<Option<OAuthFlowRecord>, OAuthFlowError> {
+        Ok(OAuthFlowRegistry::admitted_connector_browser_attempt(
+            self, state, target,
+        ))
+    }
+
     fn pending_connector_browser_attempt(
         &self,
         target: &AuthCredentialIdentity,

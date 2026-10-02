@@ -681,8 +681,9 @@ class AuthStatusParamsMcpLoginTarget(TypedDict, total=False):
 
 AuthStatusParams = AuthStatusParamsBindingIdParams | AuthStatusParamsMcpLoginTarget
 
-# Request payload for `auth/login/complete`. `Debug` redacts `code` and
-# `state`.
+# Request payload for `auth/login/complete`. For an MCP target, issuer,
+# client and resource come from the admitted attempt named by `state`;
+# nothing else is echoed. `Debug` redacts `code` and `state`.
 class LoginCompleteParamsProviderLoginTarget(TypedDict, total=False):
     code: Required[str]
     redirect_uri: Required[str]
@@ -692,15 +693,13 @@ class LoginCompleteParamsProviderLoginTarget(TypedDict, total=False):
     provider: Required[Literal['anthropic', 'openai', 'google', 'copilot']]
     realm_id: Required[str]
 
-class LoginCompleteParamsMcpLoginCompleteTarget(TypedDict, total=False):
+class LoginCompleteParamsMcpLoginTarget(TypedDict, total=False):
     code: Required[str]
     redirect_uri: Required[str]
     state: Required[str]
-    client_id: Required[str]
     mcp: Required[WireMcpAuthTarget]
-    resource_metadata_url: NotRequired[Optional[str]]
 
-LoginCompleteParams = LoginCompleteParamsProviderLoginTarget | LoginCompleteParamsMcpLoginCompleteTarget
+LoginCompleteParams = LoginCompleteParamsProviderLoginTarget | LoginCompleteParamsMcpLoginTarget
 
 # Request payload for `auth/login/start`.
 class LoginStartParamsProviderLoginTarget(TypedDict, total=False):
@@ -737,6 +736,21 @@ class WireAuthStatusResultMcpAuthStatus(TypedDict, total=False):
     phase: Required[Literal['authorized', 'reauth_required'] | Literal['authorization_required']]
 
 WireAuthStatusResult = WireAuthStatusResultAuthStatusDetail | WireAuthStatusResultMcpAuthStatus
+
+@dataclass
+class LoginCancelParams:
+    """Request payload for `auth/login/cancel`: retire the pending MCP attempt
+admitted under `state` for this configured server. `Debug` redacts `state`."""
+    mcp: WireMcpAuthTarget
+    state: str
+
+
+@dataclass
+class WireLoginCancelled:
+    """`auth/login/cancel` success body."""
+    cancelled: bool
+    mcp: WireMcpAuthTarget
+
 
 @dataclass
 class ActivateInstructionParams:
@@ -5919,10 +5933,8 @@ class WireLoginStartMcpLoginStart(TypedDict, total=False):
     authorize_url: Required[str]
     redirect_uri: Required[str]
     state: Required[str]
-    client_id: Required[str]
     disposition: Required[Literal['started', 'joined']]
     mcp: Required[WireMcpAuthTarget]
-    resource_metadata_url: Required[str]
 
 WireLoginStart = WireLoginStartProviderLoginStart | WireLoginStartMcpLoginStart
 

@@ -977,11 +977,15 @@ class MeerkatClient:
     ) -> dict[str, Any]:
         """Start host-driven OAuth for an MCP server via `auth/login/start`.
 
-        Returns `{authorize_url, state, redirect_uri, mcp, client_id,
-        resource_metadata_url}`. The authorize URL and state are host-channel
-        data: open the URL only in a browser no agent tool can observe, bind
-        `redirect_uri` yourself, and never pass these values to an agent,
-        tool result, transcript or log. Finish with `auth_mcp_login_complete`.
+        Returns `{authorize_url, state, redirect_uri, mcp, disposition}`;
+        `disposition` is `"joined"` when an attempt was already pending for the
+        server (its URL and state are returned; no second attempt exists).
+        `redirect_uri` must be an http loopback URL you bind yourself. The
+        authorize URL and state are host-channel data: open the URL only in a
+        browser no agent tool can observe, and never pass these values to an
+        agent, tool result, transcript or log. Finish with
+        `auth_mcp_login_complete`, or retire the attempt with
+        `auth_mcp_login_cancel`.
         """
         return await self._request(
             "auth/login/start",
@@ -999,24 +1003,38 @@ class MeerkatClient:
         code: str,
         state: str,
         redirect_uri: str,
-        client_id: str,
-        resource_metadata_url: str | None = None,
         oauth_account: str | None = None,
     ) -> dict[str, Any]:
         """Complete host-driven MCP OAuth via `auth/login/complete` with the
-        loopback callback's `code`/`state` and the `client_id` and
-        `resource_metadata_url` returned by `auth_mcp_login_start`. Returns a
-        secret-free summary."""
-        params: dict[str, Any] = {
-            "mcp": _mcp_auth_target(server_name, server_url, oauth_account),
-            "client_id": client_id,
-            "code": code,
-            "state": state,
-            "redirect_uri": redirect_uri,
-        }
-        if resource_metadata_url is not None:
-            params["resource_metadata_url"] = resource_metadata_url
-        return await self._request("auth/login/complete", params)
+        loopback callback's `code` and `state`. Issuer, client and resource
+        come from the admitted attempt. Returns a secret-free summary."""
+        return await self._request(
+            "auth/login/complete",
+            {
+                "mcp": _mcp_auth_target(server_name, server_url, oauth_account),
+                "code": code,
+                "state": state,
+                "redirect_uri": redirect_uri,
+            },
+        )
+
+    async def auth_mcp_login_cancel(
+        self,
+        server_name: str,
+        server_url: str,
+        state: str,
+        *,
+        oauth_account: str | None = None,
+    ) -> dict[str, Any]:
+        """Retire a pending MCP OAuth attempt by its `state` via
+        `auth/login/cancel` (for example after losing the loopback listener)."""
+        return await self._request(
+            "auth/login/cancel",
+            {
+                "mcp": _mcp_auth_target(server_name, server_url, oauth_account),
+                "state": state,
+            },
+        )
 
     async def auth_mcp_status(
         self,

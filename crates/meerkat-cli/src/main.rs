@@ -3000,6 +3000,12 @@ enum McpCommands {
         /// Scope to read from
         #[arg(long, value_enum)]
         scope: Option<CliMcpScope>,
+
+        /// Allow login without an interactive terminal. If the browser cannot
+        /// be opened, the authorize URL is printed to stderr, so do not use
+        /// this where output is captured or logged.
+        #[arg(long)]
+        allow_headless: bool,
     },
 
     /// Remove an MCP server
@@ -4736,7 +4742,10 @@ struct RuntimeScope {
     context_root: Option<PathBuf>,
     user_config_root: Option<PathBuf>,
     auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
-    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[cfg(any(
+        all(feature = "anthropic", feature = "openai", feature = "gemini"),
+        feature = "mcp"
+    ))]
     provider_auth_authority: meerkat_runtime::ProviderAuthRuntimeAuthority,
 }
 
@@ -4746,7 +4755,10 @@ impl RuntimeScope {
     }
 }
 
-#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+#[cfg(any(
+    all(feature = "anthropic", feature = "openai", feature = "gemini"),
+    feature = "mcp"
+))]
 fn new_cli_auth_handles() -> (
     meerkat_core::handles::GeneratedAuthLeaseHandle,
     meerkat_runtime::ProviderAuthRuntimeAuthority,
@@ -4756,7 +4768,10 @@ fn new_cli_auth_handles() -> (
     (authority.generated_auth_lease_handle(), authority)
 }
 
-#[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
+#[cfg(not(any(
+    all(feature = "anthropic", feature = "openai", feature = "gemini"),
+    feature = "mcp"
+)))]
 fn new_cli_auth_lease() -> meerkat_core::handles::GeneratedAuthLeaseHandle {
     let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
     meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
@@ -4823,9 +4838,15 @@ fn resolve_runtime_scope_with_realm(
         );
     }
     let user_config_root = cli.user_config_root.clone().or_else(dirs::home_dir);
-    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[cfg(any(
+        all(feature = "anthropic", feature = "openai", feature = "gemini"),
+        feature = "mcp"
+    ))]
     let (auth_lease, provider_auth_authority) = new_cli_auth_handles();
-    #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
+    #[cfg(not(any(
+        all(feature = "anthropic", feature = "openai", feature = "gemini"),
+        feature = "mcp"
+    )))]
     let auth_lease = new_cli_auth_lease();
     Ok(RuntimeScope {
         locator,
@@ -4839,7 +4860,10 @@ fn resolve_runtime_scope_with_realm(
         context_root: Some(context_root),
         user_config_root,
         auth_lease,
-        #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+        #[cfg(any(
+            all(feature = "anthropic", feature = "openai", feature = "gemini"),
+            feature = "mcp"
+        ))]
         provider_auth_authority,
     })
 }
@@ -15985,12 +16009,16 @@ async fn handle_mcp_command(command: McpCommands, cli_scope: &RuntimeScope) -> a
             )
             .await
         }
-        McpCommands::Login { name, scope } => {
+        McpCommands::Login {
+            name,
+            scope,
+            allow_headless,
+        } => {
             let scope = scope.map(|s| match s {
                 CliMcpScope::User => McpScope::User,
                 CliMcpScope::Project | CliMcpScope::Local => McpScope::Project,
             });
-            login_mcp_server(name, scope, cli_scope).await
+            login_mcp_server(name, scope, cli_scope, allow_headless).await
         }
         McpCommands::Remove { name, scope } => {
             let scope = scope.map(|s| match s {
@@ -16068,12 +16096,29 @@ async fn load_mcp_login_servers(
     Ok(servers)
 }
 
+/// `rkat mcp login` refuses to run headless unless explicitly allowed: a
+/// headless run would print the authorize URL and state into captured output.
+#[cfg(feature = "mcp")]
+fn require_mcp_login_terminal(allow_headless: bool, is_terminal: bool) -> anyhow::Result<()> {
+    if allow_headless || is_terminal {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "rkat mcp login needs an interactive terminal; pass --allow-headless to log in without one (the authorize URL may then be printed to stderr)"
+    )
+}
+
 #[cfg(feature = "mcp")]
 async fn login_mcp_server(
     name: String,
     scope: Option<McpScope>,
     cli_scope: &RuntimeScope,
+    allow_headless: bool,
 ) -> anyhow::Result<()> {
+    require_mcp_login_terminal(allow_headless, {
+        use std::io::IsTerminal;
+        std::io::stderr().is_terminal()
+    })?;
     let servers = load_mcp_login_servers(&name, scope, cli_scope).await?;
     if servers.is_empty() {
         anyhow::bail!("MCP server '{name}' not found");
@@ -19838,9 +19883,15 @@ mod tests {
     }
 
     fn test_scope(state_root: PathBuf, realm_id: &str) -> RuntimeScope {
-        #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+        #[cfg(any(
+            all(feature = "anthropic", feature = "openai", feature = "gemini"),
+            feature = "mcp"
+        ))]
         let (auth_lease, provider_auth_authority) = new_cli_auth_handles();
-        #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
+        #[cfg(not(any(
+            all(feature = "anthropic", feature = "openai", feature = "gemini"),
+            feature = "mcp"
+        )))]
         let auth_lease = new_cli_auth_lease();
         RuntimeScope {
             root_choice: meerkat_core::RealmRootChoice::Explicit,
@@ -19864,7 +19915,10 @@ mod tests {
             // developer's real `~/.rkat/config.toml`.
             user_config_root: Some(state_root),
             auth_lease,
-            #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+            #[cfg(any(
+                all(feature = "anthropic", feature = "openai", feature = "gemini"),
+                feature = "mcp"
+            ))]
             provider_auth_authority,
         }
     }
@@ -25265,13 +25319,38 @@ default_model = "gemma"
             .expect("mcp login should parse");
         match login.command.expect("test invocation parses a subcommand") {
             Commands::Mcp {
-                command: McpCommands::Login { name, scope },
+                command:
+                    McpCommands::Login {
+                        name,
+                        scope,
+                        allow_headless,
+                    },
             } => {
                 assert_eq!(name, "remote");
                 assert!(matches!(scope, Some(CliMcpScope::Project)));
+                assert!(!allow_headless, "headless login is opt-in");
             }
             _ => unreachable!("expected mcp login"),
         }
+        let headless = Cli::try_parse_from(["rkat", "mcp", "login", "remote", "--allow-headless"])
+            .expect("mcp login --allow-headless should parse");
+        assert!(matches!(
+            headless.command,
+            Some(Commands::Mcp {
+                command: McpCommands::Login {
+                    allow_headless: true,
+                    ..
+                }
+            })
+        ));
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_login_refuses_headless_unless_explicitly_allowed() {
+        assert!(require_mcp_login_terminal(false, false).is_err());
+        assert!(require_mcp_login_terminal(true, false).is_ok());
+        assert!(require_mcp_login_terminal(false, true).is_ok());
     }
 
     #[cfg(feature = "mcp")]
@@ -29824,9 +29903,15 @@ supports_reasoning = true
     }
 
     fn test_scope_with_context(root: PathBuf) -> RuntimeScope {
-        #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+        #[cfg(any(
+            all(feature = "anthropic", feature = "openai", feature = "gemini"),
+            feature = "mcp"
+        ))]
         let (auth_lease, provider_auth_authority) = new_cli_auth_handles();
-        #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
+        #[cfg(not(any(
+            all(feature = "anthropic", feature = "openai", feature = "gemini"),
+            feature = "mcp"
+        )))]
         let auth_lease = new_cli_auth_lease();
         RuntimeScope {
             root_choice: meerkat_core::RealmRootChoice::Explicit,
@@ -29847,7 +29932,10 @@ supports_reasoning = true
             context_root: Some(root),
             user_config_root: None,
             auth_lease,
-            #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+            #[cfg(any(
+                all(feature = "anthropic", feature = "openai", feature = "gemini"),
+                feature = "mcp"
+            ))]
             provider_auth_authority,
         }
     }

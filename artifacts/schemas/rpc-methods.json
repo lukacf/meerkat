@@ -323,6 +323,12 @@
       "result_type": "WireLoginReady"
     },
     {
+      "description": "Retire a pending MCP OAuth attempt by its state",
+      "name": "auth/login/cancel",
+      "params_type": "LoginCancelParams",
+      "result_type": "WireLoginCancelled"
+    },
+    {
       "description": "Begin a device-code OAuth login; returns user-code + verification URL",
       "name": "auth/login/device_start",
       "params_type": "DeviceStartParams",

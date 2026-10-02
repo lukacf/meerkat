@@ -10533,14 +10533,32 @@
         ],
         "type": "object"
       },
+      "LoginCancelParams": {
+        "additionalProperties": false,
+        "description": "Request payload for `auth/login/cancel`: retire the pending MCP attempt\nadmitted under `state` for this configured server. `Debug` redacts `state`.",
+        "properties": {
+          "mcp": {
+            "$ref": "#/components/schemas/WireMcpAuthTarget"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mcp",
+          "state"
+        ],
+        "title": "LoginCancelParams",
+        "type": "object"
+      },
       "LoginCompleteParams": {
-        "description": "Request payload for `auth/login/complete`. `Debug` redacts `code` and\n`state`.",
+        "description": "Request payload for `auth/login/complete`. For an MCP target, issuer,\nclient and resource come from the admitted attempt named by `state`;\nnothing else is echoed. `Debug` redacts `code` and `state`.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/WireProviderLoginTarget"
           },
           {
-            "$ref": "#/components/schemas/WireMcpLoginCompleteTarget"
+            "$ref": "#/components/schemas/WireMcpLoginTarget"
           }
         ],
         "properties": {
@@ -21434,6 +21452,23 @@
           }
         ]
       },
+      "WireLoginCancelled": {
+        "description": "`auth/login/cancel` success body.",
+        "properties": {
+          "cancelled": {
+            "type": "boolean"
+          },
+          "mcp": {
+            "$ref": "#/components/schemas/WireMcpAuthTarget"
+          }
+        },
+        "required": [
+          "mcp",
+          "cancelled"
+        ],
+        "title": "WireLoginCancelled",
+        "type": "object"
+      },
       "WireLoginReady": {
         "description": "`POST /auth/login/complete` / ready leg of device-code success body.\n\nThe optional `state` field distinguishes the flat `POST\n/auth/login/complete` response (no `state` set) from the device-code\nready leg (`state = \"ready\"`) which is part of the pending/slow_down/\naccess_denied/expired/ready tagged protocol.",
         "oneOf": [
@@ -21526,29 +21561,6 @@
         ],
         "type": "object"
       },
-      "WireMcpLoginCompleteTarget": {
-        "additionalProperties": false,
-        "description": "MCP arm of [`WireLoginCompleteTarget`].",
-        "properties": {
-          "client_id": {
-            "type": "string"
-          },
-          "mcp": {
-            "$ref": "#/components/schemas/WireMcpAuthTarget"
-          },
-          "resource_metadata_url": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "mcp",
-          "client_id"
-        ],
-        "type": "object"
-      },
       "WireMcpLoginDisposition": {
         "description": "Whether `auth/login/start` admitted a new MCP attempt or returned the one\nalready pending for the target (no second attempt is ever admitted).",
         "enum": [
@@ -21577,25 +21589,17 @@
       },
       "WireMcpLoginStart": {
         "additionalProperties": false,
-        "description": "MCP arm of [`WireLoginStartTarget`]: the public values to echo on\n`auth/login/complete`.",
+        "description": "MCP arm of [`WireLoginStartTarget`]. A joined start returns the pending\nattempt's authorize URL and state: wire callers are host-privileged by\ncontract.",
         "properties": {
-          "client_id": {
-            "type": "string"
-          },
           "disposition": {
             "$ref": "#/components/schemas/WireMcpLoginDisposition"
           },
           "mcp": {
             "$ref": "#/components/schemas/WireMcpAuthTarget"
-          },
-          "resource_metadata_url": {
-            "type": "string"
           }
         },
         "required": [
           "mcp",
-          "client_id",
-          "resource_metadata_url",
           "disposition"
         ],
         "type": "object"
@@ -25344,6 +25348,44 @@
           }
         },
         "summary": "Test a binding resolve path"
+      }
+    },
+    "/auth/login/cancel": {
+      "post": {
+        "operationId": "post_auth_login_cancel",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginCancelParams"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireLoginCancelled"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Retire a pending MCP OAuth attempt by its state"
       }
     },
     "/auth/login/complete": {

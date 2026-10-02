@@ -1,4 +1,8 @@
-#![cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+#![cfg(all(
+    feature = "mcp",
+    feature = "test-mcp-oauth-fixtures",
+    not(target_arch = "wasm32")
+))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -9,27 +13,26 @@
 //! Host-driven MCP OAuth keeps human authentication outside model
 //! observation (ADR-001 Toolkit r2, item 3).
 //!
-//! The host admits a real attempt (so the authorize URL and state exist),
-//! an agent runs while the server is still unauthorized, the host completes
-//! the login from its loopback callback, and a second agent run uses the
-//! authorized MCP tool. Secret canaries (authorize URL, state, code, PKCE
-//! challenge, access and refresh tokens, and the ignored DCR secret) must be
-//! absent from agent events, the transcript (which carries tool results) and
-//! every captured log line.
+//! Through the facade host API this exercises a successful login, a failed
+//! completion, an explicit cancel, a dropped pending login and the advisory
+//! launch path, plus agent runs before and after authorization. Every
+//! attempt's authorize URL, state, PKCE challenge and PKCE verifier, and every
+//! secret the fixture issues (code, access/refresh/ID token, DCR secret), must
+//! be absent from agent events, transcripts (which carry tool results) and
+//! every captured log record, `tracing` and `log` alike. Positive controls
+//! prove each surface was actually captured.
 
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Redirect};
-use axum::routing::{get, post};
-use axum::{Form, Json, Router};
+use meerkat::test_fixtures::mcp_oauth::{
+    ECHO_REPLY, ISSUED_SECRET_CANARIES, McpOAuthFixture, SUBJECT, follow_authorize_url,
+};
 use meerkat::{
     AgentBuildConfig, AgentFactory, HostAuthService, HostMcpAuthPhase, LlmDoneOutcome, LlmEvent,
-    LlmRequest, MCP_INTERACTIVE_LOGIN_TIMEOUT, MCP_OAUTH_CALLBACK_PATH, McpOAuthCallback,
-    McpServerIdentity,
+    LlmRequest, MCP_INTERACTIVE_LOGIN_TIMEOUT, McpOAuthBrowserLaunch, McpOAuthLoginStart,
+    McpOAuthLoopbackBegin, McpServerIdentity,
 };
 use meerkat_client::LlmClient;
 use meerkat_core::mcp_config::McpServerConfig;
@@ -37,172 +40,7 @@ use meerkat_core::{AgentEvent, Config, Message};
 use meerkat_providers::auth_store::{
     EphemeralTokenStore, InMemoryCoordinator, ProviderAuthPersistence,
 };
-use serde_json::{Value, json};
-use tokio::net::TcpListener;
-
-const CODE_CANARY: &str = "code-canary-7f3a9c";
-const ACCESS_CANARY: &str = "access-canary-51be04";
-const REFRESH_CANARY: &str = "refresh-canary-c2d811";
-const DCR_SECRET_CANARY: &str = "dcr-secret-canary-0e6f";
-const SUBJECT: &str = "oidc-subject-7";
-const ECHO_REPLY: &str = "echo-reply-visible-to-agent";
-
-#[derive(Default)]
-struct Fixture {
-    redirect_uri: Mutex<Option<String>>,
-}
-
-fn host(headers: &HeaderMap) -> String {
-    headers
-        .get("host")
-        .and_then(|value| value.to_str().ok())
-        .unwrap()
-        .to_owned()
-}
-
-async fn spawn_fixture() -> String {
-    let state = Arc::new(Fixture::default());
-    let app = Router::new()
-        .route("/mcp", post(mcp))
-        .route("/public", post(public_mcp))
-        .route(
-            "/.well-known/oauth-protected-resource/mcp",
-            get(|headers: HeaderMap| async move {
-                let host = host(&headers);
-                Json(json!({
-                    "resource": format!("http://{host}/mcp"),
-                    "authorization_servers": [format!("http://{host}")],
-                }))
-            }),
-        )
-        .route(
-            "/.well-known/oauth-authorization-server",
-            get(|headers: HeaderMap| async move {
-                Json(json!({
-                    "issuer": format!("http://{}", host(&headers)),
-                    "code_challenge_methods_supported": ["S256"],
-                    "authorization_endpoint": "/authorize",
-                    "token_endpoint": "/token",
-                    "registration_endpoint": "/register",
-                }))
-            }),
-        )
-        .route(
-            "/.well-known/openid-configuration",
-            get(|headers: HeaderMap| async move {
-                let host = host(&headers);
-                Json(json!({
-                    "issuer": format!("http://{host}"),
-                    "userinfo_endpoint": format!("http://{host}/userinfo"),
-                }))
-            }),
-        )
-        .route("/register", post(register))
-        .route("/authorize", get(authorize))
-        .route("/token", post(token))
-        .route(
-            "/userinfo",
-            get(|headers: HeaderMap| async move {
-                if bearer(&headers) != Some(ACCESS_CANARY) {
-                    return StatusCode::UNAUTHORIZED.into_response();
-                }
-                Json(json!({ "sub": SUBJECT })).into_response()
-            }),
-        )
-        .with_state(state);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    base
-}
-
-fn bearer(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-}
-
-async fn register(State(state): State<Arc<Fixture>>, Json(body): Json<Value>) -> Json<Value> {
-    *state.redirect_uri.lock().unwrap() = body["redirect_uris"][0].as_str().map(ToOwned::to_owned);
-    Json(json!({
-        "client_id": "client-123",
-        "client_secret": DCR_SECRET_CANARY,
-        "token_endpoint_auth_method": "none",
-    }))
-}
-
-async fn authorize(
-    State(state): State<Arc<Fixture>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let redirect_uri = state.redirect_uri.lock().unwrap().clone().unwrap();
-    Redirect::temporary(&format!(
-        "{redirect_uri}?code={CODE_CANARY}&state={}",
-        params["state"]
-    ))
-}
-
-async fn token(Form(body): Form<HashMap<String, String>>) -> Json<Value> {
-    assert_eq!(body.get("code").map(String::as_str), Some(CODE_CANARY));
-    Json(json!({
-        "access_token": ACCESS_CANARY,
-        "refresh_token": REFRESH_CANARY,
-        "expires_in": 3600,
-        "scope": "openid",
-    }))
-}
-
-/// An MCP server that needs no authorization at all.
-async fn public_mcp(Json(request): Json<Value>) -> axum::response::Response {
-    mcp_reply(request)
-}
-
-async fn mcp(headers: HeaderMap, Json(request): Json<Value>) -> axum::response::Response {
-    if bearer(&headers) != Some(ACCESS_CANARY) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(
-                "www-authenticate",
-                r#"Bearer resource_metadata="/.well-known/oauth-protected-resource/mcp""#,
-            )],
-        )
-            .into_response();
-    }
-    mcp_reply(request)
-}
-
-fn mcp_reply(request: Value) -> axum::response::Response {
-    let Some(id) = request.get("id").cloned() else {
-        return StatusCode::ACCEPTED.into_response();
-    };
-    let result = match request["method"].as_str() {
-        Some("initialize") => json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": { "tools": {} },
-            "serverInfo": { "name": "canary-mcp", "version": "0.1.0" },
-        }),
-        Some("tools/list") => json!({
-            "tools": [{
-                "name": "echo",
-                "description": "Echo input",
-                "inputSchema": { "type": "object", "properties": {} },
-            }]
-        }),
-        Some("tools/call") => json!({
-            "content": [{ "type": "text", "text": ECHO_REPLY }],
-        }),
-        other => {
-            return Json(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32601, "message": format!("unsupported {other:?}") },
-            }))
-            .into_response();
-        }
-    };
-    Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
-}
+use serde_json::json;
 
 /// Calls the MCP echo tool once when offered, then answers in text.
 struct EchoCallingClient;
@@ -281,6 +119,40 @@ impl Write for LogBuffer {
     }
 }
 
+/// Capture every `tracing` event and, through the log bridge, every `log`
+/// record at TRACE.
+fn capture_all_logs() -> LogBuffer {
+    use tracing_subscriber::util::SubscriberInitExt;
+    let logs = LogBuffer::default();
+    let writer = logs.clone();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish()
+        .try_init()
+        .expect("canary owns the process-wide log capture");
+    logs
+}
+
+fn host_service(runtime: &meerkat_runtime::MeerkatMachine) -> HostAuthService {
+    HostAuthService::new(
+        ProviderAuthPersistence::new(
+            Arc::new(EphemeralTokenStore::new()),
+            Arc::new(InMemoryCoordinator::new()),
+        ),
+        runtime.provider_auth_runtime_authority(),
+    )
+}
+
+fn selected_server(url: String) -> McpServerConfig {
+    let mut server = McpServerConfig::streamable_http("canary", url, HashMap::new());
+    if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut server.transport {
+        http.oauth_account = Some(SUBJECT.to_owned());
+    }
+    server
+}
+
 /// Run one agent turn; returns the serialized events and transcript.
 async fn run_agent(
     factory: &AgentFactory,
@@ -309,46 +181,13 @@ async fn run_agent(
     (events.join("\n"), transcript)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_oauth_secrets_never_reach_agent_observation_or_logs() {
-    let logs = LogBuffer::default();
-    let writer = logs.clone();
-    tracing::subscriber::set_global_default(
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish(),
-    )
-    .unwrap();
-
-    let base = spawn_fixture().await;
-    let temp = tempfile::tempdir().unwrap();
-    let factory = AgentFactory::new(temp.path().join("sessions"));
-    let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
-    let service = HostAuthService::new(
-        ProviderAuthPersistence::new(
-            Arc::new(EphemeralTokenStore::new()),
-            Arc::new(InMemoryCoordinator::new()),
-        ),
-        runtime.provider_auth_runtime_authority(),
-    );
-    let mut server =
-        McpServerConfig::streamable_http("canary", format!("{base}/mcp"), HashMap::new());
-    if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut server.transport {
-        http.oauth_account = Some(SUBJECT.to_owned());
-    }
-    let target = McpServerIdentity::from_config(&server).unwrap();
-
-    // The host admits an attempt; its authorize URL and state now exist.
-    let binding = meerkat_providers::auth_oauth::bind_loopback_callback(MCP_OAUTH_CALLBACK_PATH)
-        .await
-        .unwrap();
-    let start = service
-        .mcp_login_start(&target, &binding.redirect_url, None)
-        .await
-        .unwrap();
-    let callback = binding.expect_state(start.state.clone());
+/// Every secret of one admitted attempt: authorize URL, state, PKCE
+/// challenge and the PKCE verifier held by the flow owner.
+fn attempt_canaries(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    target: &McpServerIdentity,
+    start: &McpOAuthLoginStart,
+) -> Vec<String> {
     let challenge = start
         .authorize_url
         .split("code_challenge=")
@@ -356,8 +195,99 @@ async fn mcp_oauth_secrets_never_reach_agent_observation_or_logs() {
         .and_then(|rest| rest.split('&').next())
         .unwrap()
         .to_owned();
+    let identity: meerkat_core::AuthCredentialIdentity = target.auth_binding_ref().unwrap().into();
+    let verifier = runtime
+        .provider_auth_runtime_authority()
+        .oauth_flow_authority()
+        .admitted_connector_browser_attempt(&start.state, &identity)
+        .unwrap()
+        .expect("the attempt is admitted")
+        .pkce_verifier;
+    vec![
+        start.authorize_url.clone(),
+        start.state.clone(),
+        challenge,
+        verifier,
+    ]
+}
 
-    // Unauthorized run: typed host status, nothing secret for the agent.
+async fn begin(
+    service: &HostAuthService,
+    target: &McpServerIdentity,
+) -> meerkat::McpOAuthPendingLogin {
+    match service
+        .mcp_begin_loopback_login(target, None)
+        .await
+        .unwrap()
+    {
+        McpOAuthLoopbackBegin::Started(pending) => pending,
+        McpOAuthLoopbackBegin::Joined(_) => panic!("no attempt should be pending"),
+    }
+}
+
+/// The host's browser: follows the authorize URL to its own loopback.
+fn fixture_browser(url: String) -> std::io::Result<()> {
+    tokio::runtime::Handle::current().block_on(follow_authorize_url(&url))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_oauth_secrets_never_reach_agent_observation_or_logs() {
+    let logs = capture_all_logs();
+    let fixture = McpOAuthFixture::spawn().await.unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let factory = AgentFactory::new(temp.path().join("sessions"));
+    let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+    let service = host_service(&runtime);
+    let server = selected_server(fixture.mcp_url());
+    let target = McpServerIdentity::from_config(&server).unwrap();
+    let mut canaries: Vec<String> = ISSUED_SECRET_CANARIES
+        .iter()
+        .map(|canary| (*canary).to_owned())
+        .collect();
+
+    // Cancel path, with the advisory launch exercised.
+    let cancelled = begin(&service, &target).await;
+    canaries.extend(attempt_canaries(&runtime, &target, cancelled.start()));
+    let launched_urls = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&launched_urls);
+    assert_eq!(
+        cancelled
+            .launch_browser(move |url| {
+                recorder.lock().unwrap().push(url);
+                Ok(())
+            })
+            .await,
+        McpOAuthBrowserLaunch::Launched
+    );
+    assert_eq!(
+        launched_urls.lock().unwrap().as_slice(),
+        [cancelled.start().authorize_url.clone()],
+        "positive control: the launch path received the authorize URL"
+    );
+    cancelled.cancel().await.unwrap();
+
+    // Drop path.
+    let dropped = begin(&service, &target).await;
+    canaries.extend(attempt_canaries(&runtime, &target, dropped.start()));
+    drop(dropped);
+
+    // Error path: the provider refuses the exchange after the user approved.
+    let failing = begin(&service, &target).await;
+    canaries.extend(attempt_canaries(&runtime, &target, failing.start()));
+    fixture.fail_token_exchange(true);
+    assert_eq!(
+        failing.launch_browser(fixture_browser).await,
+        McpOAuthBrowserLaunch::Launched
+    );
+    assert!(
+        failing
+            .complete(MCP_INTERACTIVE_LOGIN_TIMEOUT)
+            .await
+            .is_err()
+    );
+    fixture.fail_token_exchange(false);
+
+    // Unauthorized agent run: typed host status, nothing secret for the agent.
     assert_eq!(
         service.mcp_status(&target).await.unwrap().phase,
         HostMcpAuthPhase::AuthorizationRequired
@@ -366,53 +296,39 @@ async fn mcp_oauth_secrets_never_reach_agent_observation_or_logs() {
         run_agent(&factory, &service, &server).await;
     assert!(!unauthorized_transcript.contains(ECHO_REPLY));
 
-    // The host's browser follows the authorize URL to its own loopback.
-    let browser = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()
-        .unwrap();
-    browser.get(&start.authorize_url).send().await.unwrap();
-    let outcome = callback.wait(MCP_INTERACTIVE_LOGIN_TIMEOUT).await.unwrap();
-    let completed = service
-        .mcp_login_complete(
-            &target,
-            McpOAuthCallback {
-                redirect_uri: start.redirect_uri.clone(),
-                state: outcome.state,
-                code: outcome.code,
-                client_id: start.client_id.clone(),
-                resource_metadata_url: Some(start.resource_metadata_url.clone()),
-            },
-        )
+    // Success path.
+    let succeeding = begin(&service, &target).await;
+    canaries.extend(attempt_canaries(&runtime, &target, succeeding.start()));
+    assert_eq!(
+        succeeding.launch_browser(fixture_browser).await,
+        McpOAuthBrowserLaunch::Launched
+    );
+    let completed = succeeding
+        .complete(MCP_INTERACTIVE_LOGIN_TIMEOUT)
         .await
-        .unwrap();
+        .expect("login completes");
     assert_eq!(completed.account_id.as_deref(), Some(SUBJECT));
     assert_eq!(
         service.mcp_status(&target).await.unwrap().phase,
         HostMcpAuthPhase::Authorized
     );
 
-    // Authorized run: the agent uses the tool (positive control).
+    // Authorized agent run: the agent uses the tool (positive control).
     let (authorized_events, authorized_transcript) = run_agent(&factory, &service, &server).await;
     assert!(
         authorized_transcript.contains(ECHO_REPLY),
-        "authorized MCP tool result must reach the agent"
+        "positive control: the authorized MCP tool result reaches the agent"
     );
 
-    let captured_logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
     assert!(
-        captured_logs.contains("awaiting human authorization"),
-        "the unauthorized connection must have reported the typed status"
+        captured.contains("awaiting human authorization"),
+        "positive control: tracing events are captured"
     );
-    let canaries = [
-        start.authorize_url.as_str(),
-        start.state.as_str(),
-        challenge.as_str(),
-        CODE_CANARY,
-        ACCESS_CANARY,
-        REFRESH_CANARY,
-        DCR_SECRET_CANARY,
-    ];
+    assert!(
+        captured.contains("reqwest"),
+        "positive control: log-crate records are captured through the bridge"
+    );
     for (surface, observed) in [
         ("unauthorized agent events", &unauthorized_events),
         ("unauthorized transcript", &unauthorized_transcript),
@@ -421,11 +337,11 @@ async fn mcp_oauth_secrets_never_reach_agent_observation_or_logs() {
             "authorized transcript and tool results",
             &authorized_transcript,
         ),
-        ("logs", &captured_logs),
+        ("logs", &captured),
     ] {
-        for canary in canaries {
+        for canary in &canaries {
             assert!(
-                !observed.contains(canary),
+                !observed.contains(canary.as_str()),
                 "{surface} leaked an OAuth secret canary"
             );
         }
@@ -434,21 +350,15 @@ async fn mcp_oauth_secrets_never_reach_agent_observation_or_logs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_http_mcp_server_without_account_connects_under_the_native_resolver() {
-    let base = spawn_fixture().await;
+    let fixture = McpOAuthFixture::spawn().await.unwrap();
     let temp = tempfile::tempdir().unwrap();
     let factory = AgentFactory::new(temp.path().join("sessions"));
     let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
-    let service = HostAuthService::new(
-        ProviderAuthPersistence::new(
-            Arc::new(EphemeralTokenStore::new()),
-            Arc::new(InMemoryCoordinator::new()),
-        ),
-        runtime.provider_auth_runtime_authority(),
-    );
+    let service = host_service(&runtime);
     // No `oauth_account`: an unselected server must keep connecting without
     // credentials, exactly as before a resolver was installed.
     let server =
-        McpServerConfig::streamable_http("public", format!("{base}/public"), HashMap::new());
+        McpServerConfig::streamable_http("public", fixture.public_mcp_url(), HashMap::new());
     let (_events, transcript) = run_agent(&factory, &service, &server).await;
     assert!(
         transcript.contains(ECHO_REPLY),
@@ -458,16 +368,10 @@ async fn public_http_mcp_server_without_account_connects_under_the_native_resolv
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unselected_server_demanding_oauth_is_refused_with_typed_account_selection() {
-    let base = spawn_fixture().await;
+    let fixture = McpOAuthFixture::spawn().await.unwrap();
     let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
-    let service = HostAuthService::new(
-        ProviderAuthPersistence::new(
-            Arc::new(EphemeralTokenStore::new()),
-            Arc::new(InMemoryCoordinator::new()),
-        ),
-        runtime.provider_auth_runtime_authority(),
-    );
-    let server = McpServerConfig::streamable_http("guarded", format!("{base}/mcp"), HashMap::new());
+    let service = host_service(&runtime);
+    let server = McpServerConfig::streamable_http("guarded", fixture.mcp_url(), HashMap::new());
     let resolver: Arc<dyn meerkat::McpAuthResolver> =
         Arc::new(service.mcp_oauth_authority().unwrap());
     let error = match meerkat::McpConnection::connect_with_mcp_auth(

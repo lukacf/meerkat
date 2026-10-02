@@ -103,6 +103,7 @@ from .types import (
     LiveTruncateResult,
     LiveWebrtcAnswerParams,
     LiveWebrtcAnswerResult,
+    LoginCancelParams,
     LoginCompleteParams,
     LoginStartParams,
     McpAddParams,
@@ -270,6 +271,7 @@ from .types import (
     WireAuthStatusResult,
     WireDeviceCompleteResult,
     WireDeviceStart,
+    WireLoginCancelled,
     WireLoginReady,
     WireLoginStart,
     WireProvisionApiKeyResult,
@@ -731,6 +733,14 @@ class RpcRequest(Protocol):
         params: LoginCompleteParams,
         /,
     ) -> Awaitable[WireLoginReady]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["auth/login/cancel"],
+        params: LoginCancelParams,
+        /,
+    ) -> Awaitable[WireLoginCancelled]: ...
 
     @overload
     def __call__(

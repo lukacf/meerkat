@@ -244,12 +244,14 @@ them.
   - `meerkat::HostAuthError` gains `McpOAuth(McpOAuthError)` and
     `McpTarget(HostMcpTargetRefusal)`.
 - `auth/login/start`, `auth/login/complete` and `auth/status/get` accept an MCP
-  server target. Provider JSON is unchanged, but the Rust and SDK types change:
+  server target, and `auth/login/cancel` (RPC and `POST /auth/login/cancel`)
+  is new. Provider JSON is unchanged, but the Rust and SDK types change:
   - `meerkat_contracts::LoginStartParams` replaces `provider`, `realm_id`,
     `binding_id` and `profile_id` with `target: WireLoginTarget`.
   - `meerkat_contracts::LoginCompleteParams` replaces the same fields with
-    `target: WireLoginCompleteTarget`; its `Debug` now redacts `code` and
-    `state`.
+    `target: WireLoginTarget`; its `Debug` now redacts `code` and `state`. An
+    MCP completion carries only `code`, `state` and `redirect_uri`: issuer,
+    client and resource come from the admitted attempt.
   - `meerkat_contracts::WireLoginStart` replaces `provider` with
     `target: WireLoginStartTarget`; its `Debug` now redacts `authorize_url` and
     `state`.
@@ -263,6 +265,10 @@ them.
     Python generated types are no longer constructible dataclasses; the client
     wrappers build the request dicts.
   - Behaviour-only: a request mixing provider fields with `mcp` is refused.
+  - Behaviour-only: provider `auth/login/start` and `auth/login/complete`
+    params now refuse unknown fields (they were ignored), and
+    `auth/status/get` refuses a case-variant `mcp` key instead of falling back
+    to a binding status.
 
 ### Added
 
@@ -303,6 +309,23 @@ them.
     blocking pool and return the advisory `McpOAuthBrowserLaunch`, which never
     retries or cancels the attempt.
   - `PkceChallenge::s256_for_verifier`.
+  - Completion is anchored on the admitted attempt: the flow owner must name a
+    live attempt for `state` (the new read-only
+    `OAuthFlowAuthority::admitted_connector_browser_attempt`, default `None`)
+    before any network I/O, and only the recorded issuer's metadata is then
+    fetched. Every non-success exit retires the attempt; dropping an
+    unfinished `McpOAuthPendingLogin::complete` retires the binding and the
+    attempt. `McpOAuthAuthority::cancel_attempt` retires an attempt by
+    `state`; `McpOAuthLoginStart::remaining` bounds the callback wait by the
+    attempt's own expiry.
+  - Start-or-join is serialized per target, the redirect URI must be an http
+    loopback address (RFC 8252), `McpOAuthAuthority::new` uses an HTTP client
+    that follows no redirects, and a 3xx answer to discovery or registration
+    is refused. `McpOAuthError::Callback` reports loopback bind, callback and
+    timeout failures.
+  - `open_system_browser` launches the platform opener without logging the
+    URL; `launch_system_browser` uses it instead of the `webbrowser` crate,
+    which logged the command line at debug.
   - `McpOAuthAuthority::stored_only`. The `McpAuthResolver` impl and the CLI
     resolver keep stored-only semantics for servers without `oauth_account`,
     so servers that need no OAuth connect as before. Interactive login for
@@ -312,7 +335,7 @@ them.
   endpoint with the new access token and binds `sub` to the server's
   `oauth_account`.
 - `meerkat::HostAuthService::mcp_begin_loopback_login`, `mcp_login_start`,
-  `mcp_login_complete`,
+  `mcp_login_complete`, `mcp_login_cancel_by_state`,
   `mcp_login_cancel`, `mcp_status`, `mcp_oauth_authority` and
   `with_mcp_account_strategy`; `meerkat::HostMcpAuthStatus` and
   `HostMcpAuthPhase`; `meerkat::resolve_configured_mcp_target` and
@@ -332,14 +355,21 @@ them.
   `McpRouterAdapter::servers_awaiting_authorization`. This is not an agent
   event.
 - `McpOAuthError::is_refusal` classifies MCP OAuth errors for surfaces.
-- Wire: `WireMcpAuthTarget`, `WireMcpAuthStatus`, `WireMcpAuthPhase`,
+- Wire: `LoginCancelParams`, `WireLoginCancelled`, `WireMcpAuthTarget`,
+  `WireMcpAuthStatus`, `WireMcpAuthPhase`,
   `WireMcpLoginDisposition` (`started` / `joined` on the MCP login start) and
-  the target enums above. Python: `auth_mcp_login_start`,
-  `auth_mcp_login_complete`, `auth_mcp_status`. TypeScript:
-  `authMcpStatus`. Web: `Auth.mcpStatus`.
+  the target enums above. A joined start returns the pending attempt's URL
+  and state: wire callers are host-privileged by contract. Python: `auth_mcp_login_start`,
+  `auth_mcp_login_complete`, `auth_mcp_login_cancel`, `auth_mcp_status`.
+  TypeScript: `authLoginCancel`, `authMcpStatus`. Web: `Auth.loginCancel`,
+  `Auth.mcpStatus`.
 - `rkat mcp login` and `rkat run --mcp-auth interactive` drive the host split
   (the CLI owns the loopback callback and the browser). They require the
-  server's `oauth_account`.
+  server's `oauth_account`. `rkat mcp login` refuses to run without a terminal
+  unless `--allow-headless` is given.
+- `meerkat` feature `test-mcp-oauth-fixtures`:
+  `meerkat::test_fixtures::mcp_oauth`, an OAuth-protected MCP fixture server
+  for the MCP OAuth canaries (test-support only).
 
 - `meerkat_machine_schema::SymbolRef::parse` is a public constructor for a
   coverage anchor path, so a crate outside Meerkat can build a coverage

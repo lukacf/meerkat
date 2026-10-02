@@ -13,12 +13,12 @@ use serde_json::value::RawValue;
 use meerkat_anthropic::runtime::oauth as a_oauth;
 use meerkat_contracts::{
     AuthStatusParams, BindingIdParams, CreateProfileParams, DeviceCompleteParams,
-    DeviceStartParams, LoginCompleteParams, LoginStartParams, ProvisionApiKeyParams, RealmIdParams,
-    WireAuthProfile, WireAuthStatusDetail, WireAuthStatusResult, WireBackendProfile,
-    WireBindingIdentity, WireDeviceCompleteResult, WireLoginCompleteTarget, WireLoginReady,
-    WireLoginReadyTarget, WireLoginStart, WireLoginStartTarget, WireLoginTarget,
-    WireMcpLoginCompleteTarget, WireMcpLoginReady, WireMcpLoginStart, WireMcpLoginTarget,
-    WireProviderBinding, WireProviderLoginReady, WireProviderLoginStart, WireProvisionApiKeyResult,
+    DeviceStartParams, LoginCancelParams, LoginCompleteParams, LoginStartParams,
+    ProvisionApiKeyParams, RealmIdParams, WireAuthProfile, WireAuthStatusDetail,
+    WireAuthStatusResult, WireBackendProfile, WireBindingIdentity, WireDeviceCompleteResult,
+    WireLoginCancelled, WireLoginReady, WireLoginReadyTarget, WireLoginStart, WireLoginStartTarget,
+    WireLoginTarget, WireMcpLoginReady, WireMcpLoginStart, WireMcpLoginTarget, WireProviderBinding,
+    WireProviderLoginReady, WireProviderLoginStart, WireProvisionApiKeyResult,
     WireRealmConnectionSet,
 };
 use meerkat_core::handles::LeaseKey;
@@ -1546,8 +1546,6 @@ pub async fn handle_auth_login_start(
                     redirect_uri: started.redirect_uri,
                     target: WireLoginStartTarget::Mcp(WireMcpLoginStart {
                         mcp,
-                        client_id: started.client_id,
-                        resource_metadata_url: started.resource_metadata_url,
                         disposition: meerkat::mcp_login_disposition_to_wire(started.disposition),
                     }),
                 },
@@ -1603,12 +1601,8 @@ pub async fn handle_auth_login_complete(
         Err(error_value) => return host_auth_error_response(id, error_value),
     };
     let provider_target = match parsed.target {
-        WireLoginCompleteTarget::Provider(target) => target,
-        WireLoginCompleteTarget::Mcp(WireMcpLoginCompleteTarget {
-            mcp,
-            client_id,
-            resource_metadata_url,
-        }) => {
+        WireLoginTarget::Provider(target) => target,
+        WireLoginTarget::Mcp(WireMcpLoginTarget { mcp }) => {
             let target = match configured_mcp_target(runtime, &mcp).await {
                 Ok(target) => target,
                 Err(error_value) => return host_auth_error_response(id, error_value),
@@ -1620,8 +1614,6 @@ pub async fn handle_auth_login_complete(
                         redirect_uri: parsed.redirect_uri,
                         state: parsed.state,
                         code: parsed.code,
-                        client_id,
-                        resource_metadata_url,
                     },
                 )
                 .await
@@ -1701,6 +1693,37 @@ pub async fn handle_auth_login_complete(
             scopes: completed.scopes,
         },
     )
+}
+
+/// `auth/login/cancel`: retire the pending MCP attempt admitted under
+/// `state` for a configured server. Local only; an unknown state is refused.
+pub async fn handle_auth_login_cancel(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: &SessionRuntime,
+) -> RpcResponse {
+    let parsed: LoginCancelParams = match parse_params(params) {
+        Ok(v) => v,
+        Err(r) => return r.with_id(id),
+    };
+    let target = match configured_mcp_target(runtime, &parsed.mcp).await {
+        Ok(target) => target,
+        Err(error_value) => return host_auth_error_response(id, error_value),
+    };
+    let service = match host_auth_service(runtime) {
+        Ok(service) => service,
+        Err(error_value) => return host_auth_error_response(id, error_value),
+    };
+    match service.mcp_login_cancel_by_state(&target, &parsed.state) {
+        Ok(()) => RpcResponse::success(
+            id,
+            WireLoginCancelled {
+                mcp: parsed.mcp,
+                cancelled: true,
+            },
+        ),
+        Err(error_value) => host_auth_error_response(id, error_value),
+    }
 }
 
 pub async fn handle_auth_login_device_start(
@@ -3079,7 +3102,6 @@ mod tests {
             );
             let complete = raw_params(serde_json::json!({
                 "mcp": mcp,
-                "client_id": "client-123",
                 "code": "code",
                 "state": "state",
                 "redirect_uri": "http://127.0.0.1:1/mcp/oauth/callback",

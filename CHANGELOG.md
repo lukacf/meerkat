@@ -1405,7 +1405,7 @@ them.
   constructors keep their default handler. Host factories receive the exact
   selected server configuration; authentication remains with the auth resolver.
   Other callbacks are not enabled by this first profile. AgentFactory, SDK and
-  Toolkit configuration of this optional service remain separate follow-ups.
+  host configuration of this optional service remain separate follow-ups.
 - `ServiceMemberLiveHost::forget_live_context_summary`,
   `ServiceMemberLiveHost::retained_live_context_summary` (read-only
   provenance) and `ServiceMemberLiveHost::prune_retained_live_context_summaries`

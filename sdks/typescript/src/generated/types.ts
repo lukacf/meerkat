@@ -2849,6 +2849,7 @@ export interface BridgeCapabilities {
   observe_member?: boolean;
   resolvable_providers?: Provider[];
   retire_member?: boolean;
+  rotation_observe_hold?: boolean;
   supported_protocol_versions?: BridgeProtocolVersion[];
   tracked_input_cancel?: boolean;
   unwire_member?: boolean;
@@ -4461,6 +4462,7 @@ export interface BridgeCommandMemberOperatorRequest {
 
 export interface BridgeCommandObserveSupervisorRotation {
   command: "observe_supervisor_rotation";
+  hold_until_terminal_ms?: number | null;
   observer: BridgePeerSpec;
   observer_epoch: number;
   operation_id: string;

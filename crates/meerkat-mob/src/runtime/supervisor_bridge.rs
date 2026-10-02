@@ -148,6 +148,11 @@ pub(crate) struct MobSupervisorBridge {
     #[cfg(not(target_arch = "wasm32"))]
     controlling_reply_endpoint: StdRwLock<Option<PeerAddress>>,
     shutdown_complete: std::sync::atomic::AtomicBool,
+    /// Whether each peer (by peer id) advertised held rotation observation in
+    /// its bind reply. In-memory only: after a restart a peer is unknown until
+    /// it binds again, and an unknown peer is offered the hold with the typed
+    /// `Unsupported` rejection as the fallback.
+    rotation_observe_hold: StdMutex<HashMap<String, bool>>,
 }
 
 /// Linear owner for one bridge request correlation.
@@ -544,7 +549,27 @@ impl MobSupervisorBridge {
             #[cfg(not(target_arch = "wasm32"))]
             controlling_reply_endpoint: StdRwLock::new(controlling_reply_endpoint),
             shutdown_complete: std::sync::atomic::AtomicBool::new(false),
+            rotation_observe_hold: StdMutex::new(HashMap::new()),
         })
+    }
+
+    /// Record whether `peer_id` supports held rotation observation, from its
+    /// advertised capabilities or from a typed `Unsupported` rejection.
+    pub(crate) fn record_peer_rotation_observe_hold(&self, peer_id: &str, supported: bool) {
+        self.rotation_observe_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(peer_id.to_string(), supported);
+    }
+
+    /// Whether `peer_id` supports held rotation observation; `None` when it
+    /// has not advertised capabilities to this process.
+    pub(crate) fn peer_rotation_observe_hold(&self, peer_id: &str) -> Option<bool> {
+        self.rotation_observe_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(peer_id)
+            .copied()
     }
 
     async fn build_runtime(

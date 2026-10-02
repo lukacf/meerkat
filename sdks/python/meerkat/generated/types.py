@@ -4072,6 +4072,7 @@ class BridgeCapabilities:
     observe_member: Optional[bool] = None
     resolvable_providers: Optional[list[Provider]] = None
     retire_member: Optional[bool] = None
+    rotation_observe_hold: Optional[bool] = None
     supported_protocol_versions: Optional[list[BridgeProtocolVersion]] = None
     tracked_input_cancel: Optional[bool] = None
     unwire_member: Optional[bool] = None
@@ -7969,6 +7970,7 @@ class BridgeCommandMemberOperatorRequest(TypedDict, total=False):
 
 class BridgeCommandObserveSupervisorRotation(TypedDict, total=False):
     command: Required[Literal['observe_supervisor_rotation']]
+    hold_until_terminal_ms: NotRequired[Optional[int]]
     observer: Required[BridgePeerSpec]
     observer_epoch: Required[int]
     operation_id: Required[str]

@@ -2414,6 +2414,10 @@
             "default": false,
             "type": "boolean"
           },
+          "rotation_observe_hold": {
+            "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
+            "type": "boolean"
+          },
           "supported_protocol_versions": {
             "default": [
               2,
@@ -3868,6 +3872,15 @@
               "command": {
                 "const": "observe_supervisor_rotation",
                 "type": "string"
+              },
+              "hold_until_terminal_ms": {
+                "description": "Hold the reply until the operation is terminal (completed or\nrejected) as visible to this observer, for at most this many\nmilliseconds. When the hold elapses the member replies with the\nobservation it has then (not found or pending). Absent: a single-shot\nobservation. A completed receipt is visible to the next supervisor, so\nsupervisors hold their attempted-authority read.\n\nAn extension independent of the protocol version, like\n`tracked_input_cancel`: members advertise it with\n[`BridgeCapabilities::rotation_observe_hold`]. A member that does not\nimplement it rejects the field (this payload denies unknown fields)\nwith the typed `Unsupported` cause, and the supervisor falls back to\nsingle-shot observation.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "observer": {
                 "$ref": "#/components/schemas/BridgePeerSpec"

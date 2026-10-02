@@ -193,6 +193,11 @@ const MEMBER_PROGRESS_OBSERVATION_TIMEOUT: Duration = Duration::from_millis(250)
 /// unbounded handoff here would prevent those authoritative cleanup steps
 /// from ever running.
 const RETIRE_PEER_LIFECYCLE_NOTICE_TIMEOUT: Duration = Duration::from_millis(250);
+/// Hang guard for one member's held supervisor-rotation observation. The
+/// member answers when the operation is terminal, so success returns at that
+/// transition; the guard bounds a member that never settles and leaves half
+/// for the retained-authority read that can see a rejection.
+const ROTATION_OBSERVE_HOLD_GUARD: Duration = Duration::from_secs(10);
 
 /// Actor-owned task termination policy at a `JoinError` boundary.
 ///
@@ -50739,13 +50744,15 @@ impl MobActor {
                     "supervisor rotation operation {operation_id} has no durable target for peer '{peer_id}'"
                 ))
             })?;
-            let next_observe_command =
+            let build_next_observe = |hold_until_terminal_ms: Option<u64>| {
                 BridgeCommand::ObserveSupervisorRotation(BridgeSupervisorRotationObserve {
                     operation_id,
                     observer: expected_target.clone(),
                     observer_epoch: next.epoch,
                     protocol_version: next.protocol_version,
-                });
+                    hold_until_terminal_ms,
+                })
+            };
             let retained_observer = self
                 .supervisor_bridge
                 .supervisor_spec_for_authority_and_recipient(&stable_current, peer)
@@ -50756,8 +50763,21 @@ impl MobActor {
                     observer: retained_observer.into(),
                     observer_epoch: stable_current.epoch,
                     protocol_version: next.protocol_version,
+                    hold_until_terminal_ms: None,
                 });
-            let observation_window = if cfg!(test) {
+            // A member that implements held observation answers the
+            // attempted-authority read when the operation is terminal: no
+            // polling, and the window below is only a hang guard. Offer it
+            // unless the member is known not to implement it; a member whose
+            // capabilities were stale or never advertised rejects the hold
+            // with the typed `Unsupported` cause and falls back. Members that
+            // predate the extension keep the single-shot observation loop
+            // (the compatibility path), with its historic window.
+            let mut hold =
+                self.supervisor_bridge.peer_rotation_observe_hold(&peer_id) != Some(false);
+            let observation_window = if hold {
+                ROTATION_OBSERVE_HOLD_GUARD
+            } else if cfg!(test) {
                 std::time::Duration::from_secs(1)
             } else {
                 std::time::Duration::from_secs(5)
@@ -50768,19 +50788,33 @@ impl MobActor {
                 |error| format!("one-way submission was not delivered: {error}"),
             );
             let mut legacy_adoption_submitted = false;
+            let mut observed_found = false;
             let completed = loop {
                 let now = Instant::now();
                 if now >= deadline {
                     break false;
                 }
+                // Legacy detection needs a prompt NotFound: probe single-shot
+                // until the operation has been seen or adopted, then hold.
+                let held = hold
+                    && !(accepted_before_observation
+                        && !legacy_adoption_submitted
+                        && !observed_found);
                 // Reserve half of the remaining observation window for the
                 // retained-authority read. A rejected attempted authority can
                 // consume its whole request timeout without returning a typed
-                // rejection because it has no reply route.
-                let request_timeout = std::cmp::min(
-                    deadline.saturating_duration_since(now) / 2,
-                    std::time::Duration::from_millis(500),
-                );
+                // rejection because it has no reply route. A held read asks
+                // the member to answer well inside its own request timeout.
+                let remaining = deadline.saturating_duration_since(now);
+                let request_timeout = if held {
+                    remaining / 2
+                } else {
+                    std::cmp::min(remaining / 2, std::time::Duration::from_millis(500))
+                };
+                let hold_until_terminal_ms = held.then(|| {
+                    u64::try_from((request_timeout * 3 / 4).as_millis()).unwrap_or(u64::MAX)
+                });
+                let next_observe_command = build_next_observe(hold_until_terminal_ms);
                 // Completed rotations are observable under `next`, while a
                 // terminal rejection deliberately retains the previous/current
                 // supervisor. Try the attempted authority first, then fall back
@@ -50799,6 +50833,19 @@ impl MobActor {
                     )
                     .await;
                 let observation = match next_observation {
+                    Err(MobError::BridgeCommandRejected {
+                        cause: super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                        ..
+                    }) if held => {
+                        // Stale or never-advertised capabilities: the member
+                        // predates held observation. Fall back to the
+                        // single-shot compatibility path for this member.
+                        self.supervisor_bridge
+                            .record_peer_rotation_observe_hold(&peer_id, false);
+                        hold = false;
+                        last_observation = "member does not implement held observation".to_string();
+                        continue;
+                    }
                     Ok(observation @ BridgeSupervisorRotationObservation::Found { .. }) => {
                         observation
                     }
@@ -50822,6 +50869,10 @@ impl MobActor {
                                 last_observation = format!(
                                     "{last_observation}; attempted authority returned not-found; retained-authority observation failed: {error}"
                                 );
+                                if hold {
+                                    break false;
+                                }
+                                // Compatibility path only.
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                                 continue;
                             }
@@ -50855,6 +50906,10 @@ impl MobActor {
                                 last_observation = format!(
                                     "{last_observation}; attempted-authority observation failed: {next_error}; retained-authority observation failed: {retained_error}"
                                 );
+                                if hold {
+                                    break false;
+                                }
+                                // Compatibility path only.
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                                 continue;
                             }
@@ -50886,6 +50941,10 @@ impl MobActor {
                                 last_observation = format!(
                                     "{last_observation}; attempted-authority observation failed: {next_error}; retained-authority observation failed: {retained_error}"
                                 );
+                                if hold {
+                                    break false;
+                                }
+                                // Compatibility path only.
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                                 continue;
                             }
@@ -50962,6 +51021,10 @@ impl MobActor {
                                 }
                             }
                             let Some(refresh_value) = refresh_value else {
+                                if hold {
+                                    break false;
+                                }
+                                // Compatibility path only.
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                                 continue;
                             };
@@ -50973,6 +51036,10 @@ impl MobActor {
                                 last_observation = format!(
                                     "legacy next-authority route refresh was not acknowledged: {error}"
                                 );
+                                if hold {
+                                    break false;
+                                }
+                                // Compatibility path only.
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                                 continue;
                             }
@@ -51002,6 +51069,9 @@ impl MobActor {
                             }
                         } else {
                             last_observation = "operation not found yet".to_string();
+                            if hold {
+                                break false;
+                            }
                         }
                     }
                     BridgeSupervisorRotationObservation::Found {
@@ -51016,6 +51086,12 @@ impl MobActor {
                             )));
                         }
                         last_observation = format!("operation pending in phase {phase:?}");
+                        observed_found = true;
+                        if held {
+                            // The member held the read until its deadline:
+                            // the operation is durably pending.
+                            break false;
+                        }
                     }
                     BridgeSupervisorRotationObservation::Found {
                         state: BridgeSupervisorRotationState::Completed { receipt },
@@ -51066,7 +51142,10 @@ impl MobActor {
                         )));
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                if !hold {
+                    // Compatibility path only: single-shot observation polls.
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
             };
 
             if !completed {

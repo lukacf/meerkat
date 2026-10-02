@@ -329,6 +329,7 @@ printf '%s\n' \
   'echo "Error: Invariant NotGoalSilentExhausted is violated."' \
   'echo "Error: Invariant NotGoalFaultedChannelReportsClosed is violated."' \
   'echo "Error: Invariant NotGoalReRegisteredSilentReopen is violated."' \
+  'echo "Error: Invariant NotGoalUnregisteredAfterFault is violated."' \
   'echo "Error: Action property NeverRequestAttached is violated."' \
   'echo "Error: Action property NeverRequestRunning is violated."' \
   'echo "Error: Action property NeverAudibleAttached is violated."' \

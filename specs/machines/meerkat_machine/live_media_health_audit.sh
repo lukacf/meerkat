@@ -107,7 +107,8 @@ if [[ "$(cat "${work_dir}/safety.status")" != "0" ]] \
   exit 1
 fi
 
-for goal in Audible SilentReopen SilentExhausted FaultedChannelReportsClosed ReRegisteredSilentReopen; do
+for goal in Audible SilentReopen SilentExhausted FaultedChannelReportsClosed ReRegisteredSilentReopen \
+  UnregisteredAfterFault; do
   cfg="${work_dir}/goal-${goal}.cfg"
   derive_cfg "${cfg}" "  NotGoal${goal}"
   # One worker, as for the firing runs below: it stops at the first violation

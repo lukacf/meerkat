@@ -9,7 +9,9 @@
 # constraint, then:
 #   1. checks every invariant over the audit's state space (must pass), and
 #   2. proves each judgement reachable: for each goal it checks the goal's
-#      negation and requires TLC to report that invariant violated.
+#      negation and requires TLC to report that invariant violated, and
+#   3. proves each new transition fires: for each Never* action property it
+#      requires TLC to report that property violated.
 # It prints the safety run's distinct states and search depth, and each goal's
 # counterexample length (a real multi-step witness past the 5-step prefix).
 # An anchor this script expects but cannot find fails the run instead of
@@ -53,6 +55,7 @@ derive_cfg() {
   replace_exact_line "  SessionIdValues = {}" '  SessionIdValues = {"session_1"}' "${cfg}"
   replace_exact_line "  AgentRuntimeIdValues = {}" '  AgentRuntimeIdValues = {"runtime_1"}' "${cfg}"
   replace_exact_line "  SessionLlmIdentityValues = {}" '  SessionLlmIdentityValues = {"identity_1"}' "${cfg}"
+  replace_exact_line "  RunIdValues = {}" '  RunIdValues = {"run_1"}' "${cfg}"
   replace_exact_line "  StringValues = {}" '  StringValues = {"session_1", "channel_1", "channel_2", "output_1", "output_2"}' "${cfg}"
   replace_exact_line "CONSTANTS" "CONSTANTS
   AuditMaxSteps = ${max_steps}" "${cfg}"
@@ -115,4 +118,17 @@ for goal in Audible SilentReopen SilentExhausted FaultedChannelReportsClosed; do
   states="$(grep -cE '^State [0-9]+:' "${work_dir}/goal-${goal}.log" || true)"
   echo "[goal-${goal}] counterexample length ${states} states"
 done
-echo "live media health audit passed at model_step_count <= ${max_steps}; every judgement reachable"
+for edge in RequestAttached RequestRunning AudibleAttached AudibleRunning \
+  SilentReopenAttached SilentReopenRunning SilentExhaustedAttached SilentExhaustedRunning; do
+  cfg="${work_dir}/fires-${edge}.cfg"
+  derive_cfg "${cfg}" "" "  Never${edge}"
+  run_tlc "fires-${edge}" "${cfg}" "$@"
+  if ! grep -q "Action property Never${edge} is violated" "${work_dir}/fires-${edge}.log"; then
+    echo "error: media health transition ${edge} never fires within ${max_steps} steps" >&2
+    tail -40 "${work_dir}/fires-${edge}.log" >&2
+    exit 1
+  fi
+  states="$(grep -cE '^State [0-9]+:' "${work_dir}/fires-${edge}.log" || true)"
+  echo "[fires-${edge}] witness length ${states} states"
+done
+echo "live media health audit passed at model_step_count <= ${max_steps}; every judgement reachable; every transition fires"

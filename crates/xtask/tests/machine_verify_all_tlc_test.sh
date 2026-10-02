@@ -160,11 +160,13 @@ TLC_WORKERS="${tlc_workers}" "${live_steer_audit}" "${LIVE_STEER_AUDIT_MAX_STEPS
 # channel, which the ci sweep never reaches. A third hand-written audit over
 # the same generated model binds one channel, explores requests, judgements,
 # closed status, close and the second channel's open and bind on the same
-# session, under every generated invariant (including
+# session, in Attached and (after a run starts) Running, under every
+# generated invariant (including
 # live_media_health_budget_and_verdicts_are_consistent) plus its own
 # invariants and action properties (judged once, first output only). It
 # proves every judgement reachable by requiring a counterexample to its
-# negation; the exhausted budget needs 12 steps. Under a minute at 16 steps.
+# negation, and every new transition firing (each Never* action property must
+# be violated). The exhausted budget needs 12 steps; about a minute at 16.
 live_media_health_audit="${workspace_root}/specs/machines/meerkat_machine/live_media_health_audit.sh"
 if [[ ! -x "${live_media_health_audit}" ]]; then
   echo "error: live media health audit runner is missing from workspace runfiles: ${live_media_health_audit}" >&2

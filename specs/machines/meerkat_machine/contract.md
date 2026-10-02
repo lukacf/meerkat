@@ -20415,21 +20415,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LiveChannelStatusResolved`
 - To: `Stopped`
 
-### `RequestLiveMediaHealthIdle`
-- From: `Idle`
-- On: `RequestLiveMediaHealth`(session_id, channel_id, runtime_id, fence_token, generation, output_id, assistant_transcript_nonempty)
-- Guards:
-  - `output_present`
-  - `assistant_transcript_nonempty`
-  - `channel_belongs_to_session`
-  - `channel_execution_active`
-  - `runtime_binding_matches`
-  - `fence_binding_matches`
-  - `generation_binding_matches`
-  - `first_output_only`
-- Emits: `LiveMediaHealthRequested`
-- To: `Idle`
-
 ### `RequestLiveMediaHealthAttached`
 - From: `Attached`
 - On: `RequestLiveMediaHealth`(session_id, channel_id, runtime_id, fence_token, generation, output_id, assistant_transcript_nonempty)
@@ -20460,17 +20445,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LiveMediaHealthRequested`
 - To: `Running`
 
-### `ObserveLiveChannelMediaHealthAudibleIdle`
-- From: `Idle`
-- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
-- Guards:
-  - `audible`
-  - `channel_belongs_to_session`
-  - `channel_execution_active`
-  - `exact_requested_output`
-- Emits: `LiveChannelMediaHealthJudged`
-- To: `Idle`
-
 ### `ObserveLiveChannelMediaHealthAudibleAttached`
 - From: `Attached`
 - On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
@@ -20492,18 +20466,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `exact_requested_output`
 - Emits: `LiveChannelMediaHealthJudged`
 - To: `Running`
-
-### `ObserveLiveChannelMediaHealthSilentReopenIdle`
-- From: `Idle`
-- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
-- Guards:
-  - `silent`
-  - `reopen_budget_remains`
-  - `channel_belongs_to_session`
-  - `channel_execution_active`
-  - `exact_requested_output`
-- Emits: `LiveChannelMediaHealthJudged`
-- To: `Idle`
 
 ### `ObserveLiveChannelMediaHealthSilentReopenAttached`
 - From: `Attached`
@@ -20528,18 +20490,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `exact_requested_output`
 - Emits: `LiveChannelMediaHealthJudged`
 - To: `Running`
-
-### `ObserveLiveChannelMediaHealthSilentExhaustedIdle`
-- From: `Idle`
-- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
-- Guards:
-  - `silent`
-  - `reopen_budget_spent`
-  - `channel_belongs_to_session`
-  - `channel_execution_active`
-  - `exact_requested_output`
-- Emits: `LiveChannelMediaHealthJudged`
-- To: `Idle`
 
 ### `ObserveLiveChannelMediaHealthSilentExhaustedAttached`
 - From: `Attached`

@@ -1082,6 +1082,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
             basic_round_trip_witness(),
             retire_runtime_path_witness(),
             destroy_runtime_path_witness(),
+            stop_holds_and_resume_releases_member_run_starts_witness(),
         ],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
@@ -2508,6 +2509,58 @@ fn retire_runtime_path_witness() -> CompositionWitness {
         // RetireRunningReleasing 5 + RetireRequested 1 + ObserveRetired 1); steps
         // ~17 (4 injects + 9 transitions + 4 route deliveries).
         state_limits: meerkat_mob_seam_witness_limits(21, 4, 16),
+    }
+}
+
+/// A Stop quiesce takes the Stop arm (which emits HoldMemberRunStarts), the
+/// mob stops, Resume releases (ResumeStopped emits ReleaseMemberRunStarts),
+/// and a later Destroy quiesce takes the non-Stop arm (which never holds).
+/// Both quiesce arms are in the script, so a guard that lets either intent
+/// take the other arm leaves an expected arm unobserved.
+fn stop_holds_and_resume_releases_member_run_starts_witness() -> CompositionWitness {
+    let quiesce = |intent: &str| {
+        witness_input(
+            "mob",
+            "BeginPlacedCompletionLifecycleQuiesce",
+            vec![witness_field(
+                "intent",
+                named_variant("PlacedCompletionLifecycleIntentKind", intent),
+            )],
+        )
+    };
+    let order = |earlier: &str, later: &str| CompositionWitnessTransitionOrder {
+        earlier: witness_transition("mob", earlier),
+        later: witness_transition("mob", later),
+    };
+    CompositionWitness {
+        name: witness_id("stop_holds_and_resume_releases_member_run_starts"),
+        preload_inputs: vec![
+            quiesce("Stop"),
+            witness_input("mob", "Stop", vec![]),
+            witness_input("mob", "Resume", vec![]),
+            quiesce("Destroy"),
+        ],
+        expected_routes: vec![],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![
+            witness_transition("mob", "BeginPlacedCompletionLifecycleQuiesceFreshStop"),
+            witness_transition("mob", "StopRunning"),
+            witness_transition("mob", "ResumeStopped"),
+            witness_transition("mob", "BeginPlacedCompletionLifecycleQuiesceFresh"),
+        ],
+        expected_transition_order: vec![
+            order(
+                "BeginPlacedCompletionLifecycleQuiesceFreshStop",
+                "StopRunning",
+            ),
+            order("StopRunning", "ResumeStopped"),
+            order(
+                "ResumeStopped",
+                "BeginPlacedCompletionLifecycleQuiesceFresh",
+            ),
+        ],
+        state_limits: meerkat_mob_seam_witness_limits(12, 0, 12),
     }
 }
 

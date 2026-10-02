@@ -279,6 +279,19 @@ them.
 
 ### Fixed
 
+- Three meerkat-mob-mcp tests no longer fail on a loaded host (#1509). They
+  now assert ordering with events instead of wall-clock margins.
+  `relink_past_max_run_retires_a_child_still_running` relies on the child's
+  still-closed gate. `a_status_read_held_past_max_run_still_retires_the_child_at_the_deadline`
+  observes the moment the re-link abandons the held status read.
+  `the_deadline_yields_a_typed_partial_outcome_and_still_cleans_up` expires
+  the deadline on the coordinator clock once the round's turn is held.
+  Under a pinned load repro (60 copies on one core) the old tests passed
+  9/60, 0/30 and 18/60; the new ones pass every run. To support the last
+  one, the temporary council's deadline waits re-arm when the coordinator
+  clock offset changes, driven by its setter's notification. Without an
+  offset change (production) each wait is the same single timer as before.
+
 - The machine TLA generator parenthesizes a field's pending value when a
   later expression in the same update block reads it. A conditionally
   updated field was spliced bare as `IF c THEN a ELSE b`, so TLA+ precedence

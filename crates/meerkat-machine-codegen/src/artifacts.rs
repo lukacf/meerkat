@@ -5093,6 +5093,39 @@ fn collect_composition_named_bindings<'a>(
 mod tests {
     use super::*;
 
+    /// Every quantified Next disjunct leads with its transition's source-phase
+    /// guard, so TLC rejects the whole disjunct in other phases instead of
+    /// enumerating each parameter tuple per state (#1499 measured 464 s
+    /// unhoisted against 158 s hoisted on work_graph_lifecycle ci, identical
+    /// state counts).
+    #[test]
+    fn quantified_next_disjuncts_lead_with_the_source_phase_guard() {
+        let model =
+            render_machine_semantic_model(&meerkat_machine()).expect("render MeerkatMachine model");
+        let next = model
+            .split_once("\nNext ==\n")
+            .map(|(_, rest)| rest.split("\n\n").next().unwrap_or(""))
+            .expect("Next block");
+        let quantified = next
+            .lines()
+            .filter(|line| line.contains("\\E "))
+            .collect::<Vec<_>>();
+        assert!(
+            !quantified.is_empty(),
+            "MeerkatMachine has quantified transitions"
+        );
+        for line in &quantified {
+            assert!(
+                line.starts_with("    \\/ (phase = "),
+                "quantified Next disjunct without a leading phase guard: {line}"
+            );
+        }
+        assert!(
+            next.contains("    \\/ (phase = \"Running\") /\\ \\E run_id \\in RunIdValues : RequestCancelAfterBoundary(run_id)"),
+            "the guard is the transition's own source phase"
+        );
+    }
+
     #[test]
     fn substituted_compound_values_are_delimited_and_atoms_are_not() {
         for atom in [
@@ -9210,7 +9243,23 @@ impl<'a> MachineTlaCompiler<'a> {
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("{prefix}{}({})", transition.name, args)
+                // Hoist the source-phase guard ahead of the parameter
+                // quantifiers. The guard is the first conjunct of the action
+                // body too, so the disjunct is unchanged in meaning, but TLC
+                // no longer splits it into one action per parameter tuple
+                // that it must enumerate in every state: states outside the
+                // source phase reject the whole disjunct at once.
+                let from_guard = transition
+                    .from
+                    .iter()
+                    .map(|phase| format!("phase = {}", tla_string(phase)))
+                    .collect::<Vec<_>>()
+                    .join(" \\/ ");
+                if prefix.is_empty() || from_guard.is_empty() {
+                    format!("{prefix}{}({})", transition.name, args)
+                } else {
+                    format!("({from_guard}) /\\ {prefix}{}({})", transition.name, args)
+                }
             };
             pushln!(&mut out, "    \\/ {}", call);
         }

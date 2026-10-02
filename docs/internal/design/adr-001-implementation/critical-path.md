@@ -11,6 +11,12 @@ context taint and semantic disclosure prevention are not implementation goals.
 There is no pending user decision about terminality: a permission refusal is
 ordinary feedback to the model, and admitted work retains its usable controller.
 
+The [implementation checkpoint](implementation-progress.md) records current
+source and execution evidence. Native candidate `5c833bdb` still needs normal
+publication acceptance, native PR with green CI, and accepted cost measurement. The dated
+checkpoints below retain their original source scope; their passes do not qualify
+this candidate. Measurement ordering awaits the owner's cost-timing clarification.
+
 The integrated donor is `codex/local-governed-default` in
 `/Users/luka/.codex/worktrees/security-adr/meerkat-native-governed-m1`. Its frozen
 audit checkpoint remains unchanged. Publication is being extracted separately
@@ -31,13 +37,13 @@ and 0.05s execution. Its frozen source/result checkpoint is
 Provider responses and application resource semantics are fixtures. This does
 not establish persistent recovery, real provider access or complete coverage.
 
-Use tests first for critical behavior. Root serializes package-scoped Cargo
-commands in the warm integration lane, with two build jobs and four test
-workers. Agents prepare source and review deltas without starting builds. The
-next implementation checkpoint is controller continuity after the frozen audit
-slice. Optional OS confinement, consent and persistent/detached work remain held
-for their separate checkpoints. Authored tests are not recorded as observed
-failures or passes until executed.
+Use tests first for critical behavior. Root serializes Rust commands in
+source-isolated targets with command-scoped build and test budgets. Agents
+prepare source and review deltas without starting builds. The
+next gate is the current native publication checkpoint's focused execution and
+normal publication checks. Sandbox, consent and persistent/detached work remain
+held for their separate checkpoints and remain in the full delivery scope.
+Authored tests are not recorded as observed failures or passes until executed.
 Benchmarks require a separately confirmed quiet host window.
 
 After the first path, close real ingress/account policy and controller-mutation
@@ -48,7 +54,7 @@ actual process boundaries and existing-owner human consent. These are reviewed
 in slices, but a narrow profile is not the final product. Finish with adversarial
 implementation acceptance, a reviewable PR and green CI on its exact head.
 
-## Current publication and design status, 2026-10-01
+## Earlier publication and design status, 2026-10-01
 
 The frozen audit checkpoint is unchanged: 266 selected Rust tests, 414 Python
 SDK tests and 460 TypeScript SDK tests passed. The exact evidence remains under
@@ -86,7 +92,7 @@ local symlink path. The generated-file repair is pushed at `8ebe2cb9ecb826e8fb1e
 local freshness passed and new CI run `36891393790` is pending. The superseded
 failed run was canceled. CI is not GREEN, and no merge or deployment is claimed.
 
-## Remaining execution holds
+## Earlier execution holds, 2026-10-01
 
 The user's production-expansion freeze still requires one coherent verified
 slice at a time. The four controller-continuity RED cases remain open, including
@@ -177,9 +183,12 @@ a release-ready PR.
    (joint).
 
 Confinement is explicit opt-in per deployment/profile; absent configuration uses
-the existing trusted-host launch behavior. Linux and macOS are required for this
-batch. Windows confinement returns typed unsupported and follows in a later
-batch. Authorization is intended to ship on by default only if both the measured
+the existing trusted-host launch behavior. The earlier batch plan covered Linux
+and macOS and left Windows typed unsupported. That boundary does not complete
+the current full ABAC and sandbox objective: Linux, macOS and Windows must each
+meet their declared confinement acceptance, and unsupported-platform rejection
+is not confinement evidence.
+Authorization is intended to ship on by default only if both the measured
 overhead budget and full active-profile Turbo S gate pass; otherwise it ships
 opt-in. These are release activation decisions, not permission to omit coverage.
 

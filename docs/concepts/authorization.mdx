@@ -10,11 +10,13 @@ peer. Permissions belong to the authenticated work and the actual operation,
 not to a model's claim that it is authorized.
 
 <Note>
-**Implementation preview, October 2026.** A native in-memory integration test
-exercises real input admission, generated grants, denied-tool feedback,
-permitted-tool execution, normal run completion, and native audit records with
-a scripted model. This is not full deployment coverage or a released configuration
-recipe. See [integration and current support](/guides/authorization-integration)
+**Implementation preview, October 2026.** The current native candidate passed a narrow
+fixed-host, single-connection JSONL path with process-lifetime memory storage,
+real input admission, local tool refusal feedback, permitted execution, completion,
+and native audit against a loopback model fixture. The current candidate's normal
+publication gate and native PR CI remain unaccepted, and its overhead is
+unmeasured. The behavior below is the full design contract, not a claim that
+every surface implements it. See [integration and current support](/guides/authorization-integration)
 before enabling a governed path.
 </Note>
 

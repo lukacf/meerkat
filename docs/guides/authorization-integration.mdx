@@ -7,7 +7,8 @@ icon: "shield-check"
 Use local governed authorization when an embedding application needs different
 agents and callers to have different tool, source, account, or communication
 permissions. Start with the [authorization concepts](/concepts/authorization).
-For the selected storeless Rust path, use [Native governed embedding](/rust/native-authorization).
+For the fixed-host, single-connection, in-memory Rust path, use
+[Native governed embedding](/rust/native-authorization).
 
 <Note>
 **Preview integration contract, October 2026.** The Rust implementation is under
@@ -22,12 +23,14 @@ governed profile.
 
 | Area | Current evidence and remaining work |
 | --- | --- |
-| Native input, grants, and tool feedback | An executed in-memory native test covers admitted work, a generated grant, refused delete, permitted read, normal completion, and native audit using a scripted model and fixture resource policy. |
+| Native input, grants, and tool feedback | Native candidate `5c833bdb` passed fixed-host, single-connection JSONL with process-lifetime memory storage, loopback model HTTP, local tool refusal, permitted execution, completion, and native audit. These results do not establish SQLite, process restart, JWT ingress, or all-surface support. |
 | Model/provider and infrastructure errors | Focused tests exercise primary infrastructure-error classification through three provider adapters, native deferred siblings, and live/fallback fixtures. They do not certify every production route, retry, hosted capability, or live mode. |
 | Controller continuity | Actual controller selection and retained work references exist. Account-policy changes, token release, and concurrent admission still require complete integration and validation. |
 | Durable operation audit | Native row attachment exists. Durable recovery and commit-race coverage remain incomplete; do not advertise durable audit from the in-memory test. |
 | Human consent | The existing approval owner has exact-candidate, authenticated-host, expiry, cancellation, and one-use APIs. End-to-end presentation, late decision delivery, and real sink consumption remain integration work. |
 | OS confinement | Platform work is in progress. macOS launch probes do not establish complete bootstrap integrity or all shell paths; Linux, Windows, containers, and browser/WASM need their own declared capabilities and evidence. |
+| Console access administration | The separate existing MobKit controller has 47 backend tests, 20 UI component tests, and a real checked-save/recovery browser scenario passing on their recorded candidates. This does not activate native governed work or establish SQLite/restart or JWT coverage. |
+| Publication and overhead | The current native candidate's normal publication gate and native PR CI remain unaccepted, and its overhead is unmeasured. Ancestor tests and Console acceptance do not supply those gates. |
 | Full application coverage | Tool/source access, peers, schedules, memory/history/export, Elephant, live/audio, and all supported surfaces remain the intended scope. A narrow successful fixture is not acceptance of this whole set. |
 
 Do not label a deployment fully governed while it has an unguarded path that can

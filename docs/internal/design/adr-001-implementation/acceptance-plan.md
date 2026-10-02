@@ -2,8 +2,9 @@
 
 > **Acceptance scope revised, 2026-10-01.** The owner approved the
 > [local governed default](../adr-001-local-governed-default.md). Its detailed
-> contract is in review. The previous high-assurance budgets, witness requirements
-> and restricted first profile below are historical, not current default gates.
+> r8 contract has four-reviewer design acceptance. The previous high-assurance
+> budgets, witness requirements and restricted first profile below are historical,
+> not current default gates.
 > New target: no added hot-path RTT/fsync, under 1 ms p99 added authorization
 > per tool/model dispatch and at most 10 percent turn overhead, with broad
 > provider, streaming, tool, compaction and live coverage.
@@ -13,13 +14,22 @@ Luka's objective is full ADR implementation, adversarial acceptance by the GCP
 Meerkat/MobKit lead, Homecore, OB3 and Toolkit reviewers, and PRs with green CI.
 The first vertical slice is an implementation gate, not completion.
 
-The final reviewed requirements are [ADR-001](../adr-001-runtime-security.md)
-and [governed profiles](../governed-deployment-profiles.md), frozen at r6 in the
-[review record](../adr-001-runtime-security-review.md). No design verdict counts
-as acceptance of implementation. Later changes to these requirements require an
-explicit disposition; missing implementation cannot be relabeled out of scope.
+Read [ADR-001](../adr-001-runtime-security.md) and
+[governed profiles](../governed-deployment-profiles.md) through the accepted
+[local-default amendment](../adr-001-local-governed-default.md) and
+[confinement and consent addendum](../adr-001-confinement-and-consent.md).
+The earlier [r6 review](../adr-001-runtime-security-review.md) does not restore
+parked witness/time requirements to the default path. Full ABAC and sandbox
+coverage remain required; deployment opt-in
+does not make sandbox implementation optional. No design verdict counts as
+implementation acceptance, and missing coverage cannot be relabeled out of scope.
 
-## Baselines and isolation
+The [implementation checkpoint](implementation-progress.md) records current
+execution and publication status. No native PR with green CI or accepted cost
+measurement exists for the current candidate. Measurement ordering awaits the
+owner's cost-timing clarification; the low-overhead requirement is unchanged.
+
+## Historical baselines and isolation
 
 - Meerkat implementation base: main `df1fae188`, integrated into isolated branch
   `codex/security-authorization-adr` at `b4ecf8a10` after the reviewed-document
@@ -59,7 +69,7 @@ be a second work-execution authority.
    Create independently green PRs to main, declare source breaks and migration,
    run local WASM and semantic/model gates, and verify actual PR CI state.
 
-## Numeric acceptance budgets
+## Historical high-assurance numeric budgets
 
 These thresholds are declared before runtime implementation. They are acceptance
 criteria, not measurements or claims that the current code passes. Compare the
@@ -96,7 +106,7 @@ required recovery custody. Active attempts, unresolved appends and pending
 settlement retain necessary durable evidence. Archival integrity anchors and
 current antirollback authority must survive outside restored application state.
 
-### Known clock-profile budget failure, 2026-10-01
+### Optional clock-profile budget failure, 2026-10-01
 
 The accepted `LinuxChronyNtsV1` producer proposal r5
 (`5ebb51becc516783aa178305d0dc1873056cc0b48e3f45a1ef751ddd4526218d`)

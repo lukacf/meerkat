@@ -2,7 +2,22 @@
 
 ## Current first-native-path acceptance, 2026-10-02
 
-Root and independent raw review accepted the narrow R7 gate: 14 selected,
+Current native publication source is `5c833bdbdbfb7106019a81da0dec60f19a3f8bc0`.
+Its initial focused attempt stopped at a mixed-cache bridge-symbol link failure
+after 262.30s, exit 101; zero tests ran. Removing the cross-source target/lane
+overrides allowed the same command on the same source to exit 0 in 273.34s:
+53 selected tests passed in 5.942s of test execution; 4,710 tests were outside
+the selection. Root matched all eight former failures to unique PASS lines.
+The current candidate also passed both non-default-feature governed JSONL tests
+in 0.08s of test execution, 452.55s command time: local refusal followed by
+permitted execution in the same run, and rejection of shared bundles and
+unsupported wire setup. Four earlier functional passes on ancestor `2210e70b6`
+remain source-qualified; its MCP and live-barge-in selections have not been
+rerun on this candidate. There is no current native implementation PR, green PR CI, or accepted
+overhead result. The full ABAC and sandbox objective remains open; these narrow
+checkpoints do not remove persistence/restart or broader surface/platform coverage.
+
+Earlier, root and independent raw review accepted the narrow R7 gate: 14 selected,
 14 PASS, zero failures, ignored tests or timeouts, on source
 `f7e871a46296a2c494cb748780db86957675d39e`. This covers 11 custody/cancellation
 controls, two governed JSONL tests and one MCP unsupported-profile control;
@@ -31,27 +46,34 @@ candidate. Their receipt is
 Before a fresh measurement grant, the final publication candidate must have
 its own exact-source optimized build and both correctness smokes. Performance
 remains unproven. Window `W-minimal-20261002-1` was not granted and was cancelled
-at 2026-10-02 11:19:43 UTC; zero measurements ran. Native publication comes
-first, followed by a fresh minimal full-host window after the native PR push.
-Representative measurement follows later with its own lock and reserved cores.
+at 2026-10-02 11:19:43 UTC; zero measurements ran. Measurement ordering awaits
+the owner's cost-timing clarification. No publication-first sequence or new
+benchmark window is established by this record; low-overhead acceptance remains
+required.
 
-Separately, root and independent review accepted 47 Console backend tests on
-`1966cb3ce2ce97988a3381932f362a739377bebf`, zero failed or ignored. Composed
-backend/UI tree `6f8cf3d3e52736489fb6c2bfd98bc3b8f3271511` builds and exactly
-reproduces its assets; canonical HEAD freshness remains unaccepted until a
-normal commit supplies the matching baseline. These candidates are not
-published and do not establish integrated UI/backend network E2E acceptance.
-PR520's earlier green CI belongs to old `8ebe2cb9`; its current conflicts and
-rebase remain reserved after PR541, PR542 and release 0.8.45. It is not CI for
-the accepted new candidates.
+Separately, 47 Console backend tests passed on
+`13e1847720a5e1ae0654137da724f085fcf68bbc`. The reviewed UI repair patch
+`081bf002dc1e80c08b72a139600e9cd092e84597dee0f9597dc78aa0006993f2`
+is committed remotely as `77d9eb0f0eb67e5058b41cdc56ff211de9003968`, tree
+`299b015fa48937db6a7fb09f90982157c31a5fbd`; normal commit hooks passed in 0.16s.
+The local private checkout retains the same patch on `13e184772`. The repair
+passed 20 component tests and the real checked-save/recovery browser scenario,
+including three exact writes, no read-only writes, and recovery after one
+deliberate failed protected read. This is acceptance of existing MobKit access
+administration, not native governed work, SQLite/restart, or JWT ingress.
+Console source remains on the 0.8.45 dependency line. PR520's old green CI does
+not qualify the reviewed repair; current publication and CI are separate gates.
 
-The PR targets `release/0.8.51`. Only the no-wedge fix, TLA precedence fix and
-a demonstrated mandatory tip CI blocker may precede it; other queued PRs are
-held behind it. The reserved release tip is
-`178f137543d532820cbe1f9013a25de93975de10`. At source preparation, the merge is
-resolved; canonical generation, merged-source tests, normal publication hooks
-and required PR CI remain pending. This source preparation is not a native
-PR or CI result.
+The earlier publication plan targeted `release/0.8.51`, reserved tip
+`178f137543d532820cbe1f9013a25de93975de10`, and held other queued PRs except the
+no-wedge fix, TLA precedence fix and demonstrated mandatory tip CI blockers.
+That reservation was released at 2026-10-02 19:52 UTC. Development continues on
+its own branches; full-feature integration remains held. Neither a native
+checkpoint PR nor a Console PR520 milestone merge has occurred.
+Regenerated source is committed at `5c833bdb`; its normal commit hooks passed.
+The focused repairs and non-default-feature governed JSONL pair passed on that
+source. Normal push hooks and required PR CI remain pending.
+Source preparation is not a native PR or CI result.
 
 The separate persistent controller-administration extension passed eight focused
 tests on `8f65c1364395f7f91c477134b859069b64e2132b`: the unchanged real JSONL
@@ -63,9 +85,10 @@ initial empty Idle checkpoint to the actual live owner without adding hot-path
 persistence. The original failure and diagnostic evidence remain preserved.
 The accepted result is under
 `/Users/luka/.codex/adr-001-evidence/gcp-native-s3-persistent-admin-green-r2-20261002`.
-This source candidate remains outside the first publication checkpoint. It
-covers loaded owners with the stock memory store, not SQLite or process restart,
-and must be revalidated when integrated after publication. SQLite/restart,
+At that acceptance checkpoint, this source candidate was outside the first
+publication checkpoint. It covers loaded owners with the stock memory store,
+not SQLite or process restart; later integration needs its own source-qualified
+validation. SQLite/restart,
 broader surfaces, performance and full five-story/37-checkpoint ADR coverage
 remain required next slices. Earlier
 records retain their historical source and scope; this section supersedes

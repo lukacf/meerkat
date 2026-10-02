@@ -2993,6 +2993,9 @@ pub struct MemberAdmissionBacklogSnapshot {
     pub topology_parked_reloads: BTreeMap<AgentIdentity, usize>,
     #[cfg(test)]
     pub settled_reload_invocations: BTreeMap<AgentIdentity, usize>,
+    /// Parked deliveries the lane skipped because their caller had left.
+    #[cfg(test)]
+    pub skipped_abandoned: BTreeMap<AgentIdentity, usize>,
 }
 
 /// Maximum deliveries parked behind one member's in-flight admission before
@@ -3046,6 +3049,17 @@ impl MemberAdmissionBacklogGauge {
                 .await
                 .expect("the gauge owns its record signal");
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_abandoned_skip(&self, agent_identity: &AgentIdentity) {
+        *self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .skipped_abandoned
+            .entry(agent_identity.clone())
+            .or_default() += 1;
     }
 
     #[cfg(test)]
@@ -6750,11 +6764,41 @@ impl MobHandle {
     // because some command arms re-enter this seam (ensure-member/reconcile
     // → retire/spawn), which would make opaque future types — and their
     // `Send` inference — mutually recursive.
+    //
+    // SubmitWork is the exception: it is routed inline. The actor skips a
+    // parked delivery whose caller has left by checking its reply channel,
+    // and a relieved task holds that receiver until its asynchronous abort
+    // lands, after the caller is already gone. A delivery popped in that
+    // window ran a ghost turn. Inline, the receiver lives in the caller's
+    // own future and closes the moment the caller drops. The arm is a thin
+    // forward, not the large routing frame the relief exists for.
     fn execute_machine_command(&self, command: MobMachineCommand) -> BoxedMachineCommandFuture {
         let handle = self.clone();
-        Box::pin(meerkat_runtime::stack_relief::relieve_caller_stack(
-            move || async move { handle.execute_machine_command_inner(command).await },
-        ))
+        match command {
+            MobMachineCommand::SubmitWork(cmd) => {
+                Box::pin(async move { handle.submit_work_command(cmd).await })
+            }
+            command => Box::pin(meerkat_runtime::stack_relief::relieve_caller_stack(
+                move || async move { handle.execute_machine_command_inner(command).await },
+            )),
+        }
+    }
+
+    async fn submit_work_command(
+        &self,
+        cmd: Box<crate::mob_machine::SubmitWorkCommand>,
+    ) -> Result<MobMachineCommandResult, MobError> {
+        // Shell dispatch is a thin forward: the mob actor owns work-origin
+        // legality via the MobMachine DSL. There is no origin re-decision
+        // here: `spec.origin` is forwarded verbatim and the DSL accepts or
+        // rejects.
+        let receipt_work_ref = cmd.work_ref.clone();
+        let payload = submit_work_payload(cmd)?;
+        self.send_actor_command(|reply_tx| MobCommand::SubmitWork { payload, reply_tx })
+            .await??;
+        Ok(MobMachineCommandResult::WorkReceipt {
+            work_ref: receipt_work_ref,
+        })
     }
 
     async fn execute_machine_command_inner(
@@ -6863,19 +6907,7 @@ impl MobHandle {
                     .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
-            MobMachineCommand::SubmitWork(cmd) => {
-                // Shell dispatch is a thin forward: the mob actor owns
-                // work-origin legality via the MobMachine DSL. There is no
-                // origin re-decision here — `spec.origin` is forwarded
-                // verbatim and the DSL accepts or rejects.
-                let receipt_work_ref = cmd.work_ref.clone();
-                let payload = submit_work_payload(cmd)?;
-                self.send_actor_command(|reply_tx| MobCommand::SubmitWork { payload, reply_tx })
-                    .await??;
-                Ok(MobMachineCommandResult::WorkReceipt {
-                    work_ref: receipt_work_ref,
-                })
-            }
+            MobMachineCommand::SubmitWork(cmd) => self.submit_work_command(cmd).await,
             MobMachineCommand::CancelWork { work_ref } => {
                 // No work-tracking ledger backs per-unit cancellation, so
                 // there is no authority that can locate and cancel an

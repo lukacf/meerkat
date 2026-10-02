@@ -7736,6 +7736,9 @@ struct LiveExternalPeerHarness {
     drop_next_attempted_rotation_observation_response: Arc<AtomicBool>,
     drop_next_authorize_response: Arc<AtomicBool>,
     reject_next_rotation: Arc<AtomicBool>,
+    advertise_rotation_observe_hold: Arc<AtomicBool>,
+    reject_held_rotation_observes: Arc<AtomicBool>,
+    held_rotation_observes: Arc<AtomicUsize>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
     direct_member_fence: Arc<RwLock<Option<super::bridge_protocol::BridgeDirectMemberFence>>>,
     bind_peer_id_override: Arc<RwLock<Option<String>>>,
@@ -7859,6 +7862,25 @@ impl LiveExternalPeerHarness {
 
     fn reject_next_rotation(&self) {
         self.reject_next_rotation.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the next bind reply advertises held rotation observation.
+    fn advertise_rotation_observe_hold(&self, advertise: bool) {
+        self.advertise_rotation_observe_hold
+            .store(advertise, Ordering::Relaxed);
+    }
+
+    /// Answer held rotation observations the way a member that predates the
+    /// extension does: the unknown field fails decoding with the typed
+    /// `Unsupported` cause.
+    fn reject_held_rotation_observes(&self, reject: bool) {
+        self.reject_held_rotation_observes
+            .store(reject, Ordering::Relaxed);
+    }
+
+    /// Held rotation observations received.
+    fn held_rotation_observes(&self) -> usize {
+        self.held_rotation_observes.load(Ordering::Relaxed)
     }
 
     async fn authorized_supervisor_peer_id(&self) -> Option<String> {
@@ -8057,6 +8079,51 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// The harness member's single observation of a rotation as the payload's
+/// observer (shared by single-shot and held observation).
+async fn harness_rotation_observation(
+    operations: &RwLock<
+        HashMap<
+            super::bridge_protocol::SupervisorRotationOperationId,
+            super::bridge_protocol::BridgeSupervisorRotationState,
+        >,
+    >,
+    supervisor: &RwLock<Option<HarnessSupervisorState>>,
+    payload: &super::bridge_protocol::BridgeSupervisorRotationObserve,
+) -> super::bridge_protocol::BridgeSupervisorRotationObservation {
+    let known_state = operations.read().await.get(&payload.operation_id).cloned();
+    let retained_current = supervisor.read().await.clone();
+    let retained_current_matches = retained_current.as_ref().is_some_and(|current| {
+        super::bridge_protocol::BridgePeerSpec::from(current.supervisor.clone()) == payload.observer
+            && current.epoch == payload.observer_epoch
+    });
+    let observer_authorized = known_state.as_ref().is_some_and(|state| match state {
+        super::bridge_protocol::BridgeSupervisorRotationState::Pending { operation, .. } => {
+            retained_current_matches
+                || (operation.target.target == payload.observer
+                    && operation.target.target_epoch == payload.observer_epoch)
+        }
+        super::bridge_protocol::BridgeSupervisorRotationState::Completed { receipt } => {
+            retained_current_matches
+                || (receipt.target.target == payload.observer
+                    && receipt.target.target_epoch == payload.observer_epoch)
+        }
+        super::bridge_protocol::BridgeSupervisorRotationState::Rejected { .. } => {
+            retained_current_matches
+        }
+        _ => false,
+    });
+    if observer_authorized {
+        super::bridge_protocol::BridgeSupervisorRotationObservation::Found {
+            state: known_state.expect("authorized known rotation"),
+        }
+    } else {
+        super::bridge_protocol::BridgeSupervisorRotationObservation::NotFound {
+            operation_id: payload.operation_id,
+        }
+    }
+}
+
 async fn spawn_live_external_tcp_peer(peer_name: &str) -> LiveExternalPeerHarness {
     spawn_live_external_peer_with_transport(peer_name, true).await
 }
@@ -8131,6 +8198,15 @@ async fn spawn_live_external_peer_with_transport(
     let responder_drop_next_authorize_response = drop_next_authorize_response.clone();
     let reject_next_rotation = Arc::new(AtomicBool::new(false));
     let responder_reject_next_rotation = reject_next_rotation.clone();
+    let advertise_rotation_observe_hold = Arc::new(AtomicBool::new(true));
+    let responder_advertise_rotation_observe_hold = advertise_rotation_observe_hold.clone();
+    let reject_held_rotation_observes = Arc::new(AtomicBool::new(false));
+    let responder_reject_held_rotation_observes = reject_held_rotation_observes.clone();
+    let held_rotation_observes = Arc::new(AtomicUsize::new(0));
+    let responder_held_rotation_observes = held_rotation_observes.clone();
+    // Bumped whenever a rotation operation is recorded, so a held observation
+    // answers when its operation appears.
+    let responder_rotation_progress = Arc::new(tokio::sync::watch::Sender::new(0u64));
     let supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>> = Arc::new(RwLock::new(None));
     let responder_supervisor_state = supervisor_state.clone();
     let direct_member_fence: Arc<RwLock<Option<super::bridge_protocol::BridgeDirectMemberFence>>> =
@@ -8281,6 +8357,7 @@ async fn spawn_live_external_peer_with_transport(
                                         },
                                     },
                                 );
+                                responder_rotation_progress.send_modify(|seen| *seen = seen.wrapping_add(1));
                                 responder_runtime
                                     .mark_interaction_complete(candidate.interaction.id.0);
                                 continue;
@@ -8309,6 +8386,7 @@ async fn spawn_live_external_peer_with_transport(
                                     receipt: operation,
                                 },
                             );
+                            responder_rotation_progress.send_modify(|seen| *seen = seen.wrapping_add(1));
                             if let Some(previous) = previous {
                                 remove_live_external_peer_trust(
                                     &responder_ingress_finalizer,
@@ -8607,6 +8685,9 @@ async fn spawn_live_external_peer_with_transport(
                                                                     interrupt_member: true,
                                                                     hard_cancel_member: false,
                                                                     tracked_input_cancel: false,
+                                                                    rotation_observe_hold:
+                                                                        responder_advertise_rotation_observe_hold
+                                                                            .load(Ordering::Relaxed),
                                                                     retire_member: true,
                                                                     destroy_member: true,
                                                                     wire_member: true,
@@ -9025,61 +9106,110 @@ async fn spawn_live_external_peer_with_transport(
                                 super::bridge_protocol::BridgeCommand::ObserveSupervisorRotation(
                                     payload,
                                 ) => {
-                                    let known_state = responder_rotation_operations
-                                        .read()
-                                        .await
-                                        .get(&payload.operation_id)
-                                        .cloned();
-                                    let retained_current =
-                                        responder_supervisor_state.read().await.clone();
-                                    let retained_current_matches = retained_current
-                                        .as_ref()
-                                        .is_some_and(|current| {
-                                            super::bridge_protocol::BridgePeerSpec::from(
-                                                current.supervisor.clone(),
-                                            ) == payload.observer
-                                                && current.epoch == payload.observer_epoch
-                                        });
-                                    let observer_authorized = known_state.as_ref().is_some_and(
-                                        |state| match state {
-                                            super::bridge_protocol::BridgeSupervisorRotationState::Pending {
-                                                operation,
-                                                ..
-                                            } => {
-                                                retained_current_matches
-                                                    || (operation.target.target == payload.observer
-                                                        && operation.target.target_epoch
-                                                            == payload.observer_epoch)
-                                            }
-                                            super::bridge_protocol::BridgeSupervisorRotationState::Completed {
-                                                receipt,
-                                            } => {
-                                                retained_current_matches
-                                                    || (receipt.target.target == payload.observer
-                                                        && receipt.target.target_epoch
-                                                            == payload.observer_epoch)
-                                            }
-                                            super::bridge_protocol::BridgeSupervisorRotationState::Rejected {
-                                                ..
-                                            } => retained_current_matches,
-                                            _ => false,
-                                        },
-                                    );
-                                    let observation = if observer_authorized {
-                                        super::bridge_protocol::BridgeSupervisorRotationObservation::Found {
-                                            state: known_state.expect("authorized known rotation"),
-                                        }
+                                    let held = payload.hold_until_terminal_ms;
+                                    if held.is_some() {
+                                        responder_held_rotation_observes
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    if held.is_some()
+                                        && responder_reject_held_rotation_observes
+                                            .load(Ordering::Relaxed)
+                                    {
+                                        serde_json::to_value(
+                                            super::bridge_protocol::BridgeReply::Rejected {
+                                                cause: super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                                                reason: "invalid bridge command: unknown field `hold_until_terminal_ms`"
+                                                    .to_string(),
+                                            },
+                                        )
+                                        .expect("held observation rejection")
                                     } else {
-                                            super::bridge_protocol::BridgeSupervisorRotationObservation::NotFound {
-                                            operation_id: payload.operation_id,
+                                        // Subscribed before the read, so an
+                                        // operation recorded after it wakes the
+                                        // held waiter.
+                                        let mut progress = responder_rotation_progress.subscribe();
+                                        let observation = harness_rotation_observation(
+                                            &responder_rotation_operations,
+                                            &responder_supervisor_state,
+                                            &payload,
+                                        )
+                                        .await;
+                                        if let (
+                                            Some(hold_ms),
+                                            super::bridge_protocol::BridgeSupervisorRotationObservation::NotFound { .. },
+                                        ) = (held, &observation)
+                                        {
+                                            // Held and not yet visible: answer
+                                            // when the operation is recorded or
+                                            // the hold elapses, off the responder
+                                            // loop that records it.
+                                            let operations = Arc::clone(&responder_rotation_operations);
+                                            let supervisor = Arc::clone(&responder_supervisor_state);
+                                            let reply_runtime = Arc::clone(&responder_runtime);
+                                            let interaction_id = candidate.interaction.id;
+                                            let to = to.clone();
+                                            reply_tasks.spawn(async move {
+                                                let deadline = tokio::time::Instant::now()
+                                                    + std::time::Duration::from_millis(hold_ms);
+                                                let observation = loop {
+                                                    let observation = harness_rotation_observation(
+                                                        &operations,
+                                                        &supervisor,
+                                                        &payload,
+                                                    )
+                                                    .await;
+                                                    if !matches!(
+                                                        observation,
+                                                        super::bridge_protocol::BridgeSupervisorRotationObservation::NotFound { .. }
+                                                    ) {
+                                                        break observation;
+                                                    }
+                                                    match tokio::time::timeout_at(
+                                                        deadline,
+                                                        progress.changed(),
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(Ok(())) => {}
+                                                        Ok(Err(_)) | Err(_) => break observation,
+                                                    }
+                                                };
+                                                let result = serde_json::to_value(
+                                                    super::bridge_protocol::BridgeReply::SupervisorRotation(
+                                                        observation,
+                                                    ),
+                                                )
+                                                .expect("held rotation observation response");
+                                                if let Err(error) = reply_runtime
+                                                    .send(CommsCommand::PeerResponse {
+                                                        objective_id: None,
+                                                        content_taint: None,
+                                                        to,
+                                                        in_reply_to: interaction_id,
+                                                        status: meerkat_core::interaction::ResponseStatus::Completed,
+                                                        result,
+                                                        blocks: None,
+                                                        handling_mode: None,
+                                                    })
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        %interaction_id,
+                                                        %error,
+                                                        "held rotation observation response send was not confirmed"
+                                                    );
+                                                }
+                                                reply_runtime.mark_interaction_complete(interaction_id.0);
+                                            });
+                                            continue;
                                         }
-                                    };
-                                    serde_json::to_value(
-                                        super::bridge_protocol::BridgeReply::SupervisorRotation(
-                                            observation,
-                                        ),
-                                    )
-                                    .expect("rotation observation response")
+                                        serde_json::to_value(
+                                            super::bridge_protocol::BridgeReply::SupervisorRotation(
+                                                observation,
+                                            ),
+                                        )
+                                        .expect("rotation observation response")
+                                    }
                                 }
                                 _ => serde_json::json!({
                                     "error": "unsupported bridge command in test harness"
@@ -9296,6 +9426,9 @@ async fn spawn_live_external_peer_with_transport(
         drop_next_attempted_rotation_observation_response,
         drop_next_authorize_response,
         reject_next_rotation,
+        advertise_rotation_observe_hold,
+        reject_held_rotation_observes,
+        held_rotation_observes,
         supervisor_state,
         direct_member_fence,
         bind_peer_id_override,
@@ -18953,6 +19086,158 @@ async fn test_rotate_supervisor_unreadable_final_completion_loss_fail_stops_and_
     assert!(machine.supervisor_pending_authority_peer_id.is_none());
 }
 
+/// A member that advertises held observation answers the attempted-authority
+/// read when the operation is terminal: the rotation converges in one call,
+/// with no polling.
+#[tokio::test]
+async fn test_rotate_supervisor_converges_with_one_held_observation() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "rotate-supervisor-held-observation",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+
+    let report = handle
+        .rotate_supervisor()
+        .await
+        .expect("held observation converges in one call");
+    let rotated = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load rotated authority")
+        .expect("rotated authority");
+    assert_eq!(rotated.public_peer_id, report.public_peer_id);
+    assert_eq!(
+        external.held_rotation_observes(),
+        1,
+        "one held attempted-authority read answers at the terminal transition"
+    );
+}
+
+/// A member whose bind reply did not advertise held observation is observed
+/// single-shot (the compatibility path) and is never offered the hold; with
+/// its operation unobservable the rotation stays durably pending.
+#[tokio::test]
+async fn test_rotate_supervisor_observes_a_member_without_held_observation_single_shot() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "rotate-supervisor-single-shot-observation",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    external.advertise_rotation_observe_hold(false);
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+
+    external.suppress_rotation_observations(true);
+    let error = handle
+        .rotate_supervisor()
+        .await
+        .expect_err("an unobservable operation stays durably pending");
+    assert!(
+        matches!(
+            error,
+            MobError::SupervisorRotationIncomplete {
+                pending_authority_recorded: true,
+                rollback_succeeded: false,
+                ..
+            }
+        ),
+        "expected durable pending, got {error:?}"
+    );
+    assert_eq!(
+        external.held_rotation_observes(),
+        0,
+        "a member that did not advertise the capability is never offered a held observation"
+    );
+}
+
+/// A member whose advertised capabilities were stale (it predates held
+/// observation) rejects the hold with the typed `Unsupported` cause; the
+/// supervisor falls back to single-shot observation and converges.
+#[tokio::test]
+async fn test_rotate_supervisor_falls_back_when_a_member_rejects_held_observation() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "rotate-supervisor-held-observation-fallback",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+
+    external.reject_held_rotation_observes(true);
+    let report = handle
+        .rotate_supervisor()
+        .await
+        .expect("the typed rejection falls back to single-shot observation");
+    let rotated = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load rotated authority")
+        .expect("rotated authority");
+    assert_eq!(rotated.public_peer_id, report.public_peer_id);
+    assert_eq!(
+        external.held_rotation_observes(),
+        1,
+        "exactly one held attempt, rejected typed, before the single-shot fallback"
+    );
+}
+
 #[tokio::test]
 async fn test_rotate_supervisor_timeout_keeps_durable_operation_and_retry_reuses_id() {
     let _serial = lock_real_comms_tests();
@@ -19379,6 +19664,10 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
     assert!(
         !external.authorize_response_drop_is_armed(),
         "the first legacy route-refresh response must be dropped exactly once"
+    );
+    assert!(
+        external.held_rotation_observes() >= 1,
+        "after legacy adoption the member's answer arrives on a held observation"
     );
     assert_eq!(report.public_peer_id, next.public_peer_id);
     let authorized = external

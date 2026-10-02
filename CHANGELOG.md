@@ -42,6 +42,13 @@ them.
   typed admission wait (#1431). Callers that relied on these auto traits (for
   example `std::panic::catch_unwind` around a driver reference) must wrap it in
   `AssertUnwindSafe`.
+- `meerkat_contracts::wire::supervisor_bridge::BridgeSupervisorRotationObserve`
+  gains the public field `hold_until_terminal_ms: Option<u64>`.
+  `meerkat_contracts::wire::supervisor_bridge::BridgeCapabilities` gains the
+  public field `rotation_observe_hold: bool`. Struct literals must set them;
+  `None` and `false` keep today's behaviour. On the wire both are omitted when
+  unset, so payloads to and from members that predate them are unchanged. The
+  supervisor bridge protocol version stays V6.
 - Behaviour-only (not measured by the gate): rkat-rpc callback routing is
   owned per connection (#1451). Over TCP, a session's callback tools route
   only to the connection that created it, and `tools/register` changes only
@@ -144,6 +151,13 @@ them.
   through one shared projection, so no path drops it. The Python SDK already
   passes the generated overlay through on all three paths, now pinned by
   payload tests.
+
+
+- `meerkat_runtime::MeerkatMachine::wait_input_admitted_by_idempotency_key`
+  waits until a live session's runtime has admitted an input for an
+  idempotency key and returns its id. The driver signals every accepted
+  input, so the wait is woken by the admission rather than re-reading on a
+  timer. It returns `Ok(None)` for a session without a live registration.
 
 
 - `meerkat_runtime::MeerkatMachine::wait_input_admitted_by_idempotency_key`
@@ -266,6 +280,40 @@ them.
   Unix.
 
 ### Changed
+
+- Supervisor rotation no longer polls a member for convergence. A member
+  advertising `rotation_observe_hold` answers a held
+  `ObserveSupervisorRotation` when the operation is terminal, waking on a
+  per-session rotation-progress signal; the supervisor's observation window is
+  then only a hang guard that returns the durably pending observation.
+  - The supervisor records each member's capability from its bind reply.
+  - A member whose capability is unknown (for example after a restart) is
+    offered the hold. A member that predates it rejects the unknown field with
+    the typed `Unsupported` cause, and the supervisor falls back to single-shot
+    observation.
+  - Members known not to support it keep the single-shot observation loop
+    unchanged, as the compatibility path.
+  - `test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_restart`
+    failed 16/30 under load because one 1 s polling window raced the member's
+    completion. It now converges in one call.
+- Debug worker-stack headroom (#1446): the unregister teardown saga and the
+  session registration chain no longer reserve every section's temporaries
+  in one poll frame. Their numbered phases and sections now run in boxed
+  async blocks, and the registration path's large child futures are built in
+  their own frames, with bodies unchanged. Measured on the 2 MiB stack canary
+  (debug), at the deepest machine apply:
+  - the teardown chain went from 1,487,592 B to 597,784 B (the saga's own
+    poll frame from 787,560 B to 58,584 B);
+  - the registration chain went from 1,490,216 B to 697,224 B.
+
+  The canary now also passes at 1536 KiB and 1280 KiB. No behaviour change.
+- rkat-rpc over TCP: a new connection no longer overwrites the shared
+  runtime's callback channel, id counter and tool registry (#1451). Before,
+  callbacks for an older connection's new sessions went to the newest
+  connection, its registered tools were cleared, and callback ids restarted
+  in another connection's id space. On connection close the server now fails
+  pending callbacks before its graceful request shutdown, so a session waiting
+  on a gone client gets the typed failure immediately.
 
 - Debug worker-stack headroom (#1446): the unregister teardown saga and the
   session registration chain no longer reserve every section's temporaries

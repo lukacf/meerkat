@@ -14404,8 +14404,18 @@ impl MultiBackendProvisioner {
                 )
                 .await);
         }
-        match super::bridge_protocol::decode_bridge_payload(&command, value, "BindMember command") {
-            Ok(payload) => Ok((payload, install)),
+        match super::bridge_protocol::decode_bridge_payload::<
+            super::bridge_protocol::BridgeBindResponse,
+        >(&command, value, "BindMember command")
+        {
+            Ok(payload) => {
+                // Capabilities choose the rotation observation path later.
+                self.supervisor_bridge.record_peer_rotation_observe_hold(
+                    &payload.peer_id,
+                    payload.capabilities.rotation_observe_hold,
+                );
+                Ok((payload, install))
+            }
             Err(error) => Err(MobError::ExternalMemberCleanupUncertain {
                 reason: format!(
                     "BindMember returned an unauthenticated or undecodable terminal response after send: {error}; recipient trust retained"

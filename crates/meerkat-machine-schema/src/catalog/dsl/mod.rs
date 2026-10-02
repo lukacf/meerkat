@@ -63,6 +63,11 @@ pub struct MachineSchemaMetadata {
     pub command_plans: Vec<CommandPlanSchema>,
     pub ci_step_limit: Option<u32>,
     pub deep_domain_overrides: std::collections::BTreeMap<String, usize>,
+    pub input_field_domains: Vec<crate::InputFieldDomain>,
+    /// `(input field, state field)` pairs expanded at attach time into one
+    /// [`crate::InputFieldDomainKind::StateField`] declaration per input
+    /// variant whose transitions bind that field.
+    pub state_bound_input_fields: Vec<(crate::identity::FieldId, crate::identity::FieldId)>,
 }
 
 impl MachineSchemaMetadata {
@@ -73,7 +78,42 @@ impl MachineSchemaMetadata {
         schema.command_plans = self.command_plans;
         schema.ci_step_limit = self.ci_step_limit;
         schema.deep_domain_overrides = self.deep_domain_overrides;
+        schema.input_field_domains = self.input_field_domains;
+        for (input_field, state_field) in self.state_bound_input_fields {
+            let variants = schema
+                .transitions
+                .iter()
+                .filter_map(|transition| match &transition.on {
+                    crate::TriggerMatch::Input { variant, bindings }
+                        if bindings.contains(&input_field) =>
+                    {
+                        Some(variant.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<indexmap::IndexSet<_>>();
+            for input in variants {
+                schema.input_field_domains.push(crate::InputFieldDomain {
+                    input,
+                    field: input_field.clone(),
+                    domain: crate::InputFieldDomainKind::StateField(state_field.clone()),
+                });
+            }
+        }
         schema
+    }
+
+    /// Explore `input_field` of every input that binds it as exactly the
+    /// current value of `state_field` (an input that echoes machine state
+    /// back, such as `expected_revision` against `revision`).
+    pub fn with_state_bound_input_field(
+        mut self,
+        input_field: crate::identity::FieldId,
+        state_field: crate::identity::FieldId,
+    ) -> Self {
+        self.state_bound_input_fields
+            .push((input_field, state_field));
+        self
     }
 
     pub fn with_ci_step_limit(mut self, ci_step_limit: u32) -> Self {
@@ -86,6 +126,22 @@ impl MachineSchemaMetadata {
     /// changed by this model-checking-only annotation.
     pub fn with_tlc_representative_input(mut self, input: InputVariantId) -> Self {
         self.tlc_representative_inputs.push(input);
+        self
+    }
+
+    /// Declare the TLC payload domain of one unsigned input field (model
+    /// checking only). See [`crate::InputFieldDomainKind`].
+    pub fn with_input_field_domain(
+        mut self,
+        input: InputVariantId,
+        field: crate::identity::FieldId,
+        domain: crate::InputFieldDomainKind,
+    ) -> Self {
+        self.input_field_domains.push(crate::InputFieldDomain {
+            input,
+            field,
+            domain,
+        });
         self
     }
 
@@ -233,6 +289,8 @@ fn machine_schema_metadata(
         command_plans: Vec::new(),
         ci_step_limit: None,
         deep_domain_overrides: std::collections::BTreeMap::new(),
+        input_field_domains: Vec::new(),
+        state_bound_input_fields: Vec::new(),
     }
 }
 
@@ -4637,11 +4695,19 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
 
 pub fn dsl_workgraph_lifecycle_machine() -> MachineSchema {
     workgraph_lifecycle_schema_metadata()
+        .with_state_bound_input_field(
+            crate::identity::FieldId::from_trusted_catalog_literal("expected_revision"),
+            crate::identity::FieldId::from_trusted_catalog_literal("revision"),
+        )
         .attach_to(workgraph_lifecycle::WorkGraphLifecycleMachineState::schema())
 }
 
 pub fn dsl_work_attention_lifecycle_machine() -> MachineSchema {
     work_attention_lifecycle_schema_metadata()
+        .with_state_bound_input_field(
+            crate::identity::FieldId::from_trusted_catalog_literal("expected_revision"),
+            crate::identity::FieldId::from_trusted_catalog_literal("revision"),
+        )
         .attach_to(work_attention_lifecycle::WorkAttentionLifecycleMachineState::schema())
 }
 

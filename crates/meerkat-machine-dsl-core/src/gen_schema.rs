@@ -288,6 +288,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                     named_types: vec![],
                     ci_step_limit: None,
                     deep_domain_overrides: Default::default(),
+                    input_field_domains: Default::default(),
                 }
             }
 

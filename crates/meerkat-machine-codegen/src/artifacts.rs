@@ -5354,6 +5354,56 @@ mod tests {
         );
     }
 
+    fn next_disjunct_for<'a>(model: &'a str, action: &str) -> &'a str {
+        let next = model
+            .split_once("\nNext ==\n")
+            .map(|(_, rest)| rest.split("\n\n").next().unwrap_or(""))
+            .expect("Next block");
+        next.lines()
+            .find(|line| line.contains(&format!(" {action}(")))
+            .expect("Next disjunct for the action")
+    }
+
+    /// A declared domain, not a binding name, decides an input field's TLC
+    /// domain: additional values extend the default unsigned range, a state
+    /// binding explores exactly the state field, and an undeclared
+    /// `expected_revision` gets the plain default (the old name match is gone).
+    #[test]
+    fn declared_input_field_domains_decide_the_rendered_domain() {
+        use meerkat_machine_schema::catalog::dsl::dsl_workgraph_lifecycle_machine;
+        use meerkat_machine_schema::identity::{FieldId, InputVariantId};
+        use meerkat_machine_schema::{InputFieldDomain, InputFieldDomainKind};
+
+        let shipped = dsl_workgraph_lifecycle_machine();
+        let model = render_machine_semantic_model(&shipped).expect("render workgraph model");
+        assert!(
+            next_disjunct_for(&model, "UpdateOpen")
+                .contains("\\E expected_revision \\in {revision} : "),
+            "a state-bound declaration explores exactly the state field"
+        );
+
+        let mut sampled = shipped.clone();
+        sampled.input_field_domains.push(InputFieldDomain {
+            input: InputVariantId::parse("CreateOpen").expect("input slug"),
+            field: FieldId::parse("unresolved_blocker_count").expect("field slug"),
+            domain: InputFieldDomainKind::AdditionalValues([3, 8].into_iter().collect()),
+        });
+        let model = render_machine_semantic_model(&sampled).expect("render sampled model");
+        assert!(
+            next_disjunct_for(&model, "CreateOpen")
+                .contains("\\E arg_unresolved_blocker_count \\in (0..2 \\cup {3, 8}) : "),
+            "additional values extend the default unsigned domain"
+        );
+
+        let mut undeclared = shipped;
+        undeclared.input_field_domains.clear();
+        let model = render_machine_semantic_model(&undeclared).expect("render undeclared model");
+        assert!(
+            next_disjunct_for(&model, "UpdateOpen").contains("\\E expected_revision \\in 0..2 : "),
+            "without a declaration the binding name no longer selects a domain"
+        );
+    }
+
     #[test]
     fn substituted_compound_values_are_delimited_and_atoms_are_not() {
         for atom in [
@@ -6897,7 +6947,12 @@ impl<'a> CompositionTlaCompiler<'a> {
                 let Some(ty) = binding_types.get(binding.as_str()) else {
                     return self.machine_transition_name(instance_id, transition);
                 };
-                let domain = self.binding_domain_for_binding(instance_id, binding.as_str(), ty);
+                let domain = self.binding_domain_for_binding(
+                    instance_id,
+                    trigger_input_variant(transition),
+                    binding.as_str(),
+                    ty,
+                );
                 let domain = if transition_uses_tlc_representative_payload(
                     self.machine(instance_id),
                     transition,
@@ -6941,19 +6996,27 @@ impl<'a> CompositionTlaCompiler<'a> {
         }
     }
 
-    fn binding_domain_for_binding(&self, instance_id: &str, binding: &str, ty: &TypeRef) -> String {
-        if binding == "expected_revision"
-            && matches!(ty, TypeRef::U64)
-            && self
-                .machine(instance_id)
-                .state
-                .fields
-                .iter()
-                .any(|field| field.name.as_str() == "revision" && matches!(field.ty, TypeRef::U64))
-        {
-            return format!("{{{}}}", self.field_var(instance_id, "revision"));
+    /// Payload domain for one bound field of `input` on `instance_id`: the
+    /// machine's declared input field domain if it has one, otherwise the
+    /// type's default domain.
+    fn binding_domain_for_binding(
+        &self,
+        instance_id: &str,
+        input: Option<&str>,
+        binding: &str,
+        ty: &TypeRef,
+    ) -> String {
+        let declared =
+            input.and_then(|input| self.machine(instance_id).input_field_domain(input, binding));
+        match declared {
+            Some(meerkat_machine_schema::InputFieldDomainKind::StateField(state_field)) => {
+                format!("{{{}}}", self.field_var(instance_id, state_field.as_str()))
+            }
+            Some(meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(values)) => {
+                additional_values_domain(&self.binding_domain_for_type(ty), values)
+            }
+            None => self.binding_domain_for_type(ty),
         }
-        self.binding_domain_for_type(ty)
     }
 
     fn machine_vars(&self) -> Vec<String> {
@@ -9137,6 +9200,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                             );
                             let domain = self.binding_domain_for_binding(
                                 route.to.machine.as_str(),
+                                Some(target_variant.name.as_str()),
                                 binding.to_field.as_str(),
                                 &target_field.ty,
                             );
@@ -9533,7 +9597,11 @@ impl<'a> MachineTlaCompiler<'a> {
                     let Some(ty) = binding_types.get(binding.as_str()) else {
                         return Ok(String::new());
                     };
-                    let domain = self.binding_domain_for_binding(binding.as_str(), ty);
+                    let domain = self.binding_domain_for_binding(
+                        trigger_input_variant(transition),
+                        binding.as_str(),
+                        ty,
+                    );
                     let domain =
                         if transition_uses_tlc_representative_payload(self.schema, transition) {
                             tlc_representative_domain(domain)
@@ -11109,19 +11177,23 @@ impl<'a> MachineTlaCompiler<'a> {
         }
     }
 
-    fn binding_domain_for_binding(&self, binding: &str, ty: &TypeRef) -> String {
-        if binding == "expected_revision"
-            && matches!(ty, TypeRef::U64)
-            && self
-                .schema
-                .state
-                .fields
-                .iter()
-                .any(|field| field.name.as_str() == "revision" && matches!(field.ty, TypeRef::U64))
-        {
-            return "{revision}".into();
+    /// Payload domain for one bound field of `input`: the declared input
+    /// field domain if the schema has one, otherwise the type's default.
+    fn binding_domain_for_binding(
+        &self,
+        input: Option<&str>,
+        binding: &str,
+        ty: &TypeRef,
+    ) -> String {
+        match input.and_then(|input| self.schema.input_field_domain(input, binding)) {
+            Some(meerkat_machine_schema::InputFieldDomainKind::StateField(state_field)) => {
+                format!("{{{}}}", state_field.as_str())
+            }
+            Some(meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(values)) => {
+                additional_values_domain(&self.binding_domain_for_type(ty), values)
+            }
+            None => self.binding_domain_for_type(ty),
         }
-        self.binding_domain_for_type(ty)
     }
 
     fn compile_updates(
@@ -12989,4 +13061,22 @@ fn tla_is_atom(expr: &str) -> bool {
         }
     }
     true
+}
+
+/// The input variant a transition is triggered by, if it is input-triggered.
+fn trigger_input_variant(transition: &TransitionSchema) -> Option<&str> {
+    match &transition.on {
+        TriggerMatch::Input { variant, .. } => Some(variant.as_str()),
+        _ => None,
+    }
+}
+
+/// The default unsigned domain extended with declared additional values.
+fn additional_values_domain(default: &str, values: &BTreeSet<u64>) -> String {
+    let values = values
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("({default} \\cup {{{values}}})")
 }

@@ -2292,6 +2292,13 @@ impl VerifiedHeadCanonicalTranscriptHistory {
             current,
         })
     }
+
+    /// The replayed graph this proof binds to the physical head.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn history(&self) -> &ValidatedTranscriptHistory {
+        &self.history
+    }
 }
 
 impl VerifiedSessionHeadMaterialization {
@@ -4213,6 +4220,10 @@ pub struct PreparedHeadCanonicalRewriteMutation {
     steps: Vec<PreparedHeadCanonicalRewriteStep>,
     tail_base_seq: u64,
     serialized_tail: Vec<Vec<u8>>,
+    /// Occurrences the live graph has retired (its retention cut). A store
+    /// that bounds its rows retires its persisted graph to this count in the
+    /// same transaction; one that ignores it stays correct, only unbounded.
+    transcript_retired_count: u64,
 }
 
 impl PreparedHeadCanonicalRewriteMutation {
@@ -4733,11 +4744,17 @@ impl PreparedHeadCanonicalRewriteMutation {
         }
         let successor_rewrite_count = u64::try_from(history.commit_count())
             .map_err(|_| SessionStoreError::Corrupted(session.id().clone()))?;
+        let transcript_retired_count = u64::try_from(history.retired_count())
+            .map_err(|_| SessionStoreError::Corrupted(session.id().clone()))?;
+        // A row-lineage anchor older than the retention cut would make cold
+        // row replay read rewrite rows the store retires, so the successor
+        // rotates to a new anchor (a compaction successor: small).
         let preserved_row_lineage_anchor =
             observed_head.row_lineage_anchor.clone().filter(|anchor| {
-                successor_rewrite_count
-                    .checked_sub(anchor.rewrite_count())
-                    .is_some_and(|delta| delta < SESSION_ROW_LINEAGE_REBASE_INTERVAL)
+                anchor.rewrite_count() >= transcript_retired_count
+                    && successor_rewrite_count
+                        .checked_sub(anchor.rewrite_count())
+                        .is_some_and(|delta| delta < SESSION_ROW_LINEAGE_REBASE_INTERVAL)
             });
         let successor_head = SessionHead::from_session_with_message_row_prefix(
             session,
@@ -4789,7 +4806,15 @@ impl PreparedHeadCanonicalRewriteMutation {
             steps,
             tail_base_seq,
             serialized_tail,
+            transcript_retired_count,
         }))
+    }
+
+    /// The live graph's retention cut: occurrences a row-bounding store may
+    /// retire from its persisted graph in this mutation's transaction.
+    #[must_use]
+    pub const fn transcript_retired_count(&self) -> u64 {
+        self.transcript_retired_count
     }
 
     #[must_use]
@@ -5057,6 +5082,22 @@ fn validate_store_issued_head_identity_pair(
     Ok(())
 }
 
+/// Whether an [`IncrementalSessionStore`] bounds its persisted transcript
+/// history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptRowRetention {
+    /// The store retires its persisted graph to the cut a prepared rewrite
+    /// mutation carries
+    /// ([`PreparedHeadCanonicalRewriteMutation::transcript_retired_count`])
+    /// in that mutation's transaction, deleting the rewrite rows and strands
+    /// below it. Stored rows stay bounded by the retention window.
+    RetiresToCut,
+    /// The store keeps every rewrite row. It stays correct (the rolling graph
+    /// identity is unchanged by retirement), but disk and cold-load replay
+    /// grow with session history.
+    KeepsAll,
+}
+
 /// Capability trait for O(delta) session persistence.
 ///
 /// Every retained transcript body is addressed by a strand delta: an exact
@@ -5088,6 +5129,16 @@ fn validate_store_issued_head_identity_pair(
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait IncrementalSessionStore: SessionStore {
+    /// Whether this store bounds its persisted transcript history; see
+    /// [`TranscriptRowRetention`].
+    ///
+    /// The default is [`TranscriptRowRetention::KeepsAll`], which session
+    /// services report once at construction, so an unbounded store is
+    /// visible rather than silent.
+    fn transcript_row_retention(&self) -> TranscriptRowRetention {
+        TranscriptRowRetention::KeepsAll
+    }
+
     /// Activate every physical HeadCanonical session in one backend snapshot.
     ///
     /// This operation is required and deliberately has no default. A durable

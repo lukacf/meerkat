@@ -8519,6 +8519,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
         let incremental = store.as_incremental();
+        if let Some(incremental) = incremental.as_ref()
+            && incremental.transcript_row_retention()
+                == meerkat_core::TranscriptRowRetention::KeepsAll
+        {
+            tracing::warn!(
+                "incremental session store keeps every transcript rewrite row (no row retention); \
+                 session graphs stay bounded in memory, but this store's disk use and cold-load \
+                 replay grow with session history"
+            );
+        }
         Self {
             inner: Arc::new(EphemeralSessionService::new(
                 builder,

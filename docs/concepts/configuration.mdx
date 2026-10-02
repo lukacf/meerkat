@@ -205,9 +205,9 @@ rewrites keep that history. Older rewrites keep their commit records and
 digests, and their message bodies are dropped. Without the bound, a session
 document kept every message it ever produced, however often it compacted. A
 fork, rewind, restore or revision read that targets a revision older than the
-window fails with a typed error naming the oldest retained revision. A
-head-canonical store such as SQLite still keeps the full history out of line,
-so revision reads there can still serve older revisions from the store.
+window fails with a typed error naming the oldest retained revision. The
+SQLite store applies the same bound to its rows: each compaction's write
+deletes the stored history below the window in the same transaction.
 
 ## Retry and stream watchdog settings
 

@@ -162,15 +162,15 @@ use transcript_history::validate::{
     assistant_tool_use_ids, message_role_name, validate_transcript_tool_result_shape,
 };
 pub use transcript_history::{
-    ProvenReleased0810RewriteRemap, RetiredTranscriptPrefix, TRANSCRIPT_HISTORY_FORMAT_CURRENT,
-    TranscriptEndpointWitness, TranscriptGraphPrefixAccumulator, TranscriptHistoryRetention,
-    TranscriptHistoryState, TranscriptParentAdvance, TranscriptRevisionBody,
-    TranscriptRevisionEdge, TranscriptRewriteAuditReceiptBatch, TranscriptRewriteCommit,
-    TranscriptRewriteCommits, TranscriptRewriteParentTransition, TranscriptRewritePatch,
-    TranscriptRewritePrefixAccumulator, TranscriptRewriteRecord, ValidatedTranscriptHistory,
-    ValidatedTranscriptRewriteSuffix, extend_transcript_rewrite_prefix_accumulator,
-    remap_proven_released_0810_rewrite_record, transcript_history_full_body_materializations,
-    transcript_rewrite_prefix_digest,
+    ProvenReleased0810RewriteRemap, RetiredTranscriptGraphBase, RetiredTranscriptPrefix,
+    TRANSCRIPT_HISTORY_FORMAT_CURRENT, TranscriptEndpointWitness, TranscriptGraphPrefixAccumulator,
+    TranscriptHistoryRetention, TranscriptHistoryState, TranscriptParentAdvance,
+    TranscriptRevisionBody, TranscriptRevisionEdge, TranscriptRewriteAuditReceiptBatch,
+    TranscriptRewriteCommit, TranscriptRewriteCommits, TranscriptRewriteParentTransition,
+    TranscriptRewritePatch, TranscriptRewritePrefixAccumulator, TranscriptRewriteRecord,
+    ValidatedTranscriptHistory, ValidatedTranscriptRewriteSuffix,
+    extend_transcript_rewrite_prefix_accumulator, remap_proven_released_0810_rewrite_record,
+    transcript_history_full_body_materializations, transcript_rewrite_prefix_digest,
 };
 
 /// Current session format version.
@@ -1308,6 +1308,37 @@ impl ValidatedTranscriptHistory {
             expected_rewrite_prefix,
             expected_graph_prefix,
         )?;
+        Ok(Self::adopt_session_validated(std::sync::Arc::new(state)))
+    }
+
+    /// Seal a re-anchored graph reconstructed from a head-canonical store's
+    /// persisted [`RetiredTranscriptGraphBase`] and its retained edge rows.
+    #[doc(hidden)]
+    pub fn from_store_replayed_retired_graph(
+        base: RetiredTranscriptGraphBase,
+        edges: Vec<TranscriptRevisionEdge>,
+        expected_rewrite_prefix: &TranscriptRewritePrefixAccumulator,
+        expected_graph_prefix: &TranscriptGraphPrefixAccumulator,
+    ) -> Result<Self, TranscriptEditError> {
+        let state = TranscriptHistoryState::from_store_replayed_retired_graph(
+            base,
+            edges,
+            expected_rewrite_prefix,
+            expected_graph_prefix,
+        )?;
+        Ok(Self::adopt_session_validated(std::sync::Arc::new(state)))
+    }
+
+    /// This graph re-anchored through absolute generation `retired_count`
+    /// (a no-op at or below its current retired count).
+    ///
+    /// The store-side entry to the graph owner's retirement transition: a
+    /// head-canonical store replays its persisted graph, retires it to the
+    /// count the live session reached, and persists the resulting
+    /// [`TranscriptHistoryState::retired_base`].
+    pub fn retired_through(&self, retired_count: usize) -> Result<Self, TranscriptEditError> {
+        let mut state = self.state().clone();
+        state.retire_occurrences_through(retired_count)?;
         Ok(Self::adopt_session_validated(std::sync::Arc::new(state)))
     }
 

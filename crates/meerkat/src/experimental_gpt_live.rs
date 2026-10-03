@@ -12470,9 +12470,12 @@ mod tests {
             let release = recv_json(&mut socket, &capture).await;
             assert_eq!(release["type"], "session.commentary.append");
             assert_eq!(release["delegation_id"], DELEGATION_ID);
-            // The result lands after the model's last output word, so it is
-            // followed by one speak cue bound to its delegation.
-            let release_at_ms = if late_tail { 1500.0 } else { 2.0 };
+            // The result lands after a gap following the model's last output
+            // word, into silence, so it is followed at once by one speak cue
+            // bound to its delegation. (A result at the end of the output so
+            // far, gap 0, is the generation frontier of a response still being
+            // voiced; its cue waits for the response to end.)
+            let release_at_ms = if late_tail { 1900.0 } else { 400.0 };
             send_json(&mut socket, json!({"type":"session.commentary.appended","event_id":"a2","start_ms":release_at_ms,"end_ms":release_at_ms})).await;
             let cue = recv_json(&mut socket, &capture).await;
             assert_eq!(cue["type"], "session.instructions.append");

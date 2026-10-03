@@ -64,6 +64,9 @@ impl MonitorStartTool {
             ),
             None => None,
         };
+        self.job_manager
+            .confinement_binding(&self.config.confinement)
+            .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
         let limits = MonitorProtocolLimits {
             max_line_bytes: input
                 .max_line_bytes

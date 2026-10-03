@@ -25,10 +25,10 @@ use meerkat_store::FsBlobStore;
 use serde_json::json;
 
 use super::{
-    DurableShellJobRuntime, JobId, JobManager, ShellConfig, ShellConfinement,
+    DurableShellJobRuntime, JobId, JobManager, MonitorStartTool, ShellConfig, ShellConfinement,
     ShellJobDeliveryProjector, ShellTool,
 };
-use crate::builtin::BuiltinTool;
+use crate::builtin::{BuiltinTool, ToolOutput};
 
 fn requirement(work: &Path) -> ExecutionConfinement {
     ConfinementSpec {
@@ -316,6 +316,48 @@ async fn required_confinement_rejects_mismatched_manager_and_public_config_chang
         )
     );
     assert!(!fixture.work.join("changed-profile").exists());
+}
+
+#[tokio::test]
+async fn required_monitor_rejects_trusted_manager_before_target_entry() {
+    let fixture = JobsFixture::new();
+    let required = required_config(&fixture.work);
+    let mut trusted = required.clone();
+    trusted.confinement = ShellConfinement::TrustedHost;
+    let tool = MonitorStartTool::new(required, fixture.manager(trusted));
+    let marker = fixture.work.join("monitor-mismatched");
+    let result = tool
+        .call(json!({
+            "command": "printf ran > monitor-mismatched; printf '%s\\n' '{\"type\":\"complete\"}'",
+            "protocol": "framed_jsonl",
+            "delivery": "record",
+            "timeout_secs": 5
+        }))
+        .await;
+
+    // If submission unexpectedly succeeds, observe its terminal result before
+    // checking the target-entry canary so an asynchronous launch cannot hide it.
+    if let Ok(ToolOutput::Json(output)) = &result {
+        let id = meerkat_jobs::JobId::new(
+            output["job_id"]
+                .as_str()
+                .expect("submitted monitor has a job id"),
+        )
+        .unwrap();
+        fixture.completed(&id).await;
+    }
+    assert!(
+        !marker.exists(),
+        "mismatched Required monitor entered target"
+    );
+    let error = result.expect_err("a trusted manager must not weaken a Required monitor");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "Execution failed: {}",
+            meerkat_core::confinement::ConfinementRefusal::InvalidRequirement
+        )
+    );
 }
 
 #[tokio::test]

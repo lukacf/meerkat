@@ -12,12 +12,12 @@ below, separately from scenario execution. It implements the test intent of the
 [confinement and consent addendum](adr-001-confinement-and-consent.md), and the
 [public integration guide](../../guides/authorization-integration.mdx).
 
-The inspected working tree is `meerkat-native-governed-m1`, HEAD
+The original r7 inspection used `meerkat-native-governed-m1`, HEAD
 `fe929df4981ed0c4a444ccb9dc13ab580e7a4afc`, including its uncommitted integration
 changes. HEAD alone does not identify the complete candidate. Freeze actual
 source/artifact hashes when implementing and running these cases.
 
-One native in-memory test already proves generated-grant denial reaches a
+The original r7 native in-memory foundation proves generated-grant denial reaches a
 scripted controller, a permitted tool executes, the same run completes, and
 native audit records exist. That is real runtime execution with a scripted
 provider, not a live-provider or durable-recovery result. Focused audit error,
@@ -292,12 +292,13 @@ Operation correlation across C4/C5/D8 applies to the exact resumed logical effec
 Genuinely new effects receive new OperationIds; the test must not force every
 post-recovery operation to reuse an earlier identity.
 
-Existing anchors: the four local-authorization RED tests at
-`local_authorization.rs:639-699`, `controller_custody.rs:129`, the native input
-audit buffer, and `smoke_model_fallback.rs` child-process pattern. Attach the
-fix and execution receipts for those previously observed REDs before C1-C3 are
-advertised. C4-C7 stay blocked until the
-durable owner integration works; copying a MemoryStore snapshot is not recovery.
+Existing anchors include the local-authorization and controller-custody tests,
+the native input audit buffer, and the `smoke_model_fallback.rs` child-process
+pattern. The four REDs recorded by the original r7 inspection are historical;
+selected repaired controls have passed, as qualified below. They do not establish
+all C1-C3 removal and race variants. C4 durable authority restoration and C7
+pre-open physical SQLite custody remain unimplemented. The prepared C7 tests are
+unexecuted; C4 still lacks its owner-backed restoration API. Copying a MemoryStore snapshot is not process recovery.
 
 ## Story D: approve one exact action, then confine its actual process
 
@@ -385,11 +386,39 @@ current coverage. Implementation records should use the existing
 Covered only with an exact executed test, PendingFix with a blocker,
 Gap with a reason, and Impossible only for a justified contract exclusion.
 
+Recorded evidence as of 2026-10-03 remains prerequisite coverage. The repair
+later committed as native `141aad15` passed 49 selected integration tests and
+six library controls: `oauth_resolve`, machine/metadata/ordinal contracts,
+`core_apply_terminal_truth`, selected `cross_host_flows` and `fork_off_surface`
+cases, `b1_live_join_*`, and `detached_delivery_follows_runtime_presence`.
+The earlier 13-test acceptance batch included
+`governed_jsonl_refusal_retains_actor_seed_and_context_then_same_run_read_finishes`,
+bundle ownership, RPC credential continuity and wire readiness. Its JSONL wire
+flow uses memory stores and a local HTTP model fixture; it proves neither disk
+JSONL persistence nor restart or live-provider coverage. Test-body durations are
+not authorization overhead measurements. Native `12fe6077` includes the repairs
+and regenerated outputs; its seventh normal push stopped on a test-helper
+`clippy::implicit_clone` lint, with no successful publication, remote CI or cost
+acceptance for this candidate.
+
+Console `103540e8` includes passing `authorization-feedback` and three
+`checked-save-*` mock-browser contracts. `real-checked-save-recovery` passed on
+Console `9762e89b` using a recorded earlier `console_acceptance_fixture` binary:
+its build log and matching Rust/Cargo inputs exist, but its historical binary
+digest does not. This is Console access-owner evidence, not current native
+readiness or C4 recovery evidence. The unfiltered Console browser suite remains
+unexecuted because three required native reference binaries were unavailable.
+
+All 37 checkpoints (A1-A8, B1-B7, C1-C7, D1-D9 and E1-E6) and their advertised
+surface/platform variants remain required. These focused results do not execute
+the five proposed Turbo S suites. Full implementation review, OS/helper launch
+coverage, durable recovery and the measured cost gate remain outstanding.
+
 | Required feature or surface | Exact checkpoints/variant | Current prerequisite or gap |
 | --- | --- | --- |
 | Qualified identities, auth vs account, represented subject, idempotency | A1/A4/A7-A8, C2/C6 | Real ingress/authenticated association, actual mailbox callback and interleaved R/X work; native batch conjoins every original. |
 | Root/child/third-level narrowing, expiry, revocation, correlated rules | A2/A4, B1 | Generated grant owner exists; cross-agent propagation required. |
-| Same-model refusal, healthy sibling, same-run continuation, queued work | A2/A3, E1 | Native scripted foundation exists; L and surface variants proposed. |
+| Same-model refusal, healthy sibling, same-run continuation, queued work | A2/A3, E1 | Native scripted and governed memory-backed JSONL wire controls passed; full A2/A3/E1 variants remain required. |
 | Anthropic, OpenAI, Gemini text | A2 once per family; A6/E2/E4 adapter faults | Real standard credentials plus actual governed adapter selected. |
 | Compatible/self-hosted, Copilot and cloud backend/account variants | A4/A6 route-specific variant, existing active provider smoke overlay | Every advertised backend needs its own real positive route and deterministic negative send oracle; common adapter alone is insufficient. Missing credentials block that advertised cell. |
 | Hosted search/code/image, image-generation executors | A6/E4; governed overlays on existing S74/S76/S77/S79/S80/S82/S90 | Conservative capability checks and actual hosted request inspection; provider action may be opaque. No finer effect claim than provider contract supports. |
@@ -402,8 +431,8 @@ Gap with a reason, and Impossible only for a justified contract exclusion.
 | Session read/subscribe/monitoring and live publication | B5/B7/E5 | Actual observer auth and queued-send audience freshness, independent monitor-copy denial, no per-chunk or physical-room claims. |
 | Independent service activation and agent frontends | B7 service-lifecycle variant | PendingFix: pausing/removing an agent frontend leaves an independently active shared service available to its authorized audience; removing the service does not widen another service or release shared credential/package restrictions. Exercise actual separate owners and authorized positive controls. |
 | Separately authorized setup executor | B2/B3/D6 `find_and_install` variant | Business requester never inherits installer/shell permission; actual integration location and recipient owner are PendingFix until wired. |
-| Credential/controller admission and all removal APIs | C1-C3 | Existing four RED tests plus clear/status/acquire/storage races require fixes. |
-| Persistent/detached operation and actual process recovery | C4-C7, D5/D6 monitor | Positive restart, runtime-store reconstruction and same-store host exclusivity; retain logical effect correlation and audit prefix. Detached mid-run revocation needs actual entry/worker enforcement. |
+| Credential/controller admission and all removal APIs | C1-C3 | Selected controller/custody controls passed; full removal-API and clear/status/acquire/storage race acceptance remains pending. |
+| Persistent/detached operation and actual process recovery | C4-C7, D5/D6 monitor | PendingFix: C4 durable authority restoration and C7 pre-open physical SQLite custody are unimplemented; prepared C7 tests are unexecuted. Positive restart and runtime-store reconstruction must retain logical effect correlation and audit prefix. Detached revocation still needs actual entry/worker enforcement. |
 | Approval freshness, authenticated decision, late delivery, one-use | D1-D3/D8-D9 | Positive approved sink and concurrent consumption, pending host restart, late typed input/next request, current eligibility and relevant/unrelated change; physical integration remains outstanding. |
 | macOS/Linux confinement, non-userns/container modes | D4-D7 platform/configuration variants | Actual capabilities, bootstrap integrity and all launch families must pass; Required cannot silently downgrade. |
 | Windows/remote/browser unsupported OS requirements | D6 capability-negative variant | Explicit unsupported is correct only for unadvertised/unsupported profile; never a positive isolation claim. |
@@ -412,8 +441,8 @@ Gap with a reason, and Impossible only for a justified contract exclusion.
 | Python and TypeScript packaged SDKs | C6/E5 | `sdks/python/tests/test_e2e_smoke.py` S38/S39 and `sdks/typescript/tests/e2e_smoke.test.mjs` S43/S44. Fresh generated wire artifacts required. |
 | Browser/raw WASM vs hosted browser client | A1/A6/B5/B7/E5 | Separate S47/S48 raw exports and packaged SDK variants; server-only enforcement does not prove browser execution. Browser fetch controls/capabilities remain explicit. |
 | Live text/audio, interruption, backend switch and playback | A6/B5/B7/E4/E5 overlays on S71/S72 and S97-S107 | Reuse prerecorded audio and existing calls; observe real live send/tool boundary and typed lifecycle. Text fixture is not audio evidence. |
-| MobKit console and domain policy | E5/E6, B3/D1 controls | Real decoded events and authenticated action routes; rendering is projection only. |
-| Default/trusted mode, mandatory gate, cheap checks | B2/B3, D6, cost gate below | Explicit profile inventory and measured costs, no semantic provenance tests. |
+| MobKit console and domain policy | E5/E6, B3/D1 controls | Mock-browser feedback/checked-save controls and qualified real Console checked-save evidence exist; full E5/E6/B3/D1 decoded-event and authenticated-action variants remain pending. Rendering is projection only. |
+| Default/trusted mode, mandatory gate, cheap checks | B2/B3, D6, cost gate below | Explicit profile inventory and measured costs remain pending; no accepted overhead benchmark. No semantic provenance tests. |
 
 Before running, enumerate the advertised profile from real provider capabilities,
 enabled tool/launch inventory and registered surfaces. Map every entry to a row

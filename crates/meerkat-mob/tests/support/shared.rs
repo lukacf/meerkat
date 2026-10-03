@@ -5219,7 +5219,7 @@ impl meerkat_client::LlmClient for ToolThenTextClient {
         self.requests
             .lock()
             .expect("member request log")
-            .push(request.messages.to_vec());
+            .push(request.messages.clone());
         let events = if self.fired.swap(true, Ordering::SeqCst) {
             vec![
                 meerkat_client::LlmEvent::TextDelta {

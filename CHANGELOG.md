@@ -1966,13 +1966,17 @@ them.
   - Talk-over: every barge-in that lands on assistant speech (S100's, and
     S103's barge-in and correction) must leave the user's onset to the last
     audible assistant frame within `TALK_OVER_BOUND_MS` (3000 ms). The ingest
-    segment (onset to the provider's first voiced input frame, 500 ms) and the
-    playout segment (the provider's last voiced output frame to last audible,
-    700 ms) are bounded on their own. The provider's turn-taking segment is
-    journaled on every yield. Each bound is derived from the healthy soak
-    maximum plus the browser's 100 ms energy window. The old rule, that the
-    audio ends before the user's utterance does, tied the bound to the
-    fixture's length.
+    segment (onset to the provider's first voiced input frame, taken at the
+    reflected input stream's cadence slot so sideband jitter is excluded,
+    500 ms) and the playout segment (the provider's last voiced output frame
+    to last audible, 900 ms) are bounded on their own, and the provider's
+    turn-taking segment is journaled on every yield. Assistant speech that
+    starts during the user's utterance fails unless it is a classified
+    backchannel. The bounds are frozen: each is the maximum of a stated
+    healthy population (73 yields of the 0.8.51 soak) plus the browser's
+    100 ms energy window, and an exceedance is a finding to attribute, never
+    a reason to raise the number. The old rule, that the audio ends before
+    the user's utterance does, tied the bound to the fixture's length.
   - Readouts: every delegation result is delivered into the provider
     conversation exactly once and voiced inside one response, in every
     scenario. A result delivered before the session's close request (the

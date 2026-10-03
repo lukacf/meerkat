@@ -201,7 +201,9 @@ impl TryFrom<ConfinementSpec> for ExecutionConfinement {
 
 /// Bounded operation-local diagnostics. Never expose an environment value,
 /// credential path, gate token, or secret-bearing command line in this error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
 pub enum ConfinementRefusal {
     #[error("invalid execution confinement requirement")]
     InvalidRequirement,

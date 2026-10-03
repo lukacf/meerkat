@@ -13299,7 +13299,8 @@
           "policy_denied",
           "policy_indeterminate",
           "other",
-          "callback_pending"
+          "callback_pending",
+          "confinement_refused"
         ],
         "type": "string"
       },
@@ -21282,7 +21283,8 @@
           "policy_denied",
           "policy_indeterminate",
           "other",
-          "callback_pending"
+          "callback_pending",
+          "confinement_refused"
         ],
         "type": "string"
       },
@@ -38345,7 +38347,8 @@
           "policy_denied",
           "policy_indeterminate",
           "other",
-          "callback_pending"
+          "callback_pending",
+          "confinement_refused"
         ],
         "type": "string"
       },

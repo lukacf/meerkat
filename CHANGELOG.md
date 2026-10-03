@@ -37,6 +37,12 @@ them.
 
 ### Breaking
 
+- Exhaustive matches must handle `meerkat_core::ToolError::ConfinementRefused`,
+  `meerkat_core::ToolDispatchTerminalErrorKind::ConfinementRefused` and
+  `meerkat_tools::BuiltinToolError::ConfinementRefused`. Tool feedback uses
+  `confinement_refused` with the exact mechanical launch cause, distinct from
+  permission denial and ordinary IO or custody failure. Existing terminal
+  error ordinals are preserved.
 - The publicly exhaustive `meerkat_contracts::ErrorCode` enum gains
   `InputRefused` and `InputNotReady`. Downstream exhaustive matches must add
   both variants; this is a Rust source compatibility break. Their JSON-RPC

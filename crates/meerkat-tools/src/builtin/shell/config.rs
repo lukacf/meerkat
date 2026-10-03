@@ -53,6 +53,19 @@ pub enum ShellError {
     Io(#[from] std::io::Error),
 }
 
+impl From<ShellError> for crate::builtin::BuiltinToolError {
+    fn from(error: ShellError) -> Self {
+        if let ShellError::Io(io_error) = &error
+            && let Some(refusal) = io_error.get_ref().and_then(|source| {
+                source.downcast_ref::<meerkat_core::confinement::ConfinementRefusal>()
+            })
+        {
+            return (*refusal).into();
+        }
+        Self::execution_failed(error.to_string())
+    }
+}
+
 /// Trusted host configuration for mechanical process confinement.
 ///
 /// This is never selected by shell arguments or persisted job metadata. Recovery
@@ -514,7 +527,101 @@ impl ShellConfig {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::builtin::BuiltinToolError;
+    use meerkat_core::confinement::ConfinementRefusal;
     use tempfile::TempDir;
+
+    #[test]
+    fn shell_error_projects_all_direct_confinement_causes_exactly() {
+        for refusal in [
+            ConfinementRefusal::InvalidRequirement,
+            ConfinementRefusal::InvalidLaunch,
+            ConfinementRefusal::UnsupportedRequirement,
+            ConfinementRefusal::BackendUnavailable,
+            ConfinementRefusal::PreparationFailed,
+        ] {
+            let error = ShellError::Io(std::io::Error::other(refusal));
+            assert!(matches!(
+                BuiltinToolError::from(error),
+                BuiltinToolError::ConfinementRefused { refusal: actual } if actual == refusal
+            ));
+            assert!(matches!(
+                BuiltinToolError::from(refusal),
+                BuiltinToolError::ConfinementRefused { refusal: actual } if actual == refusal
+            ));
+        }
+    }
+
+    #[test]
+    fn shell_error_does_not_interpret_io_messages_as_confinement_causes() {
+        for refusal in [
+            ConfinementRefusal::InvalidRequirement,
+            ConfinementRefusal::InvalidLaunch,
+            ConfinementRefusal::UnsupportedRequirement,
+            ConfinementRefusal::BackendUnavailable,
+            ConfinementRefusal::PreparationFailed,
+        ] {
+            let error = ShellError::Io(std::io::Error::other(refusal.to_string()));
+            let expected = error.to_string();
+            assert!(matches!(
+                BuiltinToolError::from(error),
+                BuiltinToolError::ExecutionFailed(message) if message == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn shell_error_keeps_ordinary_io_and_custody_failures_in_existing_class() {
+        let errors = [
+            ShellError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "ordinary permission failure",
+            )),
+            ShellError::Io(std::io::Error::other(
+                super::super::ProcessCustodyError::Io {
+                    context: "record process custody",
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "custody denied",
+                    ),
+                },
+            )),
+            ShellError::Io(std::io::Error::other(
+                super::super::ProcessCustodyError::InvalidScope("invalid scope".into()),
+            )),
+            ShellError::BlockedCommand("blocked command".into()),
+            ShellError::JobNotFound("missing job".into()),
+        ];
+        for error in errors {
+            let expected = error.to_string();
+            assert!(matches!(
+                BuiltinToolError::from(error),
+                BuiltinToolError::ExecutionFailed(message) if message == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn shell_error_only_projects_the_direct_io_payload() {
+        let errors = [
+            ShellError::Io(std::io::Error::other(std::io::Error::other(
+                ConfinementRefusal::InvalidLaunch,
+            ))),
+            ShellError::Io(std::io::Error::other(
+                super::super::ProcessCustodyError::Io {
+                    context: "record process custody",
+                    source: std::io::Error::other(ConfinementRefusal::PreparationFailed),
+                },
+            )),
+        ];
+        for error in errors {
+            let expected = error.to_string();
+            assert!(matches!(
+                BuiltinToolError::from(error),
+                BuiltinToolError::ExecutionFailed(message) if message == expected
+            ));
+        }
+    }
 
     // ==================== ShellConfig Struct Test ====================
 

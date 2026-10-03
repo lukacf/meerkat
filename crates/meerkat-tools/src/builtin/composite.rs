@@ -653,6 +653,9 @@ impl CompositeDispatcher {
                     ToolError::OperationAuthorizationUnavailable
                 }
                 BuiltinToolError::TaskError(te) => ToolError::ExecutionFailed { message: te },
+                BuiltinToolError::ConfinementRefused { refusal } => {
+                    ToolError::ConfinementRefused { refusal }
+                }
             })?;
         let async_ops = tool.async_ops_for_output(&output);
         match output {
@@ -1271,6 +1274,87 @@ mod tests {
     /// laundered ambient CWD.
     fn test_project_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    struct RefusingLocalTool(meerkat_core::confinement::ConfinementRefusal);
+
+    #[async_trait]
+    impl BuiltinTool for RefusingLocalTool {
+        fn name(&self) -> &'static str {
+            "refusing_local_tool"
+        }
+
+        fn def(&self) -> ToolDef {
+            ToolDef::new(
+                self.name(),
+                "Refusal projection fixture",
+                json!({"type": "object"}),
+            )
+        }
+
+        fn default_enabled(&self) -> bool {
+            true
+        }
+
+        async fn call(&self, _args: Value) -> Result<ToolOutput, BuiltinToolError> {
+            Err(BuiltinToolError::ConfinementRefused { refusal: self.0 })
+        }
+    }
+
+    #[tokio::test]
+    async fn local_tool_dispatch_preserves_every_confinement_cause() {
+        use meerkat_core::confinement::ConfinementRefusal;
+
+        let dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(test_project_root()),
+            None,
+            None,
+            None,
+        )
+        .expect("composite dispatcher should build");
+        let raw_args = serde_json::value::RawValue::from_string("{}".into()).unwrap();
+        for (refusal, wire_cause) in [
+            (
+                ConfinementRefusal::InvalidRequirement,
+                "invalid_requirement",
+            ),
+            (ConfinementRefusal::InvalidLaunch, "invalid_launch"),
+            (
+                ConfinementRefusal::UnsupportedRequirement,
+                "unsupported_requirement",
+            ),
+            (
+                ConfinementRefusal::BackendUnavailable,
+                "backend_unavailable",
+            ),
+            (ConfinementRefusal::PreparationFailed, "preparation_failed"),
+        ] {
+            let tool = RefusingLocalTool(refusal);
+            let call = ToolCallView {
+                id: "refused-call",
+                name: tool.name(),
+                args: &raw_args,
+            };
+            let error = dispatcher
+                .call_local_tool(&tool, call, json!({}), &ToolDispatchContext::default())
+                .await
+                .expect_err("launch refusal must remain an operation-local error");
+            assert!(matches!(
+                &error,
+                ToolError::ConfinementRefused { refusal: actual } if *actual == refusal
+            ));
+            assert_eq!(error.error_code(), "confinement_refused");
+            assert_eq!(
+                error.structured_data(),
+                Some(json!({"refusal": wire_cause}))
+            );
+            assert!(matches!(
+                meerkat_core::ToolDispatchTerminalErrorKind::from(&error),
+                meerkat_core::ToolDispatchTerminalErrorKind::ConfinementRefused
+            ));
+        }
     }
 
     #[derive(Default)]

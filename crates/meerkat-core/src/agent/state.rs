@@ -16254,10 +16254,12 @@ mod tests {
     async fn assert_tool_denial_preserves_sibling_and_model_turn(
         hide_blocked_tool: bool,
         denied_first: bool,
+        dispatch_refusal: Option<crate::confinement::ConfinementRefusal>,
     ) {
         struct RecordingDispatcher {
             tools: Arc<[Arc<ToolDef>]>,
             dispatched: Mutex<Vec<(String, String)>>,
+            dispatch_refusal: Option<crate::confinement::ConfinementRefusal>,
         }
 
         #[async_trait]
@@ -16270,6 +16272,13 @@ mod tests {
                 &self,
                 call: ToolCallView<'_>,
             ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                if call.name == "blocked_tool"
+                    && let Some(refusal) = self.dispatch_refusal
+                {
+                    // Model the shell owner's exact pre-entry result. The
+                    // blocked body must not perform its recorded effect.
+                    return Err(ToolError::ConfinementRefused { refusal });
+                }
                 self.dispatched
                     .lock()
                     .unwrap()
@@ -16377,11 +16386,18 @@ mod tests {
                 )),
             ]),
             dispatched: Mutex::new(Vec::new()),
+            dispatch_refusal,
         });
-        let policy = crate::tool_execution_policy::ToolExecutionPolicy::resolve(
-            crate::ops::ToolAccessPolicy::DenyList(["blocked_tool"].into_iter().collect()),
-        )
-        .expect("deny list must resolve");
+        let access_policy = if dispatch_refusal.is_some() {
+            // Admit the attempted call so the executor's typed error is tested.
+            crate::ops::ToolAccessPolicy::AllowList(
+                ["blocked_tool", "open_tool"].into_iter().collect(),
+            )
+        } else {
+            crate::ops::ToolAccessPolicy::DenyList(["blocked_tool"].into_iter().collect())
+        };
+        let policy = crate::tool_execution_policy::ToolExecutionPolicy::resolve(access_policy)
+            .expect("deny list must resolve");
         let gated = Arc::new(
             crate::tool_execution_policy::ExecutionPolicyGatedDispatcher::new(
                 Arc::clone(&inner),
@@ -16455,12 +16471,20 @@ mod tests {
         );
         for result in follow_up_results {
             if result.tool_use_id == "call-blocked" {
-                let expected = crate::ops::terminal_tool_outcome_for_error(
-                    "call-blocked",
-                    ToolError::access_denied("blocked_tool"),
-                );
+                let error = match dispatch_refusal {
+                    Some(refusal) => ToolError::ConfinementRefused { refusal },
+                    None => ToolError::access_denied("blocked_tool"),
+                };
+                let expected = crate::ops::terminal_tool_outcome_for_error("call-blocked", error);
                 assert!(result.is_error);
                 assert_eq!(result.content, expected.result.content);
+                if let Some(refusal) = dispatch_refusal {
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&crate::types::text_content(&result.content))
+                            .expect("typed refusal feedback must use the canonical JSON envelope");
+                    assert_eq!(payload["error"], "confinement_refused");
+                    assert_eq!(payload["data"]["refusal"], serde_json::json!(refusal));
+                }
             } else {
                 assert!(!result.is_error);
                 assert_eq!(crate::types::text_content(&result.content), "ok");
@@ -16509,14 +16533,36 @@ mod tests {
     #[tokio::test]
     async fn visibility_precheck_denial_preserves_sibling_and_model_turn() {
         for denied_first in [true, false] {
-            assert_tool_denial_preserves_sibling_and_model_turn(true, denied_first).await;
+            assert_tool_denial_preserves_sibling_and_model_turn(true, denied_first, None).await;
         }
     }
 
     #[tokio::test]
     async fn execution_policy_gate_denial_is_ordinary_tool_error_and_run_continues() {
         for denied_first in [true, false] {
-            assert_tool_denial_preserves_sibling_and_model_turn(false, denied_first).await;
+            assert_tool_denial_preserves_sibling_and_model_turn(false, denied_first, None).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatched_confinement_refusal_preserves_sibling_and_model_turn() {
+        use crate::confinement::ConfinementRefusal;
+
+        for refusal in [
+            ConfinementRefusal::InvalidRequirement,
+            ConfinementRefusal::InvalidLaunch,
+            ConfinementRefusal::UnsupportedRequirement,
+            ConfinementRefusal::BackendUnavailable,
+            ConfinementRefusal::PreparationFailed,
+        ] {
+            for refused_first in [true, false] {
+                assert_tool_denial_preserves_sibling_and_model_turn(
+                    false,
+                    refused_first,
+                    Some(refusal),
+                )
+                .await;
+            }
         }
     }
 

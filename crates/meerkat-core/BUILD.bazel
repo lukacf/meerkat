@@ -346,6 +346,73 @@ rust_test(
 )
 
 rust_test(
+    name = "confinement_refusal_contracts_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "confinement_refusal_contracts",
+    crate_root = "tests/confinement_refusal_contracts.rs",
+    crate_features = [
+        "__meerkat-facade-agent-factory-build",
+        "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
+        "jsonschema",
+        "schema",
+        "test-support",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
+        "--cfg=meerkat_internal_generated_authority_bridge",
+    ],
+    compile_data = [
+        "Cargo.toml",
+        "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
+    ],
+    srcs = [
+        "tests/confinement_refusal_contracts.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_BIN_NAME": "confinement_refusal_contracts",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-core",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-kernels:meerkat_machine_kernels",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "document_cost_probe_test",
     aliases = aliases(
         package_name = "crates/meerkat-core",
@@ -1701,6 +1768,7 @@ test_suite(
     tests = [
         ":auth_binding_no_string_form_test",
         ":compiled_application_tool_policy_test",
+        ":confinement_refusal_contracts_test",
         ":document_cost_probe_test",
         ":durable_tail_classification_test",
         ":fork_at_rotates_session_id_test",

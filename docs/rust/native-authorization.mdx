@@ -16,8 +16,9 @@ The in-memory persistence composition passed a bounded native validation gate
 on tested tree `f68f905ad37ddc2dca7af84ca7921c7d64bed04d`. This is evidence for
 that source snapshot, not a released support claim. Stock CLI, REST, RPC and
 MCP paths do not acquire governed activation from this API. SQLite, restart and
-recovery, full surface coverage, human consent and OS confinement remain separate
-integration work. The additive `meerkat_rpc::governed_jsonl` entry provides a
+recovery, full surface coverage, human consent and broader OS confinement remain
+separate integration work. The native shell composition below covers supported
+macOS requirements. The additive `meerkat_rpc::governed_jsonl` entry provides a
 fixed-host, single-connection profile. It requires `default-features = false`
 plus `local-authorization` and does not activate ordinary RPC constructors.
 Governed SQLite close/reopen and process restart, sandbox enforcement across
@@ -59,6 +60,94 @@ For persistence, select governed mode during construction as shown below. The
 fluent installer does not upgrade a persistent machine. The backend must supply
 exclusive execution custody; setup refusal must propagate before publishing a
 service or provider-auth handle.
+
+## Configure native shell confinement on the factory
+
+For automatically composed shell tools, install the trusted host requirement
+with `AgentFactory::with_shell_confinement`. Keep using the native owners above
+to authorize each exact shell operation. Confinement controls the process's
+mechanical access after authorization; it does not authenticate input or grant
+permission to a command.
+
+This native Rust excerpt assumes existing, canonical absolute paths named
+`work_root` and `sessions_path`. It grants application filesystem access to the
+work tree plus the declared command-runtime baseline and denies IP networking:
+
+```rust
+use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
+use meerkat_core::confinement::{
+    ConfinementSpec, ExecutionConfinement, FilesystemAccess, IpNetworkAccess,
+    PathAccess, PlatformBaseline,
+};
+use meerkat_tools::builtin::shell::ShellConfinement;
+
+let requirement: ExecutionConfinement = ConfinementSpec {
+    baseline: PlatformBaseline::CommandRuntimeV1,
+    read: FilesystemAccess::Paths(vec![PathAccess::Subtree(work_root.clone())]),
+    write: FilesystemAccess::Paths(vec![PathAccess::Subtree(work_root.clone())]),
+    deny_read: vec![],
+    deny_write: vec![],
+    network: IpNetworkAccess::Denied,
+    unix_connect: vec![],
+    require_descendant_termination: false,
+}
+.try_into()?;
+
+let factory = AgentFactory::new(sessions_path)
+    .project_root(&work_root)
+    .builtins(false)
+    .shell(true)
+    .with_shell_confinement(ShellConfinement::Required { requirement });
+let mut config = Config::default();
+config.shell.program = "/bin/bash".into();
+// This example grants local shell operations, not provider-hosted search.
+config.provider_tools.anthropic.web_search = false;
+let builder = FactoryAgentBuilder::new(factory, config);
+```
+
+Use this builder in the native service composition below. Each agent build
+creates its own shell dispatcher and shared job manager, retaining the same
+immutable host requirement for foreground, background and monitor launches.
+The application need not inject a shared shell dispatcher or a second policy
+evaluator. When the factory also has a runtime root and session identity, it
+settles earlier process custody and binds that session's durable process owner
+before publishing the dispatcher. Without a runtime root, shell containment is
+in process; background jobs still require their separate durable job runtime.
+
+`Required` enforces the complete supported requirement or refuses that launch;
+there is no unrestricted fallback. The current backend uses macOS Seatbelt.
+Non-macOS hosts, exact IP endpoint grants and required termination of descendants
+that escape their process group are unsupported. Invalid requirements or an
+unavailable executor also refuse before the requested command runs. Required
+launches use the configured cwd and exact explicit environment, with no ambient
+environment inheritance. Select a directly executable shell allowed by the
+requirement; the example uses `/bin/bash` to avoid macOS `/bin/sh`'s mutable
+selector outside the work grant. `TrustedHost` is the default shell compatibility
+mode and inherits the host environment. It is independent of local-governed
+authorization: installing native grant owners does not select `Required`, and
+selecting `Required` does not install those owners.
+
+If the application grants only its local tools, disable provider-hosted
+capabilities it does not authorize in the existing `Config` before constructing
+the builder. For example, Anthropic web search defaults to enabled on supported
+models; the shell E1 fixture uses the explicit disable shown above. It is an
+application capability choice rather than a requirement for every shell host.
+This selects requested provider capabilities. It does not replace the native
+controller or operation owner checks, and a capability kept enabled still needs
+its own current authorization.
+
+The macOS `e1_policy_control/shell_confinement.rs` fixture passed its bounded E1
+test with authenticated native ingress, actual grants and model HTTP boundaries,
+two authorized shell commands and native audit. The first command enters and
+then receives a nonzero exit with stderr for a denied
+filesystem write; the outside file remains unchanged, a permitted sibling
+executes, and the same run continues to its next model turn. That is returned
+shell feedback from an entered process. A backend or launch refusal happens
+before the command runs. Shell dispatch preserves its exact mechanical cause as
+`confinement_refused` tool feedback, including foreground, background and monitor
+recovery paths. Ordinary IO and custody failures retain their execution error
+class. This bounded scenario does not establish restart,
+performance acceptance or full surface/platform coverage.
 
 ## Attach and pin the controller before submitting work
 

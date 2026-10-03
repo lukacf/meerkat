@@ -407,13 +407,13 @@ impl ShellTool {
         let _invocation = self
             .config
             .check_allowlist(&input.command)
-            .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
+            .map_err(BuiltinToolError::from)?;
         let working_dir = if let Some(ref dir) = input.working_dir {
             let resolved = self
                 .config
                 .validate_working_dir_async(std::path::Path::new(dir))
                 .await
-                .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
+                .map_err(BuiltinToolError::from)?;
             Some(resolved)
         } else {
             None
@@ -421,7 +421,7 @@ impl ShellTool {
 
         self.job_manager
             .confinement_binding(&self.config.confinement)
-            .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
+            .map_err(BuiltinToolError::from)?;
         if input.background {
             if !self.job_manager.exports_canonical_async_ops() {
                 return Err(BuiltinToolError::execution_failed(
@@ -446,7 +446,7 @@ impl ShellTool {
                         .await
                 }
             }
-            .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
+            .map_err(BuiltinToolError::from)?;
 
             return Ok(ToolOutput::Json(serde_json::json!({
                 "job_id": job_id.to_string(),
@@ -468,7 +468,7 @@ impl ShellTool {
             .await
             .map_err(|error| {
                 warn!(%error, "Command execution failed");
-                BuiltinToolError::execution_failed(error.to_string())
+                BuiltinToolError::from(error)
             })?;
         let text = output.render_for_model();
         let value = serde_json::to_value(output)

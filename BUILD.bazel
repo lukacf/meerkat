@@ -615,6 +615,7 @@ test_suite(
         "//crates/meerkat-copilot:meerkat_copilot_unit_test",
         "//crates/meerkat-core:auth_binding_no_string_form_test",
         "//crates/meerkat-core:compiled_application_tool_policy_test",
+        "//crates/meerkat-core:confinement_refusal_contracts_test",
         "//crates/meerkat-core:document_cost_probe_test",
         "//crates/meerkat-core:durable_tail_classification_test",
         "//crates/meerkat-core:fork_at_rotates_session_id_test",

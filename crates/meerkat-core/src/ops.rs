@@ -120,6 +120,7 @@ pub enum ToolDispatchTerminalErrorKind {
     PolicyIndeterminate,
     Other,
     CallbackPending,
+    ConfinementRefused,
 }
 
 impl From<&ToolError> for ToolDispatchTerminalErrorKind {
@@ -134,6 +135,7 @@ impl From<&ToolError> for ToolDispatchTerminalErrorKind {
             ToolError::Timeout { .. } | ToolError::InactivityTimeout { .. } => Self::Timeout,
             ToolError::AccessDenied { .. } => Self::AccessDenied,
             ToolError::AuthorizationRefused { .. } => Self::AuthorizationRefused,
+            ToolError::ConfinementRefused { .. } => Self::ConfinementRefused,
             ToolError::OperationObservationUnavailable => Self::OperationObservationUnavailable,
             ToolError::OperationAuthorizationUnavailable => Self::OperationAuthorizationUnavailable,
             ToolError::PolicyDenied { .. } => Self::PolicyDenied,

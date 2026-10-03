@@ -248,6 +248,12 @@ pub enum ToolError {
         error: Box<ToolError>,
         failures: Vec<crate::ops::ToolDispatchSettlementFailure>,
     },
+    /// Mechanical launch requirements refused this tool.
+    /// The exact domain cause remains available to tool-feedback owners.
+    #[error("{refusal}")]
+    ConfinementRefused {
+        refusal: crate::confinement::ConfinementRefusal,
+    },
 }
 
 impl From<crate::OperationAuthorizationError> for ToolError {
@@ -337,6 +343,7 @@ impl ToolError {
             Self::InactivityTimeout { .. } => "inactivity_timeout",
             Self::AccessDenied { .. } => "access_denied",
             Self::AuthorizationRefused { .. } => "operation_refused",
+            Self::ConfinementRefused { .. } => "confinement_refused",
             Self::OperationObservationUnavailable => "operation_observation_unavailable",
             Self::OperationAuthorizationUnavailable => "operation_authorization_unavailable",
             Self::PolicyDenied { .. } => "policy_denied",
@@ -406,6 +413,7 @@ impl ToolError {
         match self {
             Self::WithSettlementFailures { .. } => self.primary_error().structured_data(),
             Self::ExecutionFailedWithData { data, .. } => Some(data.clone()),
+            Self::ConfinementRefused { refusal } => Some(serde_json::json!({"refusal": refusal})),
             Self::PolicyDenied { denial } => serde_json::to_value(denial).ok(),
             Self::PolicyIndeterminate { failure } => serde_json::to_value(failure).ok(),
             _ => None,

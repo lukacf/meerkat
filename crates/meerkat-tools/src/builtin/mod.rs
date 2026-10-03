@@ -229,6 +229,18 @@ pub enum BuiltinToolError {
     /// An async task error occurred
     #[error("Task error: {0}")]
     TaskError(String),
+
+    /// Mechanical requirements refused this launch before target code entered.
+    #[error("{refusal}")]
+    ConfinementRefused {
+        refusal: meerkat_core::confinement::ConfinementRefusal,
+    },
+}
+
+impl From<meerkat_core::confinement::ConfinementRefusal> for BuiltinToolError {
+    fn from(refusal: meerkat_core::confinement::ConfinementRefusal) -> Self {
+        Self::ConfinementRefused { refusal }
+    }
 }
 
 impl BuiltinToolError {

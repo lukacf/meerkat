@@ -54,19 +54,19 @@ impl MonitorStartTool {
         }
         self.config
             .check_allowlist(&input.command)
-            .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
+            .map_err(BuiltinToolError::from)?;
         let working_dir = match input.working_dir.as_deref() {
             Some(path) => Some(
                 self.config
                     .validate_working_dir_async(Path::new(path))
                     .await
-                    .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?,
+                    .map_err(BuiltinToolError::from)?,
             ),
             None => None,
         };
         self.job_manager
             .confinement_binding(&self.config.confinement)
-            .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
+            .map_err(BuiltinToolError::from)?;
         let limits = MonitorProtocolLimits {
             max_line_bytes: input
                 .max_line_bytes
@@ -114,7 +114,7 @@ impl MonitorStartTool {
                     .await
             }
         }
-        .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
+        .map_err(BuiltinToolError::from)?;
         Ok(ToolOutput::Json(serde_json::json!({
             "job_id": job_id.to_string(),
             "status": "running",

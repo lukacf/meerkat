@@ -171,7 +171,7 @@ export type LiveBridgeEffectOutcome = "committed" | "failed" | "unknown";
 
 export type ToolDispatchAdmissionSource = "configured_gate" | "context_gate" | "authorization_audit";
 
-export type ToolDispatchTerminalErrorKind = "not_found" | "unavailable" | "invalid_arguments" | "execution_failed" | "timeout" | "access_denied" | "authorization_refused" | "operation_observation_unavailable" | "operation_authorization_unavailable" | "policy_denied" | "policy_indeterminate" | "other" | "callback_pending";
+export type ToolDispatchTerminalErrorKind = "not_found" | "unavailable" | "invalid_arguments" | "execution_failed" | "timeout" | "access_denied" | "authorization_refused" | "operation_observation_unavailable" | "operation_authorization_unavailable" | "policy_denied" | "policy_indeterminate" | "other" | "callback_pending" | "confinement_refused";
 
 export interface ToolDispatchSettlementFailure {
   admission_source: ToolDispatchAdmissionSource;

@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use meerkat_core::confinement::{
-    ConfinementSpec, ExecutionConfinement, FilesystemAccess, IpNetworkAccess, PathAccess,
-    PlatformBaseline,
+    ConfinementRefusal, ConfinementSpec, ExecutionConfinement, FilesystemAccess, IpNetworkAccess,
+    PathAccess, PlatformBaseline,
 };
 use meerkat_core::{BlobStore, SessionId};
 use meerkat_jobs::{
@@ -26,9 +26,10 @@ use serde_json::json;
 
 use super::{
     DurableShellJobRuntime, JobId, JobManager, MonitorStartTool, ShellConfig, ShellConfinement,
-    ShellJobDeliveryProjector, ShellTool,
+    ShellJobCancelTool, ShellJobDeliveryProjector, ShellJobStatusTool, ShellJobsListTool,
+    ShellTool,
 };
-use crate::builtin::{BuiltinTool, ToolOutput};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 fn requirement(work: &Path) -> ExecutionConfinement {
     ConfinementSpec {
@@ -115,7 +116,12 @@ async fn required_confinement_foreground_unavailable_is_local_feedback_without_e
         "refused command ran"
     );
     let error = result.expect_err("required confinement cannot fall back to direct spawn");
-    assert!(error.to_string().contains("confinement"));
+    assert!(matches!(
+        error,
+        BuiltinToolError::ConfinementRefused {
+            refusal: ConfinementRefusal::UnsupportedRequirement
+        }
+    ));
 
     // A refusal does not poison shared process custody or disable later tools.
     let mut trusted = tool.config.clone();
@@ -284,13 +290,12 @@ async fn required_confinement_rejects_mismatched_manager_and_public_config_chang
             .call(json!({"command":"printf ran > mismatched", "background":background}))
             .await
             .expect_err("a separate trusted manager must not weaken Required");
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "Execution failed: {}",
-                meerkat_core::confinement::ConfinementRefusal::InvalidRequirement
-            )
-        );
+        assert!(matches!(
+            error,
+            BuiltinToolError::ConfinementRefused {
+                refusal: ConfinementRefusal::InvalidRequirement
+            }
+        ));
         assert!(!fixture.work.join("mismatched").exists());
     }
     tool.config = trusted;
@@ -308,13 +313,12 @@ async fn required_confinement_rejects_mismatched_manager_and_public_config_chang
         .call(json!({"command":"printf ran > changed-profile"}))
         .await
         .expect_err("public config mutation must not select the cached Required profile");
-    assert_eq!(
-        error.to_string(),
-        format!(
-            "Execution failed: {}",
-            meerkat_core::confinement::ConfinementRefusal::InvalidRequirement
-        )
-    );
+    assert!(matches!(
+        error,
+        BuiltinToolError::ConfinementRefused {
+            refusal: ConfinementRefusal::InvalidRequirement
+        }
+    ));
     assert!(!fixture.work.join("changed-profile").exists());
 }
 
@@ -351,13 +355,35 @@ async fn required_monitor_rejects_trusted_manager_before_target_entry() {
         "mismatched Required monitor entered target"
     );
     let error = result.expect_err("a trusted manager must not weaken a Required monitor");
-    assert_eq!(
-        error.to_string(),
-        format!(
-            "Execution failed: {}",
-            meerkat_core::confinement::ConfinementRefusal::InvalidRequirement
-        )
-    );
+    assert!(matches!(
+        error,
+        BuiltinToolError::ConfinementRefused {
+            refusal: ConfinementRefusal::InvalidRequirement
+        }
+    ));
+}
+
+#[tokio::test]
+async fn required_monitor_unavailable_preserves_typed_refusal_without_target_entry() {
+    let fixture = JobsFixture::new();
+    let config = unsupported_config(&fixture.work);
+    let tool = MonitorStartTool::new(config.clone(), fixture.manager(config));
+    let error = tool
+        .call(json!({
+            "command": "printf ran > monitor-forbidden; printf '%s\\n' '{\"type\":\"complete\"}'",
+            "protocol": "framed_jsonl",
+            "delivery": "record",
+            "timeout_secs": 5
+        }))
+        .await
+        .expect_err("required monitor must not fall back to direct spawn");
+    assert!(matches!(
+        error,
+        BuiltinToolError::ConfinementRefused {
+            refusal: ConfinementRefusal::UnsupportedRequirement
+        }
+    ));
+    assert!(!fixture.work.join("monitor-forbidden").exists());
 }
 
 #[tokio::test]
@@ -368,10 +394,13 @@ async fn required_confinement_background_unavailable_is_local_feedback_without_e
     let result = tool
         .call(json!({"command":"printf ran > forbidden", "background":true}))
         .await;
-    assert!(
-        result.is_err(),
-        "background launch silently bypassed required confinement"
-    );
+    let error = result.expect_err("background launch must preserve required confinement refusal");
+    assert!(matches!(
+        error,
+        BuiltinToolError::ConfinementRefused {
+            refusal: ConfinementRefusal::UnsupportedRequirement
+        }
+    ));
     assert!(!fixture.work.join("forbidden").exists());
 }
 
@@ -393,6 +422,44 @@ async fn required_confinement_recovered_monitor_uses_current_host_not_old_job_me
         state.terminal_result,
         Some(JobTerminalResult::Failed { .. })
     ));
+}
+
+#[tokio::test]
+async fn recovered_monitor_refusal_remains_typed_at_each_recovery_tool_owner() {
+    for trigger in ["status", "list", "cancel"] {
+        let fixture = JobsFixture::new();
+        let id = fixture
+            .lost_monitor("printf ran > forbidden; printf '%s\\n' '{\"type\":\"complete\"}'")
+            .await;
+        let manager = fixture.manager(unsupported_config(&fixture.work));
+        let result = match trigger {
+            "status" => {
+                ShellJobStatusTool::new(manager)
+                    .call(json!({"job_id": id.as_str()}))
+                    .await
+            }
+            "list" => ShellJobsListTool::new(manager).call(json!({})).await,
+            "cancel" => {
+                ShellJobCancelTool::new(manager)
+                    .call(json!({"job_id": id.as_str()}))
+                    .await
+            }
+            _ => unreachable!("closed recovery trigger fixture"),
+        };
+        let error = result.expect_err("recovery tool must preserve current host launch refusal");
+        assert!(matches!(
+            error,
+            BuiltinToolError::ConfinementRefused {
+                refusal: ConfinementRefusal::UnsupportedRequirement
+            }
+        ));
+        assert!(!fixture.work.join("forbidden").exists());
+        let state = fixture.completed(&id).await;
+        assert!(matches!(
+            state.terminal_result,
+            Some(JobTerminalResult::Failed { .. })
+        ));
+    }
 }
 
 #[cfg(all(target_os = "macos", feature = "integration-real-tests"))]

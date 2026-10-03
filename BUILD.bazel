@@ -669,6 +669,7 @@ test_suite(
         "//crates/meerkat-machine-schema:model_routing_handoff_lifecycle_test",
         "//crates/meerkat-machine-schema:named_type_binding_covers_catalog_test",
         "//crates/meerkat-machine-schema:peer_endpoint_structural_equivalence_test",
+        "//crates/meerkat-machine-schema:phase_target_contract_test",
         "//crates/meerkat-machine-schema:placed_lifecycle_origin_fence_test",
         "//crates/meerkat-machine-schema:runtime_authority_reconciliation_totality_test",
         "//crates/meerkat-machine-schema:schema_construction_cache_test",

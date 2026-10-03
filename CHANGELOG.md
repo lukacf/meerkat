@@ -37,6 +37,111 @@ them.
 
 ### Breaking
 
+- MobMachine state records that member run starts are held (#1500):
+  `MobMachineState` (meerkat-machine-schema) and the kernel `State`
+  (meerkat-machine-kernels) gain the field `member_run_starts_held`, so code
+  that builds either struct literally must set it.
+- A Stopped or Completed mob keeps its phase on flow bookkeeping. The kernel
+  `TransitionId` enum gains a Stopped and a Completed variant for each of the
+  48 flow, frame and loop authorization, RecordLoop* and AdmitDestroyCleanup
+  transitions, appended after every existing variant so no existing
+  discriminant shifts. Added variants:
+  `TransitionId::AdmitDestroyCleanupStopped`,
+  `TransitionId::AdmitDestroyCleanupCompleted`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandAdmitNextReadyNodeStopped`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandAdmitNextReadyNodeCompleted`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandCancelNodeStopped`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandCancelNodeCompleted`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandCompleteNodeStopped`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandCompleteNodeCompleted`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandFailNodeStopped`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandFailNodeCompleted`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandRecordNodeOutputStopped`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandRecordNodeOutputCompleted`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandSkipNodeStopped`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandSkipNodeCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandCancelStepStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandCancelStepCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandCompleteStepStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandCompleteStepCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandConditionPassedStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandConditionPassedCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandConditionRejectedStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandConditionRejectedCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandDispatchStepStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandDispatchStepCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFailStepStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFailStepCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFailStepEscalatingStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFailStepEscalatingCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycleStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycleCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFrameTerminatedStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFrameTerminatedCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrameStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrameCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandNodeExecutionReleasedStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandNodeExecutionReleasedCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalatingStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalatingCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycleStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycleCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandPumpFrameSchedulerStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandPumpFrameSchedulerCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandPumpNodeSchedulerStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandPumpNodeSchedulerCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordStepOutputStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordStepOutputCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetCanceledStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetCanceledCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetFailureStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetFailureCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetSuccessStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetSuccessCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetTerminalFailureStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetTerminalFailureCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterPendingBodyFrameStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterPendingBodyFrameCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterReadyFrameStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterReadyFrameCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReadyStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReadyCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterTargetsStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterTargetsCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandSkipStepStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandSkipStepCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandStartRunStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandStartRunCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandTerminalCanceledStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandTerminalCanceledCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandTerminalCompletedStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandTerminalCompletedCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandTerminalFailedStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandTerminalFailedCompleted`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameCanceledStopped`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameCanceledCompleted`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameCompletedStopped`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameCompletedCompleted`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameFailedStopped`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameFailedCompleted`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameStartedStopped`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameStartedCompleted`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandCancelLoopStopped`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandCancelLoopCompleted`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandUntilFeedbackStopped`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandUntilFeedbackCompleted`,
+  `TransitionId::RecordLoopBodyFrameCompletedStopped`,
+  `TransitionId::RecordLoopBodyFrameCompletedCompleted`,
+  `TransitionId::RecordLoopUntilConditionFailedExhaustedStopped`,
+  `TransitionId::RecordLoopUntilConditionFailedExhaustedCompleted`,
+  `TransitionId::RecordLoopUntilConditionFailedStopped`,
+  `TransitionId::RecordLoopUntilConditionFailedCompleted`,
+  `TransitionId::RecordLoopUntilConditionMetStopped`,
+  `TransitionId::RecordLoopUntilConditionMetCompleted`.
 - `meerkat_mob::MobHandle::stop` returns `Result<MobStopReport, MobError>`
   instead of `Result<(), MobError>` (#1500).
 - Generated machine types gain the run-start hold (#1500). Machine DSL changes
@@ -1072,6 +1177,30 @@ them.
   - A REST test also pins that stopping an in-flight run
     (`POST /sessions/{id}/runs/{run_id}/stop`) reaches the interrupt without
     waiting for the run to end on its own.
+- A Stopped or Completed mob no longer moves back to Running when a flow,
+  frame or loop bookkeeping input or a destroy-cleanup admission reaches it.
+  Forty-eight MobMachine transitions (the `AuthorizeFlowRunReducerCommand*`,
+  `AuthorizeFlowFrameReducerCommand*` and
+  `AuthorizeLoopIterationReducerCommand*` authorizations, the four
+  `RecordLoop*` records and `AdmitDestroyCleanup`) shared one arm guarded on
+  Running, Stopped or Completed with a Running target. A late flow step after
+  a Stop or Shutdown therefore silently undid the Stop, and since the member
+  run-start hold, it left every member held with nothing to release them. The
+  Running arms keep their names; new Stopped and Completed arms stay in their
+  own phase. No input that was accepted before is refused now (whether a
+  stopped mob should refuse new flow work is tracked separately). `Reset`
+  still restarts the mob, and now emits `ReleaseMemberRunStarts` so a Stop's
+  holds are released. A schema contract test refuses any new multi-source
+  transition that moves its other source phases to its target without an
+  allowlisted reason. The Completed to Stopped cleanup arms
+  (`BeginCleanupCompleted`, `FinishCleanupCompleted`) now hold member run
+  starts too. MobMachine records the hold in `member_run_starts_held`, the
+  Stop commit requires it, and the invariant
+  `stopped_mob_holds_member_run_starts` (checked by TLC) says a Stopped mob
+  always holds member run starts. Contract tests check, over every arm, that
+  the field follows the hold and release effects, that every arm entering
+  Stopped holds or requires the hold, and that every Shutdown holds, Completed
+  included.
 - A mob Stop no longer lets input that was admitted to a member before the
   stop start a run while the mob is Stopped (#1500). The stop's cancel had no
   run to reach, the stop saw the member idle and completed, and the queued

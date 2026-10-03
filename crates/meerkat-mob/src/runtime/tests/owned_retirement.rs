@@ -612,6 +612,62 @@ fn shutdown_admission_requires_the_run_start_hold_effect() {
     );
 }
 
+/// Shutdown holds member run starts from every phase (#1500), Completed
+/// included: a Completed mob shuts down, stays Completed, and its Shutdown
+/// transition carried the hold the actor requires. Dropping the hold from
+/// MobMachine's ShutdownCompleted arm fails this Shutdown at its admission.
+#[tokio::test]
+async fn a_completed_mob_shuts_down_holding_member_run_starts() {
+    use crate::machines::mob_machine as mob_dsl;
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(
+            ProfileName::from("lead"),
+            AgentIdentity::from("lead-completed-shutdown"),
+            None,
+        )
+        .await
+        .expect("spawn lead");
+    handle.complete().await.expect("complete the mob");
+    assert_eq!(handle.status().await.unwrap(), MobState::Completed);
+
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        handle.shutdown_with_report(ShutdownOptions::default()),
+    )
+    .await
+    .expect("the Shutdown of a Completed mob completes")
+    .expect("a Completed mob shuts down");
+    assert_eq!(handle.status().await.unwrap(), MobState::Completed);
+
+    // The machine side of the same arm: a Completed mob's Shutdown carries
+    // the hold and records it.
+    let mut authority = mob_dsl::MobMachineAuthority::new();
+    mob_dsl::MobMachineMutator::apply(
+        &mut authority,
+        mob_dsl::MobMachineInput::BeginPlacedCompletionLifecycleQuiesce {
+            intent: mob_dsl::PlacedCompletionLifecycleIntentKind::Complete,
+        },
+    )
+    .expect("a running mob begins its Complete quiesce");
+    mob_dsl::MobMachineMutator::apply(&mut authority, mob_dsl::MobMachineInput::Complete)
+        .expect("a running mob completes");
+    let shutdown =
+        mob_dsl::MobMachineMutator::apply(&mut authority, mob_dsl::MobMachineInput::Shutdown)
+            .expect("a Completed mob admits Shutdown");
+    crate::runtime::actor::MobActor::require_member_run_start_effect(
+        &shutdown,
+        Some(true),
+        "shutdown_command_admission",
+    )
+    .expect("the Completed Shutdown carries the run-start hold");
+    assert_eq!(
+        authority.state().lifecycle_phase,
+        mob_dsl::MobPhase::Completed
+    );
+    assert!(authority.state().member_run_starts_held);
+}
+
 /// A task the Shutdown joins has a request to this actor outstanding when the
 /// Shutdown starts. The actor keeps answering while it joins (a typed
 /// refusal), so the join completes and the Shutdown finishes. The inline

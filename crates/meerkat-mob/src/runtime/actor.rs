@@ -51738,6 +51738,18 @@ impl MobActor {
             }
             return Err(error);
         }
+        // Reset releases the run starts a Stop held (#1500), realized after
+        // the commit below.
+        if let Err(error) = Self::require_member_run_start_effect(
+            &prepared.transition,
+            Some(false),
+            "reset_to_running",
+        ) {
+            if was_stopped {
+                self.provisioner.cancel_all_checkpointers().await;
+            }
+            return Err(error);
+        }
 
         // --- Event rewrite phase: append the new epoch marker. ---
         // Append-only epoch model: projections clear on MobReset; the original
@@ -51775,6 +51787,15 @@ impl MobActor {
         self.ensure_pending_spawn_alignment("handle_reset completion")?;
         self.ensure_flow_tracker_alignment("handle_reset completion")
             .await?;
+        // The reset mob runs again: release any run-start hold a Stop left
+        // (#1500). The roster was retired above, so this is normally empty.
+        if let Err(error) = self.release_all_member_run_starts().await {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "reset could not release every member's run-start hold"
+            );
+        }
         Ok(())
     }
 

@@ -5418,31 +5418,36 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         reason: meerkat_core::LiveChannelCloseReason,
         reopen_recommended: bool,
     ) -> Result<(), LiveChannelClosedNotPublished> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .filter(|handle| !handle.command_tx.is_closed())
-            .ok_or(LiveChannelClosedNotPublished::SessionNotRunning)?;
         let notice = LiveChannelClosedNotice {
             session_id: id.clone(),
             channel_id,
             reason,
             reopen_recommended,
         };
-        let mut outbox = handle
-            .live_close_notices
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let notices = outbox.get_or_insert_with(|| {
-            let (notices_tx, notices_rx) = mpsc::unbounded_channel();
-            spawn_live_close_notice_forwarder(handle.command_tx.downgrade(), notices_rx);
-            notices_tx
-        });
-        // The forwarder only stops when this handle drops its sender, so a
-        // send from a live handle always lands.
-        notices
-            .send(notice)
-            .map_err(|_| LiveChannelClosedNotPublished::ActorExited)
+        // The session table is only read under a synchronous closure (no
+        // guard across an await); enqueueing is synchronous.
+        self.sessions
+            .with_handle(id, |handle| {
+                if handle.command_tx.is_closed() {
+                    return Err(LiveChannelClosedNotPublished::SessionNotRunning);
+                }
+                let mut outbox = handle
+                    .live_close_notices
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let notices = outbox.get_or_insert_with(|| {
+                    let (notices_tx, notices_rx) = mpsc::unbounded_channel();
+                    spawn_live_close_notice_forwarder(handle.command_tx.downgrade(), notices_rx);
+                    notices_tx
+                });
+                // The forwarder only stops when this handle drops its sender,
+                // so a send from a live handle always lands.
+                notices
+                    .send(notice)
+                    .map_err(|_| LiveChannelClosedNotPublished::ActorExited)
+            })
+            .await
+            .unwrap_or(Err(LiveChannelClosedNotPublished::SessionNotRunning))
     }
 
     /// Apply an identity-bearing provider realtime transcript event.

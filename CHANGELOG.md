@@ -1975,8 +1975,10 @@ them.
     fixture's length.
   - Readouts: every delegation result is delivered into the provider
     conversation exactly once and voiced inside one response, in every
-    scenario. A repeat inside one response is a stutter, journaled as a
-    metric. The browser peer records responses; it no longer raises
+    scenario. A result delivered before the session's close request (the
+    user's sign-off or the close) must be followed by assistant speech; one
+    delivered after it is journaled. A repeat inside one response is a
+    stutter, journaled as a metric. The browser peer records responses; it no longer raises
     `duplicate_readout` itself, and missing or malformed records fail the
     scenario.
 - Model calls and shell rounds are attributable in debug logs. The agent loop

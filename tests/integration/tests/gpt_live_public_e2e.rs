@@ -611,6 +611,10 @@ struct PublicLiveHarness {
     /// Utterances heard on channels the runtime closed on a media fault, in
     /// order: the scenario's canonical-row accounting includes them.
     media_fault_heard_utterances: Vec<String>,
+    /// Onset (current peer's clock) of the user's sign-off fixture, when
+    /// the scenario played one: the session's close request, for the
+    /// readout rule (`readout_contract`).
+    sign_off_onset_ms: Option<u64>,
     _temp: tempfile::TempDir,
 }
 
@@ -993,6 +997,8 @@ impl PublicLiveHarness {
         self.channel_id = json!(replacement.id);
         *exact = replacement;
         std::mem::replace(&mut self.peer, peer).close().await;
+        // The new peer has its own clock and has heard no sign-off.
+        self.sign_off_onset_ms = None;
         Ok(())
     }
 }
@@ -1476,6 +1482,7 @@ async fn open_public_live_with(
             unmeasured_publication_fault,
             media_health,
             media_fault_heard_utterances: Vec::new(),
+            sign_off_onset_ms: None,
             _temp: temp,
         });
     }
@@ -1541,6 +1548,7 @@ async fn open_public_live_with(
         unmeasured_publication_fault: None,
         media_health: None,
         media_fault_heard_utterances: Vec::new(),
+        sign_off_onset_ms: None,
         _temp: temp,
     })
 }
@@ -4041,6 +4049,10 @@ enum ReadoutFault {
         sentence: String,
         responses: Vec<u64>,
     },
+    /// A result delivered on the peer's channel was followed by no
+    /// assistant speech: no non-empty response opened at or after its
+    /// delivery (a result delivered and never spoken).
+    MissedReadout { delegation_id: String },
 }
 
 /// The readout rule. Every delegation result is delivered exactly once, and
@@ -4050,7 +4062,14 @@ enum ReadoutFault {
 /// delivery containing that sentence, sent before the response closed (two
 /// results may share a line, a brief and its corrected copy, and each may be
 /// read once). A sentence repeated inside one response is a stutter, a
-/// measurement (`ReadoutRecord::stutters`). Deliveries are counted over
+/// measurement (`ReadoutRecord::stutters`). Every result delivered on the
+/// peer's channel must be followed by assistant speech: a response opened at
+/// or after its delivery (the result's own commentary.appended opens one).
+/// Verbatim voicing is not required for that: the model paraphrases short
+/// results, and scripted fixtures may cut a readout off. A delivery sent at
+/// or after the session's close request (`close_request_ms`, the user's
+/// sign-off or meerkat's session.close, on the peer's clock) is exempt and
+/// journaled as delivered after the close request. Deliveries are counted over
 /// every channel; voicing is checked for the deliveries on `channel`, the
 /// channel of the browser peer whose records these are (a reopen starts a
 /// fresh peer). `offset` maps sideband time to that peer's clock.
@@ -4059,6 +4078,7 @@ fn readout_faults(
     channel: u32,
     records: &[support::ReadoutRecord],
     offset: i64,
+    close_request_ms: Option<i64>,
 ) -> Vec<ReadoutFault> {
     let mut faults = Vec::new();
     let mut per_delegation: std::collections::BTreeMap<&str, usize> = Default::default();
@@ -4072,6 +4092,17 @@ fn readout_faults(
             faults.push(ReadoutFault::DuplicateDelivery {
                 delegation_id: delegation_id.to_owned(),
                 deliveries: count,
+            });
+        }
+    }
+    for delivery in deliveries_before_close_request(deliveries, channel, offset, close_request_ms) {
+        let sent = delivery.elapsed_ms as i64 - offset;
+        let spoken_after = records
+            .iter()
+            .any(|record| record.opened_ms.is_some_and(|opened| opened as i64 >= sent));
+        if !spoken_after {
+            faults.push(ReadoutFault::MissedReadout {
+                delegation_id: delivery.delegation_id.clone(),
             });
         }
     }
@@ -4129,6 +4160,20 @@ fn readout_faults(
     faults
 }
 
+/// The result deliveries on `channel` sent before the close request (all of
+/// them when there is none), ordered on the peer's clock.
+fn deliveries_before_close_request(
+    deliveries: &[ResultDelivery],
+    channel: u32,
+    offset: i64,
+    close_request_ms: Option<i64>,
+) -> impl Iterator<Item = &ResultDelivery> {
+    deliveries.iter().filter(move |d| {
+        d.channel == channel
+            && close_request_ms.is_none_or(|close| d.elapsed_ms as i64 - offset < close)
+    })
+}
+
 /// Apply the readout rule to the scenario: sideband deliveries joined with
 /// the peer's readout records. Stutters are recorded as metrics; a fault, a
 /// malformed or missing record set, or an unalignable clock is an error.
@@ -4168,7 +4213,44 @@ async fn readout_contract(
     } else {
         0
     };
-    let faults = readout_faults(&deliveries, channel, &snapshot.records, offset);
+    // The close request: the earlier of the user's sign-off and meerkat's
+    // session.close on this channel.
+    let close_sent = lines.iter().find_map(|line| match &line.entry {
+        provider_recording::Entry::ClientEvent { event }
+            if line.channel_ordinal == channel && event["type"] == "session.close" =>
+        {
+            Some(line.elapsed_ms as i64 - offset)
+        }
+        _ => None,
+    });
+    let close_request_ms = [close_sent, live.sign_off_onset_ms.map(|t| t as i64)]
+        .into_iter()
+        .flatten()
+        .min();
+    let before_close: Vec<&ResultDelivery> =
+        deliveries_before_close_request(&deliveries, channel, offset, close_request_ms).collect();
+    for delivery in deliveries.iter().filter(|d| d.channel == channel) {
+        if !before_close.iter().any(|b| std::ptr::eq(*b, delivery)) {
+            record_metric(
+                evidence,
+                channel,
+                scenario,
+                "delivered_after_close_request",
+                format!(
+                    "delegation={} sent_ms={} close_request_ms={close_request_ms:?}",
+                    delivery.delegation_id,
+                    delivery.elapsed_ms as i64 - offset
+                ),
+            )?;
+        }
+    }
+    let faults = readout_faults(
+        &deliveries,
+        channel,
+        &snapshot.records,
+        offset,
+        close_request_ms,
+    );
     record_metric(
         evidence,
         channel,
@@ -5433,6 +5515,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
                 fixture_start_entry(t, goodbye).map(|e| e.t_ms)
             })
             .await?;
+        live.sign_off_onset_ms = Some(goodbye_start);
         // The spoken reply to the goodbye is evidence, not a claim: the model
         // may stay silent after a closing remark (seen live: the provider
         // streamed the goodbye's input and never finished the user turn).
@@ -10063,7 +10146,7 @@ mod config_tests {
                 "session.commentary.appended"
             }
             .to_owned(),
-            opened_ms: (index > 0).then_some(index * 1000),
+            opened_ms: Some(index * 1000),
             closed_by: closed_ms.map(|_| "session.input_transcript.delta".to_owned()),
             closed_ms,
             text: text.to_owned(),
@@ -10080,12 +10163,12 @@ mod config_tests {
             result_delivery("item_a", 4000, BRIEF),
         ];
         let records = [readout(
-            0,
+            5,
             Some(9000),
             "Here it is. The client is the Marigold account.",
         )];
         assert_eq!(
-            super::readout_faults(&deliveries, 1, &records, 0),
+            super::readout_faults(&deliveries, 1, &records, 0, None),
             vec![super::ReadoutFault::DuplicateDelivery {
                 delegation_id: "item_a".to_owned(),
                 deliveries: 2,
@@ -10108,7 +10191,7 @@ mod config_tests {
             readout(2, Some(9000), "Sure. The kickoff is Tuesday afternoon."),
         ];
         assert_eq!(
-            super::readout_faults(&deliveries, 1, &records, 0),
+            super::readout_faults(&deliveries, 1, &records, 0, None),
             vec![super::ReadoutFault::DuplicateReadout {
                 sentence: "the kickoff is tuesday afternoon".to_owned(),
                 responses: vec![1, 2],
@@ -10122,11 +10205,11 @@ mod config_tests {
     fn a_repeat_inside_one_response_is_a_stutter_not_a_fault() {
         let deliveries = [result_delivery("item_a", 1000, BRIEF)];
         let records = [readout(
-            0,
+            1,
             None,
             "Line five. The deck code name is Pelican. Line five. The deck code name is Pelican.",
         )];
-        assert!(super::readout_faults(&deliveries, 1, &records, 0).is_empty());
+        assert!(super::readout_faults(&deliveries, 1, &records, 0, None).is_empty());
     }
 
     /// The brief and its corrected copy share lines; each delivery accounts
@@ -10140,23 +10223,87 @@ mod config_tests {
             result_delivery("item_b", 7500, CORRECTED_BRIEF),
         ];
         let first = readout(
-            0,
+            1,
             Some(6000),
             "The client is the Marigold account. The kickoff is Tuesday afternoon.",
         );
         let corrected = readout(
-            1,
+            8,
             Some(12000),
             "The client is the Marigold account. The kickoff is Friday afternoon.",
         );
-        assert!(super::readout_faults(&deliveries, 1, &[first.clone(), corrected], 0).is_empty());
-        let early = readout(1, Some(7000), "The client is the Marigold account.");
+        assert!(
+            super::readout_faults(&deliveries, 1, &[first.clone(), corrected], 0, None).is_empty()
+        );
+        let early = readout(2, Some(7000), "The client is the Marigold account.");
         assert_eq!(
-            super::readout_faults(&deliveries, 1, &[first, early], 0),
-            vec![super::ReadoutFault::DuplicateReadout {
-                sentence: "the client is the marigold account".to_owned(),
-                responses: vec![0, 1],
+            super::readout_faults(&deliveries, 1, &[first, early], 0, None),
+            vec![
+                super::ReadoutFault::MissedReadout {
+                    delegation_id: "item_b".to_owned()
+                },
+                super::ReadoutFault::DuplicateReadout {
+                    sentence: "the client is the marigold account".to_owned(),
+                    responses: vec![1, 2],
+                },
+            ]
+        );
+    }
+
+    /// A result delivered and followed by no assistant speech is a missed
+    /// readout, even when an earlier response spoke; speech after the
+    /// delivery, paraphrased or cut off, satisfies it.
+    #[test]
+    fn a_result_never_followed_by_speech_is_a_missed_readout() {
+        let deliveries = [result_delivery(
+            "item_a",
+            5000,
+            "Updated the kickoff to Thursday, October 8, 2026.",
+        )];
+        let before_only = [readout(4, Some(4900), "Okay, changing the day.")];
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &before_only, 0, None),
+            vec![super::ReadoutFault::MissedReadout {
+                delegation_id: "item_a".to_owned()
             }]
+        );
+        let paraphrased = [
+            readout(4, Some(4900), "Okay, changing the day."),
+            readout(6, None, "Thursday afternoon."),
+        ];
+        assert!(super::readout_faults(&deliveries, 1, &paraphrased, 0, None).is_empty());
+    }
+
+    /// Ordered against the close request: a result delivered before it and
+    /// never followed by speech is a missed readout; one delivered at or
+    /// after it is exempt (journaled as delivered after the close request).
+    #[test]
+    fn a_result_delivered_after_the_close_request_is_exempt() {
+        let records = [readout(4, Some(4900), "Okay, changing the day.")];
+        let before = [result_delivery(
+            "item_a",
+            5000,
+            "Updated the kickoff to Friday.",
+        )];
+        assert_eq!(
+            super::readout_faults(&before, 1, &records, 0, Some(9000)),
+            vec![super::ReadoutFault::MissedReadout {
+                delegation_id: "item_a".to_owned()
+            }]
+        );
+        let after = [result_delivery(
+            "item_a",
+            9500,
+            "Updated the kickoff to Friday.",
+        )];
+        assert!(super::readout_faults(&after, 1, &records, 0, Some(9000)).is_empty());
+        assert_eq!(
+            super::deliveries_before_close_request(&after, 1, 0, Some(9000)).count(),
+            0
+        );
+        assert_eq!(
+            super::deliveries_before_close_request(&before, 1, 0, Some(9000)).count(),
+            1
         );
     }
 

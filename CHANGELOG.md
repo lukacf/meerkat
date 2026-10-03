@@ -1136,6 +1136,10 @@ them.
   Every acknowledged result now gets one instructions-lane cue, bound to the
   result's `delegation_id`. It is phrased to be safe either way: tell the
   user the result unless it was already told.
+  user the outcome unless it was already reported since the result arrived.
+  Speech before the delivery (an intention such as "I'll use Friday") does
+  not count as a report.
+
 - Opening or refreshing a live channel on a member whose turn is in flight no
   longer waits for the turn to end.
   - The realtime open and refresh projections took the session's turn

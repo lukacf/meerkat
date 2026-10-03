@@ -2968,12 +2968,16 @@ fn thinking_event_id(token: GptLiveAppendToken, index: usize) -> String {
     format!("meerkat-thinking-{}-{index}", token.0)
 }
 
-/// The speak cue that follows every acknowledged result, bound to the
-/// result's delegation by its `delegation_id`. It names no content, so it
-/// cannot carry or alter the result it points at. It is conditional, because
-/// the broker cannot know whether the model already voiced the result: the
-/// model reads the result if it has not, and stays quiet if it has.
-const LIVE_RESULT_CUE: &str = "If you have not yet told the user this delegation's result, tell them now. If you already have, do not repeat it.";
+/// The speak cue that follows an acknowledged result the model is not
+/// already voicing, bound to the result's delegation by its `delegation_id`.
+/// It names no content, so it cannot carry or alter the result it points at.
+/// It is conditional, because the broker cannot know whether the model
+/// already voiced the result: the model reads the result if it has not, and
+/// stays quiet if it has. The dedup clause is anchored to the delivery:
+/// anything the model said about the request before the result arrived (an
+/// intention such as "I'll use Friday") is not a report of it (soak 35728bf0,
+/// S103 run 1).
+const LIVE_RESULT_CUE: &str = "This delegation's result arrived after anything you said about it. Tell the user its outcome now, unless you have already reported this result since it arrived.";
 
 fn instructions_event_id(token: GptLiveAppendToken, index: usize) -> String {
     format!("meerkat-instructions-{}-{index}", token.0)
@@ -4992,6 +4996,28 @@ mod tests {
             .apply_frame(frame(delegation_created("dlg_job2", "client")))
             .unwrap();
         assert_eq!(released_tokens(&mut state), [narration, result]);
+    }
+
+    /// S103 run 1 (soak 35728bf0): the model said "I'll use Friday" 5 ms
+    /// before the Friday result arrived, then took the old cue's "if you
+    /// already have, do not repeat it" as satisfied and never voiced the
+    /// executor's confirmation. The dedup clause counts only reports made
+    /// after the result arrived.
+    #[test]
+    fn the_result_cue_anchors_its_dedup_clause_to_the_delivery() {
+        assert!(
+            LIVE_RESULT_CUE.contains("arrived after anything you said about it"),
+            "speech before the delivery is not a report of the result"
+        );
+        assert!(
+            LIVE_RESULT_CUE
+                .contains("unless you have already reported this result since it arrived"),
+            "a genuine post-delivery report still suppresses a second readout"
+        );
+        assert!(
+            !LIVE_RESULT_CUE.contains("If you already have"),
+            "the unanchored dedup clause is gone"
+        );
     }
 
     /// A transcription tail delivered after the model's response, but whose

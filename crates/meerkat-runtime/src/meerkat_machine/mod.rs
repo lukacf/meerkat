@@ -8804,6 +8804,11 @@ pub struct MeerkatMachineShared {
     #[cfg(feature = "live")]
     live_channel_close_publisher:
         StdRwLock<Option<Arc<dyn crate::live_execution::LiveChannelCloseEventPublisher>>>,
+    /// Live channel close operations executing right now, by channel, with
+    /// the waiters woken as each one ends. See
+    /// [`MeerkatMachine::begin_live_channel_close`].
+    #[cfg(feature = "live")]
+    live_channel_closes_in_flight: Arc<LiveChannelClosesInFlight>,
     /// Sealed committed-row custody retained across generated unsafe turn
     /// boundaries. Keys are session-scoped canonical row sequences.
     #[cfg(feature = "live")]
@@ -9517,6 +9522,39 @@ impl MeerkatMachine {
             .live_channel_close_publisher
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(publisher);
+    }
+
+    /// Register a live channel close operation for as long as the returned
+    /// guard lives. Every close path holds one from its first step to its
+    /// last, whether it commits or fails, so another owner can tell a close
+    /// that is executing from one that already ended.
+    #[cfg(feature = "live")]
+    pub fn begin_live_channel_close(
+        &self,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> LiveChannelCloseInFlightGuard {
+        LiveChannelCloseInFlightGuard::begin(
+            Arc::clone(&self.shared.live_channel_closes_in_flight),
+            channel_id.as_str(),
+        )
+    }
+
+    /// Whether a close of this channel is executing right now.
+    #[cfg(feature = "live")]
+    #[must_use]
+    pub fn live_channel_close_in_flight(&self, channel_id: &meerkat_core::LiveChannelId) -> bool {
+        self.shared
+            .live_channel_closes_in_flight
+            .contains(channel_id.as_str())
+    }
+
+    /// Completes when the next live channel close operation ends, on any
+    /// channel. `notify_waiters` keeps no permit: create and `enable` the
+    /// future before reading [`Self::live_channel_close_in_flight`], then
+    /// await it while that reads `true`.
+    #[cfg(feature = "live")]
+    pub fn live_channel_close_ended(&self) -> tokio::sync::futures::Notified<'_> {
+        self.shared.live_channel_closes_in_flight.ended.notified()
     }
 
     #[cfg(feature = "live")]
@@ -10437,6 +10475,8 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_channel_close_publisher: StdRwLock::new(None),
                 #[cfg(feature = "live")]
+                live_channel_closes_in_flight: Arc::default(),
+                #[cfg(feature = "live")]
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_context_projection_gates: StdMutex::new(HashMap::new()),
@@ -10540,6 +10580,8 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_channel_close_publisher: StdRwLock::new(None),
                 #[cfg(feature = "live")]
+                live_channel_closes_in_flight: Arc::default(),
+                #[cfg(feature = "live")]
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_context_projection_gates: StdMutex::new(HashMap::new()),
@@ -10642,6 +10684,8 @@ impl MeerkatMachine {
                 live_context_mirror_host: StdRwLock::new(None),
                 #[cfg(feature = "live")]
                 live_channel_close_publisher: StdRwLock::new(None),
+                #[cfg(feature = "live")]
+                live_channel_closes_in_flight: Arc::default(),
                 #[cfg(feature = "live")]
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
@@ -11342,3 +11386,66 @@ mod durable_steer_tests;
 
 #[cfg(test)]
 mod terminal_receipt_tests;
+
+/// Close operations executing per live channel (a count: close paths nest).
+#[cfg(feature = "live")]
+#[derive(Default)]
+pub(crate) struct LiveChannelClosesInFlight {
+    by_channel: StdMutex<HashMap<String, usize>>,
+    ended: tokio::sync::Notify,
+}
+
+#[cfg(feature = "live")]
+impl LiveChannelClosesInFlight {
+    fn contains(&self, channel_id: &str) -> bool {
+        self.by_channel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(channel_id)
+    }
+}
+
+/// Holds one live channel close operation in flight; dropping it ends the
+/// operation and wakes [`MeerkatMachine::live_channel_close_ended`] waiters.
+#[cfg(feature = "live")]
+#[must_use = "the close is in flight only while the guard lives"]
+pub struct LiveChannelCloseInFlightGuard {
+    registry: Arc<LiveChannelClosesInFlight>,
+    channel_id: String,
+}
+
+#[cfg(feature = "live")]
+impl LiveChannelCloseInFlightGuard {
+    fn begin(registry: Arc<LiveChannelClosesInFlight>, channel_id: &str) -> Self {
+        *registry
+            .by_channel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(channel_id.to_string())
+            .or_default() += 1;
+        Self {
+            registry,
+            channel_id: channel_id.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "live")]
+impl Drop for LiveChannelCloseInFlightGuard {
+    fn drop(&mut self) {
+        {
+            let mut by_channel = self
+                .registry
+                .by_channel
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(count) = by_channel.get_mut(&self.channel_id) {
+                *count -= 1;
+                if *count == 0 {
+                    by_channel.remove(&self.channel_id);
+                }
+            }
+        }
+        self.registry.ended.notify_waiters();
+    }
+}

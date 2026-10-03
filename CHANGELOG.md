@@ -120,6 +120,12 @@ them.
   and `LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY` are removed. The deferred
   close settlement no longer retries on a timer (see Fixed);
   `LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND` remains as its single hang guard.
+
+- `meerkat::experimental_gpt_live::ExperimentalLivePumpRetirementError`
+  replaces `SemanticUncommitted(String)` with typed retry kinds:
+  `CloseInFlight(String)`, `SessionBusy(String)` and `Permanent(String)`
+  (see Fixed). The default `retire_bound_channel_after_pump_exit` reports
+  `Permanent`.
 - `meerkat_runtime::EphemeralRuntimeDriver` is no longer `UnwindSafe` or
   `RefUnwindSafe`: it now holds the runtime admission signal added with the
   typed admission wait (#1431). Callers that relied on these auto traits (for
@@ -765,6 +771,15 @@ them.
 - `meerkat_mob_mcp::live_delegation::LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE`
   is public, so live end-to-end checks can strip the speech-transcript note
   exactly instead of copying its wording.
+
+- `meerkat_runtime::MeerkatMachine::begin_live_channel_close` (returning
+  `LiveChannelCloseInFlightGuard`), `live_channel_close_in_flight` and
+  `live_channel_close_ended`: every live channel close path is registered
+  from its first step to its last, so another owner can wait on a close that
+  is executing instead of colliding with it.
+- `ExperimentalLiveBoundChannelActivator::await_pump_retirement_retry`, a
+  provided method (default: never retry) that waits for the typed signal a
+  retryable pump-exit retirement refusal names.
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a
@@ -1364,6 +1379,18 @@ them.
   gate, so the commit fails typed instead of hanging. A start or cancel that
   landed between the wait's checks and its registration could also be missed;
   the wait now re-reads both after registering.
+
+- An experimental GPT Live pump-exit retirement no longer retries on a timer.
+  Every close failure used to retry with exponential backoff (25 ms to 2 s),
+  with no attempt cap. Each failure is now typed where the close error is
+  produced: another close executing on the channel is `CloseInFlight`, a
+  terminal projection refused with `SessionBusy` is `SessionBusy`, and
+  everything else is `Permanent`. An in-flight close is retried once that
+  close ends, and a busy refusal once the member turn frees the boundary. A
+  permanent failure stops and is recorded for the channel, and the binding
+  stays held until an explicit close or rollback retires it. The
+  string-only `ExperimentalLiveChannelCloseError::LifecycleAuthority` sources
+  carry no typed kind yet and are treated as permanent.
 - A delivery whose caller left while it was parked behind a member's
   in-flight admission no longer runs as a ghost turn. The admission lane
   skips such a delivery by checking its reply channel, but `SubmitWork` ran

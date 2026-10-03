@@ -7692,7 +7692,8 @@ async fn interactive_login(
 
     // --- Step 2: open browser --------------------------------------
     print_step(2, 4, "Opening your browser to the provider's sign-in page");
-    let browser_ok = webbrowser::open(&login_start.authorize_url).is_ok();
+    let browser_ok =
+        launch_provider_authorize_url(&login_start.authorize_url, meerkat::open_system_browser);
     if browser_ok {
         print_ok("Browser launched. Complete the sign-in there.");
     } else {
@@ -9683,6 +9684,23 @@ async fn cli_mcp_browser_login(
         meerkat::open_system_browser(&url)
     })
     .await
+}
+
+/// Open a provider's authorize URL in the user's browser through `launch`.
+/// Production passes [`meerkat::open_system_browser`], which never logs: the
+/// URL carries the one-time `state` and the PKCE challenge, and
+/// `webbrowser::open` logged the spawned command (URL included) at debug.
+/// The launcher runs on the caller's thread, so a test capturing this
+/// thread's logs sees everything it emits.
+#[cfg(any(
+    test,
+    all(feature = "anthropic", feature = "openai", feature = "gemini")
+))]
+fn launch_provider_authorize_url<F>(authorize_url: &str, launch: F) -> bool
+where
+    F: FnOnce(&str) -> std::io::Result<()>,
+{
+    launch(authorize_url).is_ok()
 }
 
 /// [`cli_mcp_browser_login`] with an explicit browser launcher.
@@ -25362,11 +25380,9 @@ default_model = "gemma"
         ));
     }
 
-    #[cfg(feature = "mcp")]
     #[derive(Clone, Default)]
     struct CanaryLogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
 
-    #[cfg(feature = "mcp")]
     impl std::io::Write for CanaryLogBuffer {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             self.0.lock().unwrap().extend_from_slice(bytes);
@@ -25486,6 +25502,61 @@ default_model = "gemma"
                     "{surface} leaked an OAuth secret canary"
                 );
             }
+        }
+    }
+
+    /// The provider (non-MCP) login opens its authorize URL without writing
+    /// it, its `state` or its PKCE challenge to any log. Positive control: a
+    /// launcher that logs the URL, as `webbrowser::open` did with the spawned
+    /// command, is caught by the same capture. The production launcher is
+    /// `meerkat::open_system_browser`, a plain `std::process::Command` with
+    /// null stdio and no logging, so no `log`-crate record exists to bridge.
+    #[test]
+    fn provider_login_browser_launch_keeps_the_authorize_url_out_of_logs() {
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        const STATE: &str = "provider-login-state-canary";
+        const CHALLENGE: &str = "provider-login-challenge-canary";
+        let authorize_url = format!(
+            "https://auth.example.test/authorize?client_id=c&state={STATE}&code_challenge={CHALLENGE}&code_challenge_method=S256"
+        );
+        let logs = CanaryLogBuffer::default();
+        let writer = logs.clone();
+        let _capture = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish()
+            .set_default();
+        let captured = || String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+
+        // Positive control: an opener that logs what it spawns is caught.
+        assert!(launch_provider_authorize_url(&authorize_url, |url| {
+            tracing::debug!("background spawn: {url}");
+            Ok(())
+        }));
+        assert!(
+            captured().contains(STATE),
+            "positive control: a logging opener's record is captured"
+        );
+        logs.0.lock().unwrap().clear();
+
+        // The login's launch path itself writes nothing about the URL.
+        let launched = std::cell::RefCell::new(None);
+        assert!(launch_provider_authorize_url(&authorize_url, |url| {
+            *launched.borrow_mut() = Some(url.to_owned());
+            Ok(())
+        }));
+        assert_eq!(launched.borrow().as_deref(), Some(authorize_url.as_str()));
+        assert!(!launch_provider_authorize_url(&authorize_url, |_| Err(
+            std::io::Error::other("no browser")
+        )));
+        let after = captured();
+        for canary in [authorize_url.as_str(), STATE, CHALLENGE] {
+            assert!(
+                !after.contains(canary),
+                "provider login logged `{canary}`: {after}"
+            );
         }
     }
 

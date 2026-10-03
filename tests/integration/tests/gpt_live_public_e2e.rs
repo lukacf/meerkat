@@ -8306,9 +8306,9 @@ fn s105_first_int(text: &str) -> Option<i64> {
 /// (found by content: spoken file names are rendered loosely by the
 /// recognizer);
 /// the typed turn commits; the recall is answered natively; graceful close;
-/// WorkGraph parallel mode. Measured (never judged): the corrected files and
-/// the recall answer; cache_read on the second fork is not observable over RPC
-/// here.
+/// WorkGraph parallel mode; the typed correction updates both files.
+/// Measured (never judged): the recall answer; cache_read on the second fork is
+/// not observable over RPC here.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_105_gpt_live_public_fork_and_merge_parallel()
@@ -8564,13 +8564,17 @@ async fn run_s105_fork_and_merge_parallel(
             .as_ref()
             .and_then(|name| std::fs::read_to_string(workspace.join(name)).ok());
         println!("GPT_LIVE_S105_ARTIFACTS_AFTER number={number_after:?} doubled={doubled_after:?}");
-        record_metric(
-            &evidence,
-            channel,
-            "S105",
-            "typed_correction_files",
-            format!("number={number_after:?} doubled={doubled_after:?}"),
-        )?;
+        // The typed correction is executed: both files carry the corrected
+        // numbers. This is the only check that the source member acted on
+        // the merged fork state (the typed turn can succeed while the edit
+        // lands nowhere), the same contract the pre-correction check holds.
+        if number_after.as_deref().and_then(s105_first_int) != Some(21)
+            || doubled_after.as_deref().and_then(s105_first_int) != Some(42)
+        {
+            deterministic_failures.push(format!(
+                "the typed correction did not update both files: number={number_after:?} doubled={doubled_after:?}"
+            ));
+        }
         // The correction's own executor result is delivered on the same
         // serialized result channel. The recall asks about the corrected
         // numbers, so it waits for every result, the correction's included,

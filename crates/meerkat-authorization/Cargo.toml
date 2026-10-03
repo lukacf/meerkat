@@ -12,6 +12,9 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+integration-real-tests = []
+
 [dependencies]
 indexmap.workspace = true
 meerkat-core.workspace = true
@@ -33,6 +36,8 @@ futures.workspace = true
 meerkat = { path = "../meerkat", default-features = false, features = ["session-store", "memory-store", "local-authorization"] }
 meerkat-llm-core.workspace = true
 meerkat-runtime = { path = "../meerkat-runtime", features = ["local-authorization", "test-support"] }
+meerkat-tools = { workspace = true, default-features = false }
+tempfile.workspace = true
 tokio.workspace = true
 
 [lints]

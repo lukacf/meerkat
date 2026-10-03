@@ -118,6 +118,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = [
         "//crates/meerkat:__pkg__",
+        "//crates/meerkat-authorization:__pkg__",
         "//crates/meerkat-cli:__pkg__",
         "//crates/meerkat-mcp-server:__pkg__",
         "//crates/meerkat-rest:__pkg__",

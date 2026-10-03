@@ -23,6 +23,7 @@ const MAX_RECEIPT_BYTES: usize = 128 * 1024;
 #[derive(Default)]
 struct Receiver {
     bodies: Mutex<Vec<Value>>,
+    first_response: String,
     second_request: Notify,
     finish: Notify,
     authorized_requests: AtomicUsize,
@@ -42,7 +43,13 @@ impl Drop for Server {
 }
 impl Server {
     async fn start() -> Self {
-        let receiver = Arc::new(Receiver::default());
+        Self::start_with_tool_response(sibling_response()).await
+    }
+    async fn start_with_tool_response(first_response: String) -> Self {
+        let receiver = Arc::new(Receiver {
+            first_response,
+            ..Receiver::default()
+        });
         let app = Router::new()
             .route("/v1/messages", post(receive))
             .with_state(receiver.clone());
@@ -133,7 +140,7 @@ async fn receive(
         1 => (
             StatusCode::OK,
             [("content-type", "text/event-stream")],
-            sibling_response(),
+            receiver.first_response.clone(),
         ),
         2 => {
             receiver.second_request.notify_one();
@@ -736,3 +743,7 @@ mod a3_queued_work;
 
 #[path = "e1_policy_control/stock_persistent.rs"]
 mod stock_persistent;
+
+#[cfg(all(target_os = "macos", feature = "integration-real-tests"))]
+#[path = "e1_policy_control/shell_confinement.rs"]
+mod shell_confinement;

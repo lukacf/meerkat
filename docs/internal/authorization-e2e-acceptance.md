@@ -120,7 +120,17 @@ Use the existing repository commands from the root for this native checkpoint:
 ./scripts/repo-cargo test -p meerkat-tools --lib --features integration-real-tests confinement_tests
 ./scripts/repo-cargo test -p meerkat-tools --lib accepted_kill_fence_retains_custody_until_descendant_exit_is_observed
 ./scripts/repo-cargo test -p meerkat-sandbox
+MEERKAT_E1_EVIDENCE_DIR=/tmp/meerkat-e1 ./scripts/repo-cargo test -p meerkat-authorization --test native_governed_loop --features integration-real-tests e1_policy_control::shell_confinement::adr_e1_required_shell_syscall_denial_preserves_native_sibling_and_model_turn -- --ignored --exact --nocapture
 ```
+
+The explicit macOS E1 case runs the stock factory-built shell through native
+authenticated ingress, generated grants, real loopback model HTTP, ordered
+tool feedback and protected input-row audit. Both shell calls are authorized;
+the forbidden outside write is blocked by the OS after shell entry. Its
+nonzero exit and stderr remain ordinary shell output, not a fabricated
+prelaunch authorization refusal. The permitted sibling and next model turn
+complete in the same run. This case does not bind durable process custody or
+accept restart and other protected surfaces.
 
 The broader `make e2e-fast`, `make e2e-system`, and normal CI gates remain
 necessary for integrated delivery. Passing the focused native tests is not

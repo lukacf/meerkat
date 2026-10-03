@@ -164,6 +164,7 @@ rust_test(
         "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
         "//crates/meerkat:meerkat_models_agent_factory_build",
         "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "crates/meerkat-authorization",
         normal = True,
@@ -194,6 +195,7 @@ rust_test(
         "tests/native_governed_loop/e1_policy_control/a2_resource_specificity.rs",
         "tests/native_governed_loop/e1_policy_control/a3_queued_work.rs",
         "tests/native_governed_loop/e1_policy_control/a8_requester_revocation.rs",
+        "tests/native_governed_loop/e1_policy_control/shell_confinement.rs",
         "tests/native_governed_loop/e1_policy_control/stock_persistent.rs",
         "tests/native_governed_loop/e1_policy_control/stock_persistent/revalidation.rs",
         "tests/native_governed_loop/e3_tool_settlement.rs",
@@ -231,6 +233,7 @@ rust_test(
         "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
         "//crates/meerkat:meerkat_models_agent_factory_build",
         "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "crates/meerkat-authorization",

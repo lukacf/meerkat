@@ -2306,6 +2306,10 @@ pub struct AgentFactory {
     pub user_config_root: Option<PathBuf>,
     pub enable_builtins: bool,
     pub enable_shell: bool,
+    /// Native host requirement inherited by every automatically composed shell.
+    /// Session requests and recovered job metadata cannot weaken this policy.
+    #[cfg(not(target_arch = "wasm32"))]
+    shell_confinement: meerkat_tools::builtin::shell::ShellConfinement,
     #[cfg(feature = "comms")]
     pub enable_comms: bool,
     pub enable_memory: bool,
@@ -2383,6 +2387,8 @@ impl std::fmt::Debug for AgentFactory {
             .field("enable_schedule", &self.enable_schedule)
             .field("enable_workgraph", &self.enable_workgraph)
             .field("enable_mob", &self.enable_mob);
+        #[cfg(not(target_arch = "wasm32"))]
+        d.field("shell_confinement", &self.shell_confinement);
         #[cfg(feature = "comms")]
         d.field("enable_comms", &self.enable_comms);
         #[cfg(feature = "skills")]
@@ -3457,6 +3463,8 @@ impl AgentFactory {
             user_config_root: None,
             enable_builtins: false,
             enable_shell: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            shell_confinement: Default::default(),
             #[cfg(feature = "comms")]
             enable_comms: false,
             enable_memory: false,
@@ -3594,6 +3602,8 @@ impl AgentFactory {
             user_config_root: None,
             enable_builtins: false,
             enable_shell: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            shell_confinement: Default::default(),
             #[cfg(feature = "comms")]
             enable_comms: false,
             enable_memory: false,
@@ -3782,6 +3792,17 @@ impl AgentFactory {
     /// Enable or disable shell tools.
     pub fn shell(mut self, enabled: bool) -> Self {
         self.enable_shell = enabled;
+        self
+    }
+
+    /// Set the native host confinement requirement for automatically composed
+    /// shell tools. Each build compiles it into its own shell dispatcher.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_shell_confinement(
+        mut self,
+        confinement: meerkat_tools::builtin::shell::ShellConfinement,
+    ) -> Self {
+        self.shell_confinement = confinement;
         self
     }
 
@@ -16784,6 +16805,10 @@ impl AgentFactory {
         let shell_config = if effective_shell {
             let project_root = self.shell_project_root();
             let mut shell_tool_config = ShellConfig::from_defaults(&config.shell, project_root);
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                shell_tool_config.confinement = self.shell_confinement.clone();
+            }
             if let Some(env) = shell_env {
                 shell_tool_config.env_vars = env;
             }

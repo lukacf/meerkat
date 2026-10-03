@@ -10033,7 +10033,7 @@ ResolveMemberRevivalFailedRunning(agent_identity, reason) ==
 
 
 AdmitDestroyCleanup ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ mob_machine_adaptive_lifecycle_drained(adaptive_active_run, adaptive_active_layer, adaptive_active_members, adaptive_layer_phase, adaptive_layer_disposition)
     /\ (placed_completion_lifecycle_quiescing = TRUE)
     /\ (placed_completion_lifecycle_intent = Some("Destroy"))
@@ -15287,7 +15287,7 @@ CreateLoopSeedRunning(loop_instance_id, parent_frame_id, parent_node_id, loop_id
 
 
 RecordLoopBodyFrameCompletedRunning(loop_instance_id, iteration) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
     /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("BodyFrameActive"))
@@ -15302,7 +15302,7 @@ RecordLoopBodyFrameCompletedRunning(loop_instance_id, iteration) ==
 
 
 RecordLoopUntilConditionMetRunning(loop_instance_id, iteration) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
     /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("AwaitingUntilEvaluation"))
@@ -15315,7 +15315,7 @@ RecordLoopUntilConditionMetRunning(loop_instance_id, iteration) ==
 
 
 RecordLoopUntilConditionFailedRunning(loop_instance_id, iteration) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ (placed_completion_lifecycle_quiescing = FALSE)
     /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
     /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
@@ -15330,7 +15330,7 @@ RecordLoopUntilConditionFailedRunning(loop_instance_id, iteration) ==
 
 
 RecordLoopUntilConditionFailedExhausted(loop_instance_id, iteration) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
     /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("AwaitingUntilEvaluation"))
@@ -15344,7 +15344,7 @@ RecordLoopUntilConditionFailedExhausted(loop_instance_id, iteration) ==
 
 
 AuthorizeFlowRunReducerCommandStartRun(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ (placed_completion_lifecycle_quiescing = FALSE)
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ (command = "StartRun")
@@ -15356,7 +15356,7 @@ AuthorizeFlowRunReducerCommandStartRun(run_id, command, step_id, step_status, ta
 
 
 AuthorizeFlowRunReducerCommandDispatchStep(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ (placed_completion_lifecycle_quiescing = FALSE)
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
@@ -15371,7 +15371,7 @@ AuthorizeFlowRunReducerCommandDispatchStep(run_id, command, step_id, step_status
 
 
 AuthorizeFlowRunReducerCommandCompleteStep(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "CompleteStep")
@@ -15386,7 +15386,7 @@ AuthorizeFlowRunReducerCommandCompleteStep(run_id, command, step_id, step_status
 
 
 AuthorizeFlowRunReducerCommandRecordStepOutput(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "RecordStepOutput")
@@ -15399,7 +15399,7 @@ AuthorizeFlowRunReducerCommandRecordStepOutput(run_id, command, step_id, step_st
 
 
 AuthorizeFlowRunReducerCommandConditionPassed(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "ConditionPassed")
@@ -15412,7 +15412,7 @@ AuthorizeFlowRunReducerCommandConditionPassed(run_id, command, step_id, step_sta
 
 
 AuthorizeFlowRunReducerCommandConditionRejected(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "ConditionRejected")
@@ -15425,7 +15425,7 @@ AuthorizeFlowRunReducerCommandConditionRejected(run_id, command, step_id, step_s
 
 
 AuthorizeFlowRunReducerCommandFailStep(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "FailStep")
@@ -15442,7 +15442,7 @@ AuthorizeFlowRunReducerCommandFailStep(run_id, command, step_id, step_status, ta
 
 
 AuthorizeFlowRunReducerCommandFailStepEscalating(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ (placed_completion_lifecycle_quiescing = FALSE)
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
@@ -15460,7 +15460,7 @@ AuthorizeFlowRunReducerCommandFailStepEscalating(run_id, command, step_id, step_
 
 
 AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycle(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ (placed_completion_lifecycle_quiescing = TRUE)
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
@@ -15478,7 +15478,7 @@ AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycle(run_id, co
 
 
 AuthorizeFlowRunReducerCommandSkipStep(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "SkipStep")
@@ -15492,7 +15492,7 @@ AuthorizeFlowRunReducerCommandSkipStep(run_id, command, step_id, step_status, ta
 
 
 AuthorizeFlowRunReducerCommandProjectFrameStepStatus(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "ProjectFrameStepStatus")
@@ -15513,7 +15513,7 @@ AuthorizeFlowRunReducerCommandProjectFrameStepStatus(run_id, command, step_id, s
 
 
 AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailed(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "ProjectFrameStepStatus")
@@ -15536,7 +15536,7 @@ AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailed(run_id, command, step
 
 
 AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalating(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ (placed_completion_lifecycle_quiescing = FALSE)
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
@@ -15560,7 +15560,7 @@ AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalating(run_id, com
 
 
 AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycle(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ (placed_completion_lifecycle_quiescing = TRUE)
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
@@ -15584,7 +15584,7 @@ AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedBy
 
 
 AuthorizeFlowRunReducerCommandCancelStep(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "CancelStep")
@@ -15598,7 +15598,7 @@ AuthorizeFlowRunReducerCommandCancelStep(run_id, command, step_id, step_status, 
 
 
 AuthorizeFlowRunReducerCommandRegisterTargets(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ (placed_completion_lifecycle_quiescing = FALSE)
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
@@ -15615,7 +15615,7 @@ AuthorizeFlowRunReducerCommandRegisterTargets(run_id, command, step_id, step_sta
 
 
 AuthorizeFlowRunReducerCommandRecordTargetSuccess(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "RecordTargetSuccess")
@@ -15628,7 +15628,7 @@ AuthorizeFlowRunReducerCommandRecordTargetSuccess(run_id, command, step_id, step
 
 
 AuthorizeFlowRunReducerCommandRecordTargetTerminalFailure(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "RecordTargetTerminalFailure")
@@ -15641,7 +15641,7 @@ AuthorizeFlowRunReducerCommandRecordTargetTerminalFailure(run_id, command, step_
 
 
 AuthorizeFlowRunReducerCommandRecordTargetCanceled(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "RecordTargetCanceled")
@@ -15653,7 +15653,7 @@ AuthorizeFlowRunReducerCommandRecordTargetCanceled(run_id, command, step_id, ste
 
 
 AuthorizeFlowRunReducerCommandRecordTargetFailure(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "RecordTargetFailure")
@@ -15667,7 +15667,7 @@ AuthorizeFlowRunReducerCommandRecordTargetFailure(run_id, command, step_id, step
 
 
 AuthorizeFlowRunReducerCommandRegisterReadyFrame(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ (placed_completion_lifecycle_quiescing = FALSE)
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
@@ -15682,7 +15682,7 @@ AuthorizeFlowRunReducerCommandRegisterReadyFrame(run_id, command, step_id, step_
 
 
 AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReady(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "RegisterReadyFrame")
@@ -15695,7 +15695,7 @@ AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReady(run_id, command, st
 
 
 AuthorizeFlowRunReducerCommandPumpNodeScheduler(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ (placed_completion_lifecycle_quiescing = FALSE)
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
@@ -15713,7 +15713,7 @@ AuthorizeFlowRunReducerCommandPumpNodeScheduler(run_id, command, step_id, step_s
 
 
 AuthorizeFlowRunReducerCommandRegisterPendingBodyFrame(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ (placed_completion_lifecycle_quiescing = FALSE)
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
@@ -15728,7 +15728,7 @@ AuthorizeFlowRunReducerCommandRegisterPendingBodyFrame(run_id, command, step_id,
 
 
 AuthorizeFlowRunReducerCommandPumpFrameScheduler(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ (placed_completion_lifecycle_quiescing = FALSE)
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
@@ -15746,7 +15746,7 @@ AuthorizeFlowRunReducerCommandPumpFrameScheduler(run_id, command, step_id, step_
 
 
 AuthorizeFlowRunReducerCommandNodeExecutionReleased(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "NodeExecutionReleased")
@@ -15759,7 +15759,7 @@ AuthorizeFlowRunReducerCommandNodeExecutionReleased(run_id, command, step_id, st
 
 
 AuthorizeFlowRunReducerCommandFrameTerminated(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "FrameTerminated")
@@ -15772,7 +15772,7 @@ AuthorizeFlowRunReducerCommandFrameTerminated(run_id, command, step_id, step_sta
 
 
 AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrame(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "FrameTerminated")
@@ -15784,7 +15784,7 @@ AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrame(run_id, command, step
 
 
 AuthorizeFlowRunReducerCommandTerminalCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "TerminalizeCompleted")
@@ -15795,7 +15795,7 @@ AuthorizeFlowRunReducerCommandTerminalCompleted(run_id, command, step_id, step_s
 
 
 AuthorizeFlowRunReducerCommandTerminalFailed(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "TerminalizeFailed")
@@ -15807,7 +15807,7 @@ AuthorizeFlowRunReducerCommandTerminalFailed(run_id, command, step_id, step_stat
 
 
 AuthorizeFlowRunReducerCommandTerminalCanceled(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((run_id \in DOMAIN run_status) = TRUE)
     /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "TerminalizeCanceled")
@@ -15819,7 +15819,7 @@ AuthorizeFlowRunReducerCommandTerminalCanceled(run_id, command, step_id, step_st
 
 
 AuthorizeFlowFrameReducerCommandAdmitNextReadyNode(frame_id, command, node_id, node_status, terminal_status) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ (placed_completion_lifecycle_quiescing = FALSE)
     /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
     /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
@@ -15838,7 +15838,7 @@ AuthorizeFlowFrameReducerCommandAdmitNextReadyNode(frame_id, command, node_id, n
 
 
 AuthorizeFlowFrameReducerCommandCompleteNode(frame_id, command, node_id, node_status, terminal_status) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
     /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "CompleteNode")
@@ -15855,7 +15855,7 @@ AuthorizeFlowFrameReducerCommandCompleteNode(frame_id, command, node_id, node_st
 
 
 AuthorizeFlowFrameReducerCommandRecordNodeOutput(frame_id, command, node_id, node_status, terminal_status) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
     /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "RecordNodeOutput")
@@ -15869,7 +15869,7 @@ AuthorizeFlowFrameReducerCommandRecordNodeOutput(frame_id, command, node_id, nod
 
 
 AuthorizeFlowFrameReducerCommandFailNode(frame_id, command, node_id, node_status, terminal_status) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
     /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "FailNode")
@@ -15886,7 +15886,7 @@ AuthorizeFlowFrameReducerCommandFailNode(frame_id, command, node_id, node_status
 
 
 AuthorizeFlowFrameReducerCommandSkipNode(frame_id, command, node_id, node_status, terminal_status) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
     /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "SkipNode")
@@ -15903,7 +15903,7 @@ AuthorizeFlowFrameReducerCommandSkipNode(frame_id, command, node_id, node_status
 
 
 AuthorizeFlowFrameReducerCommandCancelNode(frame_id, command, node_id, node_status, terminal_status) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
     /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "CancelNode")
@@ -15962,7 +15962,7 @@ AuthorizeFlowFrameReducerCommandSealFrameCompleted(frame_id, command, node_id, n
 
 
 AuthorizeLoopIterationReducerCommandBodyFrameStarted(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ (placed_completion_lifecycle_quiescing = FALSE)
     /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
     /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
@@ -15976,7 +15976,7 @@ AuthorizeLoopIterationReducerCommandBodyFrameStarted(loop_instance_id, command, 
 
 
 AuthorizeLoopIterationReducerCommandBodyFrameCompleted(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
     /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("BodyFrameActive"))
@@ -15990,7 +15990,7 @@ AuthorizeLoopIterationReducerCommandBodyFrameCompleted(loop_instance_id, command
 
 
 AuthorizeLoopIterationReducerCommandBodyFrameFailed(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
     /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("BodyFrameActive"))
@@ -16006,7 +16006,7 @@ AuthorizeLoopIterationReducerCommandBodyFrameFailed(loop_instance_id, command, b
 
 
 AuthorizeLoopIterationReducerCommandBodyFrameCanceled(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
     /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("BodyFrameActive"))
@@ -16022,7 +16022,7 @@ AuthorizeLoopIterationReducerCommandBodyFrameCanceled(loop_instance_id, command,
 
 
 AuthorizeLoopIterationReducerCommandUntilFeedback(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
     /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("AwaitingUntilEvaluation"))
@@ -16035,7 +16035,7 @@ AuthorizeLoopIterationReducerCommandUntilFeedback(loop_instance_id, command, bod
 
 
 AuthorizeLoopIterationReducerCommandCancelLoop(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
-    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ phase = "Running"
     /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
     /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
     /\ (command = "CancelLoop")
@@ -17294,6 +17294,1466 @@ FinishExplicitResumeCancelledStopped(attempt) ==
     /\ UnchangedFrame_5709166219f04e11
 
 
+AdmitDestroyCleanupStopped ==
+    /\ phase = "Stopped"
+    /\ mob_machine_adaptive_lifecycle_drained(adaptive_active_run, adaptive_active_layer, adaptive_active_members, adaptive_layer_phase, adaptive_layer_disposition)
+    /\ (placed_completion_lifecycle_quiescing = TRUE)
+    /\ (placed_completion_lifecycle_intent = Some("Destroy"))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ destroy_admitted' = TRUE
+    /\ UnchangedFrame_aacefb944dab2de0
+
+
+AdmitDestroyCleanupCompleted ==
+    /\ phase = "Completed"
+    /\ mob_machine_adaptive_lifecycle_drained(adaptive_active_run, adaptive_active_layer, adaptive_active_members, adaptive_layer_phase, adaptive_layer_disposition)
+    /\ (placed_completion_lifecycle_quiescing = TRUE)
+    /\ (placed_completion_lifecycle_intent = Some("Destroy"))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ destroy_admitted' = TRUE
+    /\ UnchangedFrame_aacefb944dab2de0
+
+
+AuthorizeFlowFrameReducerCommandAdmitNextReadyNodeStopped(frame_id, command, node_id, node_status, terminal_status) ==
+    /\ phase = "Stopped"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
+    /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "AdmitNextReadyNode")
+    /\ (terminal_status = None)
+    /\ (node_id # None)
+    /\ (node_status = Some("Running"))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None) THEN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_ready_queue) THEN Some((IF frame_id \in DOMAIN frame_ready_queue THEN frame_ready_queue[frame_id] ELSE <<>>)) ELSE None) THEN (IF (frame_id \in DOMAIN frame_ready_queue) THEN Some((IF frame_id \in DOMAIN frame_ready_queue THEN frame_ready_queue[frame_id] ELSE <<>>)) ELSE None)["value"] ELSE None))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ frame_node_status' = mob_machine_frame_node_status_after_admit(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None))
+    /\ frame_ready_queue' = mob_machine_frame_ready_queue_after_admit(frame_ready_queue, mob_machine_frame_node_status_after_admit(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)), frame_ordered_nodes, frame_id)
+    /\ frame_last_admitted_node' = MapSet(frame_last_admitted_node, frame_id, Some((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)))
+    /\ UnchangedFrame_245a57948e828115
+
+
+AuthorizeFlowFrameReducerCommandAdmitNextReadyNodeCompleted(frame_id, command, node_id, node_status, terminal_status) ==
+    /\ phase = "Completed"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
+    /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "AdmitNextReadyNode")
+    /\ (terminal_status = None)
+    /\ (node_id # None)
+    /\ (node_status = Some("Running"))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None) THEN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_ready_queue) THEN Some((IF frame_id \in DOMAIN frame_ready_queue THEN frame_ready_queue[frame_id] ELSE <<>>)) ELSE None) THEN (IF (frame_id \in DOMAIN frame_ready_queue) THEN Some((IF frame_id \in DOMAIN frame_ready_queue THEN frame_ready_queue[frame_id] ELSE <<>>)) ELSE None)["value"] ELSE None))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ frame_node_status' = mob_machine_frame_node_status_after_admit(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None))
+    /\ frame_ready_queue' = mob_machine_frame_ready_queue_after_admit(frame_ready_queue, mob_machine_frame_node_status_after_admit(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)), frame_ordered_nodes, frame_id)
+    /\ frame_last_admitted_node' = MapSet(frame_last_admitted_node, frame_id, Some((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)))
+    /\ UnchangedFrame_245a57948e828115
+
+
+AuthorizeFlowFrameReducerCommandCancelNodeStopped(frame_id, command, node_id, node_status, terminal_status) ==
+    /\ phase = "Stopped"
+    /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
+    /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "CancelNode")
+    /\ (terminal_status = None)
+    /\ (node_id # None)
+    /\ (node_status = Some("Canceled"))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None) THEN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Running"))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ frame_node_status' = mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Canceled")
+    /\ frame_ready_queue' = mob_machine_frame_ready_queue_after_terminal(frame_ready_queue, mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Canceled"), frame_ordered_nodes, frame_id)
+    /\ UnchangedFrame_12162cf669b99293
+
+
+AuthorizeFlowFrameReducerCommandCancelNodeCompleted(frame_id, command, node_id, node_status, terminal_status) ==
+    /\ phase = "Completed"
+    /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
+    /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "CancelNode")
+    /\ (terminal_status = None)
+    /\ (node_id # None)
+    /\ (node_status = Some("Canceled"))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None) THEN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Running"))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ frame_node_status' = mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Canceled")
+    /\ frame_ready_queue' = mob_machine_frame_ready_queue_after_terminal(frame_ready_queue, mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Canceled"), frame_ordered_nodes, frame_id)
+    /\ UnchangedFrame_12162cf669b99293
+
+
+AuthorizeFlowFrameReducerCommandCompleteNodeStopped(frame_id, command, node_id, node_status, terminal_status) ==
+    /\ phase = "Stopped"
+    /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
+    /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "CompleteNode")
+    /\ (terminal_status = None)
+    /\ (node_id # None)
+    /\ (node_status = Some("Completed"))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None) THEN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Running"))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ frame_node_status' = mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Completed")
+    /\ frame_ready_queue' = mob_machine_frame_ready_queue_after_terminal(frame_ready_queue, mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Completed"), frame_ordered_nodes, frame_id)
+    /\ UnchangedFrame_12162cf669b99293
+
+
+AuthorizeFlowFrameReducerCommandCompleteNodeCompleted(frame_id, command, node_id, node_status, terminal_status) ==
+    /\ phase = "Completed"
+    /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
+    /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "CompleteNode")
+    /\ (terminal_status = None)
+    /\ (node_id # None)
+    /\ (node_status = Some("Completed"))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None) THEN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Running"))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ frame_node_status' = mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Completed")
+    /\ frame_ready_queue' = mob_machine_frame_ready_queue_after_terminal(frame_ready_queue, mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Completed"), frame_ordered_nodes, frame_id)
+    /\ UnchangedFrame_12162cf669b99293
+
+
+AuthorizeFlowFrameReducerCommandFailNodeStopped(frame_id, command, node_id, node_status, terminal_status) ==
+    /\ phase = "Stopped"
+    /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
+    /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "FailNode")
+    /\ (terminal_status = None)
+    /\ (node_id # None)
+    /\ (node_status = Some("Failed"))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None) THEN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Running"))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ frame_node_status' = mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Failed")
+    /\ frame_ready_queue' = mob_machine_frame_ready_queue_after_terminal(frame_ready_queue, mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Failed"), frame_ordered_nodes, frame_id)
+    /\ UnchangedFrame_12162cf669b99293
+
+
+AuthorizeFlowFrameReducerCommandFailNodeCompleted(frame_id, command, node_id, node_status, terminal_status) ==
+    /\ phase = "Completed"
+    /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
+    /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "FailNode")
+    /\ (terminal_status = None)
+    /\ (node_id # None)
+    /\ (node_status = Some("Failed"))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None) THEN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Running"))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ frame_node_status' = mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Failed")
+    /\ frame_ready_queue' = mob_machine_frame_ready_queue_after_terminal(frame_ready_queue, mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Failed"), frame_ordered_nodes, frame_id)
+    /\ UnchangedFrame_12162cf669b99293
+
+
+AuthorizeFlowFrameReducerCommandRecordNodeOutputStopped(frame_id, command, node_id, node_status, terminal_status) ==
+    /\ phase = "Stopped"
+    /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
+    /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RecordNodeOutput")
+    /\ (terminal_status = None)
+    /\ (node_id # None)
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None) THEN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ frame_output_recorded' = mob_machine_frame_node_bool_after_set(frame_output_recorded, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), TRUE)
+    /\ UnchangedFrame_ae4eb0bb2ac6b3ab
+
+
+AuthorizeFlowFrameReducerCommandRecordNodeOutputCompleted(frame_id, command, node_id, node_status, terminal_status) ==
+    /\ phase = "Completed"
+    /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
+    /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RecordNodeOutput")
+    /\ (terminal_status = None)
+    /\ (node_id # None)
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None) THEN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ frame_output_recorded' = mob_machine_frame_node_bool_after_set(frame_output_recorded, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), TRUE)
+    /\ UnchangedFrame_ae4eb0bb2ac6b3ab
+
+
+AuthorizeFlowFrameReducerCommandSkipNodeStopped(frame_id, command, node_id, node_status, terminal_status) ==
+    /\ phase = "Stopped"
+    /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
+    /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "SkipNode")
+    /\ (terminal_status = None)
+    /\ (node_id # None)
+    /\ (node_status = Some("Skipped"))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None) THEN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Running"))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ frame_node_status' = mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Skipped")
+    /\ frame_ready_queue' = mob_machine_frame_ready_queue_after_terminal(frame_ready_queue, mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Skipped"), frame_ordered_nodes, frame_id)
+    /\ UnchangedFrame_12162cf669b99293
+
+
+AuthorizeFlowFrameReducerCommandSkipNodeCompleted(frame_id, command, node_id, node_status, terminal_status) ==
+    /\ phase = "Completed"
+    /\ ((frame_id \in DOMAIN frame_phase) = TRUE)
+    /\ ((IF (frame_id \in DOMAIN frame_phase) THEN Some((IF frame_id \in DOMAIN frame_phase THEN frame_phase[frame_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "SkipNode")
+    /\ (terminal_status = None)
+    /\ (node_id # None)
+    /\ (node_status = Some("Skipped"))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None) THEN (IF (frame_id \in DOMAIN frame_tracked_nodes) THEN Some((IF frame_id \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[frame_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (frame_id \in DOMAIN frame_node_status) THEN Some((IF frame_id \in DOMAIN frame_node_status THEN frame_node_status[frame_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Running"))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ frame_node_status' = mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Skipped")
+    /\ frame_ready_queue' = mob_machine_frame_ready_queue_after_terminal(frame_ready_queue, mob_machine_frame_node_status_after_terminal(frame_node_status, frame_node_branches, frame_ordered_nodes, frame_node_dependencies, frame_node_dependency_modes, frame_id, (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None), "Skipped"), frame_ordered_nodes, frame_id)
+    /\ UnchangedFrame_12162cf669b99293
+
+
+AuthorizeFlowRunReducerCommandCancelStepStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "CancelStep")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ (step_status = Some("Canceled"))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Canceled")
+    /\ UnchangedFrame_bc4c673cc44fb722
+
+
+AuthorizeFlowRunReducerCommandCancelStepCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "CancelStep")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ (step_status = Some("Canceled"))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Canceled")
+    /\ UnchangedFrame_bc4c673cc44fb722
+
+
+AuthorizeFlowRunReducerCommandCompleteStepStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "CompleteStep")
+    /\ (step_id # None)
+    /\ (step_status = Some("Completed"))
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Completed")
+    /\ run_consecutive_failure_count' = MapSet(run_consecutive_failure_count, run_id, 0)
+    /\ UnchangedFrame_6e8efad89061048f
+
+
+AuthorizeFlowRunReducerCommandCompleteStepCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "CompleteStep")
+    /\ (step_id # None)
+    /\ (step_status = Some("Completed"))
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Completed")
+    /\ run_consecutive_failure_count' = MapSet(run_consecutive_failure_count, run_id, 0)
+    /\ UnchangedFrame_6e8efad89061048f
+
+
+AuthorizeFlowRunReducerCommandConditionPassedStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "ConditionPassed")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_condition_results' = mob_machine_run_step_condition_result_after_set(run_step_condition_results, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), TRUE)
+    /\ UnchangedFrame_86b2fed5d3847f3a
+
+
+AuthorizeFlowRunReducerCommandConditionPassedCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "ConditionPassed")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_condition_results' = mob_machine_run_step_condition_result_after_set(run_step_condition_results, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), TRUE)
+    /\ UnchangedFrame_86b2fed5d3847f3a
+
+
+AuthorizeFlowRunReducerCommandConditionRejectedStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "ConditionRejected")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_condition_results' = mob_machine_run_step_condition_result_after_set(run_step_condition_results, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), FALSE)
+    /\ UnchangedFrame_86b2fed5d3847f3a
+
+
+AuthorizeFlowRunReducerCommandConditionRejectedCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "ConditionRejected")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_condition_results' = mob_machine_run_step_condition_result_after_set(run_step_condition_results, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), FALSE)
+    /\ UnchangedFrame_86b2fed5d3847f3a
+
+
+AuthorizeFlowRunReducerCommandDispatchStepStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "DispatchStep")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ (step_status = Some("Dispatched"))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Dispatched")
+    /\ UnchangedFrame_bc4c673cc44fb722
+
+
+AuthorizeFlowRunReducerCommandDispatchStepCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "DispatchStep")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ (step_status = Some("Dispatched"))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Dispatched")
+    /\ UnchangedFrame_bc4c673cc44fb722
+
+
+AuthorizeFlowRunReducerCommandFailStepStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "FailStep")
+    /\ (step_id # None)
+    /\ (step_status = Some("Failed"))
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ (IF ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None) = 0) THEN TRUE ELSE (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) + 1) < (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Failed")
+    /\ run_failure_count' = MapIncrement(run_failure_count, run_id, 1)
+    /\ run_consecutive_failure_count' = MapIncrement(run_consecutive_failure_count, run_id, 1)
+    /\ UnchangedFrame_576cd63dd2784b39
+
+
+AuthorizeFlowRunReducerCommandFailStepCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "FailStep")
+    /\ (step_id # None)
+    /\ (step_status = Some("Failed"))
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ (IF ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None) = 0) THEN TRUE ELSE (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) + 1) < (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Failed")
+    /\ run_failure_count' = MapIncrement(run_failure_count, run_id, 1)
+    /\ run_consecutive_failure_count' = MapIncrement(run_consecutive_failure_count, run_id, 1)
+    /\ UnchangedFrame_576cd63dd2784b39
+
+
+AuthorizeFlowRunReducerCommandFailStepEscalatingStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "FailStep")
+    /\ (step_id # None)
+    /\ (step_status = Some("Failed"))
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None) > 0) /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) + 1) >= (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Failed")
+    /\ run_failure_count' = MapIncrement(run_failure_count, run_id, 1)
+    /\ run_consecutive_failure_count' = MapIncrement(run_consecutive_failure_count, run_id, 1)
+    /\ UnchangedFrame_576cd63dd2784b39
+
+
+AuthorizeFlowRunReducerCommandFailStepEscalatingCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "FailStep")
+    /\ (step_id # None)
+    /\ (step_status = Some("Failed"))
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None) > 0) /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) + 1) >= (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Failed")
+    /\ run_failure_count' = MapIncrement(run_failure_count, run_id, 1)
+    /\ run_consecutive_failure_count' = MapIncrement(run_consecutive_failure_count, run_id, 1)
+    /\ UnchangedFrame_576cd63dd2784b39
+
+
+AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycleStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ (placed_completion_lifecycle_quiescing = TRUE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "FailStep")
+    /\ (step_id # None)
+    /\ (step_status = Some("Failed"))
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None) > 0) /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) + 1) >= (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Failed")
+    /\ run_failure_count' = MapIncrement(run_failure_count, run_id, 1)
+    /\ run_consecutive_failure_count' = MapIncrement(run_consecutive_failure_count, run_id, 1)
+    /\ UnchangedFrame_576cd63dd2784b39
+
+
+AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycleCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ (placed_completion_lifecycle_quiescing = TRUE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "FailStep")
+    /\ (step_id # None)
+    /\ (step_status = Some("Failed"))
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None) > 0) /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) + 1) >= (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Failed")
+    /\ run_failure_count' = MapIncrement(run_failure_count, run_id, 1)
+    /\ run_consecutive_failure_count' = MapIncrement(run_consecutive_failure_count, run_id, 1)
+    /\ UnchangedFrame_576cd63dd2784b39
+
+
+AuthorizeFlowRunReducerCommandFrameTerminatedStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "FrameTerminated")
+    /\ ((run_id \in DOMAIN run_active_frame_count) = TRUE)
+    /\ ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_active_frame_count) THEN Some((IF run_id \in DOMAIN run_active_frame_count THEN run_active_frame_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_active_frame_count) THEN Some((IF run_id \in DOMAIN run_active_frame_count THEN run_active_frame_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) > 0)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_active_frame_count' = MapDecrement(run_active_frame_count, run_id, 1)
+    /\ UnchangedFrame_a41ecc5fc53ff00d
+
+
+AuthorizeFlowRunReducerCommandFrameTerminatedCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "FrameTerminated")
+    /\ ((run_id \in DOMAIN run_active_frame_count) = TRUE)
+    /\ ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_active_frame_count) THEN Some((IF run_id \in DOMAIN run_active_frame_count THEN run_active_frame_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_active_frame_count) THEN Some((IF run_id \in DOMAIN run_active_frame_count THEN run_active_frame_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) > 0)
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_active_frame_count' = MapDecrement(run_active_frame_count, run_id, 1)
+    /\ UnchangedFrame_a41ecc5fc53ff00d
+
+
+AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrameStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "FrameTerminated")
+    /\ ((run_id \in DOMAIN run_active_frame_count) = TRUE)
+    /\ ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_active_frame_count) THEN Some((IF run_id \in DOMAIN run_active_frame_count THEN run_active_frame_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_active_frame_count) THEN Some((IF run_id \in DOMAIN run_active_frame_count THEN run_active_frame_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) = 0)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_5f87c20805aa4853
+
+
+AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrameCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "FrameTerminated")
+    /\ ((run_id \in DOMAIN run_active_frame_count) = TRUE)
+    /\ ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_active_frame_count) THEN Some((IF run_id \in DOMAIN run_active_frame_count THEN run_active_frame_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_active_frame_count) THEN Some((IF run_id \in DOMAIN run_active_frame_count THEN run_active_frame_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) = 0)
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_5f87c20805aa4853
+
+
+AuthorizeFlowRunReducerCommandNodeExecutionReleasedStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "NodeExecutionReleased")
+    /\ ((run_id \in DOMAIN run_active_node_count) = TRUE)
+    /\ ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_active_node_count) THEN Some((IF run_id \in DOMAIN run_active_node_count THEN run_active_node_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_active_node_count) THEN Some((IF run_id \in DOMAIN run_active_node_count THEN run_active_node_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) > 0)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_active_node_count' = MapDecrement(run_active_node_count, run_id, 1)
+    /\ UnchangedFrame_83e06433ead46ede
+
+
+AuthorizeFlowRunReducerCommandNodeExecutionReleasedCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "NodeExecutionReleased")
+    /\ ((run_id \in DOMAIN run_active_node_count) = TRUE)
+    /\ ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_active_node_count) THEN Some((IF run_id \in DOMAIN run_active_node_count THEN run_active_node_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_active_node_count) THEN Some((IF run_id \in DOMAIN run_active_node_count THEN run_active_node_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) > 0)
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_active_node_count' = MapDecrement(run_active_node_count, run_id, 1)
+    /\ UnchangedFrame_83e06433ead46ede
+
+
+AuthorizeFlowRunReducerCommandProjectFrameStepStatusStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "ProjectFrameStepStatus")
+    /\ (step_id # None)
+    /\ (frame_id # None)
+    /\ (node_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run THEN frame_run[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some(run_id))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)))
+    /\ (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = None) THEN TRUE ELSE (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(None)) THEN TRUE ELSE ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(Some("Dispatched")))))
+    /\ (IF ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Completed")) THEN TRUE ELSE ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Skipped")))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), mob_machine_step_status_from_frame_node_status((IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) THEN (IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None)["value"] ELSE None)))
+    /\ run_consecutive_failure_count' = IF ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Completed")) THEN MapSet(run_consecutive_failure_count, run_id, 0) ELSE run_consecutive_failure_count
+    /\ UnchangedFrame_6e8efad89061048f
+
+
+AuthorizeFlowRunReducerCommandProjectFrameStepStatusCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "ProjectFrameStepStatus")
+    /\ (step_id # None)
+    /\ (frame_id # None)
+    /\ (node_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run THEN frame_run[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some(run_id))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)))
+    /\ (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = None) THEN TRUE ELSE (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(None)) THEN TRUE ELSE ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(Some("Dispatched")))))
+    /\ (IF ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Completed")) THEN TRUE ELSE ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Skipped")))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), mob_machine_step_status_from_frame_node_status((IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) THEN (IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None)["value"] ELSE None)))
+    /\ run_consecutive_failure_count' = IF ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Completed")) THEN MapSet(run_consecutive_failure_count, run_id, 0) ELSE run_consecutive_failure_count
+    /\ UnchangedFrame_6e8efad89061048f
+
+
+AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "ProjectFrameStepStatus")
+    /\ (step_id # None)
+    /\ (frame_id # None)
+    /\ (node_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run THEN frame_run[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some(run_id))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)))
+    /\ (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = None) THEN TRUE ELSE (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(None)) THEN TRUE ELSE ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(Some("Dispatched")))))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Failed"))
+    /\ (IF ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None) = 0) THEN TRUE ELSE (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) + 1) < (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Failed")
+    /\ run_failure_count' = MapIncrement(run_failure_count, run_id, 1)
+    /\ run_consecutive_failure_count' = MapIncrement(run_consecutive_failure_count, run_id, 1)
+    /\ UnchangedFrame_576cd63dd2784b39
+
+
+AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "ProjectFrameStepStatus")
+    /\ (step_id # None)
+    /\ (frame_id # None)
+    /\ (node_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run THEN frame_run[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some(run_id))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)))
+    /\ (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = None) THEN TRUE ELSE (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(None)) THEN TRUE ELSE ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(Some("Dispatched")))))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Failed"))
+    /\ (IF ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None) = 0) THEN TRUE ELSE (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) + 1) < (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Failed")
+    /\ run_failure_count' = MapIncrement(run_failure_count, run_id, 1)
+    /\ run_consecutive_failure_count' = MapIncrement(run_consecutive_failure_count, run_id, 1)
+    /\ UnchangedFrame_576cd63dd2784b39
+
+
+AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalatingStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "ProjectFrameStepStatus")
+    /\ (step_id # None)
+    /\ (frame_id # None)
+    /\ (node_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run THEN frame_run[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some(run_id))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)))
+    /\ (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = None) THEN TRUE ELSE (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(None)) THEN TRUE ELSE ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(Some("Dispatched")))))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Failed"))
+    /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None) > 0) /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) + 1) >= (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Failed")
+    /\ run_failure_count' = MapIncrement(run_failure_count, run_id, 1)
+    /\ run_consecutive_failure_count' = MapIncrement(run_consecutive_failure_count, run_id, 1)
+    /\ UnchangedFrame_576cd63dd2784b39
+
+
+AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalatingCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "ProjectFrameStepStatus")
+    /\ (step_id # None)
+    /\ (frame_id # None)
+    /\ (node_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run THEN frame_run[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some(run_id))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)))
+    /\ (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = None) THEN TRUE ELSE (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(None)) THEN TRUE ELSE ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(Some("Dispatched")))))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Failed"))
+    /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None) > 0) /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) + 1) >= (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Failed")
+    /\ run_failure_count' = MapIncrement(run_failure_count, run_id, 1)
+    /\ run_consecutive_failure_count' = MapIncrement(run_consecutive_failure_count, run_id, 1)
+    /\ UnchangedFrame_576cd63dd2784b39
+
+
+AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycleStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ (placed_completion_lifecycle_quiescing = TRUE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "ProjectFrameStepStatus")
+    /\ (step_id # None)
+    /\ (frame_id # None)
+    /\ (node_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run THEN frame_run[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some(run_id))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)))
+    /\ (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = None) THEN TRUE ELSE (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(None)) THEN TRUE ELSE ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(Some("Dispatched")))))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Failed"))
+    /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None) > 0) /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) + 1) >= (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Failed")
+    /\ run_failure_count' = MapIncrement(run_failure_count, run_id, 1)
+    /\ run_consecutive_failure_count' = MapIncrement(run_consecutive_failure_count, run_id, 1)
+    /\ UnchangedFrame_576cd63dd2784b39
+
+
+AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycleCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ (placed_completion_lifecycle_quiescing = TRUE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "ProjectFrameStepStatus")
+    /\ (step_id # None)
+    /\ (frame_id # None)
+    /\ (node_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run THEN frame_run[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some(run_id))
+    /\ ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_tracked_nodes THEN frame_tracked_nodes[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_step_ids THEN frame_node_step_ids[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)))
+    /\ (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = None) THEN TRUE ELSE (IF ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(None)) THEN TRUE ELSE ((IF ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (run_id \in DOMAIN run_step_status) THEN Some((IF run_id \in DOMAIN run_step_status THEN run_step_status[run_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None)] ELSE None)) ELSE None) = Some(Some("Dispatched")))))
+    /\ ((IF ((IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF (IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None) \in DOMAIN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None) THEN (IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_node_status THEN frame_node_status[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[(IF "value" \in DOMAIN node_id THEN node_id["value"] ELSE None)] ELSE None)) ELSE None) = Some("Failed"))
+    /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None) > 0) /\ (((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_consecutive_failure_count) THEN Some((IF run_id \in DOMAIN run_consecutive_failure_count THEN run_consecutive_failure_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) + 1) >= (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_escalation_threshold) THEN Some((IF run_id \in DOMAIN run_escalation_threshold THEN run_escalation_threshold[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Failed")
+    /\ run_failure_count' = MapIncrement(run_failure_count, run_id, 1)
+    /\ run_consecutive_failure_count' = MapIncrement(run_consecutive_failure_count, run_id, 1)
+    /\ UnchangedFrame_576cd63dd2784b39
+
+
+AuthorizeFlowRunReducerCommandPumpFrameSchedulerStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "PumpFrameScheduler")
+    /\ (loop_instance_id # None)
+    /\ (((IF "value" \in DOMAIN loop_instance_id THEN loop_instance_id["value"] ELSE None) \in run_pending_body_frame_loop_membership_flat) = TRUE)
+    /\ (\A candidate \in run_pending_body_frame_loop_membership_flat : (IF ((candidate \in DOMAIN loop_parent_frame) = FALSE) THEN TRUE ELSE (IF ((IF ((IF "value" \in DOMAIN (IF (candidate \in DOMAIN loop_parent_frame) THEN Some((IF candidate \in DOMAIN loop_parent_frame THEN loop_parent_frame[candidate] ELSE "None")) ELSE None) THEN (IF (candidate \in DOMAIN loop_parent_frame) THEN Some((IF candidate \in DOMAIN loop_parent_frame THEN loop_parent_frame[candidate] ELSE "None")) ELSE None)["value"] ELSE None) \in DOMAIN frame_run) THEN Some((IF (IF "value" \in DOMAIN (IF (candidate \in DOMAIN loop_parent_frame) THEN Some((IF candidate \in DOMAIN loop_parent_frame THEN loop_parent_frame[candidate] ELSE "None")) ELSE None) THEN (IF (candidate \in DOMAIN loop_parent_frame) THEN Some((IF candidate \in DOMAIN loop_parent_frame THEN loop_parent_frame[candidate] ELSE "None")) ELSE None)["value"] ELSE None) \in DOMAIN frame_run THEN frame_run[(IF "value" \in DOMAIN (IF (candidate \in DOMAIN loop_parent_frame) THEN Some((IF candidate \in DOMAIN loop_parent_frame THEN loop_parent_frame[candidate] ELSE "None")) ELSE None) THEN (IF (candidate \in DOMAIN loop_parent_frame) THEN Some((IF candidate \in DOMAIN loop_parent_frame THEN loop_parent_frame[candidate] ELSE "None")) ELSE None)["value"] ELSE None)] ELSE "None")) ELSE None) # Some(run_id)) THEN TRUE ELSE ((IF "value" \in DOMAIN loop_instance_id THEN loop_instance_id["value"] ELSE None) <= candidate))))
+    /\ (IF ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_max_active_frames) THEN Some((IF run_id \in DOMAIN run_max_active_frames THEN run_max_active_frames[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_max_active_frames) THEN Some((IF run_id \in DOMAIN run_max_active_frames THEN run_max_active_frames[run_id] ELSE 0)) ELSE None)["value"] ELSE None) = 0) THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_active_frame_count) THEN Some((IF run_id \in DOMAIN run_active_frame_count THEN run_active_frame_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_active_frame_count) THEN Some((IF run_id \in DOMAIN run_active_frame_count THEN run_active_frame_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) < (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_max_active_frames) THEN Some((IF run_id \in DOMAIN run_max_active_frames THEN run_max_active_frames[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_max_active_frames) THEN Some((IF run_id \in DOMAIN run_max_active_frames THEN run_max_active_frames[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_pending_body_frame_loop_membership_flat' = (run_pending_body_frame_loop_membership_flat \ {(IF "value" \in DOMAIN loop_instance_id THEN loop_instance_id["value"] ELSE None)})
+    /\ run_active_frame_count' = MapIncrement(run_active_frame_count, run_id, 1)
+    /\ run_last_granted_loop' = MapSet(run_last_granted_loop, run_id, Some((IF "value" \in DOMAIN loop_instance_id THEN loop_instance_id["value"] ELSE None)))
+    /\ UnchangedFrame_f68a6d596a1210b6
+
+
+AuthorizeFlowRunReducerCommandPumpFrameSchedulerCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "PumpFrameScheduler")
+    /\ (loop_instance_id # None)
+    /\ (((IF "value" \in DOMAIN loop_instance_id THEN loop_instance_id["value"] ELSE None) \in run_pending_body_frame_loop_membership_flat) = TRUE)
+    /\ (\A candidate \in run_pending_body_frame_loop_membership_flat : (IF ((candidate \in DOMAIN loop_parent_frame) = FALSE) THEN TRUE ELSE (IF ((IF ((IF "value" \in DOMAIN (IF (candidate \in DOMAIN loop_parent_frame) THEN Some((IF candidate \in DOMAIN loop_parent_frame THEN loop_parent_frame[candidate] ELSE "None")) ELSE None) THEN (IF (candidate \in DOMAIN loop_parent_frame) THEN Some((IF candidate \in DOMAIN loop_parent_frame THEN loop_parent_frame[candidate] ELSE "None")) ELSE None)["value"] ELSE None) \in DOMAIN frame_run) THEN Some((IF (IF "value" \in DOMAIN (IF (candidate \in DOMAIN loop_parent_frame) THEN Some((IF candidate \in DOMAIN loop_parent_frame THEN loop_parent_frame[candidate] ELSE "None")) ELSE None) THEN (IF (candidate \in DOMAIN loop_parent_frame) THEN Some((IF candidate \in DOMAIN loop_parent_frame THEN loop_parent_frame[candidate] ELSE "None")) ELSE None)["value"] ELSE None) \in DOMAIN frame_run THEN frame_run[(IF "value" \in DOMAIN (IF (candidate \in DOMAIN loop_parent_frame) THEN Some((IF candidate \in DOMAIN loop_parent_frame THEN loop_parent_frame[candidate] ELSE "None")) ELSE None) THEN (IF (candidate \in DOMAIN loop_parent_frame) THEN Some((IF candidate \in DOMAIN loop_parent_frame THEN loop_parent_frame[candidate] ELSE "None")) ELSE None)["value"] ELSE None)] ELSE "None")) ELSE None) # Some(run_id)) THEN TRUE ELSE ((IF "value" \in DOMAIN loop_instance_id THEN loop_instance_id["value"] ELSE None) <= candidate))))
+    /\ (IF ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_max_active_frames) THEN Some((IF run_id \in DOMAIN run_max_active_frames THEN run_max_active_frames[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_max_active_frames) THEN Some((IF run_id \in DOMAIN run_max_active_frames THEN run_max_active_frames[run_id] ELSE 0)) ELSE None)["value"] ELSE None) = 0) THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_active_frame_count) THEN Some((IF run_id \in DOMAIN run_active_frame_count THEN run_active_frame_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_active_frame_count) THEN Some((IF run_id \in DOMAIN run_active_frame_count THEN run_active_frame_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) < (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_max_active_frames) THEN Some((IF run_id \in DOMAIN run_max_active_frames THEN run_max_active_frames[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_max_active_frames) THEN Some((IF run_id \in DOMAIN run_max_active_frames THEN run_max_active_frames[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_pending_body_frame_loop_membership_flat' = (run_pending_body_frame_loop_membership_flat \ {(IF "value" \in DOMAIN loop_instance_id THEN loop_instance_id["value"] ELSE None)})
+    /\ run_active_frame_count' = MapIncrement(run_active_frame_count, run_id, 1)
+    /\ run_last_granted_loop' = MapSet(run_last_granted_loop, run_id, Some((IF "value" \in DOMAIN loop_instance_id THEN loop_instance_id["value"] ELSE None)))
+    /\ UnchangedFrame_f68a6d596a1210b6
+
+
+AuthorizeFlowRunReducerCommandPumpNodeSchedulerStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "PumpNodeScheduler")
+    /\ (frame_id # None)
+    /\ (((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in run_ready_frame_membership_flat) = TRUE)
+    /\ (\A candidate \in run_ready_frame_membership_flat : (IF ((IF (candidate \in DOMAIN frame_run) THEN Some((IF candidate \in DOMAIN frame_run THEN frame_run[candidate] ELSE "None")) ELSE None) # Some(run_id)) THEN TRUE ELSE ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) <= candidate)))
+    /\ (IF ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_max_active_nodes) THEN Some((IF run_id \in DOMAIN run_max_active_nodes THEN run_max_active_nodes[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_max_active_nodes) THEN Some((IF run_id \in DOMAIN run_max_active_nodes THEN run_max_active_nodes[run_id] ELSE 0)) ELSE None)["value"] ELSE None) = 0) THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_active_node_count) THEN Some((IF run_id \in DOMAIN run_active_node_count THEN run_active_node_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_active_node_count) THEN Some((IF run_id \in DOMAIN run_active_node_count THEN run_active_node_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) < (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_max_active_nodes) THEN Some((IF run_id \in DOMAIN run_max_active_nodes THEN run_max_active_nodes[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_max_active_nodes) THEN Some((IF run_id \in DOMAIN run_max_active_nodes THEN run_max_active_nodes[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_ready_frame_membership_flat' = (run_ready_frame_membership_flat \ {(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)})
+    /\ run_active_node_count' = MapIncrement(run_active_node_count, run_id, 1)
+    /\ run_last_granted_frame' = MapSet(run_last_granted_frame, run_id, Some((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)))
+    /\ UnchangedFrame_47331ddc92f6360c
+
+
+AuthorizeFlowRunReducerCommandPumpNodeSchedulerCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "PumpNodeScheduler")
+    /\ (frame_id # None)
+    /\ (((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in run_ready_frame_membership_flat) = TRUE)
+    /\ (\A candidate \in run_ready_frame_membership_flat : (IF ((IF (candidate \in DOMAIN frame_run) THEN Some((IF candidate \in DOMAIN frame_run THEN frame_run[candidate] ELSE "None")) ELSE None) # Some(run_id)) THEN TRUE ELSE ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) <= candidate)))
+    /\ (IF ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_max_active_nodes) THEN Some((IF run_id \in DOMAIN run_max_active_nodes THEN run_max_active_nodes[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_max_active_nodes) THEN Some((IF run_id \in DOMAIN run_max_active_nodes THEN run_max_active_nodes[run_id] ELSE 0)) ELSE None)["value"] ELSE None) = 0) THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_active_node_count) THEN Some((IF run_id \in DOMAIN run_active_node_count THEN run_active_node_count[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_active_node_count) THEN Some((IF run_id \in DOMAIN run_active_node_count THEN run_active_node_count[run_id] ELSE 0)) ELSE None)["value"] ELSE None) < (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_max_active_nodes) THEN Some((IF run_id \in DOMAIN run_max_active_nodes THEN run_max_active_nodes[run_id] ELSE 0)) ELSE None) THEN (IF (run_id \in DOMAIN run_max_active_nodes) THEN Some((IF run_id \in DOMAIN run_max_active_nodes THEN run_max_active_nodes[run_id] ELSE 0)) ELSE None)["value"] ELSE None)))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_ready_frame_membership_flat' = (run_ready_frame_membership_flat \ {(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)})
+    /\ run_active_node_count' = MapIncrement(run_active_node_count, run_id, 1)
+    /\ run_last_granted_frame' = MapSet(run_last_granted_frame, run_id, Some((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)))
+    /\ UnchangedFrame_47331ddc92f6360c
+
+
+AuthorizeFlowRunReducerCommandRecordStepOutputStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RecordStepOutput")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_output_recorded' = mob_machine_run_step_bool_after_set(run_output_recorded, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), TRUE)
+    /\ UnchangedFrame_fcde135cb49c28fb
+
+
+AuthorizeFlowRunReducerCommandRecordStepOutputCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RecordStepOutput")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_output_recorded' = mob_machine_run_step_bool_after_set(run_output_recorded, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), TRUE)
+    /\ UnchangedFrame_fcde135cb49c28fb
+
+
+AuthorizeFlowRunReducerCommandRecordTargetCanceledStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RecordTargetCanceled")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_5f87c20805aa4853
+
+
+AuthorizeFlowRunReducerCommandRecordTargetCanceledCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RecordTargetCanceled")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_5f87c20805aa4853
+
+
+AuthorizeFlowRunReducerCommandRecordTargetFailureStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RecordTargetFailure")
+    /\ (step_id # None)
+    /\ (retry_key # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_target_retry_counts' = mob_machine_run_retry_count_after_increment(run_target_retry_counts, run_id, (IF "value" \in DOMAIN retry_key THEN retry_key["value"] ELSE None), 1)
+    /\ UnchangedFrame_7349033cff3fa50c
+
+
+AuthorizeFlowRunReducerCommandRecordTargetFailureCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RecordTargetFailure")
+    /\ (step_id # None)
+    /\ (retry_key # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_target_retry_counts' = mob_machine_run_retry_count_after_increment(run_target_retry_counts, run_id, (IF "value" \in DOMAIN retry_key THEN retry_key["value"] ELSE None), 1)
+    /\ UnchangedFrame_7349033cff3fa50c
+
+
+AuthorizeFlowRunReducerCommandRecordTargetSuccessStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RecordTargetSuccess")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_target_success_counts' = mob_machine_run_step_u64_after_increment(run_step_target_success_counts, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), 1)
+    /\ UnchangedFrame_9e829ce61d63edf8
+
+
+AuthorizeFlowRunReducerCommandRecordTargetSuccessCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RecordTargetSuccess")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_target_success_counts' = mob_machine_run_step_u64_after_increment(run_step_target_success_counts, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), 1)
+    /\ UnchangedFrame_9e829ce61d63edf8
+
+
+AuthorizeFlowRunReducerCommandRecordTargetTerminalFailureStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RecordTargetTerminalFailure")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_target_terminal_failure_counts' = mob_machine_run_step_u64_after_increment(run_step_target_terminal_failure_counts, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), 1)
+    /\ UnchangedFrame_95dab605a0277376
+
+
+AuthorizeFlowRunReducerCommandRecordTargetTerminalFailureCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RecordTargetTerminalFailure")
+    /\ (step_id # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_target_terminal_failure_counts' = mob_machine_run_step_u64_after_increment(run_step_target_terminal_failure_counts, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), 1)
+    /\ UnchangedFrame_95dab605a0277376
+
+
+AuthorizeFlowRunReducerCommandRegisterPendingBodyFrameStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RegisterPendingBodyFrame")
+    /\ (loop_instance_id # None)
+    /\ (((IF "value" \in DOMAIN loop_instance_id THEN loop_instance_id["value"] ELSE None) \in DOMAIN loop_phase) = TRUE)
+    /\ (((IF "value" \in DOMAIN loop_instance_id THEN loop_instance_id["value"] ELSE None) \in run_pending_body_frame_loop_membership_flat) = FALSE)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_pending_body_frame_loop_membership_flat' = (run_pending_body_frame_loop_membership_flat \cup {(IF "value" \in DOMAIN loop_instance_id THEN loop_instance_id["value"] ELSE None)})
+    /\ UnchangedFrame_a6a0518694f613a9
+
+
+AuthorizeFlowRunReducerCommandRegisterPendingBodyFrameCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RegisterPendingBodyFrame")
+    /\ (loop_instance_id # None)
+    /\ (((IF "value" \in DOMAIN loop_instance_id THEN loop_instance_id["value"] ELSE None) \in DOMAIN loop_phase) = TRUE)
+    /\ (((IF "value" \in DOMAIN loop_instance_id THEN loop_instance_id["value"] ELSE None) \in run_pending_body_frame_loop_membership_flat) = FALSE)
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_pending_body_frame_loop_membership_flat' = (run_pending_body_frame_loop_membership_flat \cup {(IF "value" \in DOMAIN loop_instance_id THEN loop_instance_id["value"] ELSE None)})
+    /\ UnchangedFrame_a6a0518694f613a9
+
+
+AuthorizeFlowRunReducerCommandRegisterReadyFrameStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RegisterReadyFrame")
+    /\ (frame_id # None)
+    /\ ((IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run THEN frame_run[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some(run_id))
+    /\ (((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in run_ready_frame_membership_flat) = FALSE)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_ready_frame_membership_flat' = (run_ready_frame_membership_flat \cup {(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)})
+    /\ UnchangedFrame_8ae826c4a51b1159
+
+
+AuthorizeFlowRunReducerCommandRegisterReadyFrameCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RegisterReadyFrame")
+    /\ (frame_id # None)
+    /\ ((IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run THEN frame_run[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some(run_id))
+    /\ (((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in run_ready_frame_membership_flat) = FALSE)
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_ready_frame_membership_flat' = (run_ready_frame_membership_flat \cup {(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)})
+    /\ UnchangedFrame_8ae826c4a51b1159
+
+
+AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReadyStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RegisterReadyFrame")
+    /\ (frame_id # None)
+    /\ ((IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run THEN frame_run[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some(run_id))
+    /\ (((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in run_ready_frame_membership_flat) = TRUE)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_5f87c20805aa4853
+
+
+AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReadyCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RegisterReadyFrame")
+    /\ (frame_id # None)
+    /\ ((IF ((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run) THEN Some((IF (IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in DOMAIN frame_run THEN frame_run[(IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some(run_id))
+    /\ (((IF "value" \in DOMAIN frame_id THEN frame_id["value"] ELSE None) \in run_ready_frame_membership_flat) = TRUE)
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_5f87c20805aa4853
+
+
+AuthorizeFlowRunReducerCommandRegisterTargetsStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RegisterTargets")
+    /\ (step_id # None)
+    /\ (target_count # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_target_counts' = mob_machine_run_step_u64_after_set(run_step_target_counts, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), (IF "value" \in DOMAIN target_count THEN target_count["value"] ELSE None))
+    /\ run_step_target_success_counts' = mob_machine_run_step_u64_after_set(run_step_target_success_counts, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), 0)
+    /\ run_step_target_terminal_failure_counts' = mob_machine_run_step_u64_after_set(run_step_target_terminal_failure_counts, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), 0)
+    /\ UnchangedFrame_c04042916e13889a
+
+
+AuthorizeFlowRunReducerCommandRegisterTargetsCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "RegisterTargets")
+    /\ (step_id # None)
+    /\ (target_count # None)
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_target_counts' = mob_machine_run_step_u64_after_set(run_step_target_counts, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), (IF "value" \in DOMAIN target_count THEN target_count["value"] ELSE None))
+    /\ run_step_target_success_counts' = mob_machine_run_step_u64_after_set(run_step_target_success_counts, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), 0)
+    /\ run_step_target_terminal_failure_counts' = mob_machine_run_step_u64_after_set(run_step_target_terminal_failure_counts, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), 0)
+    /\ UnchangedFrame_c04042916e13889a
+
+
+AuthorizeFlowRunReducerCommandSkipStepStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "SkipStep")
+    /\ (step_id # None)
+    /\ (step_status = Some("Skipped"))
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Skipped")
+    /\ UnchangedFrame_bc4c673cc44fb722
+
+
+AuthorizeFlowRunReducerCommandSkipStepCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "SkipStep")
+    /\ (step_id # None)
+    /\ (step_status = Some("Skipped"))
+    /\ ((IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None) \in (IF "value" \in DOMAIN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None) THEN (IF (run_id \in DOMAIN run_tracked_steps) THEN Some((IF run_id \in DOMAIN run_tracked_steps THEN run_tracked_steps[run_id] ELSE {})) ELSE None)["value"] ELSE None))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_step_status' = mob_machine_run_step_status_after_set(run_step_status, run_id, (IF "value" \in DOMAIN step_id THEN step_id["value"] ELSE None), "Skipped")
+    /\ UnchangedFrame_bc4c673cc44fb722
+
+
+AuthorizeFlowRunReducerCommandStartRunStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ (command = "StartRun")
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Pending"))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_status' = MapSet(run_status, run_id, "Running")
+    /\ UnchangedFrame_c3af9d1ed29c9b4f
+
+
+AuthorizeFlowRunReducerCommandStartRunCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ (command = "StartRun")
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Pending"))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_status' = MapSet(run_status, run_id, "Running")
+    /\ UnchangedFrame_c3af9d1ed29c9b4f
+
+
+AuthorizeFlowRunReducerCommandTerminalCanceledStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "TerminalizeCanceled")
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_status' = MapSet(run_status, run_id, "Canceled")
+    /\ run_step_status' = mob_machine_run_step_status_after_cancel_unfinished(run_step_status, run_id)
+    /\ UnchangedFrame_870984df28cd4266
+
+
+AuthorizeFlowRunReducerCommandTerminalCanceledCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "TerminalizeCanceled")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_status' = MapSet(run_status, run_id, "Canceled")
+    /\ run_step_status' = mob_machine_run_step_status_after_cancel_unfinished(run_step_status, run_id)
+    /\ UnchangedFrame_870984df28cd4266
+
+
+AuthorizeFlowRunReducerCommandTerminalCompletedStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "TerminalizeCompleted")
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_status' = MapSet(run_status, run_id, "Completed")
+    /\ UnchangedFrame_c3af9d1ed29c9b4f
+
+
+AuthorizeFlowRunReducerCommandTerminalCompletedCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "TerminalizeCompleted")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_status' = MapSet(run_status, run_id, "Completed")
+    /\ UnchangedFrame_c3af9d1ed29c9b4f
+
+
+AuthorizeFlowRunReducerCommandTerminalFailedStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Stopped"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "TerminalizeFailed")
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_status' = MapSet(run_status, run_id, "Failed")
+    /\ run_step_status' = mob_machine_run_step_status_after_cancel_unfinished(run_step_status, run_id)
+    /\ UnchangedFrame_870984df28cd4266
+
+
+AuthorizeFlowRunReducerCommandTerminalFailedCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key) ==
+    /\ phase = "Completed"
+    /\ ((run_id \in DOMAIN run_status) = TRUE)
+    /\ ((IF (run_id \in DOMAIN run_status) THEN Some((IF run_id \in DOMAIN run_status THEN run_status[run_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "TerminalizeFailed")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_status' = MapSet(run_status, run_id, "Failed")
+    /\ run_step_status' = mob_machine_run_step_status_after_cancel_unfinished(run_step_status, run_id)
+    /\ UnchangedFrame_870984df28cd4266
+
+
+AuthorizeLoopIterationReducerCommandBodyFrameCanceledStopped(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
+    /\ phase = "Stopped"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("BodyFrameActive"))
+    /\ (command = "BodyFrameCanceled")
+    /\ (body_frame_iteration # None)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None) = body_frame_iteration)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ loop_phase' = MapSet(loop_phase, loop_instance_id, "Canceled")
+    /\ loop_last_completed_iteration' = MapSet(loop_last_completed_iteration, loop_instance_id, (IF "value" \in DOMAIN body_frame_iteration THEN body_frame_iteration["value"] ELSE None))
+    /\ loop_active_body_frame' = MapSet(loop_active_body_frame, loop_instance_id, None)
+    /\ UnchangedFrame_4951dce302f6f08a
+
+
+AuthorizeLoopIterationReducerCommandBodyFrameCanceledCompleted(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
+    /\ phase = "Completed"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("BodyFrameActive"))
+    /\ (command = "BodyFrameCanceled")
+    /\ (body_frame_iteration # None)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None) = body_frame_iteration)
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ loop_phase' = MapSet(loop_phase, loop_instance_id, "Canceled")
+    /\ loop_last_completed_iteration' = MapSet(loop_last_completed_iteration, loop_instance_id, (IF "value" \in DOMAIN body_frame_iteration THEN body_frame_iteration["value"] ELSE None))
+    /\ loop_active_body_frame' = MapSet(loop_active_body_frame, loop_instance_id, None)
+    /\ UnchangedFrame_4951dce302f6f08a
+
+
+AuthorizeLoopIterationReducerCommandBodyFrameCompletedStopped(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
+    /\ phase = "Stopped"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("BodyFrameActive"))
+    /\ (command = "BodyFrameCompleted")
+    /\ FALSE
+    /\ (body_frame_iteration # None)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None) = body_frame_iteration)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_5f87c20805aa4853
+
+
+AuthorizeLoopIterationReducerCommandBodyFrameCompletedCompleted(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
+    /\ phase = "Completed"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("BodyFrameActive"))
+    /\ (command = "BodyFrameCompleted")
+    /\ FALSE
+    /\ (body_frame_iteration # None)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None) = body_frame_iteration)
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_5f87c20805aa4853
+
+
+AuthorizeLoopIterationReducerCommandBodyFrameFailedStopped(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
+    /\ phase = "Stopped"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("BodyFrameActive"))
+    /\ (command = "BodyFrameFailed")
+    /\ (body_frame_iteration # None)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None) = body_frame_iteration)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ loop_phase' = MapSet(loop_phase, loop_instance_id, "Failed")
+    /\ loop_last_completed_iteration' = MapSet(loop_last_completed_iteration, loop_instance_id, (IF "value" \in DOMAIN body_frame_iteration THEN body_frame_iteration["value"] ELSE None))
+    /\ loop_active_body_frame' = MapSet(loop_active_body_frame, loop_instance_id, None)
+    /\ UnchangedFrame_4951dce302f6f08a
+
+
+AuthorizeLoopIterationReducerCommandBodyFrameFailedCompleted(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
+    /\ phase = "Completed"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("BodyFrameActive"))
+    /\ (command = "BodyFrameFailed")
+    /\ (body_frame_iteration # None)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None) = body_frame_iteration)
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ loop_phase' = MapSet(loop_phase, loop_instance_id, "Failed")
+    /\ loop_last_completed_iteration' = MapSet(loop_last_completed_iteration, loop_instance_id, (IF "value" \in DOMAIN body_frame_iteration THEN body_frame_iteration["value"] ELSE None))
+    /\ loop_active_body_frame' = MapSet(loop_active_body_frame, loop_instance_id, None)
+    /\ UnchangedFrame_4951dce302f6f08a
+
+
+AuthorizeLoopIterationReducerCommandBodyFrameStartedStopped(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
+    /\ phase = "Stopped"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "BodyFrameStarted")
+    /\ FALSE
+    /\ (body_frame_iteration = None)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("BodyFrameActive"))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_5f87c20805aa4853
+
+
+AuthorizeLoopIterationReducerCommandBodyFrameStartedCompleted(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
+    /\ phase = "Completed"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "BodyFrameStarted")
+    /\ FALSE
+    /\ (body_frame_iteration = None)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("BodyFrameActive"))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_5f87c20805aa4853
+
+
+AuthorizeLoopIterationReducerCommandCancelLoopStopped(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
+    /\ phase = "Stopped"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "CancelLoop")
+    /\ (body_frame_iteration = None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ loop_phase' = MapSet(loop_phase, loop_instance_id, "Canceled")
+    /\ loop_active_body_frame' = MapSet(loop_active_body_frame, loop_instance_id, None)
+    /\ UnchangedFrame_bbc26942ed6d68dd
+
+
+AuthorizeLoopIterationReducerCommandCancelLoopCompleted(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
+    /\ phase = "Completed"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ (command = "CancelLoop")
+    /\ (body_frame_iteration = None)
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ loop_phase' = MapSet(loop_phase, loop_instance_id, "Canceled")
+    /\ loop_active_body_frame' = MapSet(loop_active_body_frame, loop_instance_id, None)
+    /\ UnchangedFrame_bbc26942ed6d68dd
+
+
+AuthorizeLoopIterationReducerCommandUntilFeedbackStopped(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
+    /\ phase = "Stopped"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("AwaitingUntilEvaluation"))
+    /\ FALSE
+    /\ (body_frame_iteration = None)
+    /\ (IF (command = "UntilConditionMet") THEN TRUE ELSE (command = "UntilConditionFailed"))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_5f87c20805aa4853
+
+
+AuthorizeLoopIterationReducerCommandUntilFeedbackCompleted(loop_instance_id, command, body_frame_id, body_frame_iteration) ==
+    /\ phase = "Completed"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("AwaitingUntilEvaluation"))
+    /\ FALSE
+    /\ (body_frame_iteration = None)
+    /\ (IF (command = "UntilConditionMet") THEN TRUE ELSE (command = "UntilConditionFailed"))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_5f87c20805aa4853
+
+
+RecordLoopBodyFrameCompletedStopped(loop_instance_id, iteration) ==
+    /\ phase = "Stopped"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("BodyFrameActive"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None) = Some(iteration))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ loop_stage' = MapSet(loop_stage, loop_instance_id, "AwaitingUntilEvaluation")
+    /\ loop_current_iteration' = MapSet(loop_current_iteration, loop_instance_id, (iteration + 1))
+    /\ loop_last_completed_iteration' = MapSet(loop_last_completed_iteration, loop_instance_id, iteration)
+    /\ loop_active_body_frame' = MapSet(loop_active_body_frame, loop_instance_id, None)
+    /\ UnchangedFrame_3d835f50ec09a485
+
+
+RecordLoopBodyFrameCompletedCompleted(loop_instance_id, iteration) ==
+    /\ phase = "Completed"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("BodyFrameActive"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None) = Some(iteration))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ loop_stage' = MapSet(loop_stage, loop_instance_id, "AwaitingUntilEvaluation")
+    /\ loop_current_iteration' = MapSet(loop_current_iteration, loop_instance_id, (iteration + 1))
+    /\ loop_last_completed_iteration' = MapSet(loop_last_completed_iteration, loop_instance_id, iteration)
+    /\ loop_active_body_frame' = MapSet(loop_active_body_frame, loop_instance_id, None)
+    /\ UnchangedFrame_3d835f50ec09a485
+
+
+RecordLoopUntilConditionFailedExhaustedStopped(loop_instance_id, iteration) ==
+    /\ phase = "Stopped"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("AwaitingUntilEvaluation"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_last_completed_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_last_completed_iteration THEN loop_last_completed_iteration[loop_instance_id] ELSE 0)) ELSE None) = Some(iteration))
+    /\ ((IF "value" \in DOMAIN (IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None) THEN (IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None)["value"] ELSE None) >= (IF "value" \in DOMAIN (IF (loop_instance_id \in DOMAIN loop_max_iterations) THEN Some((IF loop_instance_id \in DOMAIN loop_max_iterations THEN loop_max_iterations[loop_instance_id] ELSE 0)) ELSE None) THEN (IF (loop_instance_id \in DOMAIN loop_max_iterations) THEN Some((IF loop_instance_id \in DOMAIN loop_max_iterations THEN loop_max_iterations[loop_instance_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ loop_phase' = MapSet(loop_phase, loop_instance_id, "Exhausted")
+    /\ loop_active_body_frame' = MapSet(loop_active_body_frame, loop_instance_id, None)
+    /\ UnchangedFrame_bbc26942ed6d68dd
+
+
+RecordLoopUntilConditionFailedExhaustedCompleted(loop_instance_id, iteration) ==
+    /\ phase = "Completed"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("AwaitingUntilEvaluation"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_last_completed_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_last_completed_iteration THEN loop_last_completed_iteration[loop_instance_id] ELSE 0)) ELSE None) = Some(iteration))
+    /\ ((IF "value" \in DOMAIN (IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None) THEN (IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None)["value"] ELSE None) >= (IF "value" \in DOMAIN (IF (loop_instance_id \in DOMAIN loop_max_iterations) THEN Some((IF loop_instance_id \in DOMAIN loop_max_iterations THEN loop_max_iterations[loop_instance_id] ELSE 0)) ELSE None) THEN (IF (loop_instance_id \in DOMAIN loop_max_iterations) THEN Some((IF loop_instance_id \in DOMAIN loop_max_iterations THEN loop_max_iterations[loop_instance_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ loop_phase' = MapSet(loop_phase, loop_instance_id, "Exhausted")
+    /\ loop_active_body_frame' = MapSet(loop_active_body_frame, loop_instance_id, None)
+    /\ UnchangedFrame_bbc26942ed6d68dd
+
+
+RecordLoopUntilConditionFailedStopped(loop_instance_id, iteration) ==
+    /\ phase = "Stopped"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("AwaitingUntilEvaluation"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_last_completed_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_last_completed_iteration THEN loop_last_completed_iteration[loop_instance_id] ELSE 0)) ELSE None) = Some(iteration))
+    /\ ((IF "value" \in DOMAIN (IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None) THEN (IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None)["value"] ELSE None) < (IF "value" \in DOMAIN (IF (loop_instance_id \in DOMAIN loop_max_iterations) THEN Some((IF loop_instance_id \in DOMAIN loop_max_iterations THEN loop_max_iterations[loop_instance_id] ELSE 0)) ELSE None) THEN (IF (loop_instance_id \in DOMAIN loop_max_iterations) THEN Some((IF loop_instance_id \in DOMAIN loop_max_iterations THEN loop_max_iterations[loop_instance_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ loop_stage' = MapSet(loop_stage, loop_instance_id, "AwaitingBodyFrame")
+    /\ loop_active_body_frame' = MapSet(loop_active_body_frame, loop_instance_id, None)
+    /\ UnchangedFrame_9ce076cd6902d320
+
+
+RecordLoopUntilConditionFailedCompleted(loop_instance_id, iteration) ==
+    /\ phase = "Completed"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("AwaitingUntilEvaluation"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_last_completed_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_last_completed_iteration THEN loop_last_completed_iteration[loop_instance_id] ELSE 0)) ELSE None) = Some(iteration))
+    /\ ((IF "value" \in DOMAIN (IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None) THEN (IF (loop_instance_id \in DOMAIN loop_current_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_current_iteration THEN loop_current_iteration[loop_instance_id] ELSE 0)) ELSE None)["value"] ELSE None) < (IF "value" \in DOMAIN (IF (loop_instance_id \in DOMAIN loop_max_iterations) THEN Some((IF loop_instance_id \in DOMAIN loop_max_iterations THEN loop_max_iterations[loop_instance_id] ELSE 0)) ELSE None) THEN (IF (loop_instance_id \in DOMAIN loop_max_iterations) THEN Some((IF loop_instance_id \in DOMAIN loop_max_iterations THEN loop_max_iterations[loop_instance_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ loop_stage' = MapSet(loop_stage, loop_instance_id, "AwaitingBodyFrame")
+    /\ loop_active_body_frame' = MapSet(loop_active_body_frame, loop_instance_id, None)
+    /\ UnchangedFrame_9ce076cd6902d320
+
+
+RecordLoopUntilConditionMetStopped(loop_instance_id, iteration) ==
+    /\ phase = "Stopped"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("AwaitingUntilEvaluation"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_last_completed_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_last_completed_iteration THEN loop_last_completed_iteration[loop_instance_id] ELSE 0)) ELSE None) = Some(iteration))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ loop_phase' = MapSet(loop_phase, loop_instance_id, "Completed")
+    /\ loop_active_body_frame' = MapSet(loop_active_body_frame, loop_instance_id, None)
+    /\ UnchangedFrame_bbc26942ed6d68dd
+
+
+RecordLoopUntilConditionMetCompleted(loop_instance_id, iteration) ==
+    /\ phase = "Completed"
+    /\ ((loop_instance_id \in DOMAIN loop_phase) = TRUE)
+    /\ ((IF (loop_instance_id \in DOMAIN loop_phase) THEN Some((IF loop_instance_id \in DOMAIN loop_phase THEN loop_phase[loop_instance_id] ELSE "None")) ELSE None) = Some("Running"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_stage) THEN Some((IF loop_instance_id \in DOMAIN loop_stage THEN loop_stage[loop_instance_id] ELSE "None")) ELSE None) = Some("AwaitingUntilEvaluation"))
+    /\ ((IF (loop_instance_id \in DOMAIN loop_last_completed_iteration) THEN Some((IF loop_instance_id \in DOMAIN loop_last_completed_iteration THEN loop_last_completed_iteration[loop_instance_id] ELSE 0)) ELSE None) = Some(iteration))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ loop_phase' = MapSet(loop_phase, loop_instance_id, "Completed")
+    /\ loop_active_body_frame' = MapSet(loop_active_body_frame, loop_instance_id, None)
+    /\ UnchangedFrame_bbc26942ed6d68dd
+
+
 Next ==
     \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E status \in FlowRunStatusValues : ClassifyFlowRunTerminalityTerminalRunning(run_id, status)
     \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E status \in FlowRunStatusValues : ClassifyFlowRunTerminalityNonTerminalRunning(run_id, status)
@@ -18463,56 +19923,56 @@ Next ==
     \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E frame_id \in FrameIdValues : \E arg_frame_scope \in FrameScopeValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E iteration \in 0..2 : \E tracked_nodes \in SetOfFlowNodeIdValues : \E ordered_nodes \in SeqOfFlowNodeIdValues : \E node_kind \in MapFlowNodeIdFlowNodeKindValues : \E node_dependencies \in MapFlowNodeIdSeqFlowNodeIdValues : \E node_dependency_modes \in MapFlowNodeIdDependencyModeValues : \E node_branches \in MapFlowNodeIdOptionBranchIdValues : \E node_step_ids \in MapFlowNodeIdStepIdValues : \E node_loop_ids \in MapFlowNodeIdLoopIdValues : \E node_status \in MapFlowNodeIdNodeRunStatusValues : \E node_failure_policy \in MapFlowNodeIdFlowNodeFailurePolicyValues : \E ready_queue \in SeqOfFlowNodeIdValues : \E output_recorded \in MapFlowNodeIdBoolValues : \E node_condition_results \in MapFlowNodeIdOptionBoolValues : \E last_admitted_node \in OptionFlowNodeIdValues : CreateFrameSeedAlreadySeededCompleted(run_id, frame_id, arg_frame_scope, loop_instance_id, iteration, tracked_nodes, ordered_nodes, node_kind, node_dependencies, node_dependency_modes, node_branches, node_step_ids, node_loop_ids, node_status, node_failure_policy, ready_queue, output_recorded, node_condition_results, last_admitted_node)
     \/ (phase = "Destroyed") /\ \E run_id \in RunIdValues : \E frame_id \in FrameIdValues : \E arg_frame_scope \in FrameScopeValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E iteration \in 0..2 : \E tracked_nodes \in SetOfFlowNodeIdValues : \E ordered_nodes \in SeqOfFlowNodeIdValues : \E node_kind \in MapFlowNodeIdFlowNodeKindValues : \E node_dependencies \in MapFlowNodeIdSeqFlowNodeIdValues : \E node_dependency_modes \in MapFlowNodeIdDependencyModeValues : \E node_branches \in MapFlowNodeIdOptionBranchIdValues : \E node_step_ids \in MapFlowNodeIdStepIdValues : \E node_loop_ids \in MapFlowNodeIdLoopIdValues : \E node_status \in MapFlowNodeIdNodeRunStatusValues : \E node_failure_policy \in MapFlowNodeIdFlowNodeFailurePolicyValues : \E ready_queue \in SeqOfFlowNodeIdValues : \E output_recorded \in MapFlowNodeIdBoolValues : \E node_condition_results \in MapFlowNodeIdOptionBoolValues : \E last_admitted_node \in OptionFlowNodeIdValues : CreateFrameSeedAlreadySeededDestroyed(run_id, frame_id, arg_frame_scope, loop_instance_id, iteration, tracked_nodes, ordered_nodes, node_kind, node_dependencies, node_dependency_modes, node_branches, node_step_ids, node_loop_ids, node_status, node_failure_policy, ready_queue, output_recorded, node_condition_results, last_admitted_node)
     \/ (phase = "Running") /\ \E loop_instance_id \in LoopInstanceIdValues : \E parent_frame_id \in FrameIdValues : \E parent_node_id \in FlowNodeIdValues : \E loop_id \in LoopIdValues : \E depth \in 0..2 : \E max_iterations \in 0..2 : CreateLoopSeedRunning(loop_instance_id, parent_frame_id, parent_node_id, loop_id, depth, max_iterations)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopBodyFrameCompletedRunning(loop_instance_id, iteration)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopUntilConditionMetRunning(loop_instance_id, iteration)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopUntilConditionFailedRunning(loop_instance_id, iteration)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopUntilConditionFailedExhausted(loop_instance_id, iteration)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandStartRun(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandDispatchStep(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandCompleteStep(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordStepOutput(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandConditionPassed(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandConditionRejected(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFailStep(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFailStepEscalating(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycle(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandSkipStep(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatus(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailed(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalating(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycle(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandCancelStep(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterTargets(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetSuccess(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetTerminalFailure(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetCanceled(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetFailure(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterReadyFrame(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReady(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandPumpNodeScheduler(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterPendingBodyFrame(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandPumpFrameScheduler(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandNodeExecutionReleased(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFrameTerminated(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrame(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandTerminalCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandTerminalFailed(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandTerminalCanceled(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandAdmitNextReadyNode(frame_id, command, node_id, node_status, terminal_status)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandCompleteNode(frame_id, command, node_id, node_status, terminal_status)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandRecordNodeOutput(frame_id, command, node_id, node_status, terminal_status)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandFailNode(frame_id, command, node_id, node_status, terminal_status)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandSkipNode(frame_id, command, node_id, node_status, terminal_status)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandCancelNode(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Running") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopBodyFrameCompletedRunning(loop_instance_id, iteration)
+    \/ (phase = "Running") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopUntilConditionMetRunning(loop_instance_id, iteration)
+    \/ (phase = "Running") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopUntilConditionFailedRunning(loop_instance_id, iteration)
+    \/ (phase = "Running") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopUntilConditionFailedExhausted(loop_instance_id, iteration)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandStartRun(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandDispatchStep(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandCompleteStep(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordStepOutput(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandConditionPassed(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandConditionRejected(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFailStep(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFailStepEscalating(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycle(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandSkipStep(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatus(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailed(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalating(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycle(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandCancelStep(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterTargets(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetSuccess(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetTerminalFailure(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetCanceled(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetFailure(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterReadyFrame(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReady(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandPumpNodeScheduler(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterPendingBodyFrame(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandPumpFrameScheduler(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandNodeExecutionReleased(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFrameTerminated(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrame(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandTerminalCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandTerminalFailed(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandTerminalCanceled(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Running") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandAdmitNextReadyNode(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Running") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandCompleteNode(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Running") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandRecordNodeOutput(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Running") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandFailNode(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Running") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandSkipNode(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Running") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandCancelNode(frame_id, command, node_id, node_status, terminal_status)
     \/ (phase = "Running") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandSealFrameRunning(frame_id, command, node_id, node_status, terminal_status)
     \/ (phase = "Stopped") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandSealFrameStopped(frame_id, command, node_id, node_status, terminal_status)
     \/ (phase = "Completed") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandSealFrameCompleted(frame_id, command, node_id, node_status, terminal_status)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameStarted(loop_instance_id, command, body_frame_id, body_frame_iteration)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameCompleted(loop_instance_id, command, body_frame_id, body_frame_iteration)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameFailed(loop_instance_id, command, body_frame_id, body_frame_iteration)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameCanceled(loop_instance_id, command, body_frame_id, body_frame_iteration)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandUntilFeedback(loop_instance_id, command, body_frame_id, body_frame_iteration)
-    \/ (phase = "Running" \/ phase = "Stopped" \/ phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandCancelLoop(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Running") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameStarted(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Running") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameCompleted(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Running") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameFailed(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Running") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameCanceled(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Running") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandUntilFeedback(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Running") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandCancelLoop(loop_instance_id, command, body_frame_id, body_frame_iteration)
     \/ StartFlowRunning
     \/ CreateRunRunning
     \/ StartRunRunning
@@ -18616,6 +20076,102 @@ Next ==
     \/ (phase = "Running") /\ \E attempt \in ResumeAttemptIdValues : SettleExplicitResumeCleanupRunning(attempt)
     \/ (phase = "Running") /\ \E attempt \in ResumeAttemptIdValues : FinishExplicitResumeRunning(attempt)
     \/ (phase = "Stopped") /\ \E attempt \in ResumeAttemptIdValues : FinishExplicitResumeCancelledStopped(attempt)
+    \/ AdmitDestroyCleanupStopped
+    \/ AdmitDestroyCleanupCompleted
+    \/ (phase = "Stopped") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandAdmitNextReadyNodeStopped(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Completed") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandAdmitNextReadyNodeCompleted(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Stopped") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandCancelNodeStopped(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Completed") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandCancelNodeCompleted(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Stopped") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandCompleteNodeStopped(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Completed") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandCompleteNodeCompleted(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Stopped") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandFailNodeStopped(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Completed") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandFailNodeCompleted(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Stopped") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandRecordNodeOutputStopped(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Completed") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandRecordNodeOutputCompleted(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Stopped") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandSkipNodeStopped(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Completed") /\ \E frame_id \in FrameIdValues : \E command \in FlowFrameReducerCommandKindValues : \E node_id \in OptionFlowNodeIdValues : \E node_status \in OptionNodeRunStatusValues : \E terminal_status \in OptionFrameStatusValues : AuthorizeFlowFrameReducerCommandSkipNodeCompleted(frame_id, command, node_id, node_status, terminal_status)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandCancelStepStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandCancelStepCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandCompleteStepStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandCompleteStepCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandConditionPassedStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandConditionPassedCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandConditionRejectedStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandConditionRejectedCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandDispatchStepStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandDispatchStepCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFailStepStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFailStepCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFailStepEscalatingStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFailStepEscalatingCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycleStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycleCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFrameTerminatedStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFrameTerminatedCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrameStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrameCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandNodeExecutionReleasedStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandNodeExecutionReleasedCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatusStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatusCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalatingStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalatingCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycleStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycleCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandPumpFrameSchedulerStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandPumpFrameSchedulerCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandPumpNodeSchedulerStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandPumpNodeSchedulerCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordStepOutputStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordStepOutputCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetCanceledStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetCanceledCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetFailureStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetFailureCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetSuccessStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetSuccessCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetTerminalFailureStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRecordTargetTerminalFailureCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterPendingBodyFrameStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterPendingBodyFrameCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterReadyFrameStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterReadyFrameCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReadyStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReadyCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterTargetsStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandRegisterTargetsCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandSkipStepStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandSkipStepCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandStartRunStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandStartRunCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandTerminalCanceledStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandTerminalCanceledCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandTerminalCompletedStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandTerminalCompletedCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandTerminalFailedStopped(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Completed") /\ \E run_id \in RunIdValues : \E command \in FlowRunReducerCommandKindValues : \E step_id \in OptionStepIdValues : \E step_status \in OptionStepRunStatusValues : \E target_count \in OptionU64Values : \E frame_id \in OptionFrameIdValues : \E node_id \in OptionFlowNodeIdValues : \E loop_instance_id \in OptionLoopInstanceIdValues : \E retry_key \in OptionStringValues : AuthorizeFlowRunReducerCommandTerminalFailedCompleted(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+    \/ (phase = "Stopped") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameCanceledStopped(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameCanceledCompleted(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Stopped") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameCompletedStopped(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameCompletedCompleted(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Stopped") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameFailedStopped(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameFailedCompleted(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Stopped") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameStartedStopped(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandBodyFrameStartedCompleted(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Stopped") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandCancelLoopStopped(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandCancelLoopCompleted(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Stopped") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandUntilFeedbackStopped(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E command \in LoopIterationReducerCommandKindValues : \E body_frame_id \in OptionFrameIdValues : \E body_frame_iteration \in OptionU64Values : AuthorizeLoopIterationReducerCommandUntilFeedbackCompleted(loop_instance_id, command, body_frame_id, body_frame_iteration)
+    \/ (phase = "Stopped") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopBodyFrameCompletedStopped(loop_instance_id, iteration)
+    \/ (phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopBodyFrameCompletedCompleted(loop_instance_id, iteration)
+    \/ (phase = "Stopped") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopUntilConditionFailedExhaustedStopped(loop_instance_id, iteration)
+    \/ (phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopUntilConditionFailedExhaustedCompleted(loop_instance_id, iteration)
+    \/ (phase = "Stopped") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopUntilConditionFailedStopped(loop_instance_id, iteration)
+    \/ (phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopUntilConditionFailedCompleted(loop_instance_id, iteration)
+    \/ (phase = "Stopped") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopUntilConditionMetStopped(loop_instance_id, iteration)
+    \/ (phase = "Completed") /\ \E loop_instance_id \in LoopInstanceIdValues : \E iteration \in 0..2 : RecordLoopUntilConditionMetCompleted(loop_instance_id, iteration)
     \/ TerminalStutter
 
 bindings_require_known_identity == (\A id \in DOMAIN member_session_bindings : (id \in DOMAIN identity_to_runtime))

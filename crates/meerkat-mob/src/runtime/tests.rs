@@ -50969,6 +50969,42 @@ fn authority_backed_root_frame_run(
     (run, frame_id, loop_instance_id)
 }
 
+/// A flow bookkeeping input reaching a Stopped mob leaves it Stopped (#1500
+/// follow-up). The flow reducer authorizations used to share one arm guarded on
+/// Running || Stopped || Completed with `to Running`, so a late StartRun
+/// authorization on a mob stopped by Shutdown moved it back to Running,
+/// silently undoing the stop and stranding member run-start holds.
+#[test]
+fn a_late_flow_authorization_on_a_stopped_mob_leaves_it_stopped() {
+    use crate::ids::RunId;
+    use crate::machines::mob_machine::{
+        MobMachineAuthority, MobMachineInput, MobMachineMutator, MobPhase,
+    };
+    use crate::run::MobMachineFlowRunCommand;
+
+    let definition = sample_definition_with_single_step_flow(60_000, 8);
+    let config = crate::run::FlowRunConfig::from_definition(FlowId::from("demo"), &definition)
+        .expect("flow config");
+    let run_id = RunId::new();
+    let mut authority = MobMachineAuthority::new();
+    apply_authority_input_for_test(
+        &mut authority,
+        MobRun::run_flow_input(&run_id, &config).expect("run flow input"),
+    );
+    MobMachineMutator::apply(&mut authority, MobMachineInput::Shutdown)
+        .expect("shutdown stops the mob");
+    assert_eq!(authority.state().lifecycle_phase, MobPhase::Stopped);
+
+    let start = MobMachineFlowRunCommand::StartRun(crate::run::flow_run::inputs::StartRun {});
+    MobMachineMutator::apply(&mut authority, start.authority_input(&run_id))
+        .expect("the late flow authorization is still accepted");
+    assert_eq!(
+        authority.state().lifecycle_phase,
+        MobPhase::Stopped,
+        "a flow bookkeeping input never moves a Stopped mob to Running"
+    );
+}
+
 fn running_authority_backed_run(definition: &MobDefinition) -> MobRun {
     use crate::ids::RunId;
     use crate::run::{

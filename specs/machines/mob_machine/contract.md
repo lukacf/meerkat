@@ -7908,7 +7908,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AdmitDestroyCleanup`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AdmitDestroyCleanup`()
 - Guards:
   - `adaptive_lifecycle_drained`
@@ -8139,7 +8139,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `placed_completion_reset_intent`
   - `placed_kickoff_pending_drained`
   - `placed_kickoff_resolved_drained`
-- Emits: `AppendLifecycleJournal`, `EmitRunLifecycleNotice`, `WiringGraphChanged`
+- Emits: `AppendLifecycleJournal`, `EmitRunLifecycleNotice`, `WiringGraphChanged`, `ReleaseMemberRunStarts`
 - To: `Running`
 
 ### `WireMembersRunning`
@@ -12122,7 +12122,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `RecordLoopBodyFrameCompletedRunning`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `RecordLoopBodyFrameCompleted`(loop_instance_id, iteration)
 - Guards:
   - `known_loop`
@@ -12133,7 +12133,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `RecordLoopUntilConditionMetRunning`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `RecordLoopUntilConditionMet`(loop_instance_id, iteration)
 - Guards:
   - `known_loop`
@@ -12144,7 +12144,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `RecordLoopUntilConditionFailedRunning`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `RecordLoopUntilConditionFailed`(loop_instance_id, iteration)
 - Guards:
   - `lifecycle_origin_open`
@@ -12157,7 +12157,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `RecordLoopUntilConditionFailedExhausted`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `RecordLoopUntilConditionFailed`(loop_instance_id, iteration)
 - Guards:
   - `known_loop`
@@ -12169,7 +12169,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandStartRun`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `lifecycle_origin_open`
@@ -12180,7 +12180,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandDispatchStep`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `lifecycle_origin_open`
@@ -12194,7 +12194,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandCompleteStep`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12207,7 +12207,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandRecordStepOutput`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12219,7 +12219,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandConditionPassed`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12231,7 +12231,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandConditionRejected`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12243,7 +12243,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandFailStep`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12257,7 +12257,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandFailStepEscalating`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `lifecycle_origin_open`
@@ -12272,7 +12272,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycle`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `lifecycle_origin_closed`
@@ -12287,7 +12287,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandSkipStep`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12300,7 +12300,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandProjectFrameStepStatus`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12319,7 +12319,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailed`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12339,7 +12339,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalating`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `lifecycle_origin_open`
@@ -12360,7 +12360,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycle`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `lifecycle_origin_closed`
@@ -12381,7 +12381,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandCancelStep`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12394,7 +12394,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandRegisterTargets`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `lifecycle_origin_open`
@@ -12408,7 +12408,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandRecordTargetSuccess`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12420,7 +12420,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandRecordTargetTerminalFailure`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12432,7 +12432,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandRecordTargetCanceled`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12444,7 +12444,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandRecordTargetFailure`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12457,7 +12457,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandRegisterReadyFrame`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `lifecycle_origin_open`
@@ -12471,7 +12471,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReady`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12484,7 +12484,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandPumpNodeScheduler`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `lifecycle_origin_open`
@@ -12499,7 +12499,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandRegisterPendingBodyFrame`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `lifecycle_origin_open`
@@ -12513,7 +12513,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandPumpFrameScheduler`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `lifecycle_origin_open`
@@ -12528,7 +12528,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandNodeExecutionReleased`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12540,7 +12540,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandFrameTerminated`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12552,7 +12552,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrame`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12564,7 +12564,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandTerminalCompleted`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12574,7 +12574,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandTerminalFailed`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12584,7 +12584,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandTerminalCanceled`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
@@ -12594,7 +12594,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowFrameReducerCommandAdmitNextReadyNode`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
 - Guards:
   - `lifecycle_origin_open`
@@ -12610,7 +12610,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowFrameReducerCommandCompleteNode`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
 - Guards:
   - `known_frame`
@@ -12625,7 +12625,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowFrameReducerCommandRecordNodeOutput`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
 - Guards:
   - `known_frame`
@@ -12638,7 +12638,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowFrameReducerCommandFailNode`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
 - Guards:
   - `known_frame`
@@ -12653,7 +12653,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowFrameReducerCommandSkipNode`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
 - Guards:
   - `known_frame`
@@ -12668,7 +12668,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeFlowFrameReducerCommandCancelNode`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
 - Guards:
   - `known_frame`
@@ -12722,7 +12722,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Completed`
 
 ### `AuthorizeLoopIterationReducerCommandBodyFrameStarted`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
 - Guards:
   - `lifecycle_origin_open`
@@ -12736,7 +12736,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeLoopIterationReducerCommandBodyFrameCompleted`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
 - Guards:
   - `known_loop`
@@ -12750,7 +12750,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeLoopIterationReducerCommandBodyFrameFailed`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
 - Guards:
   - `known_loop`
@@ -12763,7 +12763,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeLoopIterationReducerCommandBodyFrameCanceled`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
 - Guards:
   - `known_loop`
@@ -12776,7 +12776,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeLoopIterationReducerCommandUntilFeedback`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
 - Guards:
   - `known_loop`
@@ -12789,7 +12789,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `AuthorizeLoopIterationReducerCommandCancelLoop`
-- From: `Running`, `Stopped`, `Completed`
+- From: `Running`
 - On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
 - Guards:
   - `known_loop`
@@ -13822,6 +13822,1304 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `cleanup_not_pending`
 - Emits: `ExplicitResumeFinished`
 - To: `Stopped`
+
+### `AdmitDestroyCleanupStopped`
+- From: `Stopped`
+- On: `AdmitDestroyCleanup`()
+- Guards:
+  - `adaptive_lifecycle_drained`
+  - `placed_completion_quiesce_started`
+  - `placed_completion_destroy_intent`
+- Emits: `AppendLifecycleJournal`, `RequestPendingSpawnQuiesceForDestroy`
+- To: `Stopped`
+
+### `AdmitDestroyCleanupCompleted`
+- From: `Completed`
+- On: `AdmitDestroyCleanup`()
+- Guards:
+  - `adaptive_lifecycle_drained`
+  - `placed_completion_quiesce_started`
+  - `placed_completion_destroy_intent`
+- Emits: `AppendLifecycleJournal`, `RequestPendingSpawnQuiesceForDestroy`
+- To: `Completed`
+
+### `AuthorizeFlowFrameReducerCommandAdmitNextReadyNodeStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_frame`
+  - `frame_running`
+  - `admit_next_ready_node_command`
+  - `no_terminal_status`
+  - `has_node_id`
+  - `running_node_status`
+  - `node_tracked`
+  - `node_currently_ready`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowFrameReducerCommandAdmitNextReadyNodeCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_frame`
+  - `frame_running`
+  - `admit_next_ready_node_command`
+  - `no_terminal_status`
+  - `has_node_id`
+  - `running_node_status`
+  - `node_tracked`
+  - `node_currently_ready`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowFrameReducerCommandCancelNodeStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
+- Guards:
+  - `known_frame`
+  - `frame_running`
+  - `cancel_node_command`
+  - `no_terminal_status`
+  - `has_node_id`
+  - `canceled_node_status`
+  - `node_tracked`
+  - `node_currently_running`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowFrameReducerCommandCancelNodeCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
+- Guards:
+  - `known_frame`
+  - `frame_running`
+  - `cancel_node_command`
+  - `no_terminal_status`
+  - `has_node_id`
+  - `canceled_node_status`
+  - `node_tracked`
+  - `node_currently_running`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowFrameReducerCommandCompleteNodeStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
+- Guards:
+  - `known_frame`
+  - `frame_running`
+  - `complete_node_command`
+  - `no_terminal_status`
+  - `has_node_id`
+  - `completed_node_status`
+  - `node_tracked`
+  - `node_currently_running`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowFrameReducerCommandCompleteNodeCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
+- Guards:
+  - `known_frame`
+  - `frame_running`
+  - `complete_node_command`
+  - `no_terminal_status`
+  - `has_node_id`
+  - `completed_node_status`
+  - `node_tracked`
+  - `node_currently_running`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowFrameReducerCommandFailNodeStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
+- Guards:
+  - `known_frame`
+  - `frame_running`
+  - `fail_node_command`
+  - `no_terminal_status`
+  - `has_node_id`
+  - `failed_node_status`
+  - `node_tracked`
+  - `node_currently_running`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowFrameReducerCommandFailNodeCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
+- Guards:
+  - `known_frame`
+  - `frame_running`
+  - `fail_node_command`
+  - `no_terminal_status`
+  - `has_node_id`
+  - `failed_node_status`
+  - `node_tracked`
+  - `node_currently_running`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowFrameReducerCommandRecordNodeOutputStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
+- Guards:
+  - `known_frame`
+  - `frame_running`
+  - `record_node_output_command`
+  - `no_terminal_status`
+  - `has_node_id`
+  - `node_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowFrameReducerCommandRecordNodeOutputCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
+- Guards:
+  - `known_frame`
+  - `frame_running`
+  - `record_node_output_command`
+  - `no_terminal_status`
+  - `has_node_id`
+  - `node_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowFrameReducerCommandSkipNodeStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
+- Guards:
+  - `known_frame`
+  - `frame_running`
+  - `skip_node_command`
+  - `no_terminal_status`
+  - `has_node_id`
+  - `skipped_node_status`
+  - `node_tracked`
+  - `node_currently_running`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowFrameReducerCommandSkipNodeCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
+- Guards:
+  - `known_frame`
+  - `frame_running`
+  - `skip_node_command`
+  - `no_terminal_status`
+  - `has_node_id`
+  - `skipped_node_status`
+  - `node_tracked`
+  - `node_currently_running`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandCancelStepStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `cancel_step_command`
+  - `has_step_id`
+  - `step_tracked`
+  - `canceled_step_status`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandCancelStepCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `cancel_step_command`
+  - `has_step_id`
+  - `step_tracked`
+  - `canceled_step_status`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandCompleteStepStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `complete_step_command`
+  - `has_step_id`
+  - `completed_step_status`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandCompleteStepCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `complete_step_command`
+  - `has_step_id`
+  - `completed_step_status`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandConditionPassedStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `condition_passed_command`
+  - `has_step_id`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandConditionPassedCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `condition_passed_command`
+  - `has_step_id`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandConditionRejectedStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `condition_rejected_command`
+  - `has_step_id`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandConditionRejectedCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `condition_rejected_command`
+  - `has_step_id`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandDispatchStepStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `dispatch_step_command`
+  - `has_step_id`
+  - `step_tracked`
+  - `dispatched_step_status`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandDispatchStepCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `dispatch_step_command`
+  - `has_step_id`
+  - `step_tracked`
+  - `dispatched_step_status`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandFailStepStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `fail_step_command`
+  - `has_step_id`
+  - `failed_step_status`
+  - `step_tracked`
+  - `supervisor_escalation_not_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandFailStepCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `fail_step_command`
+  - `has_step_id`
+  - `failed_step_status`
+  - `step_tracked`
+  - `supervisor_escalation_not_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandFailStepEscalatingStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `fail_step_command`
+  - `has_step_id`
+  - `failed_step_status`
+  - `step_tracked`
+  - `supervisor_escalation_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`, `EscalateSupervisor`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandFailStepEscalatingCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `fail_step_command`
+  - `has_step_id`
+  - `failed_step_status`
+  - `step_tracked`
+  - `supervisor_escalation_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`, `EscalateSupervisor`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycleStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_closed`
+  - `known_run`
+  - `run_running`
+  - `fail_step_command`
+  - `has_step_id`
+  - `failed_step_status`
+  - `step_tracked`
+  - `supervisor_escalation_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycleCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_closed`
+  - `known_run`
+  - `run_running`
+  - `fail_step_command`
+  - `has_step_id`
+  - `failed_step_status`
+  - `step_tracked`
+  - `supervisor_escalation_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandFrameTerminatedStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `frame_terminated_command`
+  - `active_frame_count_present`
+  - `active_frame_count_positive`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandFrameTerminatedCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `frame_terminated_command`
+  - `active_frame_count_present`
+  - `active_frame_count_positive`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrameStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `frame_terminated_command`
+  - `active_frame_count_present`
+  - `active_frame_count_zero`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrameCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `frame_terminated_command`
+  - `active_frame_count_present`
+  - `active_frame_count_zero`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandNodeExecutionReleasedStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `node_execution_released_command`
+  - `active_node_count_present`
+  - `active_node_count_positive`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandNodeExecutionReleasedCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `node_execution_released_command`
+  - `active_node_count_present`
+  - `active_node_count_positive`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandProjectFrameStepStatusStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `project_frame_step_status_command`
+  - `has_step_id`
+  - `has_frame_id`
+  - `has_node_id`
+  - `step_tracked`
+  - `frame_belongs_to_run`
+  - `frame_node_tracked`
+  - `frame_node_maps_to_step`
+  - `run_step_not_already_terminal_projected`
+  - `frame_node_completed_or_skipped`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandProjectFrameStepStatusCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `project_frame_step_status_command`
+  - `has_step_id`
+  - `has_frame_id`
+  - `has_node_id`
+  - `step_tracked`
+  - `frame_belongs_to_run`
+  - `frame_node_tracked`
+  - `frame_node_maps_to_step`
+  - `run_step_not_already_terminal_projected`
+  - `frame_node_completed_or_skipped`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `project_frame_step_status_command`
+  - `has_step_id`
+  - `has_frame_id`
+  - `has_node_id`
+  - `step_tracked`
+  - `frame_belongs_to_run`
+  - `frame_node_tracked`
+  - `frame_node_maps_to_step`
+  - `run_step_not_already_terminal_projected`
+  - `frame_node_failed`
+  - `supervisor_escalation_not_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `project_frame_step_status_command`
+  - `has_step_id`
+  - `has_frame_id`
+  - `has_node_id`
+  - `step_tracked`
+  - `frame_belongs_to_run`
+  - `frame_node_tracked`
+  - `frame_node_maps_to_step`
+  - `run_step_not_already_terminal_projected`
+  - `frame_node_failed`
+  - `supervisor_escalation_not_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalatingStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `project_frame_step_status_command`
+  - `has_step_id`
+  - `has_frame_id`
+  - `has_node_id`
+  - `step_tracked`
+  - `frame_belongs_to_run`
+  - `frame_node_tracked`
+  - `frame_node_maps_to_step`
+  - `run_step_not_already_terminal_projected`
+  - `frame_node_failed`
+  - `supervisor_escalation_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`, `EscalateSupervisor`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalatingCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `project_frame_step_status_command`
+  - `has_step_id`
+  - `has_frame_id`
+  - `has_node_id`
+  - `step_tracked`
+  - `frame_belongs_to_run`
+  - `frame_node_tracked`
+  - `frame_node_maps_to_step`
+  - `run_step_not_already_terminal_projected`
+  - `frame_node_failed`
+  - `supervisor_escalation_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`, `EscalateSupervisor`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycleStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_closed`
+  - `known_run`
+  - `run_running`
+  - `project_frame_step_status_command`
+  - `has_step_id`
+  - `has_frame_id`
+  - `has_node_id`
+  - `step_tracked`
+  - `frame_belongs_to_run`
+  - `frame_node_tracked`
+  - `frame_node_maps_to_step`
+  - `run_step_not_already_terminal_projected`
+  - `frame_node_failed`
+  - `supervisor_escalation_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycleCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_closed`
+  - `known_run`
+  - `run_running`
+  - `project_frame_step_status_command`
+  - `has_step_id`
+  - `has_frame_id`
+  - `has_node_id`
+  - `step_tracked`
+  - `frame_belongs_to_run`
+  - `frame_node_tracked`
+  - `frame_node_maps_to_step`
+  - `run_step_not_already_terminal_projected`
+  - `frame_node_failed`
+  - `supervisor_escalation_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandPumpFrameSchedulerStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `pump_frame_scheduler_command`
+  - `has_loop_instance_id`
+  - `pending_body_frame_registered`
+  - `machine_selected_pending_body_frame_loop`
+  - `frame_capacity_available`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandPumpFrameSchedulerCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `pump_frame_scheduler_command`
+  - `has_loop_instance_id`
+  - `pending_body_frame_registered`
+  - `machine_selected_pending_body_frame_loop`
+  - `frame_capacity_available`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandPumpNodeSchedulerStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `pump_node_scheduler_command`
+  - `has_frame_id`
+  - `ready_frame_registered`
+  - `machine_selected_ready_frame`
+  - `node_capacity_available`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandPumpNodeSchedulerCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `pump_node_scheduler_command`
+  - `has_frame_id`
+  - `ready_frame_registered`
+  - `machine_selected_ready_frame`
+  - `node_capacity_available`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandRecordStepOutputStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `record_step_output_command`
+  - `has_step_id`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandRecordStepOutputCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `record_step_output_command`
+  - `has_step_id`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandRecordTargetCanceledStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `record_target_canceled_command`
+  - `has_step_id`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandRecordTargetCanceledCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `record_target_canceled_command`
+  - `has_step_id`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandRecordTargetFailureStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `record_target_failure_command`
+  - `has_step_id`
+  - `has_retry_key`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandRecordTargetFailureCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `record_target_failure_command`
+  - `has_step_id`
+  - `has_retry_key`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandRecordTargetSuccessStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `record_target_success_command`
+  - `has_step_id`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandRecordTargetSuccessCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `record_target_success_command`
+  - `has_step_id`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandRecordTargetTerminalFailureStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `record_target_terminal_failure_command`
+  - `has_step_id`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandRecordTargetTerminalFailureCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `record_target_terminal_failure_command`
+  - `has_step_id`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandRegisterPendingBodyFrameStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `register_pending_body_frame_command`
+  - `has_loop_instance_id`
+  - `known_loop`
+  - `loop_not_already_pending_body_frame`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandRegisterPendingBodyFrameCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `register_pending_body_frame_command`
+  - `has_loop_instance_id`
+  - `known_loop`
+  - `loop_not_already_pending_body_frame`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandRegisterReadyFrameStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `register_ready_frame_command`
+  - `has_frame_id`
+  - `known_frame`
+  - `frame_not_already_ready`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandRegisterReadyFrameCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `register_ready_frame_command`
+  - `has_frame_id`
+  - `known_frame`
+  - `frame_not_already_ready`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReadyStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `register_ready_frame_command`
+  - `has_frame_id`
+  - `known_frame`
+  - `frame_already_ready`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReadyCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `register_ready_frame_command`
+  - `has_frame_id`
+  - `known_frame`
+  - `frame_already_ready`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandRegisterTargetsStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `register_targets_command`
+  - `has_step_id`
+  - `has_target_count`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandRegisterTargetsCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `run_running`
+  - `register_targets_command`
+  - `has_step_id`
+  - `has_target_count`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandSkipStepStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `skip_step_command`
+  - `has_step_id`
+  - `skipped_step_status`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandSkipStepCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `skip_step_command`
+  - `has_step_id`
+  - `skipped_step_status`
+  - `step_tracked`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandStartRunStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `start_run_command`
+  - `run_pending`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandStartRunCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_run`
+  - `start_run_command`
+  - `run_pending`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandTerminalCanceledStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `terminal_canceled_command`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandTerminalCanceledCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `terminal_canceled_command`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandTerminalCompletedStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `terminal_completed_command`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandTerminalCompletedCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `terminal_completed_command`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeFlowRunReducerCommandTerminalFailedStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `terminal_failed_command`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowRunReducerCommandTerminalFailedCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `terminal_failed_command`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeLoopIterationReducerCommandBodyFrameCanceledStopped`
+- From: `Stopped`
+- On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `body_frame_active`
+  - `body_frame_canceled_command`
+  - `body_frame_iteration_present`
+  - `iteration_matches_current`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeLoopIterationReducerCommandBodyFrameCanceledCompleted`
+- From: `Completed`
+- On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `body_frame_active`
+  - `body_frame_canceled_command`
+  - `body_frame_iteration_present`
+  - `iteration_matches_current`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeLoopIterationReducerCommandBodyFrameCompletedStopped`
+- From: `Stopped`
+- On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `body_frame_active`
+  - `body_frame_completed_command`
+  - `blocked_use_RecordLoopBodyFrameCompleted`
+  - `body_frame_iteration_present`
+  - `iteration_matches_current`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeLoopIterationReducerCommandBodyFrameCompletedCompleted`
+- From: `Completed`
+- On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `body_frame_active`
+  - `body_frame_completed_command`
+  - `blocked_use_RecordLoopBodyFrameCompleted`
+  - `body_frame_iteration_present`
+  - `iteration_matches_current`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeLoopIterationReducerCommandBodyFrameFailedStopped`
+- From: `Stopped`
+- On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `body_frame_active`
+  - `body_frame_failed_command`
+  - `body_frame_iteration_present`
+  - `iteration_matches_current`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeLoopIterationReducerCommandBodyFrameFailedCompleted`
+- From: `Completed`
+- On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `body_frame_active`
+  - `body_frame_failed_command`
+  - `body_frame_iteration_present`
+  - `iteration_matches_current`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeLoopIterationReducerCommandBodyFrameStartedStopped`
+- From: `Stopped`
+- On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_loop`
+  - `loop_running`
+  - `body_frame_started_command`
+  - `blocked_use_CreateFrameSeed_body_side_effect`
+  - `no_body_frame_iteration`
+  - `body_frame_already_active`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeLoopIterationReducerCommandBodyFrameStartedCompleted`
+- From: `Completed`
+- On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_loop`
+  - `loop_running`
+  - `body_frame_started_command`
+  - `blocked_use_CreateFrameSeed_body_side_effect`
+  - `no_body_frame_iteration`
+  - `body_frame_already_active`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeLoopIterationReducerCommandCancelLoopStopped`
+- From: `Stopped`
+- On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `cancel_loop_command`
+  - `no_body_frame_iteration`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeLoopIterationReducerCommandCancelLoopCompleted`
+- From: `Completed`
+- On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `cancel_loop_command`
+  - `no_body_frame_iteration`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `AuthorizeLoopIterationReducerCommandUntilFeedbackStopped`
+- From: `Stopped`
+- On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `awaiting_until_evaluation`
+  - `blocked_use_RecordLoopUntilConditionFeedback`
+  - `no_body_frame_iteration`
+  - `until_feedback_command`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeLoopIterationReducerCommandUntilFeedbackCompleted`
+- From: `Completed`
+- On: `AuthorizeLoopIterationReducerCommand`(loop_instance_id, command, body_frame_id, body_frame_iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `awaiting_until_evaluation`
+  - `blocked_use_RecordLoopUntilConditionFeedback`
+  - `no_body_frame_iteration`
+  - `until_feedback_command`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `RecordLoopBodyFrameCompletedStopped`
+- From: `Stopped`
+- On: `RecordLoopBodyFrameCompleted`(loop_instance_id, iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `body_frame_active`
+  - `iteration_matches_current`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `RecordLoopBodyFrameCompletedCompleted`
+- From: `Completed`
+- On: `RecordLoopBodyFrameCompleted`(loop_instance_id, iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `body_frame_active`
+  - `iteration_matches_current`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `RecordLoopUntilConditionFailedExhaustedStopped`
+- From: `Stopped`
+- On: `RecordLoopUntilConditionFailed`(loop_instance_id, iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `awaiting_until_evaluation`
+  - `iteration_matches_last_completed`
+  - `iterations_exhausted`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `RecordLoopUntilConditionFailedExhaustedCompleted`
+- From: `Completed`
+- On: `RecordLoopUntilConditionFailed`(loop_instance_id, iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `awaiting_until_evaluation`
+  - `iteration_matches_last_completed`
+  - `iterations_exhausted`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `RecordLoopUntilConditionFailedStopped`
+- From: `Stopped`
+- On: `RecordLoopUntilConditionFailed`(loop_instance_id, iteration)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_loop`
+  - `loop_running`
+  - `awaiting_until_evaluation`
+  - `iteration_matches_last_completed`
+  - `iterations_remaining`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `RecordLoopUntilConditionFailedCompleted`
+- From: `Completed`
+- On: `RecordLoopUntilConditionFailed`(loop_instance_id, iteration)
+- Guards:
+  - `lifecycle_origin_open`
+  - `known_loop`
+  - `loop_running`
+  - `awaiting_until_evaluation`
+  - `iteration_matches_last_completed`
+  - `iterations_remaining`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `RecordLoopUntilConditionMetStopped`
+- From: `Stopped`
+- On: `RecordLoopUntilConditionMet`(loop_instance_id, iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `awaiting_until_evaluation`
+  - `iteration_matches_last_completed`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `RecordLoopUntilConditionMetCompleted`
+- From: `Completed`
+- On: `RecordLoopUntilConditionMet`(loop_instance_id, iteration)
+- Guards:
+  - `known_loop`
+  - `loop_running`
+  - `awaiting_until_evaluation`
+  - `iteration_matches_last_completed`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
 
 ## Coverage
 ### Code Anchors

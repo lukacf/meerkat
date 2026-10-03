@@ -3993,6 +3993,294 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FinishExplicitResumeCancelledStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AdmitDestroyCleanupStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitDestroyCleanupCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowFrameReducerCommandAdmitNextReadyNodeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowFrameReducerCommandAdmitNextReadyNodeCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowFrameReducerCommandCancelNodeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowFrameReducerCommandCancelNodeCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowFrameReducerCommandCompleteNodeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowFrameReducerCommandCompleteNodeCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowFrameReducerCommandFailNodeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowFrameReducerCommandFailNodeCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowFrameReducerCommandRecordNodeOutputStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowFrameReducerCommandRecordNodeOutputCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowFrameReducerCommandSkipNodeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowFrameReducerCommandSkipNodeCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandCancelStepStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandCancelStepCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandCompleteStepStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandCompleteStepCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandConditionPassedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandConditionPassedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandConditionRejectedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandConditionRejectedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandDispatchStepStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandDispatchStepCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandFailStepStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandFailStepCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandFailStepEscalatingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandFailStepEscalatingCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycleStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycleCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandFrameTerminatedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandFrameTerminatedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrameStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrameCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandNodeExecutionReleasedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandNodeExecutionReleasedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandProjectFrameStepStatusStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandProjectFrameStepStatusCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalatingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalatingCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycleStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycleCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandPumpFrameSchedulerStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandPumpFrameSchedulerCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandPumpNodeSchedulerStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandPumpNodeSchedulerCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRecordStepOutputStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRecordStepOutputCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRecordTargetCanceledStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRecordTargetCanceledCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRecordTargetFailureStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRecordTargetFailureCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRecordTargetSuccessStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRecordTargetSuccessCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRecordTargetTerminalFailureStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRecordTargetTerminalFailureCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRegisterPendingBodyFrameStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRegisterPendingBodyFrameCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRegisterReadyFrameStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRegisterReadyFrameCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReadyStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReadyCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRegisterTargetsStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandRegisterTargetsCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandSkipStepStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandSkipStepCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandStartRunStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandStartRunCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandTerminalCanceledStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandTerminalCanceledCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandTerminalCompletedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandTerminalCompletedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandTerminalFailedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandTerminalFailedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLoopIterationReducerCommandBodyFrameCanceledStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLoopIterationReducerCommandBodyFrameCanceledCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLoopIterationReducerCommandBodyFrameCompletedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLoopIterationReducerCommandBodyFrameCompletedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLoopIterationReducerCommandBodyFrameFailedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLoopIterationReducerCommandBodyFrameFailedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLoopIterationReducerCommandBodyFrameStartedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLoopIterationReducerCommandBodyFrameStartedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLoopIterationReducerCommandCancelLoopStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLoopIterationReducerCommandCancelLoopCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLoopIterationReducerCommandUntilFeedbackStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLoopIterationReducerCommandUntilFeedbackCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLoopBodyFrameCompletedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLoopBodyFrameCompletedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLoopUntilConditionFailedExhaustedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLoopUntilConditionFailedExhaustedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLoopUntilConditionFailedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLoopUntilConditionFailedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLoopUntilConditionMetStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLoopUntilConditionMetCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `HoldMemberRunStarts`

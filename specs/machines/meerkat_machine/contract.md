@@ -501,7 +501,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
 - `AcceptWithoutWake`(input_id: InputId)
-- `BindInputAuthority`(input_id: String, authority_binding: String, authority_batch_key: String)
 - `Recycle`
 - `RequestDeferredTools`(authorities: Map<ToolName, ToolVisibilityWitness>)
 
@@ -576,6 +575,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveBoundaryUnavailable`(input_id: String)
 - `JoinLiveBoundaryDurableAppend`(run_id: RunId, input_id: String)
 - `ResolveLiveBoundaryDurableAppendJoin`(run_id: RunId, input_id: String, lane: InputLane, observation: LiveBoundaryJoinObservation)
+- `BindInputAuthority`(input_id: String, authority_binding: String, authority_batch_key: String)
 - `ResolveAdmissionPlan`(input_id: String, authority_binding: Option<String>, authority_batch_key: Option<String>, input_kind: AdmissionInputKind, requested_lane: Option<InputLane>, continuation_kind: AdmissionContinuationKind, turn_append_shape: AdmissionTurnAppendShape, silent_intent_match: Bool, existing_superseded_input_id: Option<String>, runtime_running: Bool, active_turn_boundary_available: Bool, without_wake: Bool)
 - `ResolveAdmissionValidation`(input_id: String, input_kind: AdmissionInputKind, input_origin: AdmissionInputOriginKind, durability: InputDurabilityKind, peer_handling_mode_valid: Bool, peer_response_terminal_structurally_valid: Bool, peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus)
 - `ResolveAdmissionIdempotency`(input_id: String, idempotency_key: Option<String>)

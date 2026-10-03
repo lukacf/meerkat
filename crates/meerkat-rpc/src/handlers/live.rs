@@ -1680,6 +1680,55 @@ async fn handle_live_webrtc_answer_legacy(
     }
 }
 
+/// `live/media_health`: the client's raw decoded-audio counters for the
+/// output the runtime requested (`live/media_health_requested`). The runtime
+/// judges them; a media fault closes the channel before the verdict returns.
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+pub async fn handle_live_media_health(
+    id: Option<RpcId>,
+    params: Option<&serde_json::value::RawValue>,
+    host: &Arc<LiveAdapterHost>,
+    runtime: &Arc<SessionRuntime>,
+    experimental_live_open_authority: Option<&dyn ExperimentalLiveOpenAuthorityProvider>,
+) -> RpcResponse {
+    let parsed: meerkat_contracts::LiveMediaHealthParams = match super::parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response,
+    };
+    if parsed.output_id.trim().is_empty() {
+        return RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            "output_id must be non-empty".to_string(),
+        );
+    }
+    let Some(authority) = experimental_live_open_authority else {
+        return RpcResponse::error(
+            id,
+            error::INVALID_REQUEST,
+            "live media health is available only for GPT Live WebRTC channels".to_string(),
+        );
+    };
+    let channel_id = LiveChannelId::new(&parsed.channel_id);
+    match runtime
+        .report_experimental_live_media_health(host, authority, &channel_id, &parsed)
+        .await
+    {
+        Ok(result) => match serde_json::to_value(result) {
+            Ok(value) => RpcResponse::success(id, value),
+            Err(error) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("failed to serialize the media health verdict: {error}"),
+            ),
+        },
+        Err(meerkat::surface::ExperimentalLiveMediaHealthError::Refused(message)) => {
+            RpcResponse::error(id, error::INVALID_REQUEST, message)
+        }
+        Err(error) => RpcResponse::error(id, error::INTERNAL_ERROR, error.to_string()),
+    }
+}
+
 pub async fn handle_live_status(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
@@ -2598,6 +2647,7 @@ mod tests {
                 meerkat_runtime::meerkat_machine::dsl::LiveChannelDegradationReason::Other,
             ),
             degradation_detail: Some("provider reported degraded mode".to_string()),
+            media_fault_reopen_recommended: None,
             channel_status_commit_authority: None,
         };
 
@@ -2644,7 +2694,10 @@ mod tests {
         .await
         .expect("open_channel");
         let close_observation = host
-            .reserve_channel_close_observation(&channel_id)
+            .reserve_channel_close_observation(
+                &channel_id,
+                meerkat_core::LiveChannelCloseReason::ClientRequested,
+            )
             .await
             .expect("reserve close observation");
         let authority = machine

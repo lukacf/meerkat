@@ -8632,6 +8632,9 @@ pub struct LiveChannelStatusAuthority {
     pub status_observation_sequence: u64,
     pub degradation_reason: Option<dsl::LiveChannelDegradationReason>,
     pub degradation_detail: Option<String>,
+    /// Set when the channel closed on a media fault: whether the session may
+    /// reopen it (its one media-fault reopen is not spent).
+    pub media_fault_reopen_recommended: Option<bool>,
     pub channel_status_commit_authority: Option<meerkat_live::LiveChannelStatusCommitAuthority>,
 }
 
@@ -8644,6 +8647,7 @@ impl LiveChannelStatusAuthority {
         status_observation_sequence: u64,
         degradation_reason: Option<dsl::LiveChannelDegradationReason>,
         degradation_detail: Option<String>,
+        media_fault_reopen_recommended: Option<bool>,
     ) -> Result<Self, String> {
         Ok(Self {
             status,
@@ -8651,6 +8655,7 @@ impl LiveChannelStatusAuthority {
             status_observation_sequence,
             degradation_reason,
             degradation_detail,
+            media_fault_reopen_recommended,
             channel_status_commit_authority: Some(build_live_channel_status_commit_authority(
                 channel_id,
                 status_observation_sequence,
@@ -8744,6 +8749,10 @@ pub struct MeerkatMachineShared {
     #[cfg(feature = "live")]
     live_context_mirror_host:
         StdRwLock<Option<Arc<dyn crate::live_context_mirror::LiveContextMirrorHost>>>,
+    /// Session event publication for committed live channel closes.
+    #[cfg(feature = "live")]
+    live_channel_close_publisher:
+        StdRwLock<Option<Arc<dyn crate::live_execution::LiveChannelCloseEventPublisher>>>,
     /// Sealed committed-row custody retained across generated unsafe turn
     /// boundaries. Keys are session-scoped canonical row sequences.
     #[cfg(feature = "live")]
@@ -9426,6 +9435,31 @@ impl MeerkatMachine {
             .live_context_mirror_host
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host);
+    }
+
+    /// Install the session event publication every committed live channel
+    /// close reports to (`AgentEvent::LiveChannelClosed`).
+    #[cfg(feature = "live")]
+    pub fn set_live_channel_close_publisher(
+        &self,
+        publisher: Arc<dyn crate::live_execution::LiveChannelCloseEventPublisher>,
+    ) {
+        *self
+            .shared
+            .live_channel_close_publisher
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(publisher);
+    }
+
+    #[cfg(feature = "live")]
+    pub(crate) fn live_channel_close_publisher(
+        &self,
+    ) -> Option<Arc<dyn crate::live_execution::LiveChannelCloseEventPublisher>> {
+        self.shared
+            .live_channel_close_publisher
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     #[cfg(feature = "live")]
@@ -10333,6 +10367,8 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_context_mirror_host: StdRwLock::new(None),
                 #[cfg(feature = "live")]
+                live_channel_close_publisher: StdRwLock::new(None),
+                #[cfg(feature = "live")]
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_context_projection_gates: StdMutex::new(HashMap::new()),
@@ -10433,6 +10469,8 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_context_mirror_host: StdRwLock::new(None),
                 #[cfg(feature = "live")]
+                live_channel_close_publisher: StdRwLock::new(None),
+                #[cfg(feature = "live")]
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_context_projection_gates: StdMutex::new(HashMap::new()),
@@ -10532,6 +10570,8 @@ impl MeerkatMachine {
                 interrupted_tool_evidence_source: StdRwLock::new(None),
                 #[cfg(feature = "live")]
                 live_context_mirror_host: StdRwLock::new(None),
+                #[cfg(feature = "live")]
+                live_channel_close_publisher: StdRwLock::new(None),
                 #[cfg(feature = "live")]
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]

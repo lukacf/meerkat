@@ -117,6 +117,7 @@ RPC_PUBLIC_WRAPPERS: dict[str, tuple[type, str]] = {
     "live/open": (MeerkatClient, "live_open"),
     "live/status": (MeerkatClient, "live_status"),
     "live/close": (MeerkatClient, "live_close"),
+    "live/media_health": (MeerkatClient, "live_media_health"),
     "live/send_input": (MeerkatClient, "live_send_input_text"),
     "live/commit_input": (MeerkatClient, "live_commit_input"),
     "live/interrupt": (MeerkatClient, "live_interrupt"),

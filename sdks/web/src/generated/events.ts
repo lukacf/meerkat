@@ -357,6 +357,8 @@ export type InterruptedToolRunDisposition = {
   kind: "unknown";
 };
 
+export type LiveChannelCloseReason = "client_requested" | "client_disconnected" | "provider_closed" | "error" | "media_fault" | "replaced" | "open_abandoned";
+
 export type LiveChannelId = string;
 
 export interface LiveContextObservationId {
@@ -1301,6 +1303,14 @@ export interface BoundaryAppendsDiscardedEvent {
   type: "boundary_appends_discarded";
 }
 
+export interface LiveChannelClosedEvent {
+  channel_id: string;
+  reason: LiveChannelCloseReason;
+  reopen_recommended: boolean;
+  session_id: SessionId;
+  type: "live_channel_closed";
+}
+
 export const KNOWN_AGENT_EVENT_TYPES = [
   "run_started",
   "run_completed",
@@ -1400,4 +1410,5 @@ export type AgentEvent =
   ModelFallbackCommittedEvent |
   ModelFallbackTargetFailedEvent |
   BoundaryAppendAppliedEvent |
-  BoundaryAppendsDiscardedEvent;
+  BoundaryAppendsDiscardedEvent |
+  LiveChannelClosedEvent;

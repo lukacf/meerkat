@@ -169,6 +169,54 @@ impl LiveDelegationRuntimeBinding {
     }
 }
 
+/// Session event publication for committed live channel closes. The runtime
+/// calls it once per committed close, after `RecordLiveCloseClosed`, with the
+/// typed reason the closing path named (a media fault recorded by the
+/// generated media-health edge takes precedence) and, for a media fault,
+/// whether the session's one reopen is still available.
+#[async_trait::async_trait]
+pub trait LiveChannelCloseEventPublisher: Send + Sync {
+    async fn publish_live_channel_closed(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
+        reopen_recommended: bool,
+    );
+}
+
+/// The generated verdict on one channel's first assistant output
+/// (`LiveChannelMediaHealthJudged`): a media fault when the output's
+/// transcript was non-empty but the client decoded no audible audio for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveMediaHealthJudgement {
+    media_faulted: bool,
+    reopen_recommended: bool,
+}
+
+impl LiveMediaHealthJudgement {
+    pub(crate) const fn new(media_faulted: bool, reopen_recommended: bool) -> Self {
+        Self {
+            media_faulted,
+            reopen_recommended,
+        }
+    }
+
+    /// The output decoded silent: the channel's media path is broken and the
+    /// channel must close with reason `media_fault`.
+    #[must_use]
+    pub const fn media_faulted(&self) -> bool {
+        self.media_faulted
+    }
+
+    /// For a media fault: the session's one media-fault reopen is still
+    /// available, so the client may reopen with the retained context.
+    #[must_use]
+    pub const fn reopen_recommended(&self) -> bool {
+        self.reopen_recommended
+    }
+}
+
 pub(crate) fn bridge_phase_from_dsl(
     phase: crate::meerkat_machine::dsl::LiveBridgeOperationPhase,
 ) -> LiveBridgeOperationPhase {

@@ -2977,6 +2977,19 @@ impl MethodRouter {
                 })
                 .await
             }
+            #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+            "live/media_health" if self.live_webrtc_answer_transport.is_some() => {
+                routed_arm(|| {
+                    handlers::live::handle_live_media_health(
+                        id,
+                        params,
+                        &self.live_adapter_host,
+                        &self.runtime,
+                        self.experimental_live_open_authority.as_deref(),
+                    )
+                })
+                .await
+            }
             "live/close" if self.live_enabled() => {
                 routed_arm(|| {
                     handlers::live::handle_live_close(

@@ -5681,6 +5681,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordLiveChannelStatusStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RequestLiveMediaHealthAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestLiveMediaHealthRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthAudibleAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthAudibleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthSilentReopenAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthSilentReopenRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthSilentExhaustedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthSilentExhaustedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionDuplicateRejectedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8224,6 +8248,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveChannelStatusResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveMediaHealthRequested`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveChannelMediaHealthJudged`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RealtimeTranscriptAppended`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8350,6 +8380,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 
 ### Invariants
 - `live_delegation_steer_records_are_authorized_and_single`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_media_health_budget_and_verdicts_are_consistent`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `fence_requires_bound_runtime`

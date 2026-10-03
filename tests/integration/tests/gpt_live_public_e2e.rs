@@ -26,9 +26,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use meerkat::experimental_gpt_live::{
     ExperimentalGptLiveOpenAuthority, ExperimentalGptLiveWebrtcTransport,
     ExperimentalLiveOpenAuthorityProvider, ExperimentalLivePublicObservation,
-    ExperimentalLivePublicObservationDeliveryError, ExperimentalLivePublicObservationPublisher,
-    GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID, GPT_LIVE_PUBLIC_MODEL, LIVE_RUNTIME_WORK_PREFIX,
-    PublicGptLiveOpenAuthorityConfig, PublicGptLivePlaybackPolicy,
+    ExperimentalLivePublicObservationDeliveryError, ExperimentalLivePublicObservationKind,
+    ExperimentalLivePublicObservationPublisher, GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID,
+    GPT_LIVE_PUBLIC_MODEL, LIVE_RUNTIME_WORK_PREFIX, PublicGptLiveOpenAuthorityConfig,
+    PublicGptLivePlaybackPolicy,
 };
 use meerkat::session_runtime::live_summary::{
     LiveContextBootstrapMode, LiveContextSummarizer, LiveContextSummaryError,
@@ -164,17 +165,40 @@ impl ExperimentalLivePublicObservationPublisher for MeasuredPlaybackPublisher {
     }
 }
 
-struct UnmeasuredPlaybackPublicationGuard(Arc<AtomicBool>);
+/// Media-health requests the runtime published (`live/media_health_requested`),
+/// keyed by channel: the harness answers each with the peer's real decoded
+/// counters.
+type MediaHealthRequests = Arc<std::sync::Mutex<Vec<(LiveChannelId, String)>>>;
+
+struct UnmeasuredPlaybackPublicationGuard {
+    fault: Arc<AtomicBool>,
+    runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    media_health: MediaHealthRequests,
+}
 
 #[async_trait::async_trait]
 impl ExperimentalLivePublicObservationPublisher for UnmeasuredPlaybackPublicationGuard {
     async fn publish(
         &self,
-        _observation: ExperimentalLivePublicObservation,
+        observation: ExperimentalLivePublicObservation,
     ) -> Result<(), ExperimentalLivePublicObservationDeliveryError> {
+        if observation.kind() == ExperimentalLivePublicObservationKind::MediaHealthRequested {
+            // As the RPC surface does: only under the exact live binding.
+            let _custody = self
+                .runtime
+                .acquire_live_binding_publication_custody(observation.binding())
+                .await
+                .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
+            let output = observation.into_output();
+            self.media_health
+                .lock()
+                .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?
+                .push((output.channel_id, output.output_id));
+            return Ok(());
+        }
         // The binder requires a publisher, but unmeasured mode must bypass
         // actionable playback publication. Never mint a delivery/playback ACK.
-        self.0.store(true, Ordering::Release);
+        self.fault.store(true, Ordering::Release);
         Err(ExperimentalLivePublicObservationDeliveryError::Rejected)
     }
 }
@@ -585,6 +609,11 @@ struct PublicLiveHarness {
     server_task: tokio::task::AbortHandle,
     shared: Option<(SharedPublicLive, ExactChannel)>,
     unmeasured_publication_fault: Option<Arc<AtomicBool>>,
+    /// Media-health requests the runtime published (unmeasured shared host).
+    media_health: Option<MediaHealthRequests>,
+    /// Utterances heard on channels the runtime closed on a media fault, in
+    /// order: the scenario's canonical-row accounting includes them.
+    media_fault_heard_utterances: Vec<String>,
     _temp: tempfile::TempDir,
 }
 
@@ -1303,6 +1332,7 @@ async fn open_public_live_with(
     .with_live_webrtc(webrtc.clone())
     .with_live_webrtc_answer_transport(public_transport.clone());
     let mut unmeasured_publication_fault = None;
+    let mut media_health = None;
     let shared = if execution_policy == LiveDelegationExecutionPolicy::ExistingMember || shared_host
     {
         let member_host = ServiceMemberLiveHost::new(ServiceMemberLiveHostConfig {
@@ -1376,7 +1406,13 @@ async fn open_public_live_with(
         let publisher: Arc<dyn ExperimentalLivePublicObservationPublisher> = if concurrent {
             let fault = Arc::new(AtomicBool::new(false));
             unmeasured_publication_fault = Some(fault.clone());
-            Arc::new(UnmeasuredPlaybackPublicationGuard(fault))
+            let requests: MediaHealthRequests = Arc::default();
+            media_health = Some(Arc::clone(&requests));
+            Arc::new(UnmeasuredPlaybackPublicationGuard {
+                fault,
+                runtime: runtime.runtime_adapter(),
+                media_health: requests,
+            })
         } else {
             Arc::new(MeasuredPlaybackPublisher {
                 runtime: runtime.runtime_adapter(),
@@ -1434,6 +1470,8 @@ async fn open_public_live_with(
             server_task: server_task.abort_handle(),
             shared: Some((shared, exact)),
             unmeasured_publication_fault,
+            media_health,
+            media_fault_heard_utterances: Vec::new(),
             _temp: temp,
         });
     }
@@ -1497,6 +1535,8 @@ async fn open_public_live_with(
         server_task: server_task.abort_handle(),
         shared: None,
         unmeasured_publication_fault: None,
+        media_health: None,
+        media_fault_heard_utterances: Vec::new(),
         _temp: temp,
     })
 }
@@ -3213,11 +3253,208 @@ async fn print_no_audio_evidence(
     }
 }
 
-/// Speak one question the assistant should answer natively (no delegation):
-/// schedule the fixture, wait for its input final, the answer's first audio
-/// and the end of that audio, and return the answer window transcript with
-/// the turn timing.
+/// Speak one question the assistant should answer natively (no delegation)
+/// and return the answer window transcript with the turn timing. A channel
+/// whose first answer never became audible is recovered once, only on the
+/// runtime's typed evidence (see [`recover_from_media_fault`]): the question
+/// is then spoken again on the reopened channel.
 async fn native_question(
+    live: &mut PublicLiveHarness,
+    scenario: &str,
+    label: &str,
+    spec: PlayAt,
+) -> Result<(SpokenTurn, String, usize, u64), Box<dyn std::error::Error>> {
+    let result = match native_question_once(live, scenario, label, spec.clone()).await {
+        Err(error) if recover_from_media_fault(live, scenario, label, &spec).await? => {
+            println!(
+                "GPT_LIVE_{scenario}_MEDIA_FAULT_RETRY label={label} first_attempt_error={:?}",
+                error.to_string().lines().next().unwrap_or_default()
+            );
+            native_question_once(live, scenario, label, spec).await
+        }
+        result => result,
+    }?;
+    // A healthy channel's first output is judged too (its request arrives
+    // at the next role change): a media fault on a channel whose answer was
+    // just heard would close a working channel.
+    if let Some(output_id) = pending_media_health_request(live)
+        && let Some(verdict) = answer_media_health(live, scenario, label, output_id).await?
+        && verdict.verdict == meerkat_contracts::LiveMediaHealthVerdict::MediaFault
+    {
+        return Err(format!(
+            "{label}: the runtime judged an audible channel's first output a media fault"
+        )
+        .into());
+    }
+    Ok(result)
+}
+
+/// The output the runtime requested media health for on the current
+/// channel, when that request was published and is not answered yet.
+fn pending_media_health_request(live: &PublicLiveHarness) -> Option<String> {
+    let requests = live.media_health.as_ref()?;
+    let (_, exact) = live.shared.as_ref()?;
+    requests.lock().ok().and_then(|requests| {
+        requests
+            .iter()
+            .find(|(channel, _)| *channel == exact.id)
+            .map(|(_, output)| output.clone())
+    })
+}
+
+/// Answer one media-health request with the peer's real decoded counters
+/// (channel media start to now) and journal the runtime's verdict. `None`
+/// when the harness has no shared host.
+async fn answer_media_health(
+    live: &mut PublicLiveHarness,
+    scenario: &str,
+    label: &str,
+    output_id: String,
+) -> Result<Option<meerkat_contracts::LiveMediaHealthResult>, Box<dyn std::error::Error>> {
+    let audio = live.peer.snapshot().await?["audio"].clone();
+    let Some((shared, exact)) = live.shared.as_ref() else {
+        return Ok(None);
+    };
+    let channel_id = exact.id.clone();
+    let report = meerkat_contracts::LiveMediaHealthParams {
+        channel_id: channel_id.to_string(),
+        output_id: output_id.clone(),
+        decoded_frames: audio["decoded_frames"].as_u64().unwrap_or(0),
+        audible_frames: audio["decoded_non_silent_frames"].as_u64().unwrap_or(0),
+        max_rms: audio["max_decoded_rms"].as_f64().unwrap_or(0.0),
+    };
+    let verdict = shared
+        .member_host
+        .report_experimental_live_media_health(
+            shared.authority.as_ref(),
+            &channel_id,
+            &exact.activation_receipt,
+            &report,
+        )
+        .await
+        .map_err(|error| format!("{label}: media health report failed: {error}"))?;
+    if let Some(requests) = &live.media_health
+        && let Ok(mut requests) = requests.lock()
+    {
+        requests.retain(|(channel, output)| !(*channel == channel_id && *output == output_id));
+    }
+    let media_fault = verdict.verdict == meerkat_contracts::LiveMediaHealthVerdict::MediaFault;
+    println!(
+        "GPT_LIVE_{scenario}_MEDIA_HEALTH label={label} channel={channel_id} decoded_frames={} audible_frames={} max_rms={:.6} verdict={:?} reopen_recommended={}",
+        report.decoded_frames,
+        report.audible_frames,
+        report.max_rms,
+        verdict.verdict,
+        verdict.reopen_recommended
+    );
+    if let Some(evidence) = &live.evidence {
+        evidence.record(EvidenceRecord::MediaHealthJudged {
+            channel: evidence.current_channel()?,
+            output_id,
+            decoded_frames: report.decoded_frames,
+            audible_frames: report.audible_frames,
+            max_rms: report.max_rms,
+            media_fault,
+            reopen_recommended: verdict.reopen_recommended,
+        })?;
+    }
+    Ok(Some(verdict))
+}
+
+/// After an exchange failed waiting for the answer's audio: when the
+/// runtime judges the channel's first output a media fault (its transcript is
+/// non-empty but the client decoded no audible audio), it has already closed
+/// the channel; the harness journals the verdict, reopens the session as the
+/// verdict recommends, journals that reopen, and returns `true` so the
+/// exchange is spoken again. Without that typed evidence (no request, an
+/// audible verdict, no reopen recommended) it returns `false` and the
+/// original failure stands.
+///
+/// The runtime requests media health at the first output's typed end, which
+/// on the public protocol is the next role change. A user who hears nothing
+/// speaks again: when no request is pending yet and the channel's first
+/// output is still unjudged, the harness repeats the question, as that user
+/// would.
+async fn recover_from_media_fault(
+    live: &mut PublicLiveHarness,
+    scenario: &str,
+    label: &str,
+    spec: &PlayAt,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if live.media_health.is_none() {
+        return Ok(false);
+    }
+    let Some((shared, exact)) = live.shared.as_ref() else {
+        return Ok(false);
+    };
+    let channel_id = exact.id.clone();
+    let mut output_id = pending_media_health_request(live);
+    if output_id.is_none() {
+        let already_requested = shared
+            .runtime
+            .live_media_health_requested_output(&live.session_id, &channel_id)
+            .await?
+            .is_some();
+        if already_requested {
+            // The first output was judged already: this failure is not a
+            // silent first output.
+            return Ok(false);
+        }
+        println!("GPT_LIVE_{scenario}_MEDIA_HEALTH_REPROMPT label={label} channel={channel_id}");
+        live.peer.play_at(spec).await?;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while output_id.is_none() && Instant::now() < deadline {
+            sleep(Duration::from_millis(100)).await;
+            output_id = pending_media_health_request(live);
+        }
+    }
+    let Some(output_id) = output_id else {
+        println!(
+            "GPT_LIVE_{scenario}_MEDIA_HEALTH label={label} channel={channel_id} requested=false"
+        );
+        return Ok(false);
+    };
+    let from_channel = match &live.evidence {
+        Some(evidence) => Some(evidence.current_channel()?),
+        None => None,
+    };
+    let Some(verdict) = answer_media_health(live, scenario, label, output_id).await? else {
+        return Ok(false);
+    };
+    let media_fault = verdict.verdict == meerkat_contracts::LiveMediaHealthVerdict::MediaFault;
+    if !media_fault || !verdict.reopen_recommended {
+        return Ok(false);
+    }
+    // The closed channel's heard utterances are canonical rows too.
+    let heard: Vec<String> = live
+        .peer
+        .energy()
+        .await?
+        .heard_utterances()
+        .iter()
+        .map(|text| normalize_words(text))
+        .collect();
+    live.media_fault_heard_utterances.extend(heard);
+    live.reopen().await?;
+    if let (Some(evidence), Some(from_channel)) = (&live.evidence, from_channel) {
+        evidence.record(EvidenceRecord::MediaFaultReopened {
+            from_channel,
+            to_channel: evidence.current_channel()?,
+            exchange: label.to_owned(),
+        })?;
+    }
+    Ok(true)
+}
+
+impl PublicLiveHarness {
+    /// Utterances heard on channels closed on a media fault since the last
+    /// call, in order, for scenarios that account every heard utterance.
+    fn take_media_fault_heard_utterances(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.media_fault_heard_utterances)
+    }
+}
+
+async fn native_question_once(
     live: &mut PublicLiveHarness,
     scenario: &str,
     label: &str,
@@ -7009,6 +7246,7 @@ async fn s106_reopen_cycle(
     // An utterance still open here (a final word that arrived after the
     // reply began) is committed by the runtime as its own user row at close,
     // so it is heard too.
+    user_text.extend(live.take_media_fault_heard_utterances());
     user_text.extend(
         live.peer
             .energy()
@@ -7424,6 +7662,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(60)).await?;
         // Same rule as the reopen cycles: the channel's utterances are
         // counted once its last reply has settled.
+        user_text.extend(live.take_media_fault_heard_utterances());
         user_text.extend(
             live.peer
                 .energy()

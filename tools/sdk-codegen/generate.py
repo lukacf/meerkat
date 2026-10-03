@@ -880,7 +880,10 @@ def _promote_nested_schema_def(name: str) -> bool:
         # `command_rejected` typed channel-survives error variant.
         "WireLiveAdapterObservation",
         "WireLiveAdapterStatus",
+        "WireLiveCloseReason",
         "WireLiveDegradationReason",
+        # Media health: keep the verdict typed by name in `LiveMediaHealthResult`.
+        "LiveMediaHealthVerdict",
         "WireLiveAdapterErrorCode",
         # R7-2 (P2): promote `WireLiveConfigRejectionReason` so the typed
         # `config_rejected.reason` discriminated-union shape lands in SDK
@@ -3809,6 +3812,26 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         "Provider input latency telemetry beside the current reflected input clock.",
     )
     append_python_dataclass("LiveStatusResult", wire_schema, "Response payload for live/status.")
+    append_python_dataclass(
+        "LiveMediaHealthRequestedParams",
+        wire_schema,
+        "Notification payload for live/media_health_requested.",
+    )
+    append_python_dataclass(
+        "LiveMediaHealthParams",
+        wire_schema,
+        "Request payload for live/media_health.",
+    )
+    append_python_alias(
+        "LiveMediaHealthVerdict",
+        wire_schema,
+        "The runtime's verdict on one live/media_health report.",
+    )
+    append_python_dataclass(
+        "LiveMediaHealthResult",
+        wire_schema,
+        "Response payload for live/media_health.",
+    )
     append_python_dataclass("LiveSendInputParams", wire_schema, "Request payload for live/send_input.")
     append_python_dataclass(
         "LiveSendInputErrorData",
@@ -3930,6 +3953,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         "WireLiveDegradationReason",
         wire_schema,
         "Wire projection of LiveDegradationReason (tagged on `kind`).",
+    )
+    append_python_alias(
+        "WireLiveCloseReason",
+        wire_schema,
+        "Typed cause of a runtime-initiated live channel close.",
     )
     append_python_alias(
         "WireLiveAdapterStatus",
@@ -4599,6 +4627,10 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("WireLiveProviderInputLatencyReading", wire_schema)
     append_typescript_interface("WireLiveProviderInputLatency", wire_schema)
     append_typescript_interface("LiveStatusResult", wire_schema)
+    append_typescript_interface("LiveMediaHealthRequestedParams", wire_schema)
+    append_typescript_interface("LiveMediaHealthParams", wire_schema)
+    append_typescript_alias("LiveMediaHealthVerdict", wire_schema)
+    append_typescript_interface("LiveMediaHealthResult", wire_schema)
     append_typescript_interface("LiveSendInputParams", wire_schema)
     append_typescript_interface("LiveSendInputErrorData", wire_schema)
     append_typescript_interface("LiveTruncateParams", wire_schema)
@@ -4636,6 +4668,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_alias("RealtimeTranscriptEvent", wire_schema)
     append_typescript_alias("RealtimeTranscriptRole", wire_schema)
     append_typescript_alias("WireLiveDegradationReason", wire_schema)
+    append_typescript_alias("WireLiveCloseReason", wire_schema)
     append_typescript_alias("WireLiveAdapterStatus", wire_schema)
     # R7-2 (P2): typed wire mirror for `WireLiveAdapterErrorCode::ConfigRejected.reason`.
     # Emit the named alias before `WireLiveAdapterErrorCode` so the generated

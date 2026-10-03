@@ -199,6 +199,7 @@ impl LivePlaybackTerminalSettlement {
 pub struct LiveChannelCloseObservation {
     channel_id: String,
     close_sequence: u64,
+    reason: meerkat_core::LiveChannelCloseReason,
 }
 
 impl LiveChannelCloseObservation {
@@ -212,9 +213,16 @@ impl LiveChannelCloseObservation {
         self.close_sequence
     }
 
+    /// Why the channel is closing, named by the path that reserved the close.
+    #[must_use]
+    pub fn reason(&self) -> meerkat_core::LiveChannelCloseReason {
+        self.reason
+    }
+
     fn from_host_close_observation(
         channel_id: impl Into<String>,
         close_sequence: u64,
+        reason: meerkat_core::LiveChannelCloseReason,
     ) -> Option<Self> {
         let channel_id = channel_id.into();
         if channel_id.is_empty() || close_sequence == 0 {
@@ -223,6 +231,7 @@ impl LiveChannelCloseObservation {
         Some(Self {
             channel_id,
             close_sequence,
+            reason,
         })
     }
 }
@@ -3328,12 +3337,17 @@ impl LiveAdapterHost {
             // covers that case.
             let _ = adapter.inject_observation(synthetic).await;
         }
-        self.reserve_channel_close_observation(channel_id).await
+        self.reserve_channel_close_observation(
+            channel_id,
+            meerkat_core::LiveChannelCloseReason::Error,
+        )
+        .await
     }
 
     pub async fn reserve_channel_close_observation(
         &self,
         channel_id: &LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
     ) -> Result<LiveChannelCloseObservation, LiveAdapterHostError> {
         let mut inner = self.inner.lock().await;
         Self::reap_retired_locked(&mut inner);
@@ -3345,6 +3359,7 @@ impl LiveAdapterHost {
         LiveChannelCloseObservation::from_host_close_observation(
             channel_id.as_str().to_owned(),
             channel.close_observation_sequence,
+            reason,
         )
         .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
     }
@@ -3551,7 +3566,12 @@ impl LiveAdapterHost {
         &self,
         channel_id: &LiveChannelId,
     ) -> Result<LiveChannelCloseObservation, LiveAdapterHostError> {
-        let observation = self.reserve_channel_close_observation(channel_id).await?;
+        let observation = self
+            .reserve_channel_close_observation(
+                channel_id,
+                meerkat_core::LiveChannelCloseReason::ClientRequested,
+            )
+            .await?;
         self.prepare_channel_physical_close(&observation).await?;
         let authority = self
             .close_commit_authority_from_generated_test_machine(&observation)
@@ -4268,7 +4288,13 @@ mod tests {
         host.attach_adapter(&ch, Arc::new(FailOnceCloseAdapter::default()))
             .await
             .unwrap();
-        let observation = host.reserve_channel_close_observation(&ch).await.unwrap();
+        let observation = host
+            .reserve_channel_close_observation(
+                &ch,
+                meerkat_core::LiveChannelCloseReason::ClientRequested,
+            )
+            .await
+            .unwrap();
 
         assert!(matches!(
             host.prepare_channel_physical_close(&observation).await,

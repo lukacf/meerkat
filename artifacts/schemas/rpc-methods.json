@@ -620,6 +620,12 @@
       "result_type": "LiveWebrtcAnswerResult"
     },
     {
+      "description": "Report decoded-audio counters for the output a live/media_health_requested notification named",
+      "name": "live/media_health",
+      "params_type": "LiveMediaHealthParams",
+      "result_type": "LiveMediaHealthResult"
+    },
+    {
       "description": "Create a mob from a definition",
       "name": "mob/create",
       "params_type": "MobCreateParams",
@@ -1060,6 +1066,14 @@
     {
       "description": "Mob stream terminal notification",
       "name": "mob/stream_end"
+    },
+    {
+      "description": "Opaque playback handle for one admitted assistant output (measured playback)",
+      "name": "live/assistant_output_available"
+    },
+    {
+      "description": "Request for the client's decoded-audio counters for a channel's first assistant output",
+      "name": "live/media_health_requested"
     }
   ]
 }

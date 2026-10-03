@@ -18,8 +18,12 @@ use thiserror::Error;
 
 pub const GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID: &str = "openai.gpt-live-1-codex.function-bridge.v1";
 pub const GPT_LIVE_CLIENT_CONTEXT_PROFILE_ID: &str = "openai.gpt-live-1-codex.client-context.v1";
+/// Model-facing voice session instructions. They name no product or other
+/// proper noun the conversation does not need: the provider's input
+/// transcription is biased toward words in the session instructions (Turbo S
+/// S103: a planted "Marigold" was transcribed as "meerkat").
 pub(crate) const GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS: &str = concat!(
-    "You are the low-latency voice layer for a Meerkat executor. ",
+    "You are the low-latency voice layer for an executor agent. ",
     "The client executor does the work you cannot do yourself: hand it requests that need tools, files, current information, or extended reasoning. ",
     "Everything said in this conversation, on this call or in the text chat before or during it and its summary, is something you already know: answer questions about it yourself. ",
     "Treat returned executor context as authoritative, present it naturally, and never expose the internal split. ",
@@ -954,6 +958,25 @@ pub enum ExperimentalLiveFactoryResolutionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The voice session instructions name no product: words in them bias
+    /// the provider's input transcription (Turbo S S103 transcribed a planted
+    /// "Marigold" as "meerkat").
+    #[test]
+    fn voice_session_instructions_name_no_product() {
+        let instructions = GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS.to_ascii_lowercase();
+        for name in ["meerkat", "rkat", "mobkit", "openai", "gpt"] {
+            assert!(
+                !instructions.contains(name),
+                "the voice session instructions name {name:?}: {GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS}"
+            );
+        }
+        assert!(
+            GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS
+                .starts_with("You are the low-latency voice layer for an executor agent. "),
+            "the opening keeps its meaning without the product name"
+        );
+    }
     use meerkat_core::{
         ActingOnBehalfOf, AuthBindingRef, AuthGrant, AuthMetadata, BindingId, BindingOrigin,
         Config, GrantAction, GrantScope, ModelRegistry, PrincipalKind, PrincipalRef,

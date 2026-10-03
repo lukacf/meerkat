@@ -5068,7 +5068,11 @@ async fn try_handle_supervisor_bridge_command(
                     send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
                     return true;
                 }
-                let held = match adapter.hold_run_starts(session_id).await {
+                // The bridge carries a mob Stop's hold (#1500).
+                let held = match adapter
+                    .hold_run_starts(session_id, crate::RunStartHoldReason::MobStop)
+                    .await
+                {
                     Ok(held) => held,
                     Err(error) => {
                         send_bridge_failure(
@@ -5151,7 +5155,10 @@ async fn try_handle_supervisor_bridge_command(
                     send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
                     return true;
                 }
-                match adapter.release_run_starts(session_id).await {
+                match adapter
+                    .release_run_starts(session_id, crate::RunStartHoldReason::MobStop)
+                    .await
+                {
                     Ok(()) => {
                         send_bridge_response(
                             comms_runtime,
@@ -8345,6 +8352,7 @@ mod tests {
                     "comms-drain-test-projection-trust",
                 ),
                 runtime_epoch_id: None,
+                initial_run_start_holds: std::collections::BTreeSet::new(),
             },
             "test_projection_trust_register",
         )
@@ -8468,6 +8476,7 @@ mod tests {
                 crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
                     runtime_epoch_id: None,
+                    initial_run_start_holds: std::collections::BTreeSet::new(),
                 },
                 "running_test_peer_comms_handle_register",
             )

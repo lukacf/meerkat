@@ -7766,6 +7766,7 @@ fn a_resumed_session_earns_its_media_fault_reopen_again() {
         mm::MeerkatMachineInput::RegisterSession {
             session_id: mm::SessionId(SESSION.to_string()),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("the stopped session resumes");

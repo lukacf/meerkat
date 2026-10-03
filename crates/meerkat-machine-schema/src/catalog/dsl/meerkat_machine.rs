@@ -2376,6 +2376,31 @@ pub enum InputAbandonReason {
 /// DSL-side mirror of the shell's `meerkat_core::types::HandlingMode`; the
 /// DSL owns the typed mirror so transitions can carry it without depending
 /// on the shell's domain enum.
+/// Why a runtime's run starts are held (#1500). The runtime starts no new run
+/// while any reason holds it; each holder releases only its own reason.
+/// `RegisterSession` unions `initial_run_start_holds` one reason at a time, so
+/// a new reason needs its line in every `RegisterSession` arm.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RunStartHoldReason {
+    /// A mob Stop holds its members until Resume.
+    #[default]
+    MobStop,
+    /// A restored member waits until its host has published its tools.
+    ToolsNotPublished,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum InputLane {
     #[default]
@@ -3842,7 +3867,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             // arm instead and changes nothing, so admitted input stays queued
             // until Resume releases the hold. The current run, its turn
             // start, steer joins, cancels and terminals are unaffected.
-            run_starts_held: bool,
+            run_start_holds: Set<Enum<RunStartHoldReason>>,
             recovered_admitted_lanes: Map<String, Enum<InputLane>>,
 
             // --- Ops lifecycle substate ---
@@ -4526,7 +4551,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             input_live_boundary_join_run = EmptyMap,
             input_live_boundary_join_phase = EmptyMap,
             run_stop_requested = None,
-            run_starts_held = false,
+            run_start_holds = EmptySet,
             // Ops lifecycle substate
             op_statuses = EmptyMap,
             op_completion_seq = EmptyMap,
@@ -4857,6 +4882,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             RegisterSession {
                 session_id: SessionId,
                 runtime_epoch_id: Option<RuntimeEpochId>,
+                initial_run_start_holds: Set<Enum<RunStartHoldReason>>,
             },
             // Durable-tail recovery authorization (spec: SessionDocumentMachine
             // classifies, THIS machine authorizes, RuntimeStore realizes the
@@ -5015,8 +5041,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 staged_promotion_busy: bool,
             },
             CancelAfterBoundary { reason: String },
-            HoldRunStarts {},
-            ReleaseRunStarts {},
+            HoldRunStarts { reason: Enum<RunStartHoldReason> },
+            ReleaseRunStarts { reason: Enum<RunStartHoldReason> },
             CancelAfterBoundaryForRun { run_id: RunId, reason: String },
             AbortCancelAfterBoundaryDispatch { dispatch_generation: u64 },
             StagePersistentFilter { filter: ToolFilter, witnesses: Map<ToolName, ToolVisibilityWitness> },
@@ -10434,7 +10460,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition RegisterSession {
             per_phase [Idle, Attached, Running, Retired]
-            on input RegisterSession { session_id, runtime_epoch_id }
+            on input RegisterSession { session_id, runtime_epoch_id, initial_run_start_holds }
             guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             guard "new_session_binding" { self.session_id != Some(session_id) }
             update {
@@ -10442,6 +10468,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 // The entry epoch is born here, with the registration that
                 // owns it. Placement (`PrepareBindings`) only asserts it.
                 self.active_runtime_epoch_id = runtime_epoch_id;
+                // A new binding starts with exactly the holds its registration
+                // carries (#1500), applied before any run can start.
+                self.run_start_holds = EmptySet;
+                if initial_run_start_holds.contains(RunStartHoldReason::MobStop) {
+                    self.run_start_holds.insert(RunStartHoldReason::MobStop);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
+                    self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
+                }
                 self.current_session_llm_identity = None;
                 self.current_session_capability_surface = None;
                 self.current_session_capability_surface_status =
@@ -10468,11 +10503,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         // a stopped session (2c below).
         transition RegisterSessionIdempotent {
             per_phase [Idle, Attached, Running, Retired]
-            on input RegisterSession { session_id, runtime_epoch_id }
+            on input RegisterSession { session_id, runtime_epoch_id, initial_run_start_holds }
             guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             guard "same_session_binding" { self.session_id == Some(session_id) }
             guard "same_registered_epoch" { self.active_runtime_epoch_id == runtime_epoch_id }
-            update {}
+            update {
+                if initial_run_start_holds.contains(RunStartHoldReason::MobStop) {
+                    self.run_start_holds.insert(RunStartHoldReason::MobStop);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
+                    self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
+                }
+            }
             to Idle
         }
 
@@ -10487,7 +10529,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // minted epoch, which arms 2c/2d install.
         transition RegisterSessionEpochConflictRejected {
             per_phase [Idle, Attached, Running, Retired]
-            on input RegisterSession { session_id, runtime_epoch_id }
+            on input RegisterSession { session_id, runtime_epoch_id, initial_run_start_holds }
             guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             guard "same_session_binding" { self.session_id == Some(session_id) }
             guard "registered_epoch_differs" { self.active_runtime_epoch_id != runtime_epoch_id }
@@ -10541,7 +10583,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // the unregister saga, and a refused registration must not perturb them.
         transition RegisterSessionRefusedUnregisterDraining {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RegisterSession { session_id, runtime_epoch_id }
+            on input RegisterSession { session_id, runtime_epoch_id, initial_run_start_holds }
             guard "unregister_draining" { self.registration_phase == RegistrationPhase::Draining }
             update {}
             to Idle
@@ -10592,7 +10634,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // coordinator holds the real minted epoch, so absent-vs-minted is a
         // permanent mismatch, not a race.
         transition RegisterSessionResumesStopped {
-            on input RegisterSession { session_id, runtime_epoch_id }
+            on input RegisterSession { session_id, runtime_epoch_id, initial_run_start_holds }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "same_session_binding" { self.session_id == Some(session_id) }
             guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
@@ -10609,6 +10651,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.active_fence_token = None;
                 self.active_runtime_generation = None;
                 self.active_runtime_epoch_id = runtime_epoch_id;
+                // The stopped runtime's holds are preserved (#1500).
+                if initial_run_start_holds.contains(RunStartHoldReason::MobStop) {
+                    self.run_start_holds.insert(RunStartHoldReason::MobStop);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
+                    self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
+                }
             }
             to Idle
             emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "stopped session re-admitted for resume" }
@@ -10624,7 +10673,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // the new registration's epoch (clearing it would leave the new tenant
         // epochless and unable to persist compaction).
         transition RegisterSessionNewBindingFromStopped {
-            on input RegisterSession { session_id, runtime_epoch_id }
+            on input RegisterSession { session_id, runtime_epoch_id, initial_run_start_holds }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "new_session_binding" { self.session_id != Some(session_id) }
             guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
@@ -10640,6 +10689,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.active_fence_token = None;
                 self.active_runtime_generation = None;
                 self.active_runtime_epoch_id = runtime_epoch_id;
+                self.run_start_holds = EmptySet;
+                if initial_run_start_holds.contains(RunStartHoldReason::MobStop) {
+                    self.run_start_holds.insert(RunStartHoldReason::MobStop);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
+                    self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
+                }
                 self.registration_phase = RegistrationPhase::Queuing;
                 self.runtime_stop_deferred = false;
                 self.current_session_llm_identity = None;
@@ -14166,36 +14222,53 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
         }
 
-        // #1500 run-start hold, armed by a mob Stop and released only by its
-        // Resume. Total over every phase: a Stopped or Destroyed runtime starts
-        // no run anyway, so there it is an explicit no-op.
+        // #1500 run-start holds, one per reason: a mob Stop holds with
+        // MobStop until its Resume, and a restored member can wait with
+        // ToolsNotPublished. No run starts while any reason holds. Total over
+        // every phase. A Stopped runtime records the hold, so a resumed
+        // registration keeps it; only a Destroyed runtime ignores it.
         transition HoldRunStarts {
-            per_phase [Initializing, Idle, Attached, Running, Retired]
-            on input HoldRunStarts {}
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input HoldRunStarts { reason }
             update {
-                self.run_starts_held = true;
+                self.run_start_holds.insert(reason);
             }
             to Idle
             emit RunStartsHeld { current_run: self.current_run_id }
         }
         transition HoldRunStartsInert {
-            per_phase [Stopped, Destroyed]
-            on input HoldRunStarts {}
+            per_phase [Destroyed]
+            on input HoldRunStarts { reason }
             update {}
             to Idle
             emit RunStartsHeld { current_run: None }
         }
-        transition ReleaseRunStarts {
+        // Releasing the last reason lets runs start again: the shell wakes a
+        // parked runtime loop when input is queued. Releasing one reason while
+        // another still holds changes nothing else. An absent reason is a
+        // no-op release.
+        transition ReleaseRunStartsLast {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
-            on input ReleaseRunStarts {}
+            on input ReleaseRunStarts { reason }
+            guard "no_other_reason_holds" { for_all(held in self.run_start_holds, held == reason) }
             update {
-                self.run_starts_held = false;
+                self.run_start_holds.remove(reason);
             }
             to Idle
             emit RunStartsReleased {
                 queued: exists(input_id in self.input_phases.keys(),
                     self.input_phases.get_cloned(input_id) == Some(InputPhase::Queued))
             }
+        }
+        transition ReleaseRunStartsStillHeld {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ReleaseRunStarts { reason }
+            guard "other_reason_holds" { exists(held in self.run_start_holds, held != reason) }
+            update {
+                self.run_start_holds.remove(reason);
+            }
+            to Idle
+            emit RunStartsReleased { queued: false }
         }
 
         // 12. BoundaryAppliedPublish: Running self-loop (signal)
@@ -19735,7 +19808,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.runtime_completion_result_run_id == None
                 || self.runtime_completion_result_resolved == true
             }
-            guard "run_starts_not_held" { self.run_starts_held == false }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -19757,7 +19830,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.runtime_completion_result_run_id != None
                 && self.runtime_completion_result_resolved == false
             }
-            guard "run_starts_not_held" { self.run_starts_held == false }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -19773,7 +19846,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PrepareHeldIdle {
             on input Prepare { session_id, run_id }
             guard { self.lifecycle_phase == Phase::Idle }
-            guard "run_starts_held" { self.run_starts_held == true }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
             update {}
             to Idle
             emit RunStartHeld
@@ -19786,7 +19859,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.runtime_completion_result_run_id == None
                 || self.runtime_completion_result_resolved == true
             }
-            guard "run_starts_not_held" { self.run_starts_held == false }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -19808,7 +19881,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.runtime_completion_result_run_id != None
                 && self.runtime_completion_result_resolved == false
             }
-            guard "run_starts_not_held" { self.run_starts_held == false }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -19824,7 +19897,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PrepareHeldAttached {
             on input Prepare { session_id, run_id }
             guard { self.lifecycle_phase == Phase::Attached }
-            guard "run_starts_held" { self.run_starts_held == true }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
             update {}
             to Attached
             emit RunStartHeld
@@ -19838,7 +19911,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.runtime_completion_result_run_id == None
                 || self.runtime_completion_result_resolved == true
             }
-            guard "run_starts_not_held" { self.run_starts_held == false }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -19859,7 +19932,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.runtime_completion_result_run_id != None
                 && self.runtime_completion_result_resolved == false
             }
-            guard "run_starts_not_held" { self.run_starts_held == false }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -19875,7 +19948,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition DrainQueuedRunHeldRetired {
             on signal DrainQueuedRun { run_id }
             guard { self.lifecycle_phase == Phase::Retired }
-            guard "run_starts_held" { self.run_starts_held == true }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
             update {}
             to Retired
             emit RunStartHeld
@@ -19897,7 +19970,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (admitted_content_shape == ContentShape::Conversation
                     || admitted_content_shape == ContentShape::Empty)
             }
-            guard "run_starts_not_held" { self.run_starts_held == false }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -19937,7 +20010,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition StartConversationRunHeldIdle {
             on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
             guard { self.lifecycle_phase == Phase::Idle }
-            guard "run_starts_held" { self.run_starts_held == true }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
             update {}
             to Idle
             emit RunStartHeld
@@ -19956,7 +20029,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (admitted_content_shape == ContentShape::Conversation
                     || admitted_content_shape == ContentShape::Empty)
             }
-            guard "run_starts_not_held" { self.run_starts_held == false }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -19996,7 +20069,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition StartConversationRunHeldInitializing {
             on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
             guard { self.lifecycle_phase == Phase::Initializing }
-            guard "run_starts_held" { self.run_starts_held == true }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
             update {}
             to Initializing
             emit RunStartHeld
@@ -20015,7 +20088,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (admitted_content_shape == ContentShape::Conversation
                     || admitted_content_shape == ContentShape::Empty)
             }
-            guard "run_starts_not_held" { self.run_starts_held == false }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -20055,7 +20128,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition StartConversationRunHeldAttached {
             on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
             guard { self.lifecycle_phase == Phase::Attached }
-            guard "run_starts_held" { self.run_starts_held == true }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
             update {}
             to Attached
             emit RunStartHeld
@@ -20122,7 +20195,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.turn_phase == TurnPhase::Failed
                 || self.turn_phase == TurnPhase::Cancelled
             }
-            guard "run_starts_not_held" { self.run_starts_held == false }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -20162,7 +20235,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition StartImmediateAppendHeldInitializing {
             on input StartImmediateAppend { run_id }
             guard { self.lifecycle_phase == Phase::Initializing }
-            guard "run_starts_held" { self.run_starts_held == true }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
             update {}
             to Initializing
             emit RunStartHeld
@@ -20176,7 +20249,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.turn_phase == TurnPhase::Failed
                 || self.turn_phase == TurnPhase::Cancelled
             }
-            guard "run_starts_not_held" { self.run_starts_held == false }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -20216,7 +20289,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition StartImmediateAppendHeldAttached {
             on input StartImmediateAppend { run_id }
             guard { self.lifecycle_phase == Phase::Attached }
-            guard "run_starts_held" { self.run_starts_held == true }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
             update {}
             to Attached
             emit RunStartHeld

@@ -5834,6 +5834,7 @@ pub fn build_host_comms_runtime(
             // the host participant, not a runtime session entry, so there is no
             // entry runtime epoch to register under.
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
         "mob_host_actor::register",
     )

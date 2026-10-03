@@ -774,6 +774,7 @@ fn fresh_registered_runtime_authority(
             runtime_epoch_id: Some(crate::meerkat_machine::dsl::RuntimeEpochId::from_domain(
                 runtime_epoch_id,
             )),
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .map_err(|err| {
@@ -1483,6 +1484,32 @@ impl MeerkatMachine {
     }
 
     async fn runtime_authority_for_registration(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_id: &SessionId,
+        runtime_epoch_id: &meerkat_core::RuntimeEpochId,
+    ) -> Result<super::driver::ReconciledRuntimeAuthority, RuntimeDriverError> {
+        let mut reconciled = self
+            .unheld_runtime_authority_for_registration(runtime_id, session_id, runtime_epoch_id)
+            .await?;
+        // A new entry's authority carries the staged run-start holds (#1500)
+        // before any runtime loop exists for it.
+        for reason in self.registration_run_start_holds(session_id) {
+            dsl::MeerkatMachineMutator::apply(
+                &mut reconciled.authority,
+                dsl::MeerkatMachineInput::HoldRunStarts { reason },
+            )
+            .map_err(|error| {
+                RuntimeDriverError::Internal(super::dsl_authority::map_error(
+                    error,
+                    "staged run-start hold at registration",
+                ))
+            })?;
+        }
+        Ok(reconciled)
+    }
+
+    async fn unheld_runtime_authority_for_registration(
         &self,
         runtime_id: &LogicalRuntimeId,
         session_id: &SessionId,
@@ -3866,6 +3893,7 @@ impl MeerkatMachine {
                     // entry), which makes the machine's idempotent arm the
                     // verdict rather than its epoch-conflict arm.
                     runtime_epoch_id: Some(dsl::RuntimeEpochId::from_domain(expected_epoch)),
+                    initial_run_start_holds: self.registration_run_start_holds(session_id),
                 },
                 "MissingLiveMaterializationReadmit",
             )
@@ -10989,14 +11017,16 @@ Ok::<(), RuntimeDriverError>(())
             })
     }
 
-    /// Hold run starts for `session_id` (#1500): until
-    /// [`Self::release_run_starts`], no transition establishes a new run, so
-    /// admitted input stays queued. The current run, if any, is unaffected and
-    /// reported, so the caller can cancel exactly that run. Idempotent, and a
-    /// no-op on a stopped or destroyed runtime.
+    /// Hold run starts for `session_id` for `reason` (#1500): until that
+    /// reason is released with [`Self::release_run_starts`], no transition
+    /// establishes a new run, so admitted input stays queued. The current run,
+    /// if any, is unaffected and reported, so the caller can cancel exactly
+    /// that run. Idempotent per reason; a stopped runtime records the hold, a
+    /// destroyed one ignores it.
     pub async fn hold_run_starts(
         &self,
         session_id: &SessionId,
+        reason: super::RunStartHoldReason,
     ) -> Result<super::RunStartsHold, RuntimeDriverError> {
         let _gate = self
             .lock_current_durability_ready_session_mutation_gate(session_id)
@@ -11004,7 +11034,9 @@ Ok::<(), RuntimeDriverError>(())
         let (_, effects) = self
             .apply_session_dsl_input(
                 session_id,
-                crate::meerkat_machine::dsl::MeerkatMachineInput::HoldRunStarts {},
+                crate::meerkat_machine::dsl::MeerkatMachineInput::HoldRunStarts {
+                    reason: reason.dsl(),
+                },
                 "HoldRunStarts",
             )
             .await
@@ -11037,19 +11069,34 @@ Ok::<(), RuntimeDriverError>(())
         Ok(super::RunStartsHold { current_run })
     }
 
-    /// Release a hold taken by [`Self::hold_run_starts`]. A runtime loop that
-    /// parked on the hold is woken when input is queued.
+    /// Release `reason`'s hold on `session_id` (#1500), whether it was taken
+    /// by [`Self::hold_run_starts`] or staged for registration with
+    /// [`Self::stage_registration_run_start_hold`]. Runs start again once no
+    /// reason holds the runtime: a runtime loop that parked on the hold is
+    /// woken when input is queued. Releasing a reason that does not hold is a
+    /// no-op, and so is releasing on a session not registered yet: its
+    /// registration then applies no hold for `reason`.
     pub async fn release_run_starts(
         &self,
         session_id: &SessionId,
+        reason: super::RunStartHoldReason,
     ) -> Result<(), RuntimeDriverError> {
+        // Unstage first: a registration reads the staged reasons under the
+        // session's mutation gate, so it either already applied this hold
+        // (and the gate below orders this release after it) or never sees it.
+        self.unstage_registration_run_start_hold(session_id, reason);
+        if self.session_mutation_gate(session_id).await.is_none() {
+            return Ok(());
+        }
         let gate = self
             .lock_current_durability_ready_session_mutation_gate(session_id)
             .await?;
         let (_, effects) = self
             .apply_session_dsl_input(
                 session_id,
-                crate::meerkat_machine::dsl::MeerkatMachineInput::ReleaseRunStarts {},
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ReleaseRunStarts {
+                    reason: reason.dsl(),
+                },
                 "ReleaseRunStarts",
             )
             .await
@@ -11076,6 +11123,59 @@ Ok::<(), RuntimeDriverError>(())
             let _ = wake_tx.try_send(());
         }
         Ok(())
+    }
+
+    /// Stage a run-start hold that `session_id`'s registration applies
+    /// (#1500), before its runtime loop can start a run. If the session is
+    /// already registered, the hold is applied now as well. The reason stays
+    /// staged until [`Self::release_run_starts`] releases it, so a later
+    /// re-registration re-applies it.
+    pub async fn stage_registration_run_start_hold(
+        &self,
+        session_id: &SessionId,
+        reason: super::RunStartHoldReason,
+    ) -> Result<(), RuntimeDriverError> {
+        self.registration_run_start_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(session_id.clone())
+            .or_default()
+            .insert(reason.dsl());
+        if self.session_mutation_gate(session_id).await.is_some() {
+            self.hold_run_starts(session_id, reason).await?;
+        }
+        Ok(())
+    }
+
+    fn unstage_registration_run_start_hold(
+        &self,
+        session_id: &SessionId,
+        reason: super::RunStartHoldReason,
+    ) {
+        let mut staged = self
+            .registration_run_start_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(reasons) = staged.get_mut(session_id) {
+            reasons.remove(&reason.dsl());
+            if reasons.is_empty() {
+                staged.remove(session_id);
+            }
+        }
+    }
+
+    /// The run-start holds `session_id`'s registration applies (#1500).
+    /// Read under the session's mutation gate.
+    pub(super) fn registration_run_start_holds(
+        &self,
+        session_id: &SessionId,
+    ) -> std::collections::BTreeSet<crate::meerkat_machine::dsl::RunStartHoldReason> {
+        self.registration_run_start_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Request cancellation at the next safe boundary for the currently-running turn.

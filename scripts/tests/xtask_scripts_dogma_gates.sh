@@ -314,6 +314,8 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # unregistered.
 # live_media_health_audit.sh also requires a non-empty trace for each goal and
 # firing run, so the fake prints one trace state.
+# run_start_hold_audit.sh requires each of its seven reachability witnesses
+# to be reported violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -332,6 +334,9 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessReleasedRuns is violated."' \
   'echo "Error: Invariant NotAuditWitnessRunFinishesThenRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetiredDrainRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRegisteredHeldRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStillHeldRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStoppedHoldSurvivesResume is violated."' \
   'echo "Error: Action property AuditNeverUnregisters is violated."' \
   'echo "Error: Action property AuditNeverUnregistersWithPreparation is violated."' \
   'echo "Error: Invariant AuditNeverCancelsRecovery is violated."' \

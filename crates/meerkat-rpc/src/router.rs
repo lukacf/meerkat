@@ -5199,6 +5199,7 @@ mod tests {
                     session.to_string(),
                 ),
                 runtime_epoch_id: None,
+                initial_run_start_holds: std::collections::BTreeSet::new(),
             },
             "test::register_session",
         )
@@ -5237,6 +5238,7 @@ mod tests {
                     session_id.clone(),
                 ),
                 runtime_epoch_id: None,
+                initial_run_start_holds: std::collections::BTreeSet::new(),
             },
             "test::register_session",
         )

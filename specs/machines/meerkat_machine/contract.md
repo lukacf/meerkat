@@ -162,7 +162,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `input_live_boundary_join_run`: `Map<String, RunId>`
 - `input_live_boundary_join_phase`: `Map<String, LiveBoundaryJoinPhase>`
 - `run_stop_requested`: `Option<RunId>`
-- `run_starts_held`: `Bool`
+- `run_start_holds`: `Set<RunStartHoldReason>`
 - `recovered_admitted_lanes`: `Map<String, InputLane>`
 - `op_statuses`: `Map<String, OperationStatus>`
 - `op_completion_seq`: `Map<String, u64>`
@@ -460,7 +460,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `mob_overlay_epoch`: `u64`
 
 ## Inputs
-- `RegisterSession`(session_id: SessionId, runtime_epoch_id: Option<RuntimeEpochId>)
+- `RegisterSession`(session_id: SessionId, runtime_epoch_id: Option<RuntimeEpochId>, initial_run_start_holds: Set<RunStartHoldReason>)
 - `UnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `ReconfigureSessionLlmIdentity`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, previous_capability_surface: Option<SessionLlmCapabilitySurface>, previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus, previous_capability_base_filter: ToolFilter, view_image_tool_available: Bool, previous_view_image_visible: Bool, next_view_image_visible: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, target_identity: SessionLlmIdentity, target_capability_surface: SessionLlmCapabilitySurface, next_visibility_state: SessionToolVisibilityState, next_capability_base_filter: ToolFilter, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta)
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, session_id: SessionId)
@@ -534,8 +534,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InterruptCurrentRunForRun`(run_id: RunId)
 - `StopCurrentRunForRun`(run_id: RunId)
 - `ResolveUserInterruptPublicResult`(observation: UserInterruptObservationKind, target_present: Bool, staged_promotion_busy: Bool)
-- `HoldRunStarts`
-- `ReleaseRunStarts`
+- `HoldRunStarts`(reason: RunStartHoldReason)
+- `ReleaseRunStarts`(reason: RunStartHoldReason)
 - `CancelAfterBoundaryForRun`(run_id: RunId, reason: String)
 - `AbortCancelAfterBoundaryDispatch`(dispatch_generation: u64)
 - `StageDeferredSession`(session_id: SessionId, keep_alive: Bool, has_comms_name: Bool, llm_identity: SessionLlmIdentity, machine_archived_resume_authorized: Bool)
@@ -1688,7 +1688,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionIdle`
 - From: `Idle`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `new_session_binding`
@@ -1696,7 +1696,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionAttached`
 - From: `Attached`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `new_session_binding`
@@ -1704,7 +1704,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionRunning`
 - From: `Running`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `new_session_binding`
@@ -1712,7 +1712,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionRetired`
 - From: `Retired`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `new_session_binding`
@@ -1720,7 +1720,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionIdempotentIdle`
 - From: `Idle`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1729,7 +1729,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionIdempotentAttached`
 - From: `Attached`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1738,7 +1738,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionIdempotentRunning`
 - From: `Running`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1747,7 +1747,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionIdempotentRetired`
 - From: `Retired`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1756,7 +1756,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionEpochConflictRejectedIdle`
 - From: `Idle`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1766,7 +1766,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionEpochConflictRejectedAttached`
 - From: `Attached`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1776,7 +1776,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionEpochConflictRejectedRunning`
 - From: `Running`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1786,7 +1786,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionEpochConflictRejectedRetired`
 - From: `Retired`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1796,7 +1796,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionRefusedUnregisterDrainingIdle`
 - From: `Idle`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `unregister_draining`
 - Emits: `SessionRegistrationRejected`
@@ -1804,7 +1804,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionRefusedUnregisterDrainingAttached`
 - From: `Attached`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `unregister_draining`
 - Emits: `SessionRegistrationRejected`
@@ -1812,7 +1812,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionRefusedUnregisterDrainingRunning`
 - From: `Running`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `unregister_draining`
 - Emits: `SessionRegistrationRejected`
@@ -1820,7 +1820,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionRefusedUnregisterDrainingRetired`
 - From: `Retired`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `unregister_draining`
 - Emits: `SessionRegistrationRejected`
@@ -1828,7 +1828,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionRefusedUnregisterDrainingStopped`
 - From: `Stopped`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `unregister_draining`
 - Emits: `SessionRegistrationRejected`
@@ -1836,7 +1836,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionResumesStopped`
 - From: `Stopped`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `same_session_binding`
   - `not_draining`
@@ -1845,7 +1845,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionNewBindingFromStopped`
 - From: `Stopped`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `new_session_binding`
   - `not_draining`
@@ -5230,85 +5230,155 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `HoldRunStartsInitializing`
 - From: `Initializing`
-- On: `HoldRunStarts`()
+- On: `HoldRunStarts`(reason)
 - Emits: `RunStartsHeld`
 - To: `Initializing`
 
 ### `HoldRunStartsIdle`
 - From: `Idle`
-- On: `HoldRunStarts`()
+- On: `HoldRunStarts`(reason)
 - Emits: `RunStartsHeld`
 - To: `Idle`
 
 ### `HoldRunStartsAttached`
 - From: `Attached`
-- On: `HoldRunStarts`()
+- On: `HoldRunStarts`(reason)
 - Emits: `RunStartsHeld`
 - To: `Attached`
 
 ### `HoldRunStartsRunning`
 - From: `Running`
-- On: `HoldRunStarts`()
+- On: `HoldRunStarts`(reason)
 - Emits: `RunStartsHeld`
 - To: `Running`
 
 ### `HoldRunStartsRetired`
 - From: `Retired`
-- On: `HoldRunStarts`()
+- On: `HoldRunStarts`(reason)
 - Emits: `RunStartsHeld`
 - To: `Retired`
 
-### `HoldRunStartsInertStopped`
+### `HoldRunStartsStopped`
 - From: `Stopped`
-- On: `HoldRunStarts`()
+- On: `HoldRunStarts`(reason)
 - Emits: `RunStartsHeld`
 - To: `Stopped`
 
 ### `HoldRunStartsInertDestroyed`
 - From: `Destroyed`
-- On: `HoldRunStarts`()
+- On: `HoldRunStarts`(reason)
 - Emits: `RunStartsHeld`
 - To: `Destroyed`
 
-### `ReleaseRunStartsInitializing`
+### `ReleaseRunStartsLastInitializing`
 - From: `Initializing`
-- On: `ReleaseRunStarts`()
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `no_other_reason_holds`
 - Emits: `RunStartsReleased`
 - To: `Initializing`
 
-### `ReleaseRunStartsIdle`
+### `ReleaseRunStartsLastIdle`
 - From: `Idle`
-- On: `ReleaseRunStarts`()
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `no_other_reason_holds`
 - Emits: `RunStartsReleased`
 - To: `Idle`
 
-### `ReleaseRunStartsAttached`
+### `ReleaseRunStartsLastAttached`
 - From: `Attached`
-- On: `ReleaseRunStarts`()
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `no_other_reason_holds`
 - Emits: `RunStartsReleased`
 - To: `Attached`
 
-### `ReleaseRunStartsRunning`
+### `ReleaseRunStartsLastRunning`
 - From: `Running`
-- On: `ReleaseRunStarts`()
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `no_other_reason_holds`
 - Emits: `RunStartsReleased`
 - To: `Running`
 
-### `ReleaseRunStartsRetired`
+### `ReleaseRunStartsLastRetired`
 - From: `Retired`
-- On: `ReleaseRunStarts`()
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `no_other_reason_holds`
 - Emits: `RunStartsReleased`
 - To: `Retired`
 
-### `ReleaseRunStartsStopped`
+### `ReleaseRunStartsLastStopped`
 - From: `Stopped`
-- On: `ReleaseRunStarts`()
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `no_other_reason_holds`
 - Emits: `RunStartsReleased`
 - To: `Stopped`
 
-### `ReleaseRunStartsDestroyed`
+### `ReleaseRunStartsLastDestroyed`
 - From: `Destroyed`
-- On: `ReleaseRunStarts`()
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `no_other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Destroyed`
+
+### `ReleaseRunStartsStillHeldInitializing`
+- From: `Initializing`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Initializing`
+
+### `ReleaseRunStartsStillHeldIdle`
+- From: `Idle`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Idle`
+
+### `ReleaseRunStartsStillHeldAttached`
+- From: `Attached`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Attached`
+
+### `ReleaseRunStartsStillHeldRunning`
+- From: `Running`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Running`
+
+### `ReleaseRunStartsStillHeldRetired`
+- From: `Retired`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Retired`
+
+### `ReleaseRunStartsStillHeldStopped`
+- From: `Stopped`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Stopped`
+
+### `ReleaseRunStartsStillHeldDestroyed`
+- From: `Destroyed`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `other_reason_holds`
 - Emits: `RunStartsReleased`
 - To: `Destroyed`
 

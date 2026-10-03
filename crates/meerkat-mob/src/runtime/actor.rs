@@ -10894,6 +10894,12 @@ impl MobActor {
         })
     }
 
+    /// The member run-start posture (#1500): Held iff MobMachine's
+    /// `member_run_starts_held`. Every member bind delivers it.
+    fn member_run_start_posture(&self) -> super::supervisor_bridge::MemberRunStartPosture {
+        super::supervisor_bridge::MemberRunStartPosture::of(self.dsl_authority.state())
+    }
+
     /// HARD INVARIANT: every applied machine input must publish through this
     /// function — both the direct apply seam
     /// ([`Self::apply_dsl_input_collect_transition`]) and every
@@ -10914,13 +10920,6 @@ impl MobActor {
     /// a forwarder and health-monitor reconcile (#1250). A roster-only change
     /// (for example a projected backend-peer binding) still wakes watchers,
     /// because list projections combine both.
-    /// The member run-start posture MobMachine state implies (#1500): Held
-    /// from a Stop's quiesce until the mob leaves Stopped, Released
-    /// otherwise. Every member bind delivers it.
-    fn member_run_start_posture(&self) -> super::supervisor_bridge::MemberRunStartPosture {
-        super::supervisor_bridge::MemberRunStartPosture::of(self.dsl_authority.state())
-    }
-
     fn publish_machine_state_projection(&self) {
         // The single post-apply seam (#1500): every member bind delivers the
         // run-start posture of the state just published.
@@ -13397,6 +13396,27 @@ impl MobActor {
         Ok(())
     }
 
+    /// Release a host's run-start hold on a member (#1500). A member whose
+    /// runtime has not registered yet is released too: its registration then
+    /// applies no hold for `reason`. A member that does not hold `reason`, or
+    /// whose runtime this process does not host, is an Ok no-op.
+    async fn release_member_run_start_hold(
+        &self,
+        agent_identity: &AgentIdentity,
+        reason: super::stop_report::HostRunStartHoldReason,
+    ) -> Result<(), MobError> {
+        let member_ref = self
+            .roster
+            .read()
+            .await
+            .get(agent_identity)
+            .map(|entry| entry.member_ref.clone())
+            .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
+        self.provisioner
+            .release_member_run_starts(&member_ref, None, reason.runtime())
+            .await
+    }
+
     /// Deliver the mob's run-start posture to a placed member whose carrier
     /// was just re-activated (#1500). No Stop or Resume could reach it while
     /// the carrier was dormant, and a re-materialized runtime starts unheld.
@@ -13424,7 +13444,11 @@ impl MobActor {
                 .map(|_| ()),
             super::supervisor_bridge::MemberRunStartPosture::Released => {
                 self.provisioner
-                    .release_member_run_starts(&member_ref, Some(expected_member))
+                    .release_member_run_starts(
+                        &member_ref,
+                        Some(expected_member),
+                        meerkat_runtime::RunStartHoldReason::MobStop,
+                    )
                     .await
             }
         };
@@ -21410,6 +21434,7 @@ impl MobActor {
                 .release_member_run_starts(
                     &incarnation.member_ref,
                     incarnation.expected_member.as_ref(),
+                    meerkat_runtime::RunStartHoldReason::MobStop,
                 )
                 .await
             {
@@ -26856,6 +26881,16 @@ impl MobActor {
                     reply_tx,
                 } => {
                     self.project_member_status(agent_identity, reply_tx);
+                }
+                MobCommand::ReleaseMemberRunStarts {
+                    agent_identity,
+                    reason,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .release_member_run_start_hold(&agent_identity, reason)
+                        .await;
+                    let _ = reply_tx.send(result);
                 }
                 MobCommand::ProjectMemberStatusObserved {
                     agent_identity,

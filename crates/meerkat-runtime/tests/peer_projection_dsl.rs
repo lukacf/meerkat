@@ -43,6 +43,7 @@ fn new_authority() -> Arc<HandleDslAuthority> {
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id: mm_dsl::SessionId::from("peer-projection-test".to_string()),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
         "test::register_session",
     )

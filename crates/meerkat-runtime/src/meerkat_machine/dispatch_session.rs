@@ -751,6 +751,7 @@ mod compaction_coordinator_tests {
                     dsl::MeerkatMachineInput::RegisterSession {
                         session_id: self.dsl_session_id.clone(),
                         runtime_epoch_id: Some(self.dsl_epoch_id.clone()),
+                        initial_run_start_holds: std::collections::BTreeSet::new(),
                     },
                     "compaction_coordinator_test::register",
                 )
@@ -2360,6 +2361,9 @@ impl MeerkatMachine {
                 // The entry epoch this preparation owns. A warm/idempotent
                 // registration restates it; a cold revival installs it.
                 runtime_epoch_id: Some(current_epoch.clone()),
+                // Staged run-start holds (#1500), applied before the runtime
+                // loop can start a run.
+                initial_run_start_holds: self.registration_run_start_holds(&session_id),
             }
         };
         match self
@@ -3192,6 +3196,7 @@ impl MeerkatMachine {
                                     &entry_epoch_id,
                                 ),
                             ),
+                            initial_run_start_holds: self.registration_run_start_holds(&sid),
                         },
                         "RegisterSession",
                     )

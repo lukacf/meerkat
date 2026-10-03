@@ -7411,6 +7411,26 @@ impl MobHandle {
     /// out of a live phase and the actor exits, this may read the actor's
     /// terminal phase watch. A closed actor while the last published phase is
     /// still live is an actor failure, not lifecycle truth.
+    /// Release a host's run-start hold on a member (#1500), placed with
+    /// [`MobBuilder::hold_restored_member_run_starts`](crate::MobBuilder::hold_restored_member_run_starts).
+    /// The member starts runs again once nothing else holds it (a mob Stop
+    /// keeps holding it until Resume). Releasing before the member's runtime
+    /// has registered cancels the hold its registration would apply. A member
+    /// that does not hold `reason` is an Ok no-op; a non-member is
+    /// [`MobError::MemberNotFound`].
+    pub async fn release_member_run_starts(
+        &self,
+        agent_identity: &AgentIdentity,
+        reason: super::stop_report::HostRunStartHoldReason,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ReleaseMemberRunStarts {
+            agent_identity: agent_identity.clone(),
+            reason,
+            reply_tx,
+        })
+        .await?
+    }
+
     pub async fn status(&self) -> Result<MobState, MobError> {
         match self
             .send_actor_command(|reply_tx| MobCommand::QueryPhase { reply_tx })

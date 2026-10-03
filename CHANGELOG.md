@@ -1232,9 +1232,9 @@ them.
   - A remote member that was not bound when a Stop held or a Resume
     released its run starts gets the matching command on its next bind, also
     after a supervisor restart. Every bind delivers the run-start posture
-    derived from MobMachine state (held while the mob is Stopped or a Stop is
-    quiescing, released otherwise); the in-memory owed commands a restart
-    lost are gone. A placed member gets the posture when its carrier is
+    MobMachine state records (held while its member run starts are held,
+    released otherwise); the in-memory owed commands a restart lost are
+    gone. A placed member gets the posture when its carrier is
     re-activated, and a host that advertises the hold but rejects it as
     unsupported is reported not holdable on every Stop.
 - The rkat full-tools spawn fits its 2 MiB production worker-stack budget

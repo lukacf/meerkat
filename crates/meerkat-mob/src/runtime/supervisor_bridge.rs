@@ -93,8 +93,8 @@ impl BridgeRequestFailure {
     }
 }
 
-/// The mob's member run-start posture (#1500): `Held` from a Stop's hold
-/// pre-pass until a Resume releases, `Released` otherwise. A member that was
+/// The mob's member run-start posture (#1500), read from MobMachine's
+/// `member_run_starts_held`. A member that was
 /// not bound when the posture changed gets it on its next bind, and a
 /// restored actor sets it from the durable mob phase, so a supervisor
 /// restart cannot lose it.
@@ -105,10 +105,12 @@ pub(crate) enum MemberRunStartPosture {
 }
 
 impl MemberRunStartPosture {
-    /// The one posture rule: Held while the mob is Stopped or a Stop is
-    /// quiescing it, Released otherwise.
-    pub(crate) fn for_mob(stopped: bool, stop_quiescing: bool) -> Self {
-        if stopped || stop_quiescing {
+    /// The posture of a MobMachine state: Held iff its
+    /// `member_run_starts_held` is set. Every arm that emits
+    /// `HoldMemberRunStarts` sets it, only ResumeStopped and ResetToRunning
+    /// clear it, and TLC checks that a Stopped mob always has it set.
+    pub(crate) fn of(state: &crate::machines::mob_machine::MobMachineState) -> Self {
+        if state.member_run_starts_held {
             Self::Held
         } else {
             Self::Released

@@ -10883,13 +10883,7 @@ impl MobActor {
     /// from a Stop's quiesce until the mob leaves Stopped, Released
     /// otherwise. Every member bind delivers it.
     fn member_run_start_posture(&self) -> super::supervisor_bridge::MemberRunStartPosture {
-        let state = self.dsl_authority.state();
-        super::supervisor_bridge::MemberRunStartPosture::for_mob(
-            state.lifecycle_phase == mob_dsl::MobPhase::Stopped,
-            state.placed_completion_lifecycle_quiescing
-                && state.placed_completion_lifecycle_intent
-                    == Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Stop),
-        )
+        super::supervisor_bridge::MemberRunStartPosture::of(self.dsl_authority.state())
     }
 
     fn publish_machine_state_projection(&self) {

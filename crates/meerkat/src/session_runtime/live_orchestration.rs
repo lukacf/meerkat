@@ -860,6 +860,15 @@ mod orchestrator {
         ResultRecovery,
     }
 
+    /// Which snapshot a non-waiting live projection was built from.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ProjectionBoundary {
+        /// No turn was in flight; the ordinary guarded snapshot.
+        Settled,
+        /// A turn was in flight; the RuntimeStore-committed boundary.
+        Committed,
+    }
+
     /// Surface-agnostic live-channel orchestrator.
     ///
     /// Borrows the resolved infrastructure from a calling surface
@@ -1596,8 +1605,254 @@ mod orchestrator {
                 }
                 Err(error) => return Err(error.into()),
             };
-            let llm_identity = self.service.live_session_llm_identity(session_id).await?;
             let visible_tools = self.service.live_visible_tool_defs(session_id).await?;
+            self.realtime_open_projection_from_snapshot(
+                session_id,
+                turning_mode,
+                seed_window,
+                open_projection_lease,
+                session,
+                canonical_user_image_decoded_bytes,
+                visible_tools,
+            )
+            .await
+        }
+
+        /// [`Self::realtime_session_open_projection`] for a channel whose
+        /// provider receives committed rows after its seed through the
+        /// live-context mirror (experimental strict channels). It never waits
+        /// behind a member's running turn: with no turn in flight it projects
+        /// exactly what the ordinary open projects; with a turn in flight it
+        /// seeds from the committed boundary and the published tool
+        /// definitions, and the turn's rows reach the channel through the
+        /// mirror once its boundary commits.
+        pub async fn realtime_session_open_projection_for_mirrored_channel(
+            &self,
+            session_id: &SessionId,
+            turning_mode: meerkat_contracts::RealtimeTurningMode,
+            seed_window: Option<LiveSeedWindow>,
+        ) -> Result<RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError> {
+            self.realtime_open_projection_without_waiting_for_turn(
+                session_id,
+                turning_mode,
+                seed_window,
+            )
+            .await
+            .map(|(projection, _boundary)| projection)
+        }
+
+        /// The open projection behind
+        /// [`Self::realtime_session_open_projection_for_mirrored_channel`],
+        /// with which snapshot it was built from.
+        async fn realtime_open_projection_without_waiting_for_turn(
+            &self,
+            session_id: &SessionId,
+            turning_mode: meerkat_contracts::RealtimeTurningMode,
+            seed_window: Option<LiveSeedWindow>,
+        ) -> Result<
+            (RealtimeSessionOpenProjection, ProjectionBoundary),
+            RealtimeSessionOpenProjectionError,
+        > {
+            let open_projection_lease = realtime_open_projection_admission(self.service)
+                .try_acquire()
+                .map_err(|error| {
+                    SessionError::Agent(AgentError::InternalError(error.to_string()))
+                })?;
+            Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+            let snapshot = match self
+                .service
+                .export_realtime_open_session_snapshot_without_waiting_for_turn(session_id)
+                .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(SessionError::NotFound { .. }) => {
+                    Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+                    self.service
+                        .export_realtime_open_session_snapshot_without_waiting_for_turn(session_id)
+                        .await?
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let (session, canonical_user_image_decoded_bytes, visible_tools, boundary) =
+                match snapshot {
+                    meerkat_session::RealtimeOpenSnapshot::Settled {
+                        session,
+                        canonical_user_image_decoded_bytes,
+                    } => {
+                        let visible_tools = self.service.live_visible_tool_defs(session_id).await?;
+                        (
+                            session,
+                            canonical_user_image_decoded_bytes,
+                            visible_tools,
+                            ProjectionBoundary::Settled,
+                        )
+                    }
+                    meerkat_session::RealtimeOpenSnapshot::CommittedBoundary {
+                        session,
+                        canonical_user_image_decoded_bytes,
+                    } => {
+                        let visible_tools = self
+                            .service
+                            .published_live_visible_tool_defs(session_id)
+                            .await?;
+                        (
+                            session,
+                            canonical_user_image_decoded_bytes,
+                            visible_tools,
+                            ProjectionBoundary::Committed,
+                        )
+                    }
+                };
+            let projection = self
+                .realtime_open_projection_from_snapshot(
+                    session_id,
+                    turning_mode,
+                    seed_window,
+                    open_projection_lease,
+                    session,
+                    canonical_user_image_decoded_bytes,
+                    visible_tools,
+                )
+                .await?;
+            Ok((projection, boundary))
+        }
+
+        /// The open config `live/refresh` stamps onto one channel, never
+        /// waiting behind the member's running turn. With no turn in flight it
+        /// is exactly [`Self::realtime_session_open_config`]. With a turn in
+        /// flight it is built from the committed boundary and the published
+        /// tool definitions, and the durable resync the ordinary path performs
+        /// is deferred to the turn boundary
+        /// ([`Self::release_live_resync_at_turn_boundary`]).
+        pub async fn live_refresh_open_config_for_channel(
+            &self,
+            session_id: &SessionId,
+            channel_id: &LiveChannelId,
+            turning_mode: meerkat_contracts::RealtimeTurningMode,
+        ) -> Result<RealtimeSessionOpenConfig, RealtimeSessionOpenProjectionError> {
+            let (projection, boundary) = self
+                .realtime_open_projection_without_waiting_for_turn(session_id, turning_mode, None)
+                .await?;
+            if boundary == ProjectionBoundary::Committed {
+                self.release_live_resync_at_turn_boundary(session_id, channel_id);
+            }
+            Ok(projection.open_config)
+        }
+
+        /// The config-only refresh projection for one channel, never waiting
+        /// behind the member's running turn. With no turn in flight it is
+        /// exactly [`Self::live_refresh_config_for_session`]. With a turn in
+        /// flight it is built from the committed boundary and the published
+        /// tool definitions, and the durable resync is deferred to the turn
+        /// boundary ([`Self::release_live_resync_at_turn_boundary`]).
+        pub async fn live_refresh_config_for_channel(
+            &self,
+            session_id: &SessionId,
+            channel_id: &LiveChannelId,
+            turning_mode: meerkat_contracts::RealtimeTurningMode,
+        ) -> Result<RealtimeSessionOpenConfig, RealtimeSessionOpenProjectionError> {
+            Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+            let snapshot = match self
+                .service
+                .export_realtime_refresh_session_snapshot_without_waiting_for_turn(session_id)
+                .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(SessionError::NotFound { .. }) => {
+                    Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+                    self.service
+                        .export_realtime_refresh_session_snapshot_without_waiting_for_turn(
+                            session_id,
+                        )
+                        .await?
+                }
+                Err(error) => return Err(RealtimeSessionOpenProjectionError::Session(error)),
+            };
+            let (session, visible_tools) = match snapshot {
+                meerkat_session::RealtimeRefreshSnapshot::Settled(session) => {
+                    let visible_tools = self.service.live_visible_tool_defs(session_id).await?;
+                    (session, visible_tools)
+                }
+                meerkat_session::RealtimeRefreshSnapshot::CommittedBoundary(session) => {
+                    let visible_tools = self
+                        .service
+                        .published_live_visible_tool_defs(session_id)
+                        .await?;
+                    self.release_live_resync_at_turn_boundary(session_id, channel_id);
+                    (session, visible_tools)
+                }
+            };
+            let llm_identity = self.service.live_session_llm_identity(session_id).await?;
+            Self::refresh_config_from_session(turning_mode, llm_identity, visible_tools, &session)
+        }
+
+        /// Release, at the member's turn boundary, the durable resync a
+        /// refresh deferred because a turn was in flight. The release is a
+        /// typed outcome of the boundary (or of the channel's close before
+        /// it), never a timer.
+        fn release_live_resync_at_turn_boundary(
+            &self,
+            session_id: &SessionId,
+            channel_id: &LiveChannelId,
+        ) {
+            let pending = self
+                .service
+                .defer_live_resync_to_turn_boundary(session_id, channel_id);
+            let service = Arc::clone(self.service);
+            tokio::spawn(async move {
+                let session_id = pending.session_id().clone();
+                let channel_id = pending.channel_id().clone();
+                match service.release_live_resync_at_turn_boundary(pending).await {
+                    Ok(release) => tracing::debug!(
+                        target: "meerkat::session_runtime::live_orchestration",
+                        %session_id,
+                        ?channel_id,
+                        ?release,
+                        "deferred live refresh resync released at the turn boundary"
+                    ),
+                    Err(error) => tracing::warn!(
+                        target: "meerkat::session_runtime::live_orchestration",
+                        %session_id,
+                        ?channel_id,
+                        %error,
+                        "deferred live refresh resync failed at the turn boundary"
+                    ),
+                }
+            });
+        }
+
+        fn refresh_config_from_session(
+            turning_mode: meerkat_contracts::RealtimeTurningMode,
+            llm_identity: SessionLlmIdentity,
+            visible_tools: Vec<meerkat_core::ToolDef>,
+            session: &meerkat_core::Session,
+        ) -> Result<RealtimeSessionOpenConfig, RealtimeSessionOpenProjectionError> {
+            let transcript_rewrite_generation = session
+                .transcript_rewrite_generation()
+                .map_err(|err| SessionError::Agent(AgentError::InternalError(err.to_string())))?;
+            Ok(RealtimeSessionOpenConfig::for_refresh_from_messages(
+                turning_mode,
+                llm_identity,
+                visible_tools,
+                session.messages(),
+            )?
+            .with_user_content_identities(session.realtime_user_content_identities())
+            .with_user_content_tombstones(session.realtime_user_content_tombstones())
+            .with_transcript_rewrite_generation(transcript_rewrite_generation))
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn realtime_open_projection_from_snapshot(
+            &self,
+            session_id: &SessionId,
+            turning_mode: meerkat_contracts::RealtimeTurningMode,
+            seed_window: Option<LiveSeedWindow>,
+            open_projection_lease: meerkat_core::RealtimeOpenProjectionLease,
+            session: meerkat_core::Session,
+            canonical_user_image_decoded_bytes: usize,
+            visible_tools: Vec<meerkat_core::ToolDef>,
+        ) -> Result<RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError> {
+            let llm_identity = self.service.live_session_llm_identity(session_id).await?;
             let transcript_rewrite_generation = session
                 .transcript_rewrite_generation()
                 .map_err(|err| SessionError::Agent(AgentError::InternalError(err.to_string())))?;
@@ -1816,18 +2071,7 @@ mod orchestrator {
             };
             let llm_identity = self.service.live_session_llm_identity(session_id).await?;
             let visible_tools = self.service.live_visible_tool_defs(session_id).await?;
-            let transcript_rewrite_generation = session
-                .transcript_rewrite_generation()
-                .map_err(|err| SessionError::Agent(AgentError::InternalError(err.to_string())))?;
-            Ok(RealtimeSessionOpenConfig::for_refresh_from_messages(
-                turning_mode,
-                llm_identity,
-                visible_tools,
-                session.messages(),
-            )?
-            .with_user_content_identities(session.realtime_user_content_identities())
-            .with_user_content_tombstones(session.realtime_user_content_tombstones())
-            .with_transcript_rewrite_generation(transcript_rewrite_generation))
+            Self::refresh_config_from_session(turning_mode, llm_identity, visible_tools, &session)
         }
 
         /// Resolve the LLM identity that a new live channel will bind to
@@ -2211,8 +2455,9 @@ mod orchestrator {
                     }
                     continue;
                 }
-                let open_config = match Box::pin(self.live_refresh_config_for_session(
+                let open_config = match Box::pin(self.live_refresh_config_for_channel(
                     &session_id,
+                    &channel_id,
                     meerkat_contracts::RealtimeTurningMode::ProviderManaged,
                 ))
                 .await
@@ -2580,9 +2825,16 @@ mod orchestrator {
                         .await?,
                     None,
                 ),
+                // The experimental channel's provider receives committed rows
+                // after its seed, so a member's running turn need not delay
+                // the open.
                 None => (
-                    self.live_open_projection_for_session(session_id, turning_mode, seed_window)
-                        .await?,
+                    self.realtime_session_open_projection_for_mirrored_channel(
+                        session_id,
+                        turning_mode,
+                        seed_window,
+                    )
+                    .await?,
                     None,
                 ),
             };
@@ -4663,7 +4915,11 @@ mod orchestrator {
             Self::check_session_pin(channel_id, &session_id, expected_session)?;
 
             let open_config = self
-                .live_open_config_for_session(&session_id, RealtimeTurningMode::ProviderManaged)
+                .live_refresh_open_config_for_channel(
+                    &session_id,
+                    channel_id,
+                    RealtimeTurningMode::ProviderManaged,
+                )
                 .await
                 .map_err(LiveChannelVerbError::RefreshConfig)?;
             // #176: refresh does not rebuild the WS transport URL and has

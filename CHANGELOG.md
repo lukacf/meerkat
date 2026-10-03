@@ -1049,6 +1049,29 @@ them.
   Every acknowledged result now gets one instructions-lane cue, bound to the
   result's `delegation_id`. It is phrased to be safe either way: tell the
   user the result unless it was already told.
+
+- Opening or refreshing a live channel on a member whose turn is in flight no
+  longer waits for the turn to end.
+  - The realtime open and refresh projections took the session's turn
+    boundary and asked the busy session task for its visible tool
+    definitions, so a live open or `live/refresh` on a member mid-turn (and
+    config propagation to every live channel after it) stalled for the whole
+    turn.
+  - The session task now publishes its visible tool definitions between
+    commands and turns (`PersistentSessionService::published_live_visible_tool_defs`).
+  - A strict experimental channel without a summary policy, whose provider
+    receives committed rows through the live-context mirror, opens mid-turn
+    from the committed boundary and the published tools; the turn's rows
+    reach it through the mirror once they commit, exactly once. A pending
+    realtime image anchor still needs the boundary, so that case is refused
+    with `SessionError::Busy`. Other channels open as before.
+  - `live/refresh` and config propagation build the refresh mid-turn from the
+    committed boundary and the published tools. The durable resync the
+    refresh performed before reading is deferred to the turn boundary as a
+    typed `PendingLiveResync`, released as `LiveResyncRelease::Synchronized`
+    there, or as `ChannelClosed` when the refreshing channel closes first.
+  - With no turn in flight every open and refresh projects exactly what it
+    did before.
 - The runtime store test `contended_unregister_finalization_does_not_starve_runtime_worker`
   no longer fails on a loaded host. Its two 1 s wall-clock waits are replaced
   by typed handoffs. The heartbeat now fires on a test-only signal sent when

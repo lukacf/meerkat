@@ -1220,6 +1220,11 @@ them.
   `response_terminal` for the exact request id, from the member, with status
   `completed`.
 
+- GPT Live answers questions about text chat turns typed during a call
+  itself (Turbo S S105 r5: after a typed correction committed mid-call, "So
+  what are the two numbers now" was delegated). The session instructions
+  claimed only "the earlier text chat"; they now claim the text chat before
+  or during the call.
 - GPT Live no longer voices an invented answer from another member while a
   request to that member is still pending (Turbo S S102 r2: "Pemberton said
   it feels like it's around mid-afternoon" the moment the "I asked Analyst

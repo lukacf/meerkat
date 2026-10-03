@@ -13433,6 +13433,28 @@ impl MeerkatMachine {
     }
 
     #[cfg(feature = "live")]
+    /// Observe commits of a session's machine authority: the generation
+    /// advances once after every transition committed through the session's
+    /// apply seam, including every transition that writes an
+    /// `AuthorizeLiveDelegationResultRelease` guard input (result delivery
+    /// resolution, which frees the channel's result slot; live close; open
+    /// abandonment; transcript confirmation; worker terminal recording). A
+    /// waiter marks the current generation seen, attempts its guarded
+    /// transition, and on refusal awaits the next advance. `None` when the
+    /// session has no runtime entry; the receiver reports closed once the
+    /// entry it observed is removed. In-process only.
+    pub async fn subscribe_session_machine_commits(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<crate::tokio::sync::watch::Receiver<u64>> {
+        self.sessions
+            .read()
+            .await
+            .get(session_id)
+            .map(|entry| entry.dsl_commits.subscribe())
+    }
+
+    #[cfg(feature = "live")]
     /// Whether `channel_id` is the session's active live channel, or `None`
     /// when the session's machine state could not be read. A caller that
     /// acts on "inactive" (for example by merging a delegation result into

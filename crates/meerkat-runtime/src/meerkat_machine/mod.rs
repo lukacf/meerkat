@@ -1601,6 +1601,12 @@ struct RuntimeSessionEntry {
     /// including several Maps/Sets) so holding a reference to a
     /// `RuntimeSessionEntry` does not bloat async future sizes.
     dsl_authority: Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
+    /// Commit generation of `dsl_authority`. It advances once after every
+    /// transition committed through the session's apply seam
+    /// (`apply_session_dsl_input*`), which carries every live delegation
+    /// result-release guard input. Waiters re-check a refused guarded
+    /// transition on each advance instead of on a timer.
+    dsl_commits: Arc<crate::tokio::sync::watch::Sender<u64>>,
     /// Per-session comms drain lifecycle slot.
     ///
     /// Collapsed from the sibling `MeerkatMachine.comms_drain_slots:

@@ -57,11 +57,27 @@ eleven reconfigure controls (25.65s compile, 0.03s body).
 The actual close/reopen scenario then passed (10.69s compile, 0.56s body), as
 did all three stock memory/SQLite/reopen controls (0.48s compile, 0.60s body).
 Targeted runtime all-target Clippy passed in 4m59s. Host/RPC library Clippy
-passed in 13m15s. Normal commit hooks are the remaining checkpoint gate.
-Fresh post-reopen work, separate process restart,
+passed in 13m15s. Normal commit hooks passed at
+`2dd9d80d53f8be2d94bb5b553c903377f263ee0f`, tree
+`8c266d2d5355917f5c7996b12c3ea6f5566a129b`.
+Separate process restart,
 persistent controller administration and additional-platform acceptance remain
 open. The source-reviewed canonical service-slot adaptation is a separate next
 slice, not included in this checkpoint.
+
+The next tests-only slice executes fresh authenticated work after physical
+close/reopen. Its first run failed at credential setup (5.23s compile, 0.34s
+body): a newly created empty token vault requested release of the still-live
+credential registry. This was a fixture ownership error, not a native recovery
+defect. The corrected fixture retains the original actual host token vault and
+verifies its marked credential through the existing status owner without
+republishing or changing lifecycle state. The fresh model-tool-model run passed
+(3.82s compile, 0.62s body), with distinct input/run/tool IDs, exact protected
+audit, local denial feedback and a permitted sibling. All four stock controls
+passed; the final existing native-loop target passed nine tests with six existing
+acceptance cases explicitly ignored (0.23s compile, 0.88s body). Targeted test
+Clippy passed in 5m31s; normal commit hooks are the remaining gate. This is same-process current-owner
+work, not process restart or restored controller authority.
 
 [Meerkat issue 1618](https://github.com/lukacf/meerkat/issues/1618) is part of
 full default-profile coverage: effective per-identity policy must survive fresh,

@@ -23,7 +23,7 @@ const MAX_RECEIPT_BYTES: usize = 128 * 1024;
 #[derive(Default)]
 struct Receiver {
     bodies: Mutex<Vec<Value>>,
-    first_response: String,
+    first_responses: Vec<String>,
     second_request: Notify,
     finish: Notify,
     authorized_requests: AtomicUsize,
@@ -46,8 +46,12 @@ impl Server {
         Self::start_with_tool_response(sibling_response()).await
     }
     async fn start_with_tool_response(first_response: String) -> Self {
+        Self::start_with_tool_responses(vec![first_response]).await
+    }
+    async fn start_with_tool_responses(first_responses: Vec<String>) -> Self {
+        assert!(!first_responses.is_empty());
         let receiver = Arc::new(Receiver {
-            first_response,
+            first_responses,
             ..Receiver::default()
         });
         let app = Router::new()
@@ -88,10 +92,13 @@ fn start_message() -> Value {
     json!({"type":"message_start","message":{"id":"e1-response","type":"message","role":"assistant","model":E1_MODEL,"content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}})
 }
 fn sibling_response() -> String {
+    sibling_response_with_ids(DENIED_CALL, PERMITTED_CALL)
+}
+fn sibling_response_with_ids(denied_call: &str, permitted_call: &str) -> String {
     let mut events = vec![start_message()];
     for (index, id, name) in [
-        (0, DENIED_CALL, "delete_record"),
-        (1, PERMITTED_CALL, "read_record"),
+        (0, denied_call, "delete_record"),
+        (1, permitted_call, "read_record"),
     ] {
         events.extend([
             json!({"type":"content_block_start","index":index,"content_block":{"type":"tool_use","id":id,"name":name,"input":{}}}),
@@ -136,27 +143,27 @@ async fn receive(
             "missing fixture authorization".into(),
         );
     }
-    match count {
-        1 => (
-            StatusCode::OK,
-            [("content-type", "text/event-stream")],
-            receiver.first_response.clone(),
-        ),
-        2 => {
-            receiver.second_request.notify_one();
-            receiver.finish.notified().await;
-            (
-                StatusCode::OK,
-                [("content-type", "text/event-stream")],
-                final_response(),
-            )
-        }
-        _ => (
+    let Some(first_response) = receiver.first_responses.get((count - 1) / 2) else {
+        return (
             StatusCode::BAD_REQUEST,
             [("content-type", "application/json")],
             "unexpected extra request".into(),
-        ),
+        );
+    };
+    if count % 2 == 1 {
+        return (
+            StatusCode::OK,
+            [("content-type", "text/event-stream")],
+            first_response.clone(),
+        );
     }
+    receiver.second_request.notify_one();
+    receiver.finish.notified().await;
+    (
+        StatusCode::OK,
+        [("content-type", "text/event-stream")],
+        final_response(),
+    )
 }
 
 struct FixtureAuthorizer(Arc<Receiver>);
@@ -322,6 +329,14 @@ impl Evidence {
 }
 
 fn assert_wire_sibling_feedback(body: &Value) {
+    assert_wire_sibling_feedback_with_ids(body, DENIED_CALL, PERMITTED_CALL, 2);
+}
+fn assert_wire_sibling_feedback_with_ids(
+    body: &Value,
+    denied_call: &str,
+    permitted_call: &str,
+    expected_result_count: usize,
+) {
     let messages = body["messages"]
         .as_array()
         .expect("actual Anthropic request messages");
@@ -330,11 +345,13 @@ fn assert_wire_sibling_feedback(body: &Value) {
         .find(|message| {
             message["role"] == "assistant"
                 && message["content"].as_array().is_some_and(|blocks| {
-                    blocks
+                    let calls: Vec<_> = blocks
                         .iter()
                         .filter(|block| block["type"] == "tool_use")
-                        .count()
-                        == 2
+                        .collect();
+                    calls.len() == 2
+                        && calls[0]["id"] == denied_call
+                        && calls[1]["id"] == permitted_call
                 })
         })
         .expect("one actual assistant message owns both sibling calls");
@@ -345,11 +362,11 @@ fn assert_wire_sibling_feedback(body: &Value) {
         .collect();
     assert_eq!(
         (calls[0]["id"].as_str(), calls[0]["name"].as_str()),
-        (Some(DENIED_CALL), Some("delete_record"))
+        (Some(denied_call), Some("delete_record"))
     );
     assert_eq!(
         (calls[1]["id"].as_str(), calls[1]["name"].as_str()),
-        (Some(PERMITTED_CALL), Some("read_record"))
+        (Some(permitted_call), Some("read_record"))
     );
     let results: Vec<_> = messages
         .iter()
@@ -358,14 +375,29 @@ fn assert_wire_sibling_feedback(body: &Value) {
         .flat_map(|blocks| blocks.iter())
         .filter(|block| block["type"] == "tool_result")
         .collect();
-    assert_eq!(results.len(), 2, "exactly one result for each sibling");
+    assert_eq!(
+        results.len(),
+        expected_result_count,
+        "exact committed result count"
+    );
+    let results: Vec<_> = results
+        .into_iter()
+        .filter(|result| {
+            result["tool_use_id"] == denied_call || result["tool_use_id"] == permitted_call
+        })
+        .collect();
+    assert_eq!(
+        results.len(),
+        2,
+        "exactly one result for each current sibling"
+    );
     let refused = results
         .iter()
-        .find(|result| result["tool_use_id"] == DENIED_CALL)
+        .find(|result| result["tool_use_id"] == denied_call)
         .unwrap();
     let allowed = results
         .iter()
-        .find(|result| result["tool_use_id"] == PERMITTED_CALL)
+        .find(|result| result["tool_use_id"] == permitted_call)
         .unwrap();
     assert_eq!(refused["is_error"], true);
     let refused_text = wire_text(&refused["content"]);

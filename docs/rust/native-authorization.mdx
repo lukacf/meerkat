@@ -218,8 +218,10 @@ exclusion and release, same-file case and symlink aliases, upgrade failures,
 and the authenticated native model-tool-model flow with committed Session,
 input and protected audit. Same-process completed-turn close/reopen and actor
 reconstruction also passed, retaining the current trusted host owners and
-proving that stored effects were not replayed. These results qualify this local
-source on the executed filesystem. Fresh post-reopen work, separate process restart, other platforms,
+proving that stored effects were not replayed. Fresh authenticated work after
+reopen also passed with distinct input/run/tool IDs, local denial feedback,
+a permitted sibling and protected terminal audit. These results qualify this local
+source on the executed filesystem. Separate process restart, other platforms,
 publication, CI and performance remain separate gates.
 </Note>
 
@@ -282,9 +284,14 @@ scenario additionally drops the original service and all backend claims before
 opening new stores, then reconstructs the actor using the same actual trusted
 host owners and the stored Session document. Historical serialized authority
 associations remain audit data. They never bootstrap current grant, ingress or
-controller authority. That tested same-process reconstruction does
-not establish a separate process restart, fresh post-reopen work, performance
-acceptance or full surface coverage.
+controller authority. The fresh-work test additionally retains the actual host
+token vault and verifies its original marked credential through the existing
+status owner. Creating an unrelated empty vault requests credential release;
+it does not reconstruct the current provider authority. The new input uses
+current host grants, ingress authentication and a fresh actor pin, then completes
+the native model-tool-model flow with exact audit and no replay of the old work.
+That tested same-process reconstruction does not establish a separate process
+restart, performance acceptance or full surface coverage.
 
 The low-level equivalent is
 `MeerkatMachine::persistent_with_local_grant_authorization(runtime_store, Some(blob_store), owners)?`.

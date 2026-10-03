@@ -1177,6 +1177,17 @@ them.
 
 ### Fixed
 
+- Generated TLA+ models applied a set insert or remove to only one branch of a
+  field that a conditional update had already changed in the same transition.
+  The pending value `IF c THEN a ELSE b` was spliced unparenthesized as the
+  left operand of `\cup`/`\`, so the ELSE branch captured the operator and the
+  THEN path lost the second update. The Rust kernels were correct; the models
+  diverged on MobMachine's topology convergence (`pending_respawn_topology`
+  kept the second absent identity) and MeerkatMachine's live recovery
+  cancellation (`live_cancelled_recovery_channels` lost one channel when both
+  replacements were present), and on the mob compositions that embed them. The
+  set updates now delimit the pending value, as field reads already did
+  (#1513).
 - GPT Live no longer primes the voice model to delegate questions about the
   conversation itself (Turbo S S99: after the summary release, a run
   delegated "now tell me my historical vault phrase" instead of answering it

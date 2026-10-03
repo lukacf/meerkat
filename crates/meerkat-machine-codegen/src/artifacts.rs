@@ -5458,6 +5458,155 @@ mod tests {
             "no index may bind to one branch of a spliced conditional"
         );
     }
+
+    /// A set insert or remove of a field that a conditional update already
+    /// changed earlier in the same block takes the field's pending value, a
+    /// bare `IF c THEN a ELSE b`, as its left operand. Spliced unparenthesized,
+    /// the ELSE branch captured the set operator, so the THEN branch lost the
+    /// second update. Shipped instance: MobMachine's topology convergence
+    /// removes both absent identities from `pending_respawn_topology`; the
+    /// model removed only `a_identity` when both were absent.
+    #[test]
+    fn a_set_update_after_a_conditional_update_takes_the_whole_conditional() {
+        let model = render_machine_semantic_model(&mob_machine()).expect("render MobMachine model");
+        assert!(
+            model.contains(
+                "((IF ((a_identity \\in DOMAIN identity_to_runtime) = FALSE) THEN (pending_respawn_topology \\ {a_identity}) ELSE pending_respawn_topology) \\ {b_identity})"
+            ),
+            "the second removal must apply to the whole conditional value"
+        );
+        assert!(
+            !model.contains("ELSE pending_respawn_topology \\ {b_identity}"),
+            "no set operator may bind to one branch of a spliced conditional"
+        );
+    }
+
+    /// Every update kind that reads a field's pending value must splice it so
+    /// no operator after it can bind into one branch of a pending conditional
+    /// (`IF c THEN a ELSE b`, left by an earlier conditional update in the
+    /// same block): each occurrence must close an operand, followed only by
+    /// `)`, `,` or the end of the value. The match is exhaustive, so a new
+    /// `Update` kind must be classified here.
+    #[test]
+    fn every_update_kind_splices_a_pending_conditional_as_one_operand() {
+        use meerkat_machine_schema::identity::FieldId;
+        const PENDING: &str = "IF c THEN a ELSE b";
+        let field = || FieldId::parse("f").expect("field slug");
+        let x = || Expr::Binding("x".to_owned());
+        let samples = vec![
+            Update::Increment {
+                field: field(),
+                amount: 1,
+            },
+            Update::Decrement {
+                field: field(),
+                amount: 1,
+            },
+            Update::MapInsert {
+                field: field(),
+                key: x(),
+                value: x(),
+            },
+            Update::MapIncrement {
+                field: field(),
+                key: x(),
+                amount: 1,
+            },
+            Update::MapDecrement {
+                field: field(),
+                key: x(),
+                amount: 1,
+            },
+            Update::MapRemove {
+                field: field(),
+                key: x(),
+            },
+            Update::SetInsert {
+                field: field(),
+                value: x(),
+            },
+            Update::SetRemove {
+                field: field(),
+                value: x(),
+            },
+            Update::SeqAppend {
+                field: field(),
+                value: x(),
+            },
+            Update::SeqPrepend {
+                field: field(),
+                values: x(),
+            },
+            Update::SeqPopFront { field: field() },
+            Update::SeqRemoveValue {
+                field: field(),
+                value: x(),
+            },
+            Update::SeqRemoveAll {
+                field: field(),
+                values: x(),
+            },
+            Update::Conditional {
+                condition: Expr::Binding("d".to_owned()),
+                then_updates: vec![Update::SetInsert {
+                    field: field(),
+                    value: x(),
+                }],
+                else_updates: vec![Update::SetRemove {
+                    field: field(),
+                    value: x(),
+                }],
+            },
+            Update::ForEach {
+                binding: "y".to_owned(),
+                over: x(),
+                updates: vec![Update::SetInsert {
+                    field: field(),
+                    value: Expr::Binding("y".to_owned()),
+                }],
+            },
+        ];
+        let schema = mob_machine();
+        for update in &samples {
+            // Exhaustive: classify every kind. `Assign` does not read the
+            // field's pending value, so it cannot splice it.
+            match update {
+                Update::Assign { .. } => continue,
+                Update::Increment { .. }
+                | Update::Decrement { .. }
+                | Update::MapInsert { .. }
+                | Update::MapIncrement { .. }
+                | Update::MapDecrement { .. }
+                | Update::MapRemove { .. }
+                | Update::SetInsert { .. }
+                | Update::SetRemove { .. }
+                | Update::SeqAppend { .. }
+                | Update::SeqPrepend { .. }
+                | Update::SeqPopFront { .. }
+                | Update::SeqRemoveValue { .. }
+                | Update::SeqRemoveAll { .. }
+                | Update::Conditional { .. }
+                | Update::ForEach { .. } => {}
+            }
+            let mut compiler = MachineTlaCompiler::new(&schema);
+            let mut env = BTreeMap::from([("f".to_owned(), PENDING.to_owned())]);
+            let binding_types =
+                BTreeMap::from([("x".to_owned(), TypeRef::Set(Box::new(TypeRef::U64)))]);
+            compiler.apply_update("Probe", &mut env, &BTreeMap::new(), &binding_types, update);
+            let rendered = env.get("f").expect("the update writes f");
+            assert!(
+                rendered.contains(PENDING),
+                "{update:?} must read the pending value: {rendered}"
+            );
+            for (at, _) in rendered.match_indices(PENDING) {
+                let after = rendered[at + PENDING.len()..].chars().next();
+                assert!(
+                    matches!(after, None | Some(')' | ',')),
+                    "{update:?} lets {after:?} bind into the pending conditional: {rendered}"
+                );
+            }
+        }
+    }
     use meerkat_machine_schema::RustTypeAtom;
     use meerkat_machine_schema::catalog::dsl::{
         dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
@@ -11291,9 +11440,12 @@ impl<'a> MachineTlaCompiler<'a> {
                 );
             }
             Update::SetInsert { field, value } => {
+                // The field's pending value may be an unparenthesized
+                // conditional (`IF c THEN a ELSE b`); spliced bare as the left
+                // operand, the ELSE branch would capture the set operator.
                 let current = env
                     .get(field.as_str())
-                    .cloned()
+                    .map(|value| tla_delimited(value))
                     .unwrap_or_else(|| field.as_str().to_owned());
                 let value_expr =
                     self.render_expr_with_types(value, env, binding_env, binding_types);
@@ -11303,9 +11455,12 @@ impl<'a> MachineTlaCompiler<'a> {
                 );
             }
             Update::SetRemove { field, value } => {
+                // The field's pending value may be an unparenthesized
+                // conditional (`IF c THEN a ELSE b`); spliced bare as the left
+                // operand, the ELSE branch would capture the set operator.
                 let current = env
                     .get(field.as_str())
-                    .cloned()
+                    .map(|value| tla_delimited(value))
                     .unwrap_or_else(|| field.as_str().to_owned());
                 let value_expr =
                     self.render_expr_with_types(value, env, binding_env, binding_types);

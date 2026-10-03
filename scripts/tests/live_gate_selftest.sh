@@ -81,4 +81,19 @@ job_env="$(awk '/^    env:$/{f=1; next} f && /^    [a-z]/{exit} f' "$workflow")"
 grep -q '^      BUILDBUDDY_API_KEY: \${{ secrets.BUILDBUDDY_API_KEY }}$' <<<"$job_env" \
   || fail "live-gate.yml must set BUILDBUDDY_API_KEY in the job env for setup-buildbuddy-ci"
 
+# Gate outputs live outside the workspace: the turbo-s targets take workspace
+# files as inputs, and a log growing while Bazel hashes it failed every target
+# with Exit 34 (#1544, digest mismatch on live-gate.log). Every redirect or
+# tee in the workflow writes under $RUNNER_TEMP, and the runfiles glob never
+# takes a log.
+if grep -nE '(>>?|tee)[[:space:]]+"?[^"$[:space:]|]' "$workflow" | grep -v 'GITHUB_OUTPUT\|GITHUB_STEP_SUMMARY\|/dev/null' ; then
+  fail "live-gate.yml writes a file outside \$RUNNER_TEMP (inside the workspace)"
+fi
+grep -q 'tee "\$out/live-gate.log"' "$workflow" \
+  || fail "live-gate.yml must tee the gate log to \$RUNNER_TEMP/live-gate"
+grep -q 'out="\${RUNNER_TEMP}/live-gate"' "$workflow" \
+  || fail "live-gate.yml must root its outputs at \$RUNNER_TEMP/live-gate"
+awk '/name = "workspace_runfiles"/{f=1} f&&/^\)/{exit} f' "${ROOT}/BUILD.bazel" | grep -q '"\*\*/\*.log"' \
+  || fail "workspace_runfiles must exclude logs so a stray log is never a test input"
+
 echo "live gate selftest: ok"

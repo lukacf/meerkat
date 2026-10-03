@@ -114,6 +114,10 @@ filegroup(
             "bazel-*/**",
             "**/node_modules/**",
             "target/**",
+            # Stray logs (a CI step's tee) are never inputs: one growing
+            # while Bazel hashes it fails the upload.
+            "*.log",
+            "**/*.log",
             "secrets.env",
             "**/secrets.env",
             "*credential*.json",

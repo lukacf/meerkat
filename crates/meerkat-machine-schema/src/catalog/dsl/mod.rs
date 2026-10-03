@@ -1245,13 +1245,17 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "ReassertCausalTail",
                     "ReplayRuntimeWork",
                     "ReassertAssistantOutput",
+                    "ReplayTextChat",
                 ],
             ),
             NamedTypeBinding::string_enum(
                 "LiveContextPayloadAvailability",
                 &["NoPayload", "Materializable"],
             ),
-            NamedTypeBinding::string_enum("LiveContextRowSource", &["Conversation", "RuntimeWork"]),
+            NamedTypeBinding::string_enum(
+                "LiveContextRowSource",
+                &["Conversation", "RuntimeWork", "TextChat"],
+            ),
             NamedTypeBinding::string_enum(
                 "LiveContextRowAuthor",
                 &["User", "Assistant", "Runtime"],

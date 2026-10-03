@@ -18241,6 +18241,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_pending_append`
   - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`
+  - `quiet_history_waits_for_the_conversation`
   - `channel_has_no_recovery_obligation`
   - `append_identity_is_fresh`
 - Emits: `LiveContextAppendAuthorized`
@@ -18261,6 +18262,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_pending_append`
   - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`
+  - `quiet_history_waits_for_the_conversation`
   - `channel_has_no_recovery_obligation`
   - `append_identity_is_fresh`
 - Emits: `LiveContextAppendAuthorized`
@@ -18281,6 +18283,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_pending_append`
   - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`
+  - `quiet_history_waits_for_the_conversation`
   - `channel_has_no_recovery_obligation`
   - `append_identity_is_fresh`
 - Emits: `LiveContextAppendAuthorized`

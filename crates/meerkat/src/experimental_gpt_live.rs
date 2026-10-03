@@ -744,11 +744,12 @@ fn lower_context_append(
         // A conversational row the provider has not heard (such as the
         // executor's reply to a peer's answer) is voiced as commentary.
         // Host-typed rows (the text chat) arrive as TextChatReplay instead
-        // (#1614), and an unstamped typed row that waited behind a late
-        // summary while the channel heard newer speech arrives as a
+        // (#1614), and any typed row (text chat or not) that waited behind a
+        // late summary while the channel heard newer speech arrives as a
         // SupersededTypedRow (generated edge
         // AuthorizeLiveContextAppendSuperseded): voiced after that speech,
-        // gpt-live-1 made it the newest fact, 3/3 on 2026-09-29 (S99).
+        // gpt-live-1 made it the newest fact, 3/3 on 2026-09-29 (S99), and
+        // framed as current text chat it outranked the speech (#1623).
         meerkat_runtime::live_execution::LiveContextAppendKind::Ordinary => {
             LoweredContextAppend::Session(text)
         }

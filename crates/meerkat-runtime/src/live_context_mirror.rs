@@ -186,9 +186,6 @@ pub struct CommittedLiveContextRow {
     source: crate::meerkat_machine::dsl::LiveContextRowSource,
     #[cfg(feature = "live")]
     author: crate::meerkat_machine::dsl::LiveContextRowAuthor,
-    /// A row of a host-typed turn (the text chat): quiet context framed as
-    /// the text chat, not as background work (see [`Self::is_text_chat`]).
-    text_chat: bool,
     provider_context: Option<String>,
     causal_context: Option<String>,
     #[cfg(feature = "live")]
@@ -297,7 +294,6 @@ impl CommittedLiveContextRow {
             disposition,
             source: crate::meerkat_machine::dsl::LiveContextRowSource::Conversation,
             author: row_author(message),
-            text_chat: is_text_chat_row(message),
             provider_context,
             causal_context,
             observation_id,
@@ -367,12 +363,6 @@ impl CommittedLiveContextRow {
     #[cfg(feature = "live")]
     pub(crate) fn source(&self) -> crate::meerkat_machine::dsl::LiveContextRowSource {
         self.source
-    }
-
-    /// Whether this row belongs to a host-typed turn (the text chat): its
-    /// quiet replay is framed as the text chat (#1614).
-    pub(crate) const fn is_text_chat(&self) -> bool {
-        self.text_chat
     }
 
     #[cfg(feature = "live")]
@@ -485,9 +475,11 @@ pub(crate) fn classify_committed_boundary_rows_after(
 /// stamped at admission from the turn's work attribution; it is runtime work
 /// output, replayed quietly instead of voiced. A host-typed turn (the text
 /// chat) stamps `TranscriptTurnInput::TypedText` on its user row and its
-/// reply: the user typed and read them in the chat, so they update what the
-/// voice knows on the same quiet lane and are never voiced (#1614, S105 R3:
-/// a voiced typed correction made the model replay stale results aloud).
+/// reply: the user typed and read them in the chat, so they are the
+/// `TextChat` source, which updates what the voice knows on the quiet lane and
+/// is never voiced (#1614, S105 R3: a voiced typed correction made the model
+/// replay stale results aloud). They stay typed rows to the machine: newer
+/// heard speech supersedes them (S99).
 /// Every other row (spoken, or a peer-driven reply such as the answer to a
 /// delegated question) is conversation and is voiced. Transcript position is
 /// never consulted: a mid-turn steer can follow a typed row, and a reply can
@@ -502,23 +494,14 @@ fn row_source(message: &Message) -> crate::meerkat_machine::dsl::LiveContextRowS
         _ => None,
     };
     match (message, turn_input) {
-        (Message::BlockAssistant(_), Some(TranscriptTurnInput::RuntimeAuthored))
-        | (Message::BlockAssistant(_) | Message::User(_), Some(TranscriptTurnInput::TypedText)) => {
+        (Message::BlockAssistant(_), Some(TranscriptTurnInput::RuntimeAuthored)) => {
             LiveContextRowSource::RuntimeWork
+        }
+        (Message::BlockAssistant(_) | Message::User(_), Some(TranscriptTurnInput::TypedText)) => {
+            LiveContextRowSource::TextChat
         }
         _ => LiveContextRowSource::Conversation,
     }
-}
-
-/// Whether a row belongs to a host-typed turn (see [`row_source`]).
-#[cfg(feature = "live")]
-fn is_text_chat_row(message: &Message) -> bool {
-    let turn_input = match message {
-        Message::BlockAssistant(assistant) => assistant.identity.turn_input,
-        Message::User(user) => user.identity.turn_input,
-        _ => None,
-    };
-    turn_input == Some(meerkat_core::types::TranscriptTurnInput::TypedText)
 }
 
 #[derive(serde::Serialize)]
@@ -720,12 +703,12 @@ mod tests {
     }
 
     /// #1614 (S105 R3): a host-typed turn's user row and reply carry
-    /// `TypedText` and are text chat, replayed quietly (the runtime-work
-    /// source); an unstamped reply, such as the executor's answer to a peer's
+    /// `TypedText` and are the text-chat source, replayed quietly; an
+    /// unstamped reply, such as the executor's answer to a peer's
     /// response, stays conversation and is voiced.
     #[test]
     fn typed_text_turn_rows_are_quiet_text_chat_and_peer_replies_stay_voiced() {
-        use crate::meerkat_machine::dsl::LiveContextRowSource::{Conversation, RuntimeWork};
+        use crate::meerkat_machine::dsl::LiveContextRowSource::{Conversation, TextChat};
         use meerkat_core::types::TranscriptTurnInput;
         let mut typed = UserMessage::text("Correction: the numbers are 21 and 42.");
         typed.identity.turn_input = Some(TranscriptTurnInput::TypedText);
@@ -744,15 +727,11 @@ mod tests {
         );
         let peer_reply = reply("Pemberton replied: 13 UTC.", None);
 
-        assert_eq!(row_source(&Message::User(typed.clone())), RuntimeWork);
-        assert_eq!(row_source(&typed_reply), RuntimeWork);
+        assert_eq!(row_source(&Message::User(typed.clone())), TextChat);
+        assert_eq!(row_source(&typed_reply), TextChat);
         assert_eq!(row_source(&peer_reply), Conversation);
 
-        for (message, text_chat) in [
-            (Message::User(typed), true),
-            (typed_reply, true),
-            (peer_reply, false),
-        ] {
+        for message in [Message::User(typed), typed_reply, peer_reply] {
             let row = classify(
                 &message,
                 LiveContextCommittedTextProvenance::ParentSessionServiceTurn,
@@ -760,9 +739,9 @@ mod tests {
             assert_eq!(
                 row.disposition(),
                 LiveContextCommittedRowDisposition::MirrorParentText,
-                "a materializable parent text row either way"
+                "a materializable parent text row either way; the generated \
+                 enqueue maps the text-chat source to ReplayTextChat"
             );
-            assert_eq!(row.is_text_chat(), text_chat, "{message:?}");
         }
     }
 

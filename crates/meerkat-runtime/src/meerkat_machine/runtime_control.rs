@@ -1293,11 +1293,27 @@ mod live_context_mirror_tests {
         UserSpeech,
     }
 
+    /// How the typed row behind the late summary was submitted.
+    #[derive(Clone, Copy)]
+    enum TypedRowStamp {
+        /// No turn-input stamp (the voiced typed row).
+        Unstamped,
+        /// A host-typed turn (the text chat, `TranscriptTurnInput::TypedText`).
+        TextChat,
+    }
+
     /// Drive one typed row (canonical row 2) behind a late summary that is
     /// still being delivered, followed by one row the channel heard live
     /// (row 3), and return the append kinds in delivery order.
     async fn typed_row_append_kinds_after(
         heard: HeardAfterTyped,
+    ) -> Vec<(crate::live_execution::LiveContextAppendKind, String)> {
+        typed_row_append_kinds_after_stamped(heard, TypedRowStamp::Unstamped).await
+    }
+
+    async fn typed_row_append_kinds_after_stamped(
+        heard: HeardAfterTyped,
+        stamp: TypedRowStamp,
     ) -> Vec<(crate::live_execution::LiveContextAppendKind, String)> {
         let (machine, session_id, channel_id) = prepared_experimental_live_machine().await;
         stage_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
@@ -1340,9 +1356,11 @@ mod live_context_mirror_tests {
         session.push(meerkat_core::Message::User(
             meerkat_core::UserMessage::text("old source"),
         ));
-        session.push(meerkat_core::Message::User(
-            meerkat_core::UserMessage::text("typed request while history is pending"),
-        ));
+        let mut typed = meerkat_core::UserMessage::text("typed request while history is pending");
+        if matches!(stamp, TypedRowStamp::TextChat) {
+            typed.identity.turn_input = Some(meerkat_core::types::TranscriptTurnInput::TypedText);
+        }
+        session.push(meerkat_core::Message::User(typed));
         let observation = machine
             .record_live_context_observation(&lease, lease.new_observation_id())
             .await
@@ -1446,6 +1464,57 @@ mod live_context_mirror_tests {
                 .contains("typed request while history is pending"),
             "the typed request is delivered, not dropped: {:?}",
             appends[1].1
+        );
+    }
+
+    /// S99's shape with the text chat (#1623): a typed correction held
+    /// behind the late summary while the user said something newer aloud is
+    /// still a superseded typed row. Framed as current text chat, the stale
+    /// typed value outranked the later spoken correction (S99 "current",
+    /// 3/10); the generated superseded edge keys on the queued text-chat
+    /// disposition, so it keeps the superseded framing on the quiet lane.
+    #[tokio::test]
+    async fn superseded_text_chat_row_keeps_superseded_framing() {
+        let appends = typed_row_append_kinds_after_stamped(
+            HeardAfterTyped::UserSpeech,
+            TypedRowStamp::TextChat,
+        )
+        .await;
+        assert_eq!(
+            appends.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(),
+            [
+                crate::live_execution::LiveContextAppendKind::HistoryBootstrap,
+                crate::live_execution::LiveContextAppendKind::SupersededTypedRow,
+                crate::live_execution::LiveContextAppendKind::CausalReassertion,
+            ]
+        );
+        assert!(
+            appends[1]
+                .1
+                .contains("typed request while history is pending"),
+            "the typed row is delivered, not dropped: {:?}",
+            appends[1].1
+        );
+    }
+
+    /// The same text-chat row with only the assistant's own speech after it
+    /// is not superseded: it keeps the quiet text-chat framing.
+    #[tokio::test]
+    async fn unsuperseded_text_chat_row_keeps_text_chat_framing() {
+        assert_eq!(
+            typed_row_append_kinds_after_stamped(
+                HeardAfterTyped::AssistantOnly,
+                TypedRowStamp::TextChat,
+            )
+            .await
+            .into_iter()
+            .map(|(kind, _)| kind)
+            .collect::<Vec<_>>(),
+            [
+                crate::live_execution::LiveContextAppendKind::HistoryBootstrap,
+                crate::live_execution::LiveContextAppendKind::TextChatReplay,
+                crate::live_execution::LiveContextAppendKind::CausalReassertion,
+            ]
         );
     }
 

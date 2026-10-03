@@ -2880,6 +2880,7 @@ pub enum LiveContextRowDisposition {
     ReassertCausalTail,
     ReplayRuntimeWork,
     ReassertAssistantOutput,
+    ReplayTextChat,
 }
 
 pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{

@@ -41,6 +41,10 @@ them.
   `TextChatReplay`, the quiet text-chat append of a host-typed turn's rows
   (#1614); `HistoryBootstrap`'s discriminant shifts. Exhaustive matches must
   handle the new variant. See Fixed.
+- Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
+  meerkat-runtime `meerkat_machine::dsl`): `LiveContextRowDisposition` gains
+  the variant `ReplayTextChat` and `LiveContextRowSource` gains the variant
+  `TextChat` (#1614, #1623). Exhaustive matches must handle them. See Fixed.
 - `meerkat::session_runtime::runtime_state::RuntimeStateOps::live_session_is_stale`
   takes a `meerkat_session::LiveStalenessPosition` (`TurnBoundaryHeld` or
   `OutsideTurnBoundary`): whether the caller holds the session's
@@ -1296,7 +1300,12 @@ them.
   rows; the live mirror delivers them on the quiet thinking lane as text-chat
   context ("the user typed it and read the reply there"), never as voiced
   commentary. Spoken rows and peer-driven replies (such as the executor's
-  answer to a delegated question) are still voiced.
+  answer to a delegated question) are still voiced. A text-chat row stays a
+  typed row to the generated machine (the `TextChat` source, queued as
+  `ReplayTextChat`): one held behind a late summary while the user said
+  something newer aloud is still delivered with the superseded-typed framing,
+  so the later speech stays current (Turbo S S99: framed as current text
+  chat, a typed "Violet and Marigold" outranked the later spoken "Cobalt").
 - `MobHandle::force_cancel_member` and `MobHandle::cancel_all_work` no longer
   fail with `Internal("... Runtime not ready: attached")` on a member whose
   runtime is attached but has no run. Both now cancel the member's current

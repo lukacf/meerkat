@@ -2026,9 +2026,30 @@ struct PendingAppend {
     token: GptLiveAppendToken,
     outstanding_receipts: Vec<String>,
     rejected: bool,
-    /// A broker-owned result cue: its receipts drain here and nothing about
-    /// it is surfaced, so the sideband's append correlation never sees it.
-    internal: bool,
+    /// A broker-owned append (a result cue or an in-progress notice): its
+    /// receipts drain here and nothing about it is surfaced, so the
+    /// sideband's append correlation never sees it.
+    internal: Option<InternalAppend>,
+}
+
+/// Which broker-owned instructions append a pending append is, so its
+/// receipts are logged under their own name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InternalAppend {
+    /// The cue that follows an acknowledged result ([`LIVE_RESULT_CUE`]).
+    ResultCue,
+    /// The notice sent at a client delegation's creation
+    /// ([`LIVE_DELEGATION_IN_PROGRESS`]).
+    ProgressNotice,
+}
+
+impl InternalAppend {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ResultCue => "result cue",
+            Self::ProgressNotice => "in-progress notice",
+        }
+    }
 }
 
 struct PendingAppendIndex(usize);
@@ -2263,7 +2284,7 @@ impl SessionState {
             }
         };
         if let Some(pending) = self.pending_appends.back_mut() {
-            pending.internal = true;
+            pending.internal = Some(InternalAppend::ProgressNotice);
         }
         Ok(Some((token, delegation_id)))
     }
@@ -2282,7 +2303,7 @@ impl SessionState {
             }
         };
         if let Some(pending) = self.pending_appends.back_mut() {
-            pending.internal = true;
+            pending.internal = Some(InternalAppend::ResultCue);
         }
         Ok(Some((token, delegation_id)))
     }
@@ -2404,7 +2425,7 @@ impl SessionState {
             token,
             outstanding_receipts,
             rejected: false,
-            internal: false,
+            internal: None,
         });
         Ok(token)
     }
@@ -2431,7 +2452,7 @@ impl SessionState {
                     let Some(interrupted) = pending.lane.interrupted_by_close(pending.token) else {
                         return true;
                     };
-                    if !pending.rejected && !pending.internal {
+                    if !pending.rejected && pending.internal.is_none() {
                         observations.push_back(interrupted);
                     }
                     false
@@ -2585,8 +2606,8 @@ impl SessionState {
                     let pending = &mut self.pending_appends[append_index.0];
                     pending.outstanding_receipts.remove(receipt_index.0);
                     let report_rejection = self.close_requested || pending.lane.is_fragmented();
-                    if pending.internal {
-                        tracing::info!("public Live result cue rejected by the provider");
+                    if let Some(kind) = pending.internal {
+                        tracing::info!("public Live {} rejected by the provider", kind.label());
                         pending.rejected = true;
                     } else if report_rejection && !pending.rejected {
                         self.queued_observations
@@ -2672,8 +2693,8 @@ impl SessionState {
         pending.outstanding_receipts.remove(receipt_index.0);
         if pending.outstanding_receipts.is_empty() {
             let (token, rejected, internal) = (pending.token, pending.rejected, pending.internal);
-            if internal {
-                tracing::info!(rejected, "public Live result cue acknowledged");
+            if let Some(kind) = internal {
+                tracing::info!(rejected, "public Live {} acknowledged", kind.label());
             } else if !rejected {
                 self.queued_observations
                     .push_back(pending.lane.acknowledged(token));
@@ -5389,6 +5410,34 @@ mod tests {
         );
     }
 
+    /// Broker-owned appends are tagged by kind, so their receipts are
+    /// logged under their own name ("in-progress notice acknowledged", not
+    /// "result cue acknowledged").
+    #[test]
+    fn broker_owned_appends_carry_their_kind() {
+        let mut state = SessionState::default();
+        state.due_result_cues.push_back("dlg_cue".to_owned());
+        state
+            .due_progress_notices
+            .push_back("dlg_notice".to_owned());
+        let (cue, _) = state.reserve_due_result_cue().unwrap().expect("cue due");
+        let (notice, _) = state
+            .reserve_due_progress_notice()
+            .unwrap()
+            .expect("notice due");
+        let kind_of = |token| {
+            state
+                .pending_appends
+                .iter()
+                .find(|pending| pending.token == token)
+                .and_then(|pending| pending.internal)
+        };
+        assert_eq!(kind_of(cue), Some(InternalAppend::ResultCue));
+        assert_eq!(kind_of(notice), Some(InternalAppend::ProgressNotice));
+        assert_eq!(InternalAppend::ResultCue.label(), "result cue");
+        assert_eq!(InternalAppend::ProgressNotice.label(), "in-progress notice");
+    }
+
     #[test]
     fn the_in_progress_notice_forbids_describing_the_request_as_done() {
         assert!(LIVE_DELEGATION_IN_PROGRESS.contains("in progress"));
@@ -5425,7 +5474,8 @@ mod tests {
             state
                 .pending_appends
                 .iter()
-                .any(|pending| pending.token == token && pending.internal),
+                .any(|pending| pending.token == token
+                    && pending.internal == Some(InternalAppend::ProgressNotice)),
             "broker-owned: its receipt is consumed by the broker"
         );
         state

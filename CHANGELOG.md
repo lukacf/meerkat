@@ -1266,6 +1266,10 @@ them.
     `USER_FLOOR_SPEECH_DBFS` (-50 dBFS). There is no wall-clock timer, and
     both constants document their derivation from Turbo S provider streams
     and fixtures.
+- Public GPT Live logs each broker-owned append's receipt under its own
+  name: "in-progress notice acknowledged" and "result cue acknowledged" (and
+  the matching rejection). Before, the in-progress notice's receipts were
+  logged as a result cue's.
 - Public GPT Live no longer lets the model claim a delegated request is done
   before its result exists (S103: "I've updated it to Friday afternoon"
   3.6 s early, then silence once the result arrived).

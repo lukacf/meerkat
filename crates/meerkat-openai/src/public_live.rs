@@ -2253,6 +2253,10 @@ struct SessionState {
     /// Session-timeline start of the commentary acknowledgement being
     /// applied (`session.commentary.appended.start_ms`).
     commentary_ack_start_ms: Option<f64>,
+    /// Session-timeline end of the commentary acknowledgement being applied
+    /// (`session.commentary.appended.end_ms`): the point from which the
+    /// model's generation has the appended content in context.
+    commentary_ack_end_ms: Option<f64>,
     /// Result appends awaiting their acknowledgement, with the delegation
     /// each one answers.
     result_cue_candidates: HashMap<GptLiveAppendToken, String>,
@@ -2269,9 +2273,13 @@ struct SessionState {
     /// [`USER_FLOOR_SPEECH_DBFS`]). Starts at the release, so a model that
     /// has not spoken is silent.
     output_silence_run_ms: u64,
-    /// Session-timeline insertion point of each acknowledged result whose cue
-    /// is not yet sent (`session.commentary.appended.start_ms`).
-    result_insertion_ms: HashMap<String, f64>,
+    /// Session-timeline end of each acknowledged result's insertion
+    /// (`session.commentary.appended.end_ms`) whose cue is not yet sent.
+    /// Output starting at or after it was generated with the result in
+    /// context; output starting before it is the tail of speech already
+    /// under way when the result landed (S97 r3: " ready." over the
+    /// insertion's own span).
+    result_inserted_through_ms: HashMap<String, f64>,
     /// Client delegations created whose in-progress notice is not yet sent,
     /// in creation order ([`LIVE_DELEGATION_IN_PROGRESS`]).
     due_progress_notices: VecDeque<String>,
@@ -2321,11 +2329,12 @@ impl Default for SessionState {
             last_output_end_ms: None,
             input_since_output: false,
             commentary_ack_start_ms: None,
+            commentary_ack_end_ms: None,
             result_cue_candidates: HashMap::new(),
             due_result_cues: VecDeque::new(),
             deferred_result_cues: VecDeque::new(),
             output_silence_run_ms: OUTPUT_SILENCE_RELEASE_MS,
-            result_insertion_ms: HashMap::new(),
+            result_inserted_through_ms: HashMap::new(),
             due_progress_notices: VecDeque::new(),
             awaiting_peer_results: HashSet::new(),
             unanswered_user_input: false,
@@ -2419,15 +2428,18 @@ impl SessionState {
         }
         let awaiting_peer_replies = self.awaiting_peer_results.remove(&delegation_id);
         // Output deltas arrive in timeline order, so the latest one starting
-        // at or after the insertion point means the model spoke after the
-        // result landed.
-        let output_since_result =
-            self.result_insertion_ms
-                .remove(&delegation_id)
-                .is_none_or(|inserted| {
-                    self.last_output_start_ms
-                        .is_some_and(|start| start >= inserted)
-                });
+        // at or after the end of the result's insertion means the model
+        // spoke with the result in context. A delta that started inside or
+        // before the insertion span is the tail of speech already under way
+        // (S97 r3: " ready." at 23800-24000 over an insertion at
+        // 23800-24000), however late its sideband frame arrives.
+        let output_since_result = self
+            .result_inserted_through_ms
+            .remove(&delegation_id)
+            .is_none_or(|inserted_through| {
+                self.last_output_start_ms
+                    .is_some_and(|start| start >= inserted_through)
+            });
         Ok(Some((
             token,
             delegation_id,
@@ -2625,11 +2637,15 @@ impl SessionState {
                     false
                 });
             }
-            ServerEvent::CommentaryAppended { start_ms, .. } => {
+            ServerEvent::CommentaryAppended {
+                start_ms, end_ms, ..
+            } => {
                 self.commentary_ack_start_ms = Some(start_ms);
+                self.commentary_ack_end_ms = Some(end_ms);
                 let acknowledged = self
                     .acknowledge_append(AppendReceiptKind::Commentary, client_event_id.as_deref());
                 self.commentary_ack_start_ms = None;
+                self.commentary_ack_end_ms = None;
                 acknowledged?;
             }
             ServerEvent::ThinkingAppended { .. } => {
@@ -2903,9 +2919,9 @@ impl SessionState {
     /// model already read it ([`LIVE_RESULT_CUE`]).
     fn cue_acknowledged_result(&mut self, delegation_id: String) {
         let ack_start_ms = self.commentary_ack_start_ms;
-        if let Some(inserted) = ack_start_ms {
-            self.result_insertion_ms
-                .insert(delegation_id.clone(), inserted);
+        if let Some(inserted_through) = self.commentary_ack_end_ms {
+            self.result_inserted_through_ms
+                .insert(delegation_id.clone(), inserted_through);
         }
         let gap_ms = match (ack_start_ms, self.last_output_end_ms) {
             (Some(ack_start_ms), Some(end)) => ack_start_ms - end,
@@ -3383,10 +3399,12 @@ fn thinking_event_id(token: GptLiveAppendToken, index: usize) -> String {
 const LIVE_RESULT_CUE: &str = "This delegation's result has just arrived; anything you said about this request before now was said before it was done. If the user's latest request is still unanswered, answer it first. Then tell the user the actual outcome of this result, unless you have already told the user that outcome since it arrived; a greeting, an acknowledgement, or saying that the result follows does not count. Report only what the result itself says: when it says someone else was asked, their answer is still pending.";
 
 /// [`LIVE_RESULT_CUE`] for a result the model has not spoken since: the
-/// provider timeline shows no output after the result's insertion point, so
-/// the model cannot have reported it and the cue offers no "already
-/// reported" exception (S97 v3 r4: a greeting that ended 1 ms before the
-/// result was taken as the report, and the result was never voiced).
+/// provider timeline shows no output starting at or after the end of the
+/// result's insertion, so the model cannot have reported it and the cue
+/// offers no "already reported" exception (S97 v3 r4: a greeting that ended
+/// 1 ms before the result was taken as the report, and the result was never
+/// voiced; S97 r3 at 65294c7ca: the tail " ready." of a reply under way
+/// spanned the insertion itself and was taken as the report).
 const LIVE_RESULT_UNREPORTED_CUE: &str = "This delegation's result has just arrived and you have not told the user its outcome yet; anything you said about this request before now was said before it was done. If the user's latest request is still unanswered, answer it first. Then tell the user the actual outcome of this result now, even when it reports an error or that nothing could be done. Report only what the result itself says: when it says someone else was asked, their answer is still pending.";
 
 /// The cue that follows a result whose delegated work asked other members
@@ -3406,8 +3424,9 @@ const LIVE_RESULT_AWAITING_PEER_UNREPORTED_CUE: &str = "This delegation's result
 struct ResultCueWording {
     /// Its delegated work still awaits members' answers.
     awaiting_peer_replies: bool,
-    /// The provider timeline shows model output after the result's insertion
-    /// point, so the model may already have reported it.
+    /// The provider timeline shows model output starting at or after the end
+    /// of the result's insertion, generated with the result in context, so
+    /// the model may already have reported it.
     output_since_result: bool,
 }
 
@@ -5436,7 +5455,7 @@ mod tests {
         assert_eq!(result_cue_text(wording), LIVE_RESULT_UNREPORTED_CUE);
     }
 
-    /// Output after the insertion point (the response's tail or a folded-in
+    /// Output starting at or after the end of the insertion (a folded-in
     /// readout) keeps the exception, so a result already read is not read
     /// twice.
     #[test]
@@ -5451,6 +5470,83 @@ mod tests {
             .unwrap();
         state
             .apply_frame(frame(output_delta_span(" Table booked.", 2000.0, 2600.0)))
+            .unwrap();
+        model_output(&mut state, false, 8);
+        drain(&mut state);
+        let (_, _, wording) = state
+            .reserve_due_result_cue()
+            .unwrap()
+            .expect("one cue due");
+        assert!(wording.output_since_result);
+        assert_eq!(result_cue_text(wording), LIVE_RESULT_CUE);
+    }
+
+    fn ack_span(client_event_id: &str, start_ms: f64, end_ms: f64) -> Value {
+        let mut value = ack(Some(client_event_id));
+        value["start_ms"] = json!(start_ms);
+        value["end_ms"] = json!(end_ms);
+        value
+    }
+
+    /// S97 r3 (65294c7ca): the model was finishing "Voice channel ready."
+    /// from a response that began before the result landed. Its last delta,
+    /// " ready.", spans the insertion's own provider span (23800-24000) and
+    /// its sideband frame arrives after the acknowledgement. That tail is not
+    /// output since the result: the cue uses the unreported wording.
+    #[test]
+    fn a_tail_crossing_the_insertion_span_selects_the_unreported_cue() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        state
+            .apply_frame(frame(output_delta_span(" channel", 1800.0, 2000.0)))
+            .unwrap();
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_span(&pending_event_id(result), 2000.0, 2200.0)))
+            .unwrap();
+        assert_eq!(state.deferred_result_cues, ["dlg_cue"]);
+        state
+            .apply_frame(frame(output_delta_span(" ready.", 2000.0, 2200.0)))
+            .unwrap();
+        model_output(&mut state, false, 8);
+        drain(&mut state);
+        let (_, delegation_id, wording) = state
+            .reserve_due_result_cue()
+            .unwrap()
+            .expect("one cue due");
+        assert_eq!(delegation_id, "dlg_cue");
+        assert!(
+            !wording.output_since_result,
+            "a delta that started inside the insertion span is pre-insertion speech"
+        );
+        assert_eq!(result_cue_text(wording), LIVE_RESULT_UNREPORTED_CUE);
+    }
+
+    /// S97 r10 / S106 r1: the response under way when the result landed goes
+    /// on to voice it ("I'm here and | ready. And the directory is empty").
+    /// Output starting at the insertion's end was generated with the result
+    /// in context, so the result is not cued as unreported and read twice.
+    #[test]
+    fn a_response_continuing_past_the_insertion_end_keeps_the_exception_wording() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_span(&pending_event_id(result), 2000.0, 2200.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta_span(" I'm here and", 1800.0, 2200.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta_span(
+                " ready. And the directory is empty.",
+                2200.0,
+                3400.0,
+            )))
             .unwrap();
         model_output(&mut state, false, 8);
         drain(&mut state);

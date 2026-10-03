@@ -1325,7 +1325,11 @@ them.
   one cue until the response ends: 1600 ms of output silence measured on the
   provider's own output audio frames (`OUTPUT_SILENCE_RELEASE_MS`, derived
   like the user-floor release), never a wall-clock timer. A deferred cue
-  holds nothing a close waits on.
+  holds nothing a close waits on. When the provider timeline shows no model
+  output after the result's insertion point, the cue no longer offers an
+  "unless you have already reported it" exception, which the model took a
+  greeting for (S97 v3 r4). Where the model did speak after the result, the
+  exception now excludes greetings and acknowledgements.
 - GPT Live Turbo S S102 no longer fails a run whose member answered
   correctly. The oracle looked for the text "Peer response from" in the
   executor's history, which appears only when `send_response` carries no

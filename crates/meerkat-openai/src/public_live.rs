@@ -1714,7 +1714,7 @@ impl PublicLiveBrokerSession {
     /// Send the cues of acknowledged results, each bound to its delegation.
     async fn send_due_result_cues(&self) -> Result<(), GptLiveBrokerError> {
         loop {
-            let Some((token, delegation_id, awaiting_peer_replies)) =
+            let Some((token, delegation_id, wording)) =
                 self.state.lock().await.reserve_due_result_cue()?
             else {
                 return Ok(());
@@ -1722,12 +1722,15 @@ impl PublicLiveBrokerSession {
             let event = ClientEvent {
                 event_id: Field::Value(instructions_event_id(token, 0)),
                 command: Command::InstructionsAppend {
-                    content: result_cue_text(awaiting_peer_replies).to_owned(),
+                    content: result_cue_text(wording).to_owned(),
                     delegation_id: Nullable(Some(delegation_id)),
                 },
             };
             self.deliver_append(token, event).await?;
-            tracing::info!("public Live result cue sent");
+            tracing::info!(
+                output_since_result = wording.output_since_result,
+                "public Live result cue sent"
+            );
         }
     }
 
@@ -2266,6 +2269,9 @@ struct SessionState {
     /// [`USER_FLOOR_SPEECH_DBFS`]). Starts at the release, so a model that
     /// has not spoken is silent.
     output_silence_run_ms: u64,
+    /// Session-timeline insertion point of each acknowledged result whose cue
+    /// is not yet sent (`session.commentary.appended.start_ms`).
+    result_insertion_ms: HashMap<String, f64>,
     /// Client delegations created whose in-progress notice is not yet sent,
     /// in creation order ([`LIVE_DELEGATION_IN_PROGRESS`]).
     due_progress_notices: VecDeque<String>,
@@ -2319,6 +2325,7 @@ impl Default for SessionState {
             due_result_cues: VecDeque::new(),
             deferred_result_cues: VecDeque::new(),
             output_silence_run_ms: OUTPUT_SILENCE_RELEASE_MS,
+            result_insertion_ms: HashMap::new(),
             due_progress_notices: VecDeque::new(),
             awaiting_peer_results: HashSet::new(),
             unanswered_user_input: false,
@@ -2396,7 +2403,7 @@ impl SessionState {
     /// append, with whether its result awaits members' answers.
     fn reserve_due_result_cue(
         &mut self,
-    ) -> Result<Option<(GptLiveAppendToken, String, bool)>, GptLiveBrokerError> {
+    ) -> Result<Option<(GptLiveAppendToken, String, ResultCueWording)>, GptLiveBrokerError> {
         let Some(delegation_id) = self.due_result_cues.pop_front() else {
             return Ok(None);
         };
@@ -2411,7 +2418,24 @@ impl SessionState {
             pending.internal = Some(InternalAppend::ResultCue);
         }
         let awaiting_peer_replies = self.awaiting_peer_results.remove(&delegation_id);
-        Ok(Some((token, delegation_id, awaiting_peer_replies)))
+        // Output deltas arrive in timeline order, so the latest one starting
+        // at or after the insertion point means the model spoke after the
+        // result landed.
+        let output_since_result =
+            self.result_insertion_ms
+                .remove(&delegation_id)
+                .is_none_or(|inserted| {
+                    self.last_output_start_ms
+                        .is_some_and(|start| start >= inserted)
+                });
+        Ok(Some((
+            token,
+            delegation_id,
+            ResultCueWording {
+                awaiting_peer_replies,
+                output_since_result,
+            },
+        )))
     }
 
     /// Reserve the notice that goes ahead of a result awaiting members'
@@ -2879,6 +2903,10 @@ impl SessionState {
     /// model already read it ([`LIVE_RESULT_CUE`]).
     fn cue_acknowledged_result(&mut self, delegation_id: String) {
         let ack_start_ms = self.commentary_ack_start_ms;
+        if let Some(inserted) = ack_start_ms {
+            self.result_insertion_ms
+                .insert(delegation_id.clone(), inserted);
+        }
         let gap_ms = match (ack_start_ms, self.last_output_end_ms) {
             (Some(ack_start_ms), Some(end)) => ack_start_ms - end,
             _ => f64::INFINITY,
@@ -3352,7 +3380,14 @@ fn thinking_event_id(token: GptLiveAppendToken, index: usize) -> String {
 /// user request still unanswered (a held result goes out once the user's
 /// floor ends, possibly with that request open) is answered first. A genuine
 /// report made after the delivery still suppresses a second readout.
-const LIVE_RESULT_CUE: &str = "This delegation's result has just arrived; anything you said about this request before now was said before it was done. If the user's latest request is still unanswered, answer it first. Then tell the user the actual outcome of this result, unless you have already reported it since it arrived. Report only what the result itself says: when it says someone else was asked, their answer is still pending.";
+const LIVE_RESULT_CUE: &str = "This delegation's result has just arrived; anything you said about this request before now was said before it was done. If the user's latest request is still unanswered, answer it first. Then tell the user the actual outcome of this result, unless you have already told the user that outcome since it arrived; a greeting, an acknowledgement, or saying that the result follows does not count. Report only what the result itself says: when it says someone else was asked, their answer is still pending.";
+
+/// [`LIVE_RESULT_CUE`] for a result the model has not spoken since: the
+/// provider timeline shows no output after the result's insertion point, so
+/// the model cannot have reported it and the cue offers no "already
+/// reported" exception (S97 v3 r4: a greeting that ended 1 ms before the
+/// result was taken as the report, and the result was never voiced).
+const LIVE_RESULT_UNREPORTED_CUE: &str = "This delegation's result has just arrived and you have not told the user its outcome yet; anything you said about this request before now was said before it was done. If the user's latest request is still unanswered, answer it first. Then tell the user the actual outcome of this result now, even when it reports an error or that nothing could be done. Report only what the result itself says: when it says someone else was asked, their answer is still pending.";
 
 /// The cue that follows a result whose delegated work asked other members
 /// that have not answered yet (outbound peer requests with no terminal
@@ -3360,16 +3395,32 @@ const LIVE_RESULT_CUE: &str = "This delegation's result has just arrived; anythi
 /// "the actual outcome" is that: the model says it asked and states no
 /// answer (S102 r2 voiced an invented one). The member's real answer
 /// arrives later as its own row.
-const LIVE_RESULT_AWAITING_PEER_CUE: &str = "This delegation's result has just arrived: it reports that someone was asked, and their answer has not arrived yet. If the user's latest request is still unanswered, answer it first. Then tell the user only that you asked, unless you have already said so since it arrived; do not state, guess, or imply their answer.";
+const LIVE_RESULT_AWAITING_PEER_CUE: &str = "This delegation's result has just arrived: it reports that someone was asked, and their answer has not arrived yet. If the user's latest request is still unanswered, answer it first. Then tell the user only that you asked, unless you have already said so since it arrived (a greeting or an acknowledgement does not count); do not state, guess, or imply their answer.";
 
-/// The cue for an acknowledged result: [`LIVE_RESULT_AWAITING_PEER_CUE`]
-/// when its delegated work still awaits members' answers, otherwise
-/// [`LIVE_RESULT_CUE`].
-const fn result_cue_text(awaiting_peer_replies: bool) -> &'static str {
-    if awaiting_peer_replies {
-        LIVE_RESULT_AWAITING_PEER_CUE
-    } else {
-        LIVE_RESULT_CUE
+/// [`LIVE_RESULT_AWAITING_PEER_CUE`] for a result the model has not spoken
+/// since (see [`LIVE_RESULT_UNREPORTED_CUE`]).
+const LIVE_RESULT_AWAITING_PEER_UNREPORTED_CUE: &str = "This delegation's result has just arrived and you have not told the user about it yet: it reports that someone was asked, and their answer has not arrived yet. If the user's latest request is still unanswered, answer it first. Then tell the user now that you asked; do not state, guess, or imply their answer.";
+
+/// What a result's cue must say, read from broker state when it is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResultCueWording {
+    /// Its delegated work still awaits members' answers.
+    awaiting_peer_replies: bool,
+    /// The provider timeline shows model output after the result's insertion
+    /// point, so the model may already have reported it.
+    output_since_result: bool,
+}
+
+/// The cue for an acknowledged result: the awaiting-peer cue when its
+/// delegated work still awaits members' answers, and the "unreported" form
+/// (no "already reported" exception) when the model has produced no output
+/// since the result landed.
+const fn result_cue_text(wording: ResultCueWording) -> &'static str {
+    match (wording.awaiting_peer_replies, wording.output_since_result) {
+        (true, true) => LIVE_RESULT_AWAITING_PEER_CUE,
+        (true, false) => LIVE_RESULT_AWAITING_PEER_UNREPORTED_CUE,
+        (false, true) => LIVE_RESULT_CUE,
+        (false, false) => LIVE_RESULT_UNREPORTED_CUE,
     }
 }
 
@@ -5359,6 +5410,78 @@ mod tests {
         assert_eq!(state.reserve_due_result_cue().unwrap(), None, "exactly one");
     }
 
+    /// S97 v3 r4: the model's output ended 1 ms before the result's insertion
+    /// point and nothing followed. The deferred cue is released after the
+    /// response ends and uses the "unreported" wording, with no "already
+    /// reported" exception the model can take its greeting for.
+    #[test]
+    fn a_result_with_no_output_since_it_landed_gets_the_unreported_cue() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_at(&pending_event_id(result), 2001.0)))
+            .unwrap();
+        assert_eq!(state.deferred_result_cues, ["dlg_cue"]);
+        model_output(&mut state, false, 8);
+        drain(&mut state);
+        let (_, delegation_id, wording) = state
+            .reserve_due_result_cue()
+            .unwrap()
+            .expect("one cue due");
+        assert_eq!(delegation_id, "dlg_cue");
+        assert!(!wording.output_since_result);
+        assert_eq!(result_cue_text(wording), LIVE_RESULT_UNREPORTED_CUE);
+    }
+
+    /// Output after the insertion point (the response's tail or a folded-in
+    /// readout) keeps the exception, so a result already read is not read
+    /// twice.
+    #[test]
+    fn output_after_the_insertion_point_keeps_the_exception_wording() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_at(&pending_event_id(result), 2000.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta_span(" Table booked.", 2000.0, 2600.0)))
+            .unwrap();
+        model_output(&mut state, false, 8);
+        drain(&mut state);
+        let (_, _, wording) = state
+            .reserve_due_result_cue()
+            .unwrap()
+            .expect("one cue due");
+        assert!(wording.output_since_result);
+        assert_eq!(result_cue_text(wording), LIVE_RESULT_CUE);
+    }
+
+    /// A result landing into silence is cued at once with the unreported
+    /// wording: nothing was said since it landed.
+    #[test]
+    fn an_immediate_cue_into_silence_uses_the_unreported_wording() {
+        let mut state = state_with_spoken_delegation();
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_at(&pending_event_id(result), 4000.0)))
+            .unwrap();
+        drain(&mut state);
+        let (_, _, wording) = state
+            .reserve_due_result_cue()
+            .unwrap()
+            .expect("one cue due");
+        assert!(!wording.output_since_result);
+        assert_eq!(result_cue_text(wording), LIVE_RESULT_UNREPORTED_CUE);
+    }
+
     /// A result acknowledged within the release window after the model's last
     /// speech frame is still inside its response: deferred, then cued.
     #[test]
@@ -5842,7 +5965,8 @@ mod tests {
             "a still-open user request comes first"
         );
         assert!(
-            LIVE_RESULT_CUE.contains("unless you have already reported it since it arrived"),
+            LIVE_RESULT_CUE
+                .contains("unless you have already told the user that outcome since it arrived"),
             "a genuine post-delivery report still suppresses a second readout"
         );
         assert!(
@@ -5942,8 +6066,40 @@ mod tests {
     /// answers: the awaiting cue tells the model to say only that it asked.
     #[test]
     fn the_result_cue_is_selected_by_whether_peer_answers_are_pending() {
-        assert_eq!(result_cue_text(false), LIVE_RESULT_CUE);
-        assert_eq!(result_cue_text(true), LIVE_RESULT_AWAITING_PEER_CUE);
+        let wording = |awaiting_peer_replies, output_since_result| ResultCueWording {
+            awaiting_peer_replies,
+            output_since_result,
+        };
+        assert_eq!(result_cue_text(wording(false, true)), LIVE_RESULT_CUE);
+        assert_eq!(
+            result_cue_text(wording(true, true)),
+            LIVE_RESULT_AWAITING_PEER_CUE
+        );
+        assert_eq!(
+            result_cue_text(wording(false, false)),
+            LIVE_RESULT_UNREPORTED_CUE
+        );
+        assert_eq!(
+            result_cue_text(wording(true, false)),
+            LIVE_RESULT_AWAITING_PEER_UNREPORTED_CUE
+        );
+        for unreported in [
+            LIVE_RESULT_UNREPORTED_CUE,
+            LIVE_RESULT_AWAITING_PEER_UNREPORTED_CUE,
+        ] {
+            assert!(
+                !unreported.contains("unless"),
+                "a result the model has not spoken since gets no exception"
+            );
+            assert!(unreported.len() <= CONTEXT_FRAGMENT_MAX_BYTES);
+        }
+        for escape in [LIVE_RESULT_CUE, LIVE_RESULT_AWAITING_PEER_CUE] {
+            assert!(
+                escape.contains("does not count"),
+                "the exception rules out greetings and acknowledgements"
+            );
+            assert!(escape.len() <= CONTEXT_FRAGMENT_MAX_BYTES);
+        }
         assert!(
             LIVE_RESULT_AWAITING_PEER_CUE.contains(
                 "it reports that someone was asked, and their answer has not arrived yet"
@@ -6005,12 +6161,12 @@ mod tests {
             state
                 .acknowledge_append(AppendReceiptKind::Commentary, Some(receipt.as_str()))
                 .expect("result acknowledged");
-            let (_, delegation_id, awaiting_peer_replies) = state
+            let (_, delegation_id, wording) = state
                 .reserve_due_result_cue()
                 .expect("cue reserved")
                 .expect("cue due");
             assert_eq!(delegation_id, "dlg_peer");
-            assert_eq!(awaiting_peer_replies, awaiting);
+            assert_eq!(wording.awaiting_peer_replies, awaiting);
             assert!(
                 state.awaiting_peer_results.is_empty(),
                 "consumed by its cue"
@@ -6859,7 +7015,9 @@ mod tests {
                 let cue = recv_json(&mut socket, &capture).await;
                 assert_eq!(cue["type"], "session.instructions.append");
                 assert_eq!(cue["delegation_id"], "dlg_peer");
-                assert_eq!(cue["content"], LIVE_RESULT_AWAITING_PEER_CUE);
+                // Nothing was spoken after the result landed: the awaiting
+                // cue carries no "already said so" exception.
+                assert_eq!(cue["content"], LIVE_RESULT_AWAITING_PEER_UNREPORTED_CUE);
                 let mut cue_ack = ack(cue["event_id"].as_str());
                 cue_ack["type"] = json!("session.instructions.appended");
                 send_json(&mut socket, cue_ack).await;

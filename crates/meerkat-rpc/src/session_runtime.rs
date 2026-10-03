@@ -5293,28 +5293,20 @@ impl SessionRuntime {
             ));
         }
 
-        let jobs = self
-            .job_store
-            .list_all(10_000)
+        // Visit exactly the runtimes the delivery authority reports as holding
+        // undrained rows for this realm's jobs. The previous job-row window
+        // (`list_all(10_000)`, ordered by job id) missed sessions whose jobs
+        // aged out of it while their inbox rows stayed pending forever.
+        // Subscriber fan-out happens inside each origin runtime's rows.
+        let sessions = projector
+            .sessions_with_pending_deliveries()
             .await
             .map_err(|error| error.to_string())?;
-        let mut sessions = BTreeMap::new();
-        for job in jobs
-            .into_iter()
-            .filter(|job| job.spec.realm_id == realm_id.as_str())
-        {
-            let origin_session_id = job.spec.origin_session_id;
-            sessions.insert(origin_session_id.to_string(), origin_session_id);
-            for subscription in job.subscriptions {
-                let session_id = subscription.session_id().clone();
-                sessions.insert(session_id.to_string(), session_id);
-            }
-        }
         let base_sink: Arc<dyn meerkat::JobDeliverySink> =
             Arc::new(SessionRuntimeJobDeliverySink {
                 runtime: Arc::clone(self),
             });
-        for session_id in sessions.into_values() {
+        for session_id in sessions {
             let sink: Arc<dyn meerkat::JobDeliverySink> = match self
                 .runtime_adapter
                 .ops_lifecycle_registry(&session_id)

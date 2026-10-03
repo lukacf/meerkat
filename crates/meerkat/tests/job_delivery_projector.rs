@@ -1072,3 +1072,53 @@ async fn out_of_order_shell_acknowledgements_advance_through_the_acknowledged_pr
         .await
         .expect("a repeated acknowledgement is idempotent");
 }
+
+/// The drain population comes from the runtime delivery authority, not from a
+/// bounded window of job rows: every origin session with undrained rows for
+/// this realm's jobs is reported, foreign-realm runtimes are left alone, and a
+/// session drops out once its rows are applied.
+#[tokio::test]
+async fn pending_delivery_sessions_come_from_delivery_authority_scoped_to_realm() {
+    let job_store = Arc::new(MemoryDetachedJobStore::new());
+    let jobs = DetachedJobService::new(job_store.clone());
+    let inbox = RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new()));
+    let first_session = SessionId::new();
+    let second_session = SessionId::new();
+    let foreign_session = SessionId::new();
+    let first_job = completed_job(&jobs, first_session.clone(), "authority-a").await;
+    let _second_job = completed_job(&jobs, second_session.clone(), "authority-b").await;
+    let _foreign_job =
+        completed_job_in_realm(&jobs, "mob.other", foreign_session.clone(), "authority-c").await;
+    // An unbound projector commits every realm's rows into the shared inbox.
+    let pass = JobOutboxProjector::new(job_store.clone(), inbox.clone())
+        .project_pending(10)
+        .await
+        .expect("project");
+    assert_eq!(pass.projected.len(), 3);
+
+    let realm_projector = JobOutboxProjector::new_for_realm(job_store, inbox, "default");
+    let mut sessions = realm_projector
+        .sessions_with_pending_deliveries()
+        .await
+        .expect("pending sessions");
+    sessions.sort_by_key(ToString::to_string);
+    let mut expected = vec![first_session.clone(), second_session.clone()];
+    expected.sort_by_key(ToString::to_string);
+    assert_eq!(
+        sessions, expected,
+        "own-realm sessions only, from authority"
+    );
+
+    realm_projector
+        .acknowledge_applied(first_job.as_str())
+        .await
+        .expect("acknowledge first");
+    assert_eq!(
+        realm_projector
+            .sessions_with_pending_deliveries()
+            .await
+            .expect("pending sessions"),
+        vec![second_session],
+        "an applied session leaves the drain population"
+    );
+}

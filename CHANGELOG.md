@@ -457,6 +457,28 @@ them.
 
 ### Security
 
+- The BuildBuddy launchers no longer send the caller's environment to
+  BuildBuddy. Bazel records every client environment variable
+  (`--client_env=NAME=value`) and its command line in the build event stream.
+  `scripts/buildbuddy-bazel-poc`, through which `scripts/buildbuddy-dev`, the
+  CI lane scripts and the release workflow all reach bb, ran the client with
+  the whole shell environment, including every exported secret. The client
+  now runs under `env -i` with an explicit allowlist:
+  - process basics;
+  - toolchain and cache locations;
+  - the non-secret e2e test-selection names the lanes forward;
+  - CI metadata.
+
+  Provider keys for the live lanes (`e2e-live-rbe`, `e2e-auth-rbe`,
+  `e2e-smoke-remote-rbe`, `e2e-smoke-turbo-s-rbe`) travel only through
+  BuildBuddy's secret-env-overrides header. That header, and any explicit
+  `MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES[_BASE64]`, is now written into the
+  same 0600 temp bazelrc as the API key instead of argv. A live lane on the
+  `gcp-local` backend, and a provider value the header cannot carry exactly,
+  are refused rather than forwarded. `make path-classifier-selftest` runs
+  `scripts/tests/buildbuddy_launcher_env_test.sh`, which checks this against a
+  fake `bb` with no BuildBuddy.
+
 - Agent mob tools no longer accept host-only configuration from model
   arguments. The agent `mob_create` deserialized the internal
   `MobDefinition`, so a member with create authority could put

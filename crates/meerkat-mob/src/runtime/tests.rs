@@ -46351,6 +46351,67 @@ async fn test_retire_deadline_after_archive_commit_retains_anchor_and_retry_conv
     );
 }
 
+/// Force cancel and cancel-all-work on a member whose runtime is attached but
+/// has no run (MobKit CI: "local interrupt_member failed: Runtime not ready:
+/// attached"). Both succeed: the member has no run left that the cancel is
+/// responsible for. Neither leaves a cancel behind for the member's next run:
+/// no boundary cancel is dispatched, and the next turn completes.
+#[tokio::test]
+async fn test_cancel_verbs_on_an_attached_member_without_a_run_succeed_and_leave_no_cancel() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("attached-idle-target");
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn runtime-backed target");
+    let entry = handle
+        .get_member(&member_id)
+        .await
+        .unwrap()
+        .expect("member exists");
+    let baseline_boundary = service.cancel_after_boundary_call_count();
+
+    handle
+        .force_cancel_member(member_id.clone())
+        .await
+        .expect("force cancel of an attached member without a run succeeds");
+    handle
+        .cancel_all_work(entry.agent_runtime_id.clone(), entry.fence_token)
+        .await
+        .expect("cancel-all-work of an attached member without a run succeeds");
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        baseline_boundary,
+        "no boundary cancel is dispatched for a member without a run"
+    );
+
+    let member = handle.member(&member_id).await.expect("member handle");
+    let turn = member
+        .start_turn(
+            ContentInput::Text("after the cancels".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("admit a turn after the cancels");
+    tokio::time::timeout(Duration::from_secs(30), turn.wait())
+        .await
+        .expect("the next turn runs")
+        .expect("the next turn completes: no cancel was left behind for it");
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        baseline_boundary,
+        "the next turn received no leftover cancel"
+    );
+}
+
 #[tokio::test]
 async fn test_runtime_adapter_cancel_all_work_rejects_unsupported_boundary_cancel() {
     let (handle, service) = create_test_mob(sample_definition()).await;

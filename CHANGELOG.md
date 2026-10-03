@@ -1212,6 +1212,14 @@ them.
 
 ### Fixed
 
+- `MobHandle::force_cancel_member` and `MobHandle::cancel_all_work` no longer
+  fail with `Internal("... Runtime not ready: attached")` on a member whose
+  runtime is attached but has no run. Both now cancel the member's current
+  run, exactly that run, at its next boundary, and succeed when there is
+  nothing left to cancel (no run, or the run ended first). They no longer
+  queue an ambient cancel on an idle member that its next run could pick up.
+  `MobProvisioner` gains `cancel_member_current_run_at_boundary`, whose
+  default interrupts the member as before.
 - GPT Live no longer announces "Finished voice request ... The result follows."
   for a result whose work is still waiting on another member's answer
   (Turbo S combined5 S102 R3: the voice answered that announcement with an

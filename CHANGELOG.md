@@ -258,7 +258,6 @@ them.
     temporary councils keep their own member bindings. The classification
     comes from the mob's persisted owner bridge authority, so it survives
     restore.
-
 - `meerkat_mob::MobError` gains `ToolBundleUnavailable { bundle }`, the typed
   refusal for a member whose profile names a tool bundle its mob's builder
   does not register (previously an untyped `MobError::Internal`). Exhaustive
@@ -972,7 +971,6 @@ them.
   `rust_bundles`: each resolved bundle is a `ToolVocabularySource::Bundle`
   vocabulary on the declared restriction, so a bundle tool the member does not
   mount is inert and the gate refuses a mounted one by name.
-
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a
@@ -1305,23 +1303,20 @@ them.
   - Stop no longer sends the orchestrator a "Mob is stopping." lifecycle
     notice, which a held orchestrator could only read after Resume; the
     existing resume notice tells it the mob resumed.
-  - A remote member that was not bound when Resume released holds gets its
-    release on its next bind, and one that was not bound when Stop held them
-    gets the hold on its next bind. A placed member whose host carrier is
-    dormant (for example after a cleanup-backed host revoke) is reported
-    `NotBound` instead of failing the Stop; MobMachine re-activates a placed
-    carrier only while Running.
-  - A spawn that completes into a Stopped mob leaves it Stopped and holds
-    its members, the new one included. Before, MobMachine's spawn completion
-    moved a Stopped mob back to Running. Only Resume leaves Stopped.
   - A remote member that was not bound when a Stop held or a Resume
     released its run starts gets the matching command on its next bind, also
     after a supervisor restart. Every bind delivers the run-start posture
     MobMachine state records (held while its member run starts are held,
     released otherwise); the in-memory owed commands a restart lost are
-    gone. A placed member gets the posture when its carrier is
-    re-activated, and a host that advertises the hold but rejects it as
-    unsupported is reported not holdable on every Stop.
+    gone. A placed member whose host carrier is dormant (for example after a
+    cleanup-backed host revoke) is reported `NotBound` instead of failing the
+    Stop, and gets the posture when its carrier is re-activated; MobMachine
+    re-activates a placed carrier only while Running. A host that advertises
+    the hold but rejects it as unsupported is reported not holdable on every
+    Stop.
+  - A spawn that completes into a Stopped mob leaves it Stopped and holds
+    its members, the new one included. Before, MobMachine's spawn completion
+    moved a Stopped mob back to Running. Only Resume leaves Stopped.
 - The rkat full-tools spawn fits its 2 MiB production worker-stack budget
   again (`tools_full_with_explicit_auth_binding_can_spawn_within_production_stack_budget`
   overflowed after #1436). The agent's LLM retry loop builds its

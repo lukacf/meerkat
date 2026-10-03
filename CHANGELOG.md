@@ -1248,6 +1248,51 @@ them.
   own boxed frame, and its fallback-origin resume check runs out of line.
   Before, both recovery paths sat inline in one poll frame. The deepest
   debug path now fits in about 1.5 MiB.
+- Public GPT Live holds delegation commentary (a result or a narration)
+  that arrives while the user's latest utterance is unanswered. A held
+  narration that a close leaves unsent is dropped, since it is ephemeral
+  progress speech.
+- Public GPT Live releases held delegation commentary once the user stops
+  holding the floor, even if the model never answers. Before, only the model's
+  next output or a delegation released it, so a user who kept talking past
+  the delegation to a silent model left the result unsent for good (Turbo S
+  S103).
+  - The floor is a real user turn: an input transcript delta whose speech
+    began after the model's last output ended and after the last delegation.
+    A backchannel over the model's speech takes no floor, and audio energy
+    alone (noise) never opens one.
+  - The floor ends after `USER_FLOOR_SILENCE_RELEASE_MS` (1600 ms) of
+    reflected-input silence on the provider's audio clock, below
+    `USER_FLOOR_SPEECH_DBFS` (-50 dBFS). There is no wall-clock timer, and
+    both constants document their derivation from Turbo S provider streams
+    and fixtures.
+- Public GPT Live no longer lets the model claim a delegated request is done
+  before its result exists (S103: "I've updated it to Friday afternoon"
+  3.6 s early, then silence once the result arrived).
+  - Every client delegation now gets a broker-owned in-progress notice on the
+    instructions lane, bound to it. It says not to describe the request as done
+    or state its outcome until the result arrives.
+  - The result cue now says that anything said about the request before the
+    result arrived came before it was done. If the user's latest request is
+    still unanswered, the model answers it first, then confirms the actual
+    outcome.
+- Public GPT Live holds a delegation result that arrives while the user's
+  latest utterance is unanswered. Appending it then diverted the model into
+  answering the result instead of the user, and the request was never
+  delegated (S100, S101). The result is released in order when provider
+  ordering answers the utterance: the model's next output, or the
+  utterance's `session.delegation.created`. A close or teardown first leaves
+  it unsent, and it settles as interrupted by close. Utterance positions come
+  from the session timeline, so a transcription tail that arrives late is
+  not a new utterance.
+- A result's speak cue is no longer sent while the model speaks past the
+  result's insertion point (output observed ending after the result's
+  acknowledgement position). An instructions append during output could
+  stop the answer mid-sentence: 5 of 44 such cues did in the final soak.
+- A live delegation result interrupted by its channel's close (held,
+  in flight, or refused) is merged into the source member as runtime work.
+  Before, it was retired without the post-close merge and lost.
+
 - Public GPT Live no longer drops a delegation result's speak cue when the
   result lands soon after the model's last word. Previously a cue was
   suppressed when the gap was under 1000 ms. A result that landed 400 ms
@@ -1256,6 +1301,10 @@ them.
   Every acknowledged result now gets one instructions-lane cue, bound to the
   result's `delegation_id`. It is phrased to be safe either way: tell the
   user the result unless it was already told.
+  user the outcome unless it was already reported since the result arrived.
+  Speech before the delivery (an intention such as "I'll use Friday") does
+  not count as a report.
+
 - Opening or refreshing a live channel on a member whose turn is in flight no
   longer waits for the turn to end.
   - The realtime open and refresh projections took the session's turn

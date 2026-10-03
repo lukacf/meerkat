@@ -1312,6 +1312,10 @@ pub struct ExperimentalLiveDelegationCoordinator {
     bound_channels: BoundChannelMap,
     client_context_restart_reconciler_armed: Arc<std::sync::atomic::AtomicBool>,
     client_context_restart_inventory_ready: Arc<ClientContextRestartInventoryReady>,
+    /// Test observation of every result routed to the post-close merge, as
+    /// (operation id, result text).
+    #[cfg(test)]
+    post_close_merges: Arc<std::sync::Mutex<Vec<(String, String)>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1608,6 +1612,8 @@ impl ExperimentalLiveDelegationCoordinator {
             client_context_restart_inventory_ready: Arc::new(
                 ClientContextRestartInventoryReady::default(),
             ),
+            #[cfg(test)]
+            post_close_merges: Arc::default(),
         }
     }
 
@@ -3041,7 +3047,16 @@ impl ExperimentalLiveDelegationCoordinator {
                         {
                             let retained = self.retained.lock().await.get(&operation_id).cloned();
                             if let Some(retained) = retained {
-                                self.remove_retained_delegation(&retained).await;
+                                if observation
+                                    == LiveDelegationResultDeliveryObservation::InterruptedByClose
+                                {
+                                    // Never crossed the boundary: post-close
+                                    // merge, as in `try_release_retained_result`.
+                                    retained.result.lock().await.dispatch_crossed = false;
+                                    self.merge_result_after_channel_close(&retained).await;
+                                } else {
+                                    self.remove_retained_delegation(&retained).await;
+                                }
                             }
                         }
                         LiveDelegationResultDeliveryResolution::AmbiguityRecovery(recovery) => {
@@ -4073,14 +4088,18 @@ impl ExperimentalLiveDelegationCoordinator {
         {
             tracing::warn!(%error, %operation_id, "unstartable voice work item could not be closed");
         }
-        self.narrate(
+        // Spawned, not awaited: this runs from the channel's schedule pump,
+        // which can sit on the observation loop, and the broker may hold the
+        // narration behind an unanswered user utterance until the loop reads
+        // the output or delegation that releases it. The lane still orders
+        // it against the channel's other commentary.
+        self.spawn_narration(
             NarrationSubject::from_pending(pending, lane),
             LiveDelegationNarrationKind::Failed,
             0,
             Vec::new(),
             false,
-        )
-        .await;
+        );
     }
 
     fn spawn_narration(
@@ -4568,6 +4587,11 @@ impl ExperimentalLiveDelegationCoordinator {
         if retained.admission.worker_ownership() == LiveDelegationWorkerOwnership::OwnedMember
             && let Some(text) = undelivered
         {
+            #[cfg(test)]
+            self.post_close_merges
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((retained.operation.operation_id().to_string(), text.clone()));
             self.merge_result_into_source(retained, &text).await;
         }
         self.remove_retained_delegation(retained).await;
@@ -5533,6 +5557,16 @@ impl ExperimentalLiveDelegationCoordinator {
             LiveDelegationResultDeliveryResolution::AmbiguityRecovery(recovery) => {
                 self.retain_and_realize_result_recovery(recovery).await;
             }
+        }
+        if observation == LiveDelegationResultDeliveryObservation::InterruptedByClose {
+            // The channel closed before the provider took the result: it was
+            // held behind an unanswered utterance, still in flight, or
+            // refused. It never crossed the boundary (only delivered or
+            // ambiguous results do), so it takes the post-close path and
+            // merges into the source member as runtime work.
+            retained.result.lock().await.dispatch_crossed = false;
+            self.merge_result_after_channel_close(retained).await;
+            return Ok(());
         }
         self.remove_retained_delegation(retained).await;
         Ok(())
@@ -7552,6 +7586,10 @@ mod tests {
         /// narration reports `ActiveBindingUnavailable`, as the real control
         /// plane does between the physical close and the machine's close.
         binding_unavailable: std::sync::atomic::AtomicBool,
+        /// Every result release resolves as interrupted by close, as the
+        /// owner's close settlement resolves a result the provider never took
+        /// (for example one the broker held behind an unanswered utterance).
+        interrupt_results_by_close: std::sync::atomic::AtomicBool,
         /// Canonical commit outcomes of continuations by id; an unscripted
         /// continuation never committed.
         continuation_commits: Mutex<
@@ -7674,10 +7712,18 @@ mod tests {
                 result_digest: format!("sha256:{:x}", Sha256::digest(text.as_bytes())),
                 result_text: text,
             });
+            let observation = if self
+                .interrupt_results_by_close
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                LiveDelegationResultDeliveryObservation::InterruptedByClose
+            } else {
+                LiveDelegationResultDeliveryObservation::Delivered
+            };
             Ok(ExperimentalGptLiveResultDeliveryDispatch::Resolved(
                 meerkat::experimental_gpt_live::ExperimentalGptLiveResultDeliveryResolution::__gate0_harness(
                     authority,
-                    LiveDelegationResultDeliveryObservation::Delivered,
+                    observation,
                 ),
             ))
         }
@@ -7735,6 +7781,329 @@ mod tests {
         ] {
             assert_retained_terminal_result_chain(ownership).await?;
         }
+        Ok(())
+    }
+
+    /// A result the channel's close settles as interrupted by close (the
+    /// broker held it behind an unanswered utterance, so the provider never
+    /// took it) is delivered as runtime work: it takes the post-close merge
+    /// into the source member, and is never dropped.
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    #[tokio::test]
+    async fn a_result_interrupted_by_close_merges_into_the_source_member()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::service::{
+            CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionService,
+        };
+
+        let session_id = SessionId::new();
+        let channel_id = meerkat_core::LiveChannelId::new("live:held-result-close");
+
+        let session_service = Arc::new(meerkat_session::EphemeralSessionService::new(
+            ExactProjectionTestAgentBuilder(session_id.clone()),
+            1,
+        ));
+        SessionService::create_session(
+            session_service.as_ref(),
+            CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "exact-projection-test".to_string(),
+                prompt: "unused".to_string().into(),
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: None,
+                labels: None,
+            },
+        )
+        .await
+        .expect("materialize canonical transcript owner");
+
+        let runtime = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+        let _bindings = runtime
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare exact runtime binding");
+        let identity = meerkat_core::SessionLlmIdentity {
+            model: "experimental-live".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        runtime
+            .resolve_live_open_admission(&session_id, &channel_id, &identity)
+            .await
+            .expect("admit exact live channel");
+        let execution_profile =
+            meerkat_runtime::live_execution::LiveExecutionProfileSelection::__test_new(
+                "test-client-context",
+                meerkat_core::LiveExecutionMode::ClientContext,
+                meerkat_core::LiveExecutionCapabilities {
+                    function_bridge: false,
+                    client_context: true,
+                },
+            )
+            .expect("construct exact test execution profile");
+        runtime
+            .resolve_live_execution_profile_admission(&session_id, &channel_id, &execution_profile)
+            .await
+            .expect("admit exact client-context mode");
+        let stage = runtime
+            .stage_experimental_live_execution(&session_id, &channel_id, 0)
+            .await
+            .expect("stage exact experimental live execution");
+        runtime
+            .register_live_playback_owner(&stage, "test-exact-result-playback-owner")
+            .await
+            .expect("register exact playback owner");
+        runtime
+            .record_live_webrtc_token_issued(
+                &session_id,
+                &channel_id,
+                "test-exact-result-token",
+                100,
+                1_000,
+            )
+            .await
+            .expect("record exact signaling token");
+        let mut answer_admission = runtime
+            .resolve_live_webrtc_answer_admission(
+                &session_id,
+                &channel_id,
+                "test-exact-result-token",
+                101,
+            )
+            .await
+            .expect("resolve exact signaling admission");
+        assert!(answer_admission.admitted);
+        let admitted_offer = meerkat_live::LiveWebrtcAdmittedOffer::from_machine_admission(
+            channel_id.clone(),
+            session_id.clone(),
+            Some(meerkat_live::LiveWebrtcRuntimeBinding {
+                generation: stage.binding().generation(),
+                fence: stage.binding().fence_token(),
+            }),
+            "test-offer-sdp".to_string(),
+            answer_admission
+                .transport_seal
+                .take()
+                .expect("admitted answer carries one-use provider seal"),
+        );
+        let provider_offer = admitted_offer
+            .into_provider_offer()
+            .expect("consume exact signaling admission");
+        let provider_binding = provider_offer.binding().clone();
+        let answer = provider_offer.into_pending_bound_ready_answer(
+            "test-answer-sdp".to_string(),
+            Arc::new(ExactProjectionSideband),
+            Box::new(ExactProjectionBoundReadyResolver),
+        );
+        let (_, _, pending_bound_ready) = answer.into_parts();
+        let bound_ready = pending_bound_ready
+            .__resolve_after_answer_delivery()
+            .await
+            .expect("provider acknowledges exact empty canonical seed");
+        runtime
+            .accept_live_webrtc_answer_and_bind_execution(&provider_binding, &bound_ready, 1)
+            .await
+            .expect("bind exact live execution after provider readiness");
+
+        let turn = LiveSidebandTurnRef::__from_provider_observation(
+            &channel_id,
+            "turn:exact-result-projection".to_string(),
+            "provider-private-turn-ref".to_string(),
+        )
+        .expect("provider turn fixture");
+        let turn_started = runtime
+            .observe_live_provider_turn_started(&LiveSidebandObservation::new(
+                provider_binding.clone(),
+                LiveSidebandObservationKind::TurnStarted {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ))
+            .await
+            .expect("admit exact provider turn");
+        let provider_turn_ref = turn_started.provider_turn_ref().to_string();
+        let provider = OpaqueProviderCorrelation::new(
+            "delegation:exact-result-projection",
+            provider_turn_ref.clone(),
+        )
+        .expect("provider correlation fixture");
+        let correlation = LiveUserTurnCorrelation::new(
+            channel_id.clone(),
+            turn_started.interaction_id(),
+            provider,
+        )
+        .expect("live turn correlation fixture");
+        let operation = ExactOperationIdentity::for_domain(OperationId::new(), correlation.clone());
+        let provisional = ProvisionalLiveHandoff::new(
+            correlation,
+            "exact final delegated user input",
+            LiveHandoffInputProvenance::NormalizedHandoff,
+        )
+        .expect("provisional handoff fixture");
+        runtime
+            .admit_live_delegation(turn_started.binding(), &operation, &provisional)
+            .await
+            .expect("admit exact live delegation");
+        let runtime_id = turn_started.binding().runtime_id().clone();
+        let fence_token = turn_started.binding().fence_token();
+        let generation = turn_started.binding().generation();
+
+        let final_transcript = session_service
+            .commit_live_user_transcript_final(
+                &session_id,
+                provisional.clone(),
+                Some(meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id: provider_turn_ref,
+                    previous_item_id: None,
+                    content_index: 0,
+                    text: "exact final delegated user input".to_string(),
+                }),
+            )
+            .await
+            .expect("commit exact final transcript evidence");
+        let reconciliation = runtime
+            .reconcile_live_delegation_transcript(
+                &session_id,
+                &runtime_id,
+                fence_token,
+                generation,
+                &operation,
+                &provisional,
+                &final_transcript,
+            )
+            .await
+            .expect("reconcile exact final transcript");
+        let admission = runtime
+            .authorize_live_delegation_worker_start_with_ownership(
+                &session_id,
+                &runtime_id,
+                fence_token,
+                generation,
+                &operation,
+                &provisional,
+                "exact-result-projection-worker",
+                meerkat_runtime::live_execution::LiveDelegationWorkerOwnership::OwnedMember,
+            )
+            .await
+            .expect("authorize exact bounded worker");
+        runtime
+            .resolve_live_delegation_worker_start(
+                &runtime_id,
+                fence_token,
+                generation,
+                &admission,
+                true,
+            )
+            .await
+            .expect("record exact bounded worker start");
+        let terminal_receipt = runtime
+            .record_live_delegation_worker_terminal(
+                &runtime_id,
+                fence_token,
+                generation,
+                &admission,
+                LiveDelegationWorkerTerminalKind::Completed,
+            )
+            .await
+            .expect("record exact completed bounded worker");
+        let retirement = runtime
+            .authorize_live_delegation_worker_retirement(
+                &runtime_id,
+                fence_token,
+                generation,
+                &admission,
+            )
+            .await
+            .expect("authorize exact bounded worker retirement");
+        runtime
+            .resolve_live_delegation_worker_retirement(
+                &runtime_id,
+                fence_token,
+                generation,
+                &retirement,
+                true,
+            )
+            .await
+            .expect("record exact bounded worker retirement");
+        let exact_result = retain_terminal_result(
+            true,
+            LiveDelegationWorkerTerminalKind::Completed,
+            terminal_receipt.late(),
+            Some("line one from executor\nline two remains byte-exact  ".to_string()),
+        )
+        .expect("retired exact bounded completion is projection-eligible");
+
+        let control = Arc::new(ExactProjectionControl::default());
+        let binding = turn_started.binding().clone();
+        let retained = Arc::new(RetainedDelegation {
+            operation: operation.clone(),
+            provisional,
+            runtime_binding: binding,
+            admission,
+            delegation: LiveSidebandDelegationRef::__from_provider_observation(
+                "delegation:exact-result-projection".to_string(),
+                "provider-private-delegation-ref".to_string(),
+            )
+            .expect("provider delegation fixture"),
+            control: Arc::clone(&control) as Arc<dyn ExperimentalGptLiveControlPlane>,
+            result: Mutex::new(RetainedDelegationResult {
+                reconciliation: Some(reconciliation),
+                result_text: Some(exact_result.clone()),
+                ..RetainedDelegationResult::default()
+            }),
+            work: None,
+            workgraph: None,
+            title: "exact result projection".to_string(),
+            append_lane: Arc::new(Mutex::new(())),
+            mob_handle: None,
+            source_identity: AgentIdentity::from("exact-result-source"),
+            steer_delivery_chain: std::sync::Mutex::new(SteerDeliveryChain::default()),
+        });
+        let coordinator = ExperimentalLiveDelegationCoordinator::new(
+            Arc::clone(&runtime),
+            crate::MobMcpState::new_in_memory_with_archive_delay(0),
+        );
+        coordinator
+            .retained
+            .lock()
+            .await
+            .insert(operation.operation_id().clone(), Arc::clone(&retained));
+
+        control
+            .interrupt_results_by_close
+            .store(true, std::sync::atomic::Ordering::Release);
+        coordinator
+            .try_release_retained_result(&retained)
+            .await
+            .expect("an interrupted-by-close result settles");
+
+        assert_eq!(
+            coordinator
+                .post_close_merges
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            vec![(operation.operation_id().to_string(), exact_result.clone())],
+            "the result is routed to the post-close merge with its exact text"
+        );
+        assert!(
+            !coordinator
+                .retained
+                .lock()
+                .await
+                .contains_key(operation.operation_id()),
+            "the merge retires the retained custody"
+        );
+        assert!(
+            retained.result.lock().await.result_text.is_none(),
+            "the result text was taken by the merge, so no later path can merge it twice"
+        );
         Ok(())
     }
 

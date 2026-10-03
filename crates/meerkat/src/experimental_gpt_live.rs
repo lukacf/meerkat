@@ -12115,6 +12115,12 @@ mod tests {
                 send_json(&mut socket, delegation_created(DELEGATION_ID, "client")).await;
                 send_json(&mut socket, output_delta(ASSISTANT_TRANSCRIPT)).await;
             }
+            // The broker's in-progress notice for the created delegation,
+            // bound to it, acknowledged like the provider does.
+            let notice = recv_json(&mut socket, &capture).await;
+            assert_eq!(notice["type"], "session.instructions.append");
+            assert_eq!(notice["delegation_id"], DELEGATION_ID);
+            send_json(&mut socket, json!({"type":"session.instructions.appended","event_id":"n1","start_ms":1.0,"end_ms":1.0,"client_event_id":notice["event_id"]})).await;
             let release = recv_json(&mut socket, &capture).await;
             assert_eq!(release["type"], "session.commentary.append");
             assert_eq!(release["delegation_id"], DELEGATION_ID);
@@ -13045,14 +13051,18 @@ mod tests {
         assert!(next_semantic_observation(sideband.as_ref()).await.is_none());
 
         let events = capture.lock().expect("capture lock").client_events.clone();
-        assert_eq!(events.len(), 4);
-        assert_eq!(events[0]["type"], "session.commentary.append");
+        assert_eq!(events.len(), 5);
+        // The created delegation's in-progress notice, its result, the
+        // result's cue, then the close.
+        assert_eq!(events[0]["type"], "session.instructions.append");
         assert_eq!(events[0]["delegation_id"], public_wire::DELEGATION_ID);
-        assert_eq!(events[0]["content"], "Table booked for two.");
-        assert_eq!(events[1]["type"], "session.instructions.append");
+        assert_eq!(events[1]["type"], "session.commentary.append");
         assert_eq!(events[1]["delegation_id"], public_wire::DELEGATION_ID);
-        assert_eq!(events[2]["type"], "session.input_audio.mute");
-        assert_eq!(events[3]["type"], "session.close");
+        assert_eq!(events[1]["content"], "Table booked for two.");
+        assert_eq!(events[2]["type"], "session.instructions.append");
+        assert_eq!(events[2]["delegation_id"], public_wire::DELEGATION_ID);
+        assert_eq!(events[3]["type"], "session.input_audio.mute");
+        assert_eq!(events[4]["type"], "session.close");
         server.abort();
     }
 

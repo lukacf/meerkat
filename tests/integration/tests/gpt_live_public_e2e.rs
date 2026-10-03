@@ -2536,13 +2536,15 @@ async fn s99_native_exchange(
 /// The history probe before a summary is released. The voice model must not
 /// claim the vault phrase natively: it answers honestly that it does not
 /// know yet, or delegates a lookup to the executor, which owns the text
-/// history. A delegated lookup is a valid path and must return the exact
-/// phrase through the normal result path, voiced under the readout rule
-/// (`readout_contract`). The path each attempt took is journaled.
+/// history. A delegated lookup is a valid path whose result is ordered
+/// behind the session's bootstrap (summary) delivery barrier, so it cannot
+/// arrive while the summary is held: the probe returns the delegation, and
+/// `s99_verify_delegated_lookup` checks its result after the release. The
+/// path each probe took is journaled.
 async fn s99_history_probe(
     live: &mut PublicLiveHarness,
     phrase: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let evidence = s99_evidence(live)?.clone();
     let channel = evidence.current_channel()?;
     match s99_exchange(live, "history", s99_honest_unknown, true).await? {
@@ -2559,6 +2561,7 @@ async fn s99_history_probe(
                 "history_probe",
                 "path=native_unknown".to_owned(),
             )?;
+            Ok(None)
         }
         S99Exchange::Delegated {
             delegation_id,
@@ -2568,29 +2571,6 @@ async fn s99_history_probe(
                 !s99_recalls_phrase(&before, phrase),
                 "the voice model claimed the vault phrase natively before delegating the lookup"
             );
-            let deadline = Instant::now() + Duration::from_secs(120);
-            let result = loop {
-                let lines = evidence.provider_stream_lines()?;
-                if let Some(delivery) = result_deliveries(&lines)
-                    .into_iter()
-                    .find(|delivery| delivery.delegation_id == delegation_id)
-                {
-                    break delivery.text;
-                }
-                if Instant::now() >= deadline {
-                    return Err(format!(
-                        "the delegated history lookup {delegation_id} delivered no result within 120 s"
-                    )
-                    .into());
-                }
-                sleep(Duration::from_millis(200)).await;
-            };
-            assert!(
-                s99_recalls_phrase(&result, phrase),
-                "the delegated history lookup returned the wrong phrase: {result:?}"
-            );
-            s99_wait_for_assistant_quiet(live).await?;
-            readout_contract(&evidence, live, channel, "S99").await?;
             record_metric(
                 &evidence,
                 channel,
@@ -2598,9 +2578,43 @@ async fn s99_history_probe(
                 "history_probe",
                 format!("path=delegated delegation={delegation_id}"),
             )?;
+            Ok(Some(delegation_id))
         }
     }
-    Ok(())
+}
+
+/// After the summary release: a delegated history lookup returns the exact
+/// vault phrase through the normal result path, under the readout rule.
+async fn s99_verify_delegated_lookup(
+    live: &mut PublicLiveHarness,
+    delegation_id: &str,
+    phrase: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let evidence = s99_evidence(live)?.clone();
+    let channel = evidence.current_channel()?;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let result = loop {
+        let lines = evidence.provider_stream_lines()?;
+        if let Some(delivery) = result_deliveries(&lines)
+            .into_iter()
+            .find(|delivery| delivery.delegation_id == delegation_id)
+        {
+            break delivery.text;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the delegated history lookup {delegation_id} delivered no result within 120 s of the summary release"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(200)).await;
+    };
+    assert!(
+        s99_recalls_phrase(&result, phrase),
+        "the delegated history lookup returned the wrong phrase: {result:?}"
+    );
+    s99_wait_for_assistant_quiet(live).await?;
+    readout_contract(&evidence, live, channel, "S99").await
 }
 
 async fn s99_exchange(
@@ -2919,7 +2933,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
         "the positive control was delegated: a seeded fact must be answered natively"
     );
     s99_assert_pending(&mut live, &first_capture).await?;
-    s99_history_probe(&mut live, &phrase).await?;
+    let first_lookup = s99_history_probe(&mut live, &phrase).await?;
     s99_assert_pending(&mut live, &first_capture).await?;
 
     // Commit newer ordinary context through the existing source session while
@@ -2963,6 +2977,9 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     let elapsed = first_capture.captured_at.elapsed();
     assert!(elapsed >= S99_MIN_SUMMARY_DELAY);
     s99_release_summary(&mut live, first_capture).await?;
+    if let Some(delegation_id) = first_lookup {
+        s99_verify_delegated_lookup(&mut live, &delegation_id, &phrase).await?;
+    }
     evidence.stage(EvidenceStage::HistoricalRecall)?;
     s99_wait_for_assistant_quiet(&mut live).await?;
     // The pre-acknowledgement question offers an honest-unknown escape; once
@@ -3066,9 +3083,12 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     evidence.stage(EvidenceStage::ObsoleteJobRelease)?;
     let obsolete_returned = obsolete.release().await?;
     evidence.stage(EvidenceStage::ReplacementUnknown)?;
-    s99_history_probe(&mut live, &phrase).await?;
+    let replacement_lookup = s99_history_probe(&mut live, &phrase).await?;
     s99_assert_pending(&mut live, &replacement).await?;
     s99_release_summary(&mut live, replacement).await?;
+    if let Some(delegation_id) = replacement_lookup {
+        s99_verify_delegated_lookup(&mut live, &delegation_id, &phrase).await?;
+    }
     evidence.stage(EvidenceStage::ReplacementRecall)?;
     s99_wait_for_assistant_quiet(&mut live).await?;
     s99_native_exchange(&mut live, "recall_history", |text| {

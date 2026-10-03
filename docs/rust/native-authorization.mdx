@@ -5,7 +5,8 @@ icon: "shield-check"
 ---
 
 This guide starts with explicitly configured, storeless native Rust sessions
-and describes the in-memory persistence composition.
+and describes native persistent composition, including locally tested SQLite
+execution custody.
 The embedding application is trusted code: it authenticates callers, supplies
 current policy owners, and attaches the actual controller and executor. Merely
 enabling a Cargo feature or calling `agent.run(...)` does not establish this
@@ -15,8 +16,8 @@ integration.
 The in-memory persistence composition passed a bounded native validation gate
 on tested tree `f68f905ad37ddc2dca7af84ca7921c7d64bed04d`. This is evidence for
 that source snapshot, not a released support claim. Stock CLI, REST, RPC and
-MCP paths do not acquire governed activation from this API. SQLite, restart and
-recovery, full surface coverage, human consent and broader OS confinement remain
+MCP paths do not acquire governed activation from this API. Further SQLite qualification,
+restart and recovery, full surface coverage, human consent and broader OS confinement remain
 separate integration work. The native shell composition below covers supported
 macOS requirements. The additive `meerkat_rpc::governed_jsonl` entry provides a
 fixed-host, single-connection profile. It requires `default-features = false`
@@ -208,6 +209,82 @@ This returns the stock `PersistentSessionService` and the bundle's same
 The native runtime owns accepted inputs, original authority associations and
 attached audit, persisted in that same store. These memory stores retain records
 for the lifetime of the process; they do not provide restart durability.
+
+### SQLite persistent sessions
+
+<Note>
+Local macOS tests passed for actual backend custody, independent-process
+exclusion and release, same-file case and symlink aliases, upgrade failures,
+and the authenticated native model-tool-model flow with committed Session,
+input and protected audit. Same-process completed-turn close/reopen and actor
+reconstruction also passed, retaining the current trusted host owners and
+proving that stored effects were not replayed. These results qualify this local
+source on the executed filesystem. Fresh post-reopen work, separate process restart, other platforms,
+publication, CI and performance remain separate gates.
+</Note>
+
+The facade's `session-store` feature already enables its built-in SQLite stores;
+keep `local-authorization` enabled for governed construction. Use the actual
+SQLite session and WholeBlob runtime backends as co-tenants of the same database.
+This excerpt assumes an application-selected `PathBuf` named `database_path`
+and the application's existing `Arc<dyn BlobStore>` named `blob_store`, alongside
+`owners`, `builder`, `max_sessions` and `reconfigure_config_path` from above:
+
+```rust
+use std::sync::Arc;
+use meerkat::{PersistenceBundle, SqliteSessionStore};
+use meerkat_runtime::SqliteRuntimeStore;
+
+let runtime_store = Arc::new(
+    SqliteRuntimeStore::new_whole_blob(database_path.clone())?,
+);
+let bundle = PersistenceBundle::new_with_local_grant_authorization(
+    Arc::new(SqliteSessionStore::open(database_path)?),
+    runtime_store,
+    blob_store,
+    owners,
+)?;
+
+let (service, machine) =
+    meerkat::surface::build_runtime_backed_service_with_default_reconfigure_host(
+        builder, max_sessions, bundle, reconfigure_config_path,
+    );
+```
+
+The backend binds row I/O and execution custody to the same canonical
+regular database file. The trusted host must keep the database and lock namespace
+stable. Its two dedicated lock files coordinate lifetime claims and short claim
+admission through the operating system; SQLite transaction locks alone do not
+supply execution custody. Ordinary backend opening creates no execution lock
+files. Acquiring a claim requires access to that writable lock namespace.
+
+The physical-lock owner targets macOS, Linux and Windows; each target
+requires its own execution qualification. An ordinary
+execution owner requests shared custody; a governed owner requests exclusive
+custody before recovering provider authority or publishing handles. Conflicting
+claims refuse locally through the existing `Busy` class. Unsupported scope and
+operational acquisition failures remain explicit setup refusals. SQLite's special
+`:memory:` path cannot supply physical file custody and is refused. Use the actual
+`InMemoryRuntimeStore` for a process-local in-memory composition.
+
+Retained native drivers and exported authorization handles retain their same
+actual claim. An upgrade from shared to governed custody excludes new admissions
+while it releases and reacquires the lifetime lock. Contention restores shared
+custody before returning `Busy`; an uncertain unlock or restoration failure
+retains the admission gate and returns `Unavailable` until the failed claim's
+last owner drops. A failed claim does not become governed authority.
+
+This mechanical owner supplies the construction prerequisite for the existing
+ordinary native mixed-turn fixture. It does not establish persistent controller
+administration, grant revocation or complete credential removal, which remain
+unsupported at their separate native owner seams. The close/reopen
+scenario additionally drops the original service and all backend claims before
+opening new stores, then reconstructs the actor using the same actual trusted
+host owners and the stored Session document. Historical serialized authority
+associations remain audit data. They never bootstrap current grant, ingress or
+controller authority. That tested same-process reconstruction does
+not establish a separate process restart, fresh post-reopen work, performance
+acceptance or full surface coverage.
 
 The low-level equivalent is
 `MeerkatMachine::persistent_with_local_grant_authorization(runtime_store, Some(blob_store), owners)?`.

@@ -3987,6 +3987,11 @@ END";
     /// The storage owner keeps this namespace stable for the store's lifetime.
     #[cfg(any(unix, windows))]
     fn validate_runtime_database_file(path: &Path) -> Result<(), RuntimeStoreError> {
+        if path.as_os_str() == ":memory:" {
+            return Err(RuntimeStoreError::Unsupported(
+                "SQLite runtime execution custody requires a file-backed database".to_string(),
+            ));
+        }
         let metadata = match std::fs::metadata(path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -4044,6 +4049,20 @@ END";
             "SQLite database file identity is unavailable for {} on this platform",
             path.display()
         )))
+    }
+
+    /// Bind execution and every later row operation to one physical file.
+    /// The trusted storage owner keeps this database and its lock namespace
+    /// stable; aliases resolve here and no unresolved path becomes an owner.
+    fn bind_runtime_execution_custody(
+        path: PathBuf,
+    ) -> Result<(PathBuf, crate::store::RuntimeStoreExecutionCustody), RuntimeStoreError> {
+        let path = std::fs::canonicalize(path).map_err(|error| {
+            RuntimeStoreError::ReadFailed(format!("bind SQLite execution file identity: {error}"))
+        })?;
+        validate_runtime_database_file(&path)?;
+        let custody = crate::store::RuntimeStoreExecutionCustody::for_sqlite_database(&path);
+        Ok((path, custody))
     }
 
     #[track_caller]
@@ -9729,6 +9748,7 @@ ORDER BY runtime_id";
     /// SQLite-backed runtime store sharing the same sqlite file as `SqliteSessionStore`.
     pub struct SqliteRuntimeStore {
         path: PathBuf,
+        execution_custody: crate::store::RuntimeStoreExecutionCustody,
         session_persistence_profile: RuntimeSessionPersistenceProfile,
         /// Transcript facts of the WholeBlob documents this store wrote.
         whole_blob_transcript_facts: Arc<RecordedWholeBlobTranscriptFacts>,
@@ -9833,8 +9853,10 @@ ORDER BY runtime_id";
                 ));
             }
             drop(conn);
+            let (path, execution_custody) = bind_runtime_execution_custody(path)?;
             Ok(Self {
                 path,
+                execution_custody,
                 session_persistence_profile: RuntimeSessionPersistenceProfile::WholeBlobV1,
                 whole_blob_transcript_facts: Arc::default(),
                 #[cfg(test)]
@@ -9937,8 +9959,10 @@ ORDER BY runtime_id";
             pin_head_canonical_profile(&mut conn)?;
             activate_head_canonical_profiles(&mut conn)?;
             drop(conn);
+            let (path, execution_custody) = bind_runtime_execution_custody(path)?;
             Ok(Self {
                 path,
+                execution_custody,
                 session_persistence_profile: RuntimeSessionPersistenceProfile::HeadCanonicalV1,
                 whole_blob_transcript_facts: Arc::default(),
                 #[cfg(test)]
@@ -10866,6 +10890,10 @@ ORDER BY runtime_id";
 
     #[async_trait::async_trait]
     impl crate::store::RuntimeSessionAuthorityOps for SqliteRuntimeStore {
+        fn execution_custody(&self) -> Option<&crate::store::RuntimeStoreExecutionCustody> {
+            Some(&self.execution_custody)
+        }
+
         fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile {
             self.session_persistence_profile
         }
@@ -16220,6 +16248,508 @@ ORDER BY runtime_id";
         use tempfile::TempDir;
 
         use super::*;
+
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        mod custody_process_fixture {
+            use std::io::{BufRead as _, Write as _};
+            use std::process::{Child, Command, ExitStatus, Stdio};
+            use std::sync::mpsc::{Receiver, channel};
+            use std::time::{Duration, Instant};
+
+            use super::{Path, PathBuf, SqliteRuntimeStore, sqlite_execution_owner};
+
+            const PHASE: &str = "MEERKAT_TEST_SQLITE_CUSTODY_CHILD_PHASE";
+            const DATABASE: &str = "MEERKAT_TEST_SQLITE_CUSTODY_CHILD_DATABASE";
+            const TEST: &str =
+                "store::sqlite::inner::tests::sqlite_execution_custody_cross_process_exclusion";
+            const DEADLINE: Duration = Duration::from_secs(10);
+
+            pub(super) fn run_child_if_requested() -> bool {
+                let Some(phase) = std::env::var_os(PHASE) else {
+                    return false;
+                };
+                let phase = phase.to_str().expect("closed child phase is UTF-8");
+                assert!(
+                    matches!(phase, "shared" | "governed"),
+                    "unknown child phase"
+                );
+                let database = PathBuf::from(
+                    std::env::var_os(DATABASE).expect("self-reentry supplies its exact database"),
+                );
+                let store = SqliteRuntimeStore::new_whole_blob(database)
+                    .expect("child opens the same actual SQLite backend");
+                let claim = match phase {
+                    "shared" => sqlite_execution_owner(&store).try_acquire_shared(),
+                    "governed" => sqlite_execution_owner(&store).try_acquire_governed(),
+                    _ => unreachable!("closed child phase was validated"),
+                }
+                .expect("child acquires its actual physical lifetime claim");
+                assert_eq!(claim.is_governed(), phase == "governed");
+                // Begin a new line even if libtest has printed its test prefix.
+                let mut stdout = std::io::stdout().lock();
+                writeln!(stdout, "\nSQLITE_CUSTODY_READY:{phase}").unwrap();
+                stdout.flush().unwrap();
+                drop(stdout);
+                let mut release = String::new();
+                std::io::stdin().read_line(&mut release).unwrap();
+                assert_eq!(release, "release\n", "parent alone controls normal release");
+                drop(claim);
+                drop(store);
+                true
+            }
+
+            pub(super) struct OwnedChild {
+                child: Option<Child>,
+                ready: Receiver<Result<(), String>>,
+            }
+
+            impl OwnedChild {
+                pub(super) fn start(database: &Path, phase: &'static str) -> Self {
+                    assert!(matches!(phase, "shared" | "governed"));
+                    let mut command =
+                        Command::new(std::env::current_exe().expect("ordinary test executable"));
+                    command
+                        .args(["--exact", TEST, "--test-threads=1", "--nocapture"])
+                        .env_clear()
+                        .env(PHASE, phase)
+                        .env(DATABASE, database)
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::inherit());
+                    // Keep only existing executable-loader needs; no test or
+                    // authorization configuration is inherited by the child.
+                    for name in [
+                        "LD_LIBRARY_PATH",
+                        "DYLD_LIBRARY_PATH",
+                        "DYLD_FALLBACK_LIBRARY_PATH",
+                        "SystemRoot",
+                        "WINDIR",
+                    ] {
+                        if let Some(value) = std::env::var_os(name) {
+                            command.env(name, value);
+                        }
+                    }
+                    let mut child = command.spawn().expect("test executable self-reentry");
+                    let stdout = child.stdout.take().unwrap();
+                    let (ready_tx, ready) = channel();
+                    let owned = Self {
+                        child: Some(child),
+                        ready,
+                    };
+                    // Construct the cleanup owner before creating this reader.
+                    // Keep draining after readiness so child libtest cannot
+                    // block on a full pipe or receive a premature broken pipe.
+                    let _reader = std::thread::spawn(move || {
+                        let expected = format!("SQLITE_CUSTODY_READY:{phase}");
+                        let mut announced = false;
+                        for line in std::io::BufReader::new(stdout).lines() {
+                            match line {
+                                Ok(line) if !announced && line == expected => {
+                                    announced = true;
+                                    let _ = ready_tx.send(Ok(()));
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    if !announced {
+                                        let _ = ready_tx.send(Err(error.to_string()));
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                        if !announced {
+                            let _ =
+                                ready_tx.send(Err("child exited before physical readiness".into()));
+                        }
+                    });
+                    owned
+                }
+
+                pub(super) fn wait_ready(&self) {
+                    self.ready
+                        .recv_timeout(DEADLINE)
+                        .expect("bounded actual child claim readiness")
+                        .expect("child entered its actual backend claim");
+                }
+
+                fn wait_exit(&mut self) -> std::io::Result<ExitStatus> {
+                    let deadline = Instant::now() + DEADLINE;
+                    loop {
+                        if let Some(status) = self.child.as_mut().unwrap().try_wait()? {
+                            self.child.take();
+                            return Ok(status);
+                        }
+                        if Instant::now() >= deadline {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "test child failed to exit before its cleanup deadline",
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+
+                pub(super) fn release_and_join(&mut self) {
+                    let stdin = self.child.as_mut().unwrap().stdin.as_mut().unwrap();
+                    stdin.write_all(b"release\n").unwrap();
+                    stdin.flush().unwrap();
+                    self.child.as_mut().unwrap().stdin.take();
+                    let status = self
+                        .wait_exit()
+                        .expect("bounded child release and actual exit");
+                    assert!(status.success(), "child fixture failed: {status}");
+                }
+
+                pub(super) fn kill_and_join(&mut self) {
+                    self.child.as_mut().unwrap().kill().unwrap();
+                    let status = self
+                        .wait_exit()
+                        .expect("bounded actual child kill and exit");
+                    assert!(
+                        !status.success(),
+                        "a killed fixture must not report normal completion"
+                    );
+                }
+
+                fn terminate(&mut self) -> std::io::Result<()> {
+                    let Some(child) = self.child.as_mut() else {
+                        return Ok(());
+                    };
+                    if child.try_wait()?.is_some() {
+                        self.child.take();
+                        return Ok(());
+                    }
+                    child.kill()?;
+                    self.wait_exit().map(|_| ())
+                }
+            }
+
+            impl Drop for OwnedChild {
+                fn drop(&mut self) {
+                    if let Err(error) = self.terminate() {
+                        eprintln!("actual SQLite test child cleanup failed: {error}");
+                    }
+                }
+            }
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        #[test]
+        fn sqlite_execution_custody_cross_process_exclusion() {
+            use crate::store::RuntimeStoreExecutionCustodyError::Busy;
+            use custody_process_fixture::OwnedChild;
+
+            if custody_process_fixture::run_child_if_requested() {
+                return;
+            }
+            let directory = TempDir::new().unwrap();
+            let database = directory.path().join("process-custody.sqlite3");
+            for phase in ["shared", "governed"] {
+                let mut child = OwnedChild::start(&database, phase);
+                child.wait_ready();
+                let parent = SqliteRuntimeStore::new_whole_blob(&database).unwrap();
+                if phase == "shared" {
+                    let shared = sqlite_execution_owner(&parent)
+                        .try_acquire_shared()
+                        .expect("two actual processes may retain shared custody");
+                    assert!(!shared.is_governed());
+                    drop(shared);
+                } else {
+                    assert!(matches!(
+                        sqlite_execution_owner(&parent).try_acquire_shared(),
+                        Err(Busy)
+                    ));
+                }
+                assert!(matches!(
+                    sqlite_execution_owner(&parent).try_acquire_governed(),
+                    Err(Busy)
+                ));
+                if phase == "shared" {
+                    child.release_and_join();
+                } else {
+                    // The child still owns its exclusive claim at termination.
+                    // Reacquisition therefore observes OS process/file release.
+                    child.kill_and_join();
+                }
+                drop(parent);
+                let reopened = SqliteRuntimeStore::new_whole_blob(&database).unwrap();
+                let exclusive = sqlite_execution_owner(&reopened)
+                    .try_acquire_governed()
+                    .expect("observed child exit and final claim release reopen physical scope");
+                assert!(exclusive.is_governed());
+                drop(exclusive);
+                sqlite_execution_owner(&reopened)
+                    .try_acquire_shared()
+                    .expect("actual exclusive release also restores shared admission");
+            }
+        }
+
+        #[test]
+        fn sqlite_execution_custody_case_alias_uses_actual_same_file_identity() {
+            #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+            {
+                eprintln!("SKIP case-alias custody: physical owner is unsupported on this target");
+            }
+            #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+            {
+                use crate::store::RuntimeStoreExecutionCustodyError::Busy;
+
+                let directory = TempDir::new().unwrap();
+                let database = directory.path().join("CaseCustody.sqlite3");
+                let alias = directory.path().join("casecustody.sqlite3");
+                let first = SqliteRuntimeStore::new_whole_blob(&database).unwrap();
+                let alias_metadata = match std::fs::metadata(&alias) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        eprintln!(
+                            "SKIP case-alias custody: temporary filesystem is case-sensitive"
+                        );
+                        return;
+                    }
+                    Err(error) => panic!("case-alias metadata failed: {error}"),
+                };
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt as _;
+                    let original = std::fs::metadata(&database).unwrap();
+                    assert_eq!(
+                        (original.dev(), original.ino()),
+                        (alias_metadata.dev(), alias_metadata.ino()),
+                        "the fixture must prove actual same-file identity before lock assertions"
+                    );
+                }
+                #[cfg(windows)]
+                {
+                    assert!(alias_metadata.is_file());
+                    let original = std::fs::File::open(&database).unwrap();
+                    let alternate = std::fs::File::open(&alias).unwrap();
+                    let original = winapi_util::file::information(&original).unwrap();
+                    let alternate = winapi_util::file::information(&alternate).unwrap();
+                    assert_eq!(
+                        (original.volume_serial_number(), original.file_index()),
+                        (alternate.volume_serial_number(), alternate.file_index()),
+                        "the fixture must prove actual same-file identity before lock assertions"
+                    );
+                }
+                let second = SqliteRuntimeStore::new_whole_blob(&alias).unwrap();
+                let shared = sqlite_execution_owner(&first).try_acquire_shared().unwrap();
+                assert!(matches!(
+                    sqlite_execution_owner(&second).try_acquire_governed(),
+                    Err(Busy)
+                ));
+                drop(shared);
+                let exclusive = sqlite_execution_owner(&second)
+                    .try_acquire_governed()
+                    .unwrap();
+                assert!(matches!(
+                    sqlite_execution_owner(&first).try_acquire_shared(),
+                    Err(Busy)
+                ));
+                assert!(matches!(
+                    sqlite_execution_owner(&first).try_acquire_governed(),
+                    Err(Busy)
+                ));
+                drop(exclusive);
+                sqlite_execution_owner(&first)
+                    .try_acquire_shared()
+                    .expect("same-file alias observes the actual last claim release");
+            }
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        fn sqlite_execution_owner(
+            store: &SqliteRuntimeStore,
+        ) -> &crate::store::RuntimeStoreExecutionCustody {
+            RuntimeStore::execution_custody(store)
+                .expect("actual SQLite backend supplies physical execution custody")
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        #[test]
+        fn sqlite_execution_custody_independent_opens_retain_claims_until_last_owner() {
+            use crate::store::RuntimeStoreExecutionCustodyError::Busy;
+
+            for head_canonical in [false, true] {
+                let directory = TempDir::new().unwrap();
+                let database = directory.path().join("runtime.sqlite3");
+                let open = |path: &Path| {
+                    if head_canonical {
+                        SqliteRuntimeStore::new_head_canonical(path).unwrap()
+                    } else {
+                        SqliteRuntimeStore::new_whole_blob(path).unwrap()
+                    }
+                };
+                let first = open(&database);
+                let second = open(&database);
+                let one = sqlite_execution_owner(&first).try_acquire_shared().unwrap();
+                let two = sqlite_execution_owner(&second)
+                    .try_acquire_shared()
+                    .unwrap();
+                assert!(matches!(
+                    sqlite_execution_owner(&second).try_acquire_governed(),
+                    Err(Busy)
+                ));
+                drop(one);
+                assert!(matches!(
+                    sqlite_execution_owner(&first).try_acquire_governed(),
+                    Err(Busy)
+                ));
+                drop(two);
+                let governed = Arc::new(
+                    sqlite_execution_owner(&first)
+                        .try_acquire_governed()
+                        .unwrap(),
+                );
+                assert!(governed.is_governed());
+                let retained = Arc::clone(&governed);
+                drop(governed);
+                drop(first);
+                // A new facade over the same physical file cannot mint a new owner.
+                let reopened = open(&database);
+                assert!(matches!(
+                    sqlite_execution_owner(&reopened).try_acquire_shared(),
+                    Err(Busy)
+                ));
+                assert!(matches!(
+                    sqlite_execution_owner(&second).try_acquire_governed(),
+                    Err(Busy)
+                ));
+                let independent = open(&directory.path().join("independent.sqlite3"));
+                let unrelated = sqlite_execution_owner(&independent)
+                    .try_acquire_governed()
+                    .unwrap();
+                assert!(unrelated.is_governed());
+                drop(retained);
+                sqlite_execution_owner(&reopened)
+                    .try_acquire_shared()
+                    .expect("last actual claim released the physical scope");
+                sqlite_execution_owner(&second)
+                    .try_acquire_governed()
+                    .expect("independent open observes physical release");
+            }
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        #[test]
+        fn sqlite_execution_custody_failed_upgrade_preserves_shared_exclusion() {
+            use crate::store::RuntimeStoreExecutionCustodyError::Busy;
+
+            let (_directory, first) = temp_store();
+            let second = SqliteRuntimeStore::new_whole_blob(first.path()).unwrap();
+            let mut one = sqlite_execution_owner(&first).try_acquire_shared().unwrap();
+            let two = sqlite_execution_owner(&second)
+                .try_acquire_shared()
+                .unwrap();
+            assert_eq!(one.try_upgrade_to_governed(), Err(Busy));
+            assert!(!one.is_governed());
+            let three = sqlite_execution_owner(&second)
+                .try_acquire_shared()
+                .expect("failed upgrade must not publish an exclusive claim");
+            drop(two);
+            drop(three);
+            // This fails if a non-atomic OS upgrade silently dropped one's lock.
+            assert!(matches!(
+                sqlite_execution_owner(&second).try_acquire_governed(),
+                Err(Busy)
+            ));
+            one.try_upgrade_to_governed()
+                .expect("sole ordinary owner upgrades under physical admission custody");
+            assert!(one.is_governed());
+            assert!(matches!(
+                sqlite_execution_owner(&second).try_acquire_shared(),
+                Err(Busy)
+            ));
+            drop(one);
+            sqlite_execution_owner(&second)
+                .try_acquire_governed()
+                .expect("upgraded claim's final release reopens the scope");
+        }
+
+        #[cfg(unix)]
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        #[test]
+        fn sqlite_execution_custody_symlink_alias_names_the_same_physical_scope() {
+            use crate::store::RuntimeStoreExecutionCustodyError::Busy;
+
+            let (directory, first) = temp_store();
+            let alias = directory.path().join("alias.sqlite3");
+            std::os::unix::fs::symlink(first.path(), &alias).unwrap();
+            let aliased = SqliteRuntimeStore::new_whole_blob(&alias).unwrap();
+            let governed = sqlite_execution_owner(&first)
+                .try_acquire_governed()
+                .unwrap();
+            assert!(matches!(
+                sqlite_execution_owner(&aliased).try_acquire_shared(),
+                Err(Busy)
+            ));
+            assert!(matches!(
+                sqlite_execution_owner(&aliased).try_acquire_governed(),
+                Err(Busy)
+            ));
+            drop(governed);
+            let alias_claim = sqlite_execution_owner(&aliased)
+                .try_acquire_governed()
+                .unwrap();
+            assert!(matches!(
+                sqlite_execution_owner(&first).try_acquire_shared(),
+                Err(Busy)
+            ));
+            drop(alias_claim);
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        #[test]
+        fn sqlite_execution_custody_has_no_maintenance_holder_self_admission() {
+            use crate::store::RuntimeStoreExecutionCustodyError::Busy;
+
+            let (_directory, store) = temp_store();
+            let governed = sqlite_execution_owner(&store)
+                .try_acquire_governed()
+                .unwrap();
+            let maintenance = meerkat_sqlite::ExclusiveFence::try_acquire(store.path())
+                .unwrap()
+                .expect("maintenance and execution claims have distinct physical owners");
+            assert!(matches!(
+                sqlite_execution_owner(&store).try_acquire_shared(),
+                Err(Busy)
+            ));
+            assert!(matches!(
+                sqlite_execution_owner(&store).try_acquire_governed(),
+                Err(Busy)
+            ));
+            drop(maintenance);
+            drop(governed);
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        #[test]
+        fn sqlite_execution_custody_obeys_physical_lifetime_and_admission_locks() {
+            use crate::store::RuntimeStoreExecutionCustodyError::Busy;
+
+            let (_directory, store) = temp_store();
+            let owner = sqlite_execution_owner(&store);
+            let physical = std::fs::canonicalize(store.path()).unwrap();
+            for suffix in [".execution-custody", ".execution-custody-admission"] {
+                let mut name = physical.file_name().unwrap().to_os_string();
+                name.push(suffix);
+                let path = physical.with_file_name(name);
+                let foreign = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(path)
+                    .unwrap();
+                // A separate physical descriptor is the exclusion oracle.
+                // An in-memory path registry alone cannot satisfy this test.
+                foreign.try_lock().unwrap();
+                assert!(matches!(owner.try_acquire_shared(), Err(Busy)));
+                assert!(matches!(owner.try_acquire_governed(), Err(Busy)));
+                drop(foreign);
+                owner.try_acquire_shared().unwrap();
+                owner.try_acquire_governed().unwrap();
+            }
+        }
 
         // Source-grounded controls for the later administrative reservation tests.
         // These exercise existing APIs and do not implement that reservation.

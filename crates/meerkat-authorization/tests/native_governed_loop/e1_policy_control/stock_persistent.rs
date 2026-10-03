@@ -1,9 +1,11 @@
-//! One stock persistent service turn over the accepted memory candidate.
+//! One stock persistent service turn over the supplied WholeBlob backend.
 //! Reuses E1 HTTP/native owners and reads the real committed Session document.
-//! Process-local memory only; this is not SQLite or restart coverage.
+//! The SQLite reopen case reconstructs an actor from the real committed rows.
+//! Persistent controller administration and process restart are separate scopes.
 use super::*;
 use meerkat::surface::{
-    PersistentRuntimeExecutor, build_runtime_backed_service_with_default_reconfigure_host,
+    PersistentRuntimeExecutor, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides,
+    build_recovered_session, build_runtime_backed_service_with_default_reconfigure_host,
     materialize_session_with_reserved_admission_and_actor_slot,
 };
 use meerkat_runtime::accept::AcceptOutcome;
@@ -123,7 +125,15 @@ fn assert_stock_document(saved: &Session, session_id: &SessionId) {
         Message::BlockAssistant(assistant) if assistant.text_blocks().collect::<String>() == FINISHED)).count(), 1);
 }
 
-async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
+async fn exercise_stock_persistent(
+    server: &Server,
+    cleanup: &CleanupSlot,
+    session_store: Arc<dyn meerkat::SessionStore>,
+    store: Arc<dyn RuntimeStore>,
+    reopen_database: Option<&std::path::Path>,
+) {
+    let old_session_store = Arc::downgrade(&session_store);
+    let old_runtime_store = Arc::downgrade(&store);
     let client = http_client(server);
     let selected = client
         .controller_model_selection()
@@ -177,22 +187,23 @@ async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
         }
         Ok(())
     });
-    let store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+    let invocation_owner = Arc::new(InvocationOwner);
+    let operation_owner = Arc::new(HttpRecordOwner {
+        selection: selected.clone(),
+        endpoint: format!("{}/v1/messages", server.base_url),
+    });
     let bundle = meerkat::PersistenceBundle::new_with_local_grant_authorization(
-        Arc::new(meerkat::MemoryStore::new()),
+        session_store,
         store.clone(),
         Arc::new(meerkat::MemoryBlobStore::new()),
         NativeGrantWorkConfiguration {
-            grants,
-            ingress,
-            invocation_owner: Arc::new(InvocationOwner),
-            operation_owner: Arc::new(HttpRecordOwner {
-                selection: selected.clone(),
-                endpoint: format!("{}/v1/messages", server.base_url),
-            }),
+            grants: grants.clone(),
+            ingress: ingress.clone(),
+            invocation_owner: invocation_owner.clone(),
+            operation_owner: operation_owner.clone(),
         },
     )
-    .expect("accepted candidate configures the bundle's actual persistent owner");
+    .expect("WholeBlob backend configures the bundle's actual governed persistent owner");
     assert_eq!(
         bundle.session_persistence_profile(),
         RuntimeSessionPersistenceProfile::WholeBlobV1
@@ -201,7 +212,7 @@ async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
     let configured_adapter = bundle.runtime_adapter();
     let tools = Arc::new(RecordingTools::default());
     let mut builder = FactoryAgentBuilder::new(AgentFactory::minimal(), Config::default());
-    builder.default_llm_client = Some(client);
+    builder.default_llm_client = Some(client.clone());
     builder.default_tool_dispatcher = Some(tools.clone());
     // The stock builder installs the bundle's StoreAdapter and blob store.
     // A fresh unused path only configures the stock reconfigure host; this test
@@ -301,7 +312,7 @@ async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
     )
     .await
     .expect("same native generated credential owner");
-    let claims = association(&runtime, controller, operation, selected);
+    let claims = association(&runtime, controller, operation, selected.clone());
     let mut prompt = PromptInput::new("Attempt the two record actions", None);
     prompt.header.authority_association = Some(claims.clone());
     let input = Input::Prompt(prompt);
@@ -572,15 +583,216 @@ async fn exercise_stock_persistent(server: &Server, cleanup: &CleanupSlot) {
                     ))
         );
     }
+    let Some(database) = reopen_database else {
+        return;
+    };
+    let expected_row = serde_json::to_value(&final_row).unwrap();
+    let expected_bytes = final_document.bytes().to_vec();
+    let expected_authority = final_document.authority().clone();
+    let old_machine = Arc::downgrade(&machine);
+
+    // Close the actual original owners, not just another database facade.
+    // The outer cleanup slot remains available until teardown succeeds.
+    machine
+        .unregister_session(&session_id)
+        .await
+        .expect("original persistent worker reaches terminal teardown");
+    service
+        .discard_live_session(&session_id)
+        .await
+        .expect("original stock actor and its exported capabilities are discarded");
+    let retained = cleanup.lock().unwrap().take().unwrap();
+    assert!(Arc::ptr_eq(&retained.0, &machine));
+    assert_eq!(retained.1, session_id);
+    drop(retained);
+    drop(service);
+    drop(machine);
+    drop(configured_adapter);
+    drop(store);
+    // Teardown reports terminality before its supervisor drops its last
+    // cloned owner. Wait for actual release, without retaining a polling Arc.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let closed = old_machine.upgrade().is_none()
+                && old_session_store.upgrade().is_none()
+                && old_runtime_store.upgrade().is_none();
+            if closed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "original owners remain after teardown: machine={}, session_store={}, runtime_store={}: {error}",
+            old_machine.strong_count(),
+            old_session_store.strong_count(),
+            old_runtime_store.strong_count(),
+        )
+    });
+
+    let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(
+        meerkat::SqliteSessionStore::open(database.to_path_buf())
+            .expect("actual SQLite session backend reopens"),
+    );
+    let store: Arc<dyn RuntimeStore> = Arc::new(
+        meerkat_runtime::SqliteRuntimeStore::new_whole_blob(database.to_path_buf())
+            .expect("actual SQLite WholeBlob runtime backend reopens"),
+    );
+    let reopened_row = store
+        .load_input_state(&runtime, &input_id)
+        .await
+        .unwrap()
+        .expect("terminal input survives physical close/reopen");
+    assert_original(&reopened_row, &input_id, &claims);
+    assert_eq!(serde_json::to_value(&reopened_row).unwrap(), expected_row);
+    assert_eq!(stored_audit(&reopened_row), audit);
+    let reopened_document = store
+        .load_committed_whole_blob_snapshot(&runtime)
+        .await
+        .unwrap()
+        .expect("committed Session survives physical close/reopen");
+    assert_eq!(reopened_document.bytes(), expected_bytes.as_slice());
+    assert_eq!(reopened_document.authority(), &expected_authority);
+    assert_stock_document(reopened_document.session(), &session_id);
+
+    // These are the same actual trusted host owners. Historical associations
+    // supply expected audit data, never replacement admission authority.
+    let bundle = meerkat::PersistenceBundle::new_with_local_grant_authorization(
+        session_store,
+        store.clone(),
+        Arc::new(meerkat::MemoryBlobStore::new()),
+        NativeGrantWorkConfiguration {
+            grants,
+            ingress,
+            invocation_owner,
+            operation_owner,
+        },
+    )
+    .expect("reopened backend acquires fresh actual governed execution custody");
+    let configured_adapter = bundle.runtime_adapter();
+    let mut builder = FactoryAgentBuilder::new(AgentFactory::minimal(), Config::default());
+    builder.default_llm_client = Some(client);
+    builder.default_tool_dispatcher = Some(tools.clone());
+    let config_path =
+        std::env::temp_dir().join(format!("stock-reopened-{}.toml", SessionId::new()));
+    let (service, machine) =
+        build_runtime_backed_service_with_default_reconfigure_host(builder, 2, bundle, config_path);
+    assert!(Arc::ptr_eq(&machine, &configured_adapter));
+    assert!(Arc::ptr_eq(&service.runtime_store(), &store));
+    *cleanup.lock().unwrap() = Some((machine.clone(), session_id.clone()));
+    assert!(matches!(
+        machine.try_controller_grant_mutation(),
+        Err(meerkat_authorization_contracts::grant_mutation::ControllerCustodyRefusal::Unavailable)
+    ));
+    let persisted = service
+        .load_authoritative_session(&session_id)
+        .await
+        .unwrap()
+        .expect("stock recovery reads the actual reopened Session");
+    assert_stock_document(&persisted, &session_id);
+    let recovered = build_recovered_session(
+        persisted.clone(),
+        &SurfaceSessionRecoveryOverrides::default(),
+        SurfaceSessionRecoveryContext::default(),
+    )
+    .expect("existing owner resolves persisted session build facts");
+    let reserved = service.reserve_create_session_admission().await.unwrap();
+    let created = Box::pin(materialize_session_with_reserved_admission_and_actor_slot(
+        &service,
+        &machine,
+        persisted,
+        recovered.into_deferred_create_request(),
+        reserved,
+        {
+            let service = service.clone();
+            let machine = machine.clone();
+            move |session_id, _attachment, actor_slot| {
+                Box::new(
+                    PersistentRuntimeExecutor::new(service, machine, session_id)
+                        .with_publication_actor_slot(actor_slot),
+                )
+            }
+        },
+    ))
+    .await
+    .expect("actual stock governed actor reconstructs from reopened stores");
+    assert_eq!(created.session_id, session_id);
+    let snapshot = machine
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .unwrap();
+    assert_eq!(snapshot.binding.driver_kind, MeerkatDriverKind::Persistent);
+    assert_eq!(snapshot.binding.runtime_id, runtime);
+    let pin = {
+        let actor_lease = service
+            .acquire_live_session_actor_turn_boundary_lease(&session_id)
+            .await
+            .expect("newly reconstructed actor has its real turn boundary");
+        service
+            .pin_controller_client_for_actor(&actor_lease)
+            .await
+            .unwrap()
+    };
+    assert!(
+        pin.selection() == &selected,
+        "fresh actor pin names the actual client"
+    );
+    drop(pin);
+    let recovered_row = machine
+        .input_state(&session_id, &input_id)
+        .await
+        .unwrap()
+        .expect("reconstructed native owner reads the protected terminal row");
+    assert_eq!(serde_json::to_value(&recovered_row).unwrap(), expected_row);
+    assert_eq!(stored_audit(&recovered_row), audit);
+    let recovered_document = store
+        .load_committed_whole_blob_snapshot(&runtime)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_stock_document(recovered_document.session(), &session_id);
+    assert_eq!(
+        serde_json::to_value(recovered_document.session().messages()).unwrap(),
+        serde_json::to_value(saved.messages()).unwrap()
+    );
+    // Observe the no-replay effect oracle after the recovered worker drains.
+    // A delayed replay cannot pass by racing the reconstruction assertions.
+    machine
+        .unregister_session(&session_id)
+        .await
+        .expect("reconstructed worker reaches terminal teardown");
+    service
+        .discard_live_session(&session_id)
+        .await
+        .expect("reconstructed actor is discarded");
+    drop(cleanup.lock().unwrap().take().unwrap());
+    let retained_row = store
+        .load_input_state(&runtime, &input_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(serde_json::to_value(&retained_row).unwrap(), expected_row);
+    assert_eq!(stored_audit(&retained_row), audit);
+    assert_eq!(server.receiver.bodies.lock().unwrap().len(), 2);
+    assert_eq!(
+        server.receiver.authorized_requests.load(Ordering::SeqCst),
+        2
+    );
+    assert_eq!(*tools.0.lock().unwrap(), ["read_record"]);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stock_persistent_bundle_governed_turn_commits_session_input_and_audit() {
+async fn run_stock_persistent_case(
+    session_store: Arc<dyn meerkat::SessionStore>,
+    store: Arc<dyn RuntimeStore>,
+    reopen_database: Option<&std::path::Path>,
+) {
     let mut server = Server::start().await;
     let cleanup = CleanupSlot::new(None);
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(
         Duration::from_secs(60),
-        exercise_stock_persistent(&server, &cleanup),
+        exercise_stock_persistent(&server, &cleanup, session_store, store, reopen_database),
     ))
     .catch_unwind()
     .await;
@@ -608,6 +820,49 @@ async fn stock_persistent_bundle_governed_turn_commits_session_input_and_audit()
             .expect("bounded native worker cleanup")
             .expect("actual persistent teardown");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stock_persistent_bundle_governed_turn_commits_session_input_and_audit() {
+    run_stock_persistent_case(
+        Arc::new(meerkat::MemoryStore::new()),
+        Arc::new(InMemoryRuntimeStore::new()),
+        None,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stock_sqlite_whole_blob_governed_turn_commits_session_input_and_audit() {
+    // The temporary database remains alive through actual native teardown.
+    // Both co-tenant stores are their production SQLite backends.
+    let directory = tempfile::tempdir().expect("actual SQLite fixture directory");
+    let database = directory.path().join("stock-persistent.sqlite3");
+    let session_store = Arc::new(
+        meerkat::SqliteSessionStore::open(database.clone())
+            .expect("actual SQLite session store opens"),
+    );
+    let runtime_store = Arc::new(
+        meerkat_runtime::SqliteRuntimeStore::new_whole_blob(database)
+            .expect("actual SQLite WholeBlob runtime store opens"),
+    );
+    run_stock_persistent_case(session_store, runtime_store, None).await;
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stock_sqlite_whole_blob_reopen_preserves_governed_session_input_and_audit() {
+    let directory = tempfile::tempdir().expect("actual SQLite reopen fixture directory");
+    let database = directory.path().join("stock-reopened.sqlite3");
+    let session_store = Arc::new(
+        meerkat::SqliteSessionStore::open(database.clone())
+            .expect("actual SQLite session store opens"),
+    );
+    let runtime_store = Arc::new(
+        meerkat_runtime::SqliteRuntimeStore::new_whole_blob(database.clone())
+            .expect("actual SQLite WholeBlob runtime store opens"),
+    );
+    run_stock_persistent_case(session_store, runtime_store, Some(&database)).await;
 }
 
 #[path = "stock_persistent/revalidation.rs"]

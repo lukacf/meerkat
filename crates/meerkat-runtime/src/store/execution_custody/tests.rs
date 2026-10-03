@@ -78,7 +78,14 @@ fn upfront_governed_claim_requires_all_shared_owners_to_release() {
 fn poisoned_custody_owner_never_reopens_execution() {
     let owner = RuntimeStoreExecutionCustody::new();
     let _ = std::panic::catch_unwind(|| {
-        let _actual_owner = owner.inner.lock().unwrap();
+        let inner = match &owner.inner {
+            ExecutionCustodyOwner::Memory(inner) => inner,
+            #[cfg(feature = "sqlite-store")]
+            ExecutionCustodyOwner::Physical(_) => {
+                panic!("this fixture owns the in-memory backend");
+            }
+        };
+        let _actual_owner = inner.lock().unwrap();
         panic!("fault inside actual custody owner");
     });
     assert!(matches!(

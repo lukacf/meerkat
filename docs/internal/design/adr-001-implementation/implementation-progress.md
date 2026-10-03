@@ -17,7 +17,9 @@ command spent 43m01s compiling/checking; the wire test body took 0.01s after
 2m53s compilation. Raw results remain in the existing evidence directory below.
 These are local checkpoints; publication, native PR CI and overhead remain open.
 
-The next explicit pre-tool policy-denial slice is uncommitted. Its behavioral
+The explicit pre-tool policy-denial slice is committed locally at
+`9a3a80964b486e86416d1cab99448d5e90184150`, tree
+`fde1829da8c2975154f43c8def3cf73645223b61`. Its behavioral
 RED aborted the run with HookDenied; after repair, five selected pre-tool tests
 and thirteen hook contract tests passed. Eleven member-upcall controls then
 passed in 0.01s after 15m54s compile. Adversarial review found existing decision
@@ -26,7 +28,7 @@ transport regressions reproduced the defect; their repair passed all fifteen
 hook contracts. Schema/SDK generation, SDK freshness, event inventory, docs and
 Bazel generation checks passed. Final core/Mob all-targets, all-features Clippy
 passed in 26m36s. All twelve existing hook behavior controls passed (37.00s
-compile, 0.16s body). Final schema freshness passed.
+compile, 0.16s body). Final schema freshness and normal commit hooks passed.
 Native command-hook confinement, protected hook
 refusal audit and other hook-point locality remain incomplete.
 
@@ -34,8 +36,32 @@ The bus monitor is active. Publication clearance and a quiet performance window
 are specific scheduling dependencies, not a halt on independent work. Root owns
 the serial Rust lane while agents prepare and review child-process cleanup,
 physical SQLite custody, documentation and existing E2E registration. SQLite
-ordinary admission has a real-backend test staged; neither that test nor physical
-custody preparation is yet an executed persistence/restart pass.
+ordinary admission reproduced `UnsupportedScope` before entry (4m09s compile,
+0.04s body). Five actual backend tests reproduced the missing custody owner
+(6m41s compile, 0.10s body). The reviewed physical owner then passed those five
+controls (3m09s compile, 0.14s body) and nine memory/fault/open/path controls
+(0.58s compile, 0.10s body). The actual governed SQLite model-tool-model flow
+passed (2m12s compile, 0.66s body); its memory-backed control also passed
+(0.87s compile, 0.09s body). Seven backend controls, including independent
+process exclusion/release and a proven same-file case alias, passed
+(48.13s compile, 0.14s body). The existing hard-link rejection control passed
+(0.50s compile, 0.04s body). The same-process close/reopen test reached teardown
+and failed because the default service-machine composition retained the old
+owners. A diagnostic run confirmed one machine, two session-store and three
+runtime-store references after explicit teardown. Fresh release inspection
+found upstream `27f8de8a6` already fixed that cycle. This candidate imports its
+Weak host and RPC callers, retaining current fallible custody boundaries.
+The separate returned-guard lifetime test reproduced premature service release
+(21.46s compile, 0.04s body); a small tuple retaining the service passed all
+eleven reconfigure controls (25.65s compile, 0.03s body).
+The actual close/reopen scenario then passed (10.69s compile, 0.56s body), as
+did all three stock memory/SQLite/reopen controls (0.48s compile, 0.60s body).
+Targeted runtime all-target Clippy passed in 4m59s. Host/RPC library Clippy
+passed in 13m15s. Normal commit hooks are the remaining checkpoint gate.
+Fresh post-reopen work, separate process restart,
+persistent controller administration and additional-platform acceptance remain
+open. The source-reviewed canonical service-slot adaptation is a separate next
+slice, not included in this checkpoint.
 
 [Meerkat issue 1618](https://github.com/lukacf/meerkat/issues/1618) is part of
 full default-profile coverage: effective per-identity policy must survive fresh,
@@ -78,9 +104,10 @@ fix passed 96 isolated JS tests. It and its CI unit-route correction are include
 in this repair candidate, awaiting normal gates. These client results do not
 establish integrated gateway or native runtime acceptance.
 
-Physical SQLite custody remains unimplemented; the held C7 tests and temporary
-API scaffold are unexecuted. C4 durable grant, controller and credential
-restoration remains unimplemented. There is no native implementation PR with
+At that recorded push, physical SQLite custody was unimplemented and the held
+C7 tests and temporary API scaffold were unexecuted. The current local physical
+custody and same-process reopen results are recorded above. C4 durable grant,
+controller and credential restoration remains unimplemented. There is no native implementation PR with
 green CI or accepted overhead measurement. Full ABAC, sandbox and supported
 surface/platform coverage remain required.
 

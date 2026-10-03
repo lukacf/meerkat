@@ -3013,7 +3013,7 @@ impl SessionRuntime {
         let reconfigure_auth_lease = runtime_adapter.generated_auth_lease_handle();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
-                service: service.clone(),
+                service: Arc::<PersistentSessionService<FactoryAgentBuilder>>::downgrade(&service),
                 staged_sessions: Arc::clone(&staged_sessions),
                 factory: factory_clone.clone(),
                 auth_lease: reconfigure_auth_lease,
@@ -3163,7 +3163,7 @@ impl SessionRuntime {
         let reconfigure_auth_lease = runtime_adapter.generated_auth_lease_handle();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
-                service: service.clone(),
+                service: Arc::<PersistentSessionService<FactoryAgentBuilder>>::downgrade(&service),
                 staged_sessions: Arc::clone(&staged_sessions),
                 factory: factory_clone.clone(),
                 auth_lease: reconfigure_auth_lease,
@@ -5842,7 +5842,7 @@ impl SessionRuntime {
 
     fn llm_reconfigure_host(&self) -> SessionRuntimeLlmReconfigureHost {
         SessionRuntimeLlmReconfigureHost {
-            service: self.service.clone(),
+            service: Arc::<PersistentSessionService<FactoryAgentBuilder>>::downgrade(&self.service),
             staged_sessions: Arc::clone(&self.staged_sessions),
             factory: self.factory.clone(),
             auth_lease: self.runtime_adapter.generated_auth_lease_handle(),

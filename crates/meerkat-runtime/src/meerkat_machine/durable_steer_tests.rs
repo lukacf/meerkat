@@ -2207,3 +2207,74 @@ async fn owner_context_without_an_active_run_is_not_delivered() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(rig.script.apply_calls.load(Ordering::SeqCst), 0);
 }
+
+/// A context bound to one run (a live delegation steer authorized for the
+/// delegation's run) never reaches a later run of the same session: an
+/// existing member that outlives the delegation starts its next turn, and
+/// the stale steer is NotDelivered instead of landing in that turn.
+#[tokio::test]
+async fn owner_context_bound_to_an_ended_run_never_reaches_the_next_run() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let rig = DurableSteerRig::persistent(Arc::clone(&store)).await;
+    let first = rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenStream)
+        .await;
+    let first_run = rig
+        .adapter
+        .live_owner_current_run_id(&rig.session_id)
+        .await
+        .expect("the first run is active");
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_phase(&first, InputLifecycleState::Consumed)
+        .await;
+
+    let second = rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenStream)
+        .await;
+    let second_run = rig
+        .adapter
+        .live_owner_current_run_id(&rig.session_id)
+        .await
+        .expect("the second run is active");
+    assert_ne!(second_run, first_run);
+    let adapter = Arc::clone(&rig.adapter);
+    let session_id = rig.session_id.clone();
+    let delivery = tokio::spawn(async move {
+        adapter
+            .deliver_live_owner_request_context_into_run(
+                &session_id,
+                &first_run,
+                "live-delegation-steer:stale",
+                owner_context("meant for the first run"),
+            )
+            .await
+    });
+    // Let the delivery settle before the run moves: bound to the ended run
+    // it returns at once; an unbound one would register for the second
+    // run's next boundary.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !delivery.is_finished() && !rig.state.has_waiting_delivery_for_test() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the delivery returned or registered");
+    // The second run opens a real next boundary: an unbound context would
+    // attach to it.
+    rig.script.step(RunnerStep::OpenNextBoundary);
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_phase(&second, InputLifecycleState::Consumed)
+        .await;
+    assert_eq!(
+        delivery.await.expect("delivery task").expect("delivery"),
+        crate::live_execution::LiveOwnerContextDelivery::NotDelivered
+    );
+    assert!(
+        rig.script.request_only_taken.lock().unwrap().is_empty(),
+        "the stale steer never reached the second run"
+    );
+}

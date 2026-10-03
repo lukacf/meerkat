@@ -1381,6 +1381,13 @@ where
         self.tool_scope.snapshot()
     }
 
+    /// The provider-visible tool definitions as shared handles. Unchanged
+    /// tools keep their allocation across calls, so callers can detect a
+    /// change by pointer instead of comparing schemas.
+    pub fn visible_tool_defs_shared(&self) -> Arc<[Arc<crate::ToolDef>]> {
+        self.tool_scope.visible_tools()
+    }
+
     /// Snapshot the provider-visible tool definitions for the active LLM model.
     pub fn visible_tool_defs(&self) -> Vec<crate::ToolDef> {
         self.tool_scope

@@ -2787,6 +2787,74 @@ fn view_from_authoritative_session(session: &Session) -> SessionView {
     }
 }
 
+/// A realtime-open snapshot that never waits behind a running turn (see
+/// [`PersistentSessionService::export_realtime_open_session_snapshot_without_waiting_for_turn`]).
+#[derive(Debug)]
+pub enum RealtimeOpenSnapshot {
+    /// No turn was in flight: the live-authoritative snapshot, taken exactly
+    /// as the ordinary open takes it, under the session's turn boundary.
+    Settled {
+        session: Session,
+        canonical_user_image_decoded_bytes: usize,
+    },
+    /// A turn held the session's turn boundary: the RuntimeStore-committed
+    /// boundary. Rows the turn commits later have higher canonical sequence
+    /// numbers than this snapshot covers.
+    CommittedBoundary {
+        session: Session,
+        canonical_user_image_decoded_bytes: usize,
+    },
+}
+
+/// A realtime-refresh snapshot that never waits behind a running turn (see
+/// [`PersistentSessionService::export_realtime_refresh_session_snapshot_without_waiting_for_turn`]).
+#[derive(Debug)]
+pub enum RealtimeRefreshSnapshot {
+    /// No turn was in flight: the snapshot the ordinary refresh takes, under
+    /// the session's turn boundary, including its durable resync.
+    Settled(Session),
+    /// A turn held the session's turn boundary: the RuntimeStore-committed
+    /// boundary, read without synchronizing the live actor. The durable resync
+    /// the ordinary refresh performs is owed at the turn boundary
+    /// ([`PersistentSessionService::defer_live_resync_to_turn_boundary`]).
+    CommittedBoundary(Session),
+}
+
+/// The durable resync a live refresh owes a session whose turn was in flight
+/// when the refresh read its committed boundary. Released by
+/// [`PersistentSessionService::release_live_resync_at_turn_boundary`].
+#[derive(Debug)]
+#[must_use = "a deferred live resync is released at the turn boundary"]
+pub struct PendingLiveResync {
+    session_id: SessionId,
+    channel_id: meerkat_core::LiveChannelId,
+}
+
+impl PendingLiveResync {
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn channel_id(&self) -> &meerkat_core::LiveChannelId {
+        &self.channel_id
+    }
+}
+
+/// How a [`PendingLiveResync`] was released.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveResyncRelease {
+    /// The turn boundary was reached and the live actor was reconciled with
+    /// the durable authority there, exactly as the ordinary refresh does.
+    Synchronized,
+    /// The refreshing channel closed before the turn boundary; the resync is
+    /// dropped (the next projection reconciles at its own boundary).
+    ChannelClosed,
+    /// The session was archived or is gone by the turn boundary.
+    SessionGone,
+}
+
 /// How a live-authority check observes the live actor's transcript authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LiveAuthorityObservation {
@@ -6695,7 +6763,71 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // constructing provider seed history: deferring recovery until the
         // next ACK could commit an older image that the newly opened provider
         // session never saw, splitting canonical and provider ordering.
-        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        self.export_realtime_open_session_snapshot_under_guard(id, max_image_bytes, &mutation_guard)
+            .await
+    }
+
+    /// Export the realtime-open snapshot for a channel whose provider receives
+    /// committed rows after its seed (the live-context mirror), never waiting
+    /// behind a running turn.
+    ///
+    /// When no turn holds the session's turn boundary this is exactly
+    /// [`Self::export_realtime_open_session_snapshot_with_image_usage`], under
+    /// the same guard. When a turn holds it, the snapshot is the
+    /// RuntimeStore-committed boundary (no guard, no actor command, no
+    /// synchronization), its images hydrated the same way; the turn's rows
+    /// reach the channel through the mirror once its boundary commits. A
+    /// pending realtime image anchor cannot be reconciled without the
+    /// boundary, so that case is refused with [`SessionError::Busy`].
+    pub async fn export_realtime_open_session_snapshot_without_waiting_for_turn(
+        &self,
+        id: &SessionId,
+    ) -> Result<RealtimeOpenSnapshot, SessionError> {
+        let gate = self.turn_finalization_gate_for_session(id).await;
+        if let Ok(turn_finalization_guard) = Arc::clone(&gate).try_lock_owned() {
+            let mutation_guard = self
+                .realtime_transcript_mutation_guard_with_turn_boundary(id, turn_finalization_guard)
+                .await?;
+            let (session, canonical_user_image_decoded_bytes) = self
+                .export_realtime_open_session_snapshot_under_guard(
+                    id,
+                    MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES,
+                    &mutation_guard,
+                )
+                .await?;
+            return Ok(RealtimeOpenSnapshot::Settled {
+                session,
+                canonical_user_image_decoded_bytes,
+            });
+        }
+        let (mut session, _authority) = self.load_live_context_committed_source(id).await?;
+        if session.pending_realtime_user_content_blob().is_some() {
+            return Err(SessionError::Busy { id: id.clone() });
+        }
+        let canonical_user_image_decoded_bytes = session
+            .hydrate_realtime_user_images_with_usage(
+                self.blob_store.as_ref(),
+                MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES,
+            )
+            .await
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to hydrate realtime history images before provider projection: {err}"
+                )))
+            })?;
+        Ok(RealtimeOpenSnapshot::CommittedBoundary {
+            session,
+            canonical_user_image_decoded_bytes,
+        })
+    }
+
+    async fn export_realtime_open_session_snapshot_under_guard(
+        &self,
+        id: &SessionId,
+        max_image_bytes: usize,
+        _mutation_guard: &SessionMutationGuard,
+    ) -> Result<(Session, usize), SessionError> {
         let mut session = self.export_realtime_session_authority_snapshot(id).await?;
         if session.pending_realtime_user_content_blob().is_some() {
             let outcome = self
@@ -6717,6 +6849,72 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 )))
             })?;
         Ok((session, canonical_user_image_decoded_bytes))
+    }
+
+    /// Export the in-place realtime refresh snapshot without waiting behind a
+    /// running turn.
+    ///
+    /// When no turn holds the session's turn boundary this is exactly
+    /// [`Self::export_realtime_refresh_session_snapshot`], under the same guard.
+    /// When a turn holds it, the snapshot is the RuntimeStore-committed
+    /// boundary (no guard, no actor command, no synchronization); the caller
+    /// owes the durable resync at the turn boundary
+    /// ([`Self::defer_live_resync_to_turn_boundary`]).
+    pub async fn export_realtime_refresh_session_snapshot_without_waiting_for_turn(
+        &self,
+        id: &SessionId,
+    ) -> Result<RealtimeRefreshSnapshot, SessionError> {
+        let gate = self.turn_finalization_gate_for_session(id).await;
+        if let Ok(turn_finalization_guard) = Arc::clone(&gate).try_lock_owned() {
+            let _mutation_guard = self
+                .realtime_transcript_mutation_guard_with_turn_boundary(id, turn_finalization_guard)
+                .await?;
+            return Ok(RealtimeRefreshSnapshot::Settled(
+                self.export_realtime_session_authority_snapshot(id).await?,
+            ));
+        }
+        let (session, _authority) = self.load_live_context_committed_source(id).await?;
+        Ok(RealtimeRefreshSnapshot::CommittedBoundary(session))
+    }
+
+    /// Record the durable resync a refresh owes `id` at its turn boundary,
+    /// on behalf of the refreshing live channel.
+    pub fn defer_live_resync_to_turn_boundary(
+        &self,
+        id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> PendingLiveResync {
+        PendingLiveResync {
+            session_id: id.clone(),
+            channel_id: channel_id.clone(),
+        }
+    }
+
+    /// Release a deferred refresh resync at the session's turn boundary.
+    ///
+    /// Waits for the turn boundary exactly as the channel's other projections
+    /// do, then reconciles the live actor with the durable authority there
+    /// (the resync the ordinary refresh performs before reading). An explicit
+    /// close of the refreshing channel releases the wait at once with
+    /// [`LiveResyncRelease::ChannelClosed`]
+    /// ([`Self::release_live_projection_turn_boundary_waiters`]).
+    pub async fn release_live_resync_at_turn_boundary(
+        &self,
+        pending: PendingLiveResync,
+    ) -> Result<LiveResyncRelease, SessionError> {
+        let PendingLiveResync {
+            session_id,
+            channel_id,
+        } = pending;
+        match self
+            .realtime_transcript_mutation_guard_for_channel(&session_id, &channel_id)
+            .await
+        {
+            Ok(_mutation_guard) => Ok(LiveResyncRelease::Synchronized),
+            Err(SessionError::Busy { .. }) => Ok(LiveResyncRelease::ChannelClosed),
+            Err(SessionError::NotFound { .. }) => Ok(LiveResyncRelease::SessionGone),
+            Err(error) => Err(error),
+        }
     }
 
     /// Export the authoritative session for an in-place realtime refresh.
@@ -7068,6 +7266,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<Vec<meerkat_core::ToolDef>, SessionError> {
         self.inner.live_visible_tool_defs(id).await
+    }
+
+    /// The live session's visible tool definitions as its session task last
+    /// published them; never waits behind a running turn.
+    pub async fn published_live_visible_tool_defs(
+        &self,
+        id: &SessionId,
+    ) -> Result<Vec<meerkat_core::ToolDef>, SessionError> {
+        self.inner.published_live_visible_tool_defs(id).await
     }
 
     pub async fn external_tool_surface_snapshot(
@@ -20864,6 +21071,8 @@ mod tests {
         entered_notify: Arc<tokio::sync::Notify>,
         release_notify: Arc<tokio::sync::Semaphore>,
         pending_context: Option<String>,
+        /// `Some` when agents accept durable snapshot sync; counts the syncs.
+        durable_syncs: Option<Arc<AtomicUsize>>,
     }
 
     impl BlockingRunBuilder {
@@ -20873,7 +21082,22 @@ mod tests {
                 entered_notify: Arc::new(tokio::sync::Notify::new()),
                 release_notify: Arc::new(tokio::sync::Semaphore::new(0)),
                 pending_context: None,
+                durable_syncs: None,
             }
+        }
+
+        /// Agents that apply durable snapshot syncs, counting them.
+        fn with_durable_sync() -> Self {
+            Self {
+                durable_syncs: Some(Arc::new(AtomicUsize::new(0))),
+                ..Self::new()
+            }
+        }
+
+        fn durable_syncs(&self) -> usize {
+            self.durable_syncs
+                .as_ref()
+                .map_or(0, |syncs| syncs.load(Ordering::Acquire))
         }
 
         async fn wait_for_entered_runs(&self, expected: usize) {
@@ -20901,6 +21125,7 @@ mod tests {
         entered_notify: Arc<tokio::sync::Notify>,
         release_notify: Arc<tokio::sync::Semaphore>,
         pending_context: Option<String>,
+        durable_syncs: Option<Arc<AtomicUsize>>,
     }
 
     #[async_trait::async_trait]
@@ -20933,6 +21158,7 @@ mod tests {
                 entered_notify: Arc::clone(&self.entered_notify),
                 release_notify: Arc::clone(&self.release_notify),
                 pending_context: self.pending_context.clone(),
+                durable_syncs: self.durable_syncs.clone(),
             })
         }
     }
@@ -20955,6 +21181,18 @@ mod tests {
                 .expect("blocking run release semaphore should stay open")
                 .forget();
             self.inner.run_with_events(prompt, event_tx).await
+        }
+
+        fn sync_session_from_durable_snapshot(
+            &mut self,
+            session: Session,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            let Some(syncs) = self.durable_syncs.as_ref() else {
+                return Err(meerkat_core::error::AgentError::DurableSnapshotSyncUnsupported);
+            };
+            self.inner.sync_session_from_durable_snapshot(session)?;
+            syncs.fetch_add(1, Ordering::AcqRel);
+            Ok(())
         }
 
         fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
@@ -26176,6 +26414,193 @@ mod tests {
                 .any(|message| matches!(message, Message::System(system) if system.content == "actor-only pending context")),
             "the read must not synchronize away actor-local pending context"
         );
+    }
+
+    /// Builds a resumed live session and holds a runtime turn on it: the turn
+    /// owns the turn boundary until `release_notify` gets a permit.
+    async fn live_session_with_held_turn() -> (
+        BlockingRunBuilder,
+        Arc<PersistentSessionService<BlockingRunBuilder>>,
+        SessionId,
+        tokio::task::JoinHandle<Result<CoreApplyOutput, SessionError>>,
+    ) {
+        let builder = BlockingRunBuilder::with_durable_sync();
+        let service = Arc::new(PersistentSessionService::new(
+            builder.clone(),
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        ));
+        let seed = service
+            .save_normalized_session(recoverable_store_row())
+            .await
+            .unwrap();
+        let id = seed.id().clone();
+        service.create_session(resume_request(seed)).await.unwrap();
+        let admission = service.reserve_runtime_turn_admission(&id).await.unwrap();
+        let turn_service = Arc::clone(&service);
+        let turn_id = id.clone();
+        let active_turn = tokio::spawn(async move {
+            let _boundary = turn_service
+                .acquire_runtime_turn_finalization_guard(&turn_id)
+                .await;
+            turn_service
+                .apply_runtime_turn_with_reserved_admission(
+                    &turn_id,
+                    RunId::new(),
+                    runtime_content_turn_request("held turn"),
+                    RunApplyBoundary::RunStart,
+                    vec![InputId::new()],
+                    admission,
+                )
+                .await
+        });
+        builder.wait_for_entered_runs(1).await;
+        (builder, service, id, active_turn)
+    }
+
+    /// With no turn in flight the non-waiting refresh snapshot is the ordinary
+    /// refresh snapshot.
+    #[tokio::test]
+    async fn idle_non_waiting_refresh_snapshot_is_the_ordinary_snapshot() {
+        let service = Arc::new(PersistentSessionService::new(
+            BlockingRunBuilder::new(),
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        ));
+        let seed = service
+            .save_normalized_session(recoverable_store_row())
+            .await
+            .unwrap();
+        let id = seed.id().clone();
+        service.create_session(resume_request(seed)).await.unwrap();
+        let ordinary = service
+            .export_realtime_refresh_session_snapshot(&id)
+            .await
+            .unwrap();
+        let RealtimeRefreshSnapshot::Settled(settled) = service
+            .export_realtime_refresh_session_snapshot_without_waiting_for_turn(&id)
+            .await
+            .unwrap()
+        else {
+            panic!("an idle session refreshes from the settled snapshot");
+        };
+        // Each live export stamps its own `updated_at`; everything else is equal.
+        let shape = |session: &Session| {
+            let mut value = serde_json::to_value(session).unwrap();
+            value.as_object_mut().unwrap().remove("updated_at");
+            value
+        };
+        assert_eq!(shape(&settled), shape(&ordinary));
+    }
+
+    /// A refresh on a member mid-turn reads the committed boundary at once and
+    /// owes the durable resync; the resync is released by the turn boundary,
+    /// not before it.
+    #[tokio::test]
+    async fn deferred_refresh_resync_runs_when_the_turn_finishes() {
+        let (builder, service, id, active_turn) = live_session_with_held_turn().await;
+        let committed = service
+            .export_live_context_summary_snapshot(&id)
+            .await
+            .unwrap()
+            .0;
+        let RealtimeRefreshSnapshot::CommittedBoundary(boundary) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.export_realtime_refresh_session_snapshot_without_waiting_for_turn(&id),
+        )
+        .await
+        .expect("the refresh snapshot must not wait for the active turn")
+        .unwrap() else {
+            panic!("a refresh mid-turn reads the committed boundary");
+        };
+        assert_eq!(
+            serde_json::to_value(&boundary).unwrap(),
+            serde_json::to_value(&committed).unwrap()
+        );
+
+        let channel = meerkat_core::LiveChannelId::new("refreshing-channel");
+        let pending = service.defer_live_resync_to_turn_boundary(&id, &channel);
+        assert_eq!(pending.session_id(), &id);
+        let release_service = Arc::clone(&service);
+        let mut release = tokio::spawn(async move {
+            release_service
+                .release_live_resync_at_turn_boundary(pending)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut release)
+                .await
+                .is_err(),
+            "the resync waits for the turn boundary"
+        );
+        assert!(!active_turn.is_finished());
+        assert_eq!(builder.durable_syncs(), 0, "nothing resynced mid-turn");
+
+        builder.release_notify.add_permits(1);
+        active_turn.await.unwrap().unwrap();
+        let released = tokio::time::timeout(std::time::Duration::from_secs(5), release)
+            .await
+            .expect("the turn boundary releases the deferred resync")
+            .unwrap()
+            .unwrap();
+        assert_eq!(released, LiveResyncRelease::Synchronized);
+        assert_eq!(
+            builder.durable_syncs(),
+            1,
+            "the released resync reconciled the live actor at the boundary"
+        );
+        service
+            .export_realtime_refresh_session_snapshot(&id)
+            .await
+            .unwrap();
+        assert_eq!(
+            builder.durable_syncs(),
+            1,
+            "the deferred resync settled what the ordinary refresh would have; nothing is left"
+        );
+    }
+
+    /// Closing the refreshing channel before the turn boundary releases the
+    /// deferred resync at once, typed, without waiting out the turn.
+    #[tokio::test]
+    async fn deferred_refresh_resync_is_released_by_a_close_before_the_boundary() {
+        let (builder, service, id, active_turn) = live_session_with_held_turn().await;
+        let channel = meerkat_core::LiveChannelId::new("closing-refresh-channel");
+        let pending = service.defer_live_resync_to_turn_boundary(&id, &channel);
+        let release_service = Arc::clone(&service);
+        let mut release = tokio::spawn(async move {
+            release_service
+                .release_live_resync_at_turn_boundary(pending)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut release)
+                .await
+                .is_err(),
+            "the resync waits for the turn boundary"
+        );
+
+        service.release_live_projection_turn_boundary_waiters(&id, &channel);
+        let released = tokio::time::timeout(std::time::Duration::from_secs(1), release)
+            .await
+            .expect("the close releases the deferred resync without the turn ending")
+            .unwrap()
+            .unwrap();
+        assert_eq!(released, LiveResyncRelease::ChannelClosed);
+        assert!(!active_turn.is_finished(), "the turn is still running");
+        assert_eq!(
+            builder.durable_syncs(),
+            0,
+            "a closed channel's resync never runs"
+        );
+        service.restore_live_projection_turn_boundary_wait(&id, &channel);
+
+        builder.release_notify.add_permits(1);
+        active_turn.await.unwrap().unwrap();
     }
 
     /// A member-status observation of a session mid-turn reads the watches

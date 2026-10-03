@@ -1581,7 +1581,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         Ok(())
     }
 
-    fn orchestrator(&self) -> LiveOrchestrator<'_, B> {
+    pub(crate) fn orchestrator(&self) -> LiveOrchestrator<'_, B> {
         let actor_witness_slots = Arc::clone(&self.actor_witness_slots);
         LiveOrchestrator {
             service: &self.service,
@@ -2178,7 +2178,12 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                     .await?, None)
             }
             None => {
-                (self.prepare_open_projection(session, RealtimeTurningMode::ProviderManaged, None)
+                (self.orchestrator()
+                    .realtime_session_open_projection_for_mirrored_channel(
+                        session,
+                        RealtimeTurningMode::ProviderManaged,
+                        None,
+                    )
                     .await?, None)
             }
         };

@@ -4694,7 +4694,15 @@ impl SessionBackend {
                 .hard_cancel_run_if_current(&session_id, &run_id, "mob shutdown")
                 .await
             {
-                Ok(true) => MemberStopRun::CancelledByShutdown { run_id },
+                // Delivered, or delivered with its outcome still owned by
+                // the runtime's reconciliation (the executor may already have
+                // finished the run while the machine has not recorded it).
+                // Either way the run's recorded terminal decides what the
+                // Shutdown reports, once the member's stop sees it settle.
+                Ok(true)
+                | Err(meerkat_runtime::RuntimeDriverError::InterruptDispatchOutcomeUnknown {
+                    ..
+                }) => MemberStopRun::CancelDispatched { run_id },
                 Ok(false)
                 | Err(
                     meerkat_runtime::RuntimeDriverError::StaleAuthority { .. }

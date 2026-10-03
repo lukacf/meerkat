@@ -96,6 +96,24 @@ pub(crate) fn write_back_phase(dsl_phase: mm_dsl::MeerkatPhase) -> RuntimeState 
     }
 }
 
+/// The core view of a machine-recorded turn terminal outcome.
+pub(crate) fn core_turn_terminal_outcome(
+    outcome: mm_dsl::TurnTerminalOutcome,
+) -> meerkat_core::turn_execution_authority::TurnTerminalOutcome {
+    use meerkat_core::turn_execution_authority::TurnTerminalOutcome as Core;
+    match outcome {
+        mm_dsl::TurnTerminalOutcome::None => Core::None,
+        mm_dsl::TurnTerminalOutcome::Completed => Core::Completed,
+        mm_dsl::TurnTerminalOutcome::Failed => Core::Failed,
+        mm_dsl::TurnTerminalOutcome::Cancelled => Core::Cancelled,
+        mm_dsl::TurnTerminalOutcome::BudgetExhausted => Core::BudgetExhausted,
+        mm_dsl::TurnTerminalOutcome::TimeBudgetExceeded => Core::TimeBudgetExceeded,
+        mm_dsl::TurnTerminalOutcome::StructuredOutputValidationFailed => {
+            Core::StructuredOutputValidationFailed
+        }
+    }
+}
+
 pub(crate) fn current_run_id_from_dsl(run_id: &mm_dsl::RunId) -> Option<RunId> {
     uuid::Uuid::parse_str(&run_id.0).ok().map(RunId::from_uuid)
 }

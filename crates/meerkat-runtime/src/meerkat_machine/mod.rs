@@ -6827,6 +6827,28 @@ impl MeerkatMachine {
         dsl_authority::current_run_id_from_authority(&authority)
     }
 
+    /// The turn terminal outcome the machine retains for exactly `run_id` of
+    /// `session_id`: `None` while that run's turn has not terminalized, when
+    /// the retained terminal witness belongs to another run, or when the
+    /// session is not registered.
+    pub async fn run_turn_terminal(
+        &self,
+        session_id: &SessionId,
+        run_id: &RunId,
+    ) -> Option<meerkat_core::turn_execution_authority::TurnTerminalOutcome> {
+        let authority = self.session_dsl_authority(session_id).await.ok()?;
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = authority.state();
+        if state.turn_terminal_run_id.as_ref() != Some(&dsl::RunId::from_domain(run_id)) {
+            return None;
+        }
+        state
+            .terminal_outcome
+            .map(dsl_authority::core_turn_terminal_outcome)
+    }
+
     /// Wait until `run_id` is no longer the run the machine records for
     /// `session_id`.
     ///
@@ -8915,7 +8937,7 @@ pub struct MeerkatMachineShared {
     /// per machine: a short bound would make every success-path interrupt
     /// race the process-global cleanup dispatcher that all in-process tests
     /// share, so only a test that exercises a wedged callback shortens it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_user_interrupt_ack_timeout: StdMutex<std::time::Duration>,
     /// Deterministic test gate after fenced input captures its residency slot
     /// and exact session gate but before it locks that session gate.
@@ -10511,7 +10533,7 @@ impl MeerkatMachine {
                 test_unregister_saga_hold: StdMutex::new(None),
                 #[cfg(feature = "test-support")]
                 test_unregister_caller_wait_grace: StdMutex::new(None),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
                 #[cfg(test)]
                 test_fenced_accept_after_lease: StdMutex::new(None),
@@ -10616,7 +10638,7 @@ impl MeerkatMachine {
                 test_unregister_saga_hold: StdMutex::new(None),
                 #[cfg(feature = "test-support")]
                 test_unregister_caller_wait_grace: StdMutex::new(None),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
                 #[cfg(test)]
                 test_fenced_accept_after_lease: StdMutex::new(None),
@@ -10721,7 +10743,7 @@ impl MeerkatMachine {
                 test_unregister_saga_hold: StdMutex::new(None),
                 #[cfg(feature = "test-support")]
                 test_unregister_caller_wait_grace: StdMutex::new(None),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
                 #[cfg(test)]
                 test_fenced_accept_after_lease: StdMutex::new(None),

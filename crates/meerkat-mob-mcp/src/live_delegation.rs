@@ -1347,6 +1347,11 @@ pub struct ExperimentalLiveDelegationCoordinator {
     /// (operation id, result text).
     #[cfg(test)]
     post_close_merges: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// Test stand-in for the worker session's pending peer requests read at
+    /// release (`peer_replies::awaiting_peer_replies`, unit-tested on its
+    /// own rows): `Some` answers every release with these members.
+    #[cfg(test)]
+    awaiting_peer_replies_for_test: Arc<std::sync::Mutex<Option<Vec<String>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1645,6 +1650,8 @@ impl ExperimentalLiveDelegationCoordinator {
             ),
             #[cfg(test)]
             post_close_merges: Arc::default(),
+            #[cfg(test)]
+            awaiting_peer_replies_for_test: Arc::default(),
         }
     }
 
@@ -5486,6 +5493,15 @@ impl ExperimentalLiveDelegationCoordinator {
         session_id: &SessionId,
         interaction: &str,
     ) -> Vec<String> {
+        #[cfg(test)]
+        if let Some(members) = self
+            .awaiting_peer_replies_for_test
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return members;
+        }
         use meerkat_core::service::{SessionHistoryQuery, SessionServiceHistoryExt};
         let service = self.mobs.session_service();
         let mut messages = Vec::new();
@@ -5634,14 +5650,6 @@ impl ExperimentalLiveDelegationCoordinator {
             retained.result.lock().await.release_delivery(reservation);
             return Ok(ResultReleaseOutcome::ClosedBeforeDispatch);
         }
-        self.narrate_on_held_lane(
-            &NarrationSubject::from_retained(retained),
-            LiveDelegationNarrationKind::Completed,
-            0,
-            Vec::new(),
-            false,
-        )
-        .await;
         // Read at release, after the worker's terminal committed: a peer
         // request its turn sent whose answer has not been committed yet.
         let awaiting_peer_replies = match &worker_session {
@@ -5655,6 +5663,29 @@ impl ExperimentalLiveDelegationCoordinator {
             }
             None => Vec::new(),
         };
+        // The Completed sentence announces "the result follows". While a
+        // member's answer is still pending, the result only says they were
+        // asked, and the announcement is what the voice answered with an
+        // invented reply (combined5 S102 R3: "They said they don't know" at
+        // the narration's insertion point, before the pending-answer notice
+        // and the result were sent). So it is not sent: the voice gets the
+        // broker's pending-answer notice first, then the result.
+        if awaiting_peer_replies.is_empty() {
+            self.narrate_on_held_lane(
+                &NarrationSubject::from_retained(retained),
+                LiveDelegationNarrationKind::Completed,
+                0,
+                Vec::new(),
+                false,
+            )
+            .await;
+        } else {
+            tracing::info!(
+                operation_id = %retained.operation.operation_id(),
+                members = awaiting_peer_replies.len(),
+                "live delegation result awaits members' answers; its Completed narration is not sent"
+            );
+        }
         retained.result.lock().await.dispatch_crossed = true;
         let (dispatch, projection_evidence) = Self::release_exact_delegation_result_projection(
             retained.control.as_ref(),
@@ -7760,6 +7791,9 @@ mod tests {
         narrations: Mutex<Vec<(LiveDelegationNarrationKind, String)>>,
         /// Every released result as (delegation adapter key, text), in order.
         releases: Mutex<Vec<(String, String)>>,
+        /// The members each release reported as still owing an answer, in
+        /// release order.
+        awaiting_peer_replies: Mutex<Vec<Vec<String>>>,
         /// Narrations and result releases in the order the provider saw them.
         events: Mutex<Vec<ExactProjectionControlEvent>>,
         /// The provider transport has been retired: every release and
@@ -7831,6 +7865,19 @@ mod tests {
     impl ExperimentalGptLiveControlPlane for ExactProjectionControl {
         async fn active_binding(&self, _session_id: &SessionId) -> Option<ProviderWebrtcBinding> {
             None
+        }
+
+        async fn release_delegation_context_awaiting_peer_replies(
+            &self,
+            authority: LiveDelegationResultDeliveryAuthority,
+            delegation: LiveSidebandDelegationRef,
+            text: String,
+            peers: Vec<String>,
+        ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError>
+        {
+            self.awaiting_peer_replies.lock().await.push(peers);
+            self.release_delegation_context(authority, delegation, text)
+                .await
         }
 
         async fn next_observation(

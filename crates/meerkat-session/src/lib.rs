@@ -67,10 +67,11 @@ pub use compactor::DefaultCompactor;
 pub use persistent::{
     CommittedBoundaryRecovery, CommittedBoundaryResumePreparationReceipt,
     DEFAULT_WHOLE_BLOB_BODY_CACHE_BYTES, DurableSessionForkWithProvenance,
-    LiveContextCommittedBoundary, LiveSessionActorTurnBoundaryLease,
-    MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
-    PreparedActorSessionSeed, PreparedCommittedBoundaryResume,
+    LiveContextCommittedBoundary, LiveResyncRelease, LiveSessionActorTurnBoundaryLease,
+    MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PendingLiveResync,
+    PersistentSessionService, PreparedActorSessionSeed, PreparedCommittedBoundaryResume,
     PreparedCommittedBoundaryResumeMaterialization, PreparedCommittedBoundaryResumeUnavailable,
+    RealtimeOpenSnapshot, RealtimeRefreshSnapshot,
 };
 
 // Skill registration (inventory + meerkat-skills not available on wasm32)

@@ -596,6 +596,10 @@ impl SessionAgent for FactoryAgent {
         self.agent.visible_tool_defs()
     }
 
+    fn visible_tool_defs_shared(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+        self.agent.visible_tool_defs_shared()
+    }
+
     fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
         self.agent.external_tool_surface_snapshot()
     }

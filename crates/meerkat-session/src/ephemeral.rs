@@ -2363,6 +2363,9 @@ struct SessionHandle {
     /// The session task's transcript authority as of its last command or
     /// turn, so observations never wait behind a running turn.
     transcript_authority_rx: watch::Receiver<PublishedTranscriptAuthority>,
+    /// The session task's visible tool definitions as of its last command or
+    /// turn, so live open and refresh never wait behind a running turn.
+    visible_tool_defs_rx: watch::Receiver<Arc<[Arc<meerkat_core::ToolDef>]>>,
     llm_identity_rx: watch::Receiver<SessionLlmIdentity>,
     /// Mutexed shell around generated session turn-admission authority.
     turn_admission: Arc<std::sync::Mutex<TurnAdmissionSlot>>,
@@ -2615,6 +2618,7 @@ struct SessionTaskControl {
     state_tx: watch::Sender<SessionState>,
     summary_tx: watch::Sender<SessionSummaryCache>,
     transcript_authority_tx: watch::Sender<PublishedTranscriptAuthority>,
+    visible_tool_defs_tx: watch::Sender<Arc<[Arc<meerkat_core::ToolDef>]>>,
     llm_identity_tx: watch::Sender<SessionLlmIdentity>,
     turn_admission: Arc<std::sync::Mutex<TurnAdmissionSlot>>,
     interrupt_notify: Arc<tokio::sync::Notify>,
@@ -2636,6 +2640,24 @@ impl SessionTaskControl {
     /// Publish the actor's current transcript authority (bound to this
     /// incarnation's generation) for observers that must not wait on the
     /// task. Called whenever the task is between commands and turns.
+    /// Publish the actor's visible tool definitions when they changed.
+    fn publish_visible_tool_defs<A: SessionAgent>(&self, agent: &A) {
+        let current = agent.visible_tool_defs_shared();
+        self.visible_tool_defs_tx.send_if_modified(|published| {
+            let unchanged = published.len() == current.len()
+                && published
+                    .iter()
+                    .zip(current.iter())
+                    .all(|(published, current)| Arc::ptr_eq(published, current));
+            if unchanged {
+                false
+            } else {
+                *published = current;
+                true
+            }
+        });
+    }
+
     fn publish_transcript_authority<A: SessionAgent>(&self, agent: &A, generation: u64) {
         let current: PublishedTranscriptAuthority = agent
             .session_transcript_authority()
@@ -3131,6 +3153,17 @@ pub trait SessionAgent: Send {
     /// Snapshot the canonical visible tool definitions for the live session.
     fn visible_tool_defs(&self) -> Vec<meerkat_core::ToolDef> {
         Vec::new()
+    }
+
+    /// The visible tool definitions as shared handles, for publication.
+    /// Implementations whose tools keep their allocation while unchanged
+    /// should override this so republication is detected by pointer.
+    fn visible_tool_defs_shared(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+        self.visible_tool_defs()
+            .into_iter()
+            .map(Arc::new)
+            .collect::<Vec<_>>()
+            .into()
     }
 
     /// Take a diagnostic snapshot of the live external tool-surface state, if supported.
@@ -4759,6 +4792,34 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 "Session task dropped the reply channel".to_string(),
             ))
         })
+    }
+
+    /// The live session's visible tool definitions as the session task last
+    /// published them, without sending the task a command. A task in the
+    /// middle of a turn answers nothing until the turn ends; live open and
+    /// refresh read this instead.
+    pub async fn published_live_visible_tool_defs(
+        &self,
+        id: &SessionId,
+    ) -> Result<Vec<meerkat_core::ToolDef>, SessionError> {
+        let (task_exited, published) = self
+            .sessions
+            .with_handle(id, |handle| {
+                (
+                    handle.command_tx.is_closed(),
+                    Arc::clone(&handle.visible_tool_defs_rx.borrow()),
+                )
+            })
+            .await
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        if task_exited {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ),
+            ));
+        }
+        Ok(published.iter().map(|tool| tool.as_ref().clone()).collect())
     }
 
     /// Get a diagnostic snapshot of the live external tool-surface state for a session.
@@ -6997,6 +7058,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 .map(|snapshot| snapshot.bind_actor_generation(0))
                 .map_err(|error| error.to_string()),
         );
+        let (visible_tool_defs_tx, visible_tool_defs_rx) =
+            watch::channel(agent.visible_tool_defs_shared());
         let event_journal = SessionEventJournal::install(
             session_id.clone(),
             self.session_event_line(&session_id).await,
@@ -7021,6 +7084,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 state_tx,
                 summary_tx,
                 transcript_authority_tx,
+                visible_tool_defs_tx,
                 llm_identity_tx,
                 turn_admission: Arc::clone(&turn_admission),
                 interrupt_notify: interrupt_notify.clone(),
@@ -7045,6 +7109,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 state_tx,
                 summary_tx,
                 transcript_authority_tx,
+                visible_tool_defs_tx,
                 llm_identity_tx,
                 turn_admission: Arc::clone(&turn_admission),
                 interrupt_notify: interrupt_notify.clone(),
@@ -7067,6 +7132,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             state_rx,
             summary_rx,
             transcript_authority_rx,
+            visible_tool_defs_rx,
             llm_identity_rx,
             turn_admission: Arc::clone(&turn_admission),
             created_at,
@@ -8582,6 +8648,7 @@ async fn session_task<A: SessionAgent>(
         // Between commands and turns: publish what observers may read
         // without waiting on this task.
         control.publish_transcript_authority(&agent, transcript_authority_generation);
+        control.publish_visible_tool_defs(&agent);
         let cmd = tokio::select! {
             biased;
             () = control.shutdown_notify.notified() => {

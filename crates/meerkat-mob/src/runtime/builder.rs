@@ -7558,6 +7558,12 @@ impl MobBuilder {
             )
             .await?,
         );
+        // Resume can bind members before any actor runs (#1500): every bind
+        // delivers the posture of the machine state at that point. It is set
+        // again once the lifecycle phase and intent are recovered below.
+        supervisor_bridge.set_member_run_start_posture(
+            super::supervisor_bridge::MemberRunStartPosture::of(initial_dsl_authority.state()),
+        );
         #[cfg(not(target_arch = "wasm32"))]
         let supervisor_startup_guard =
             SupervisorBridgeStartupGuard::new(Arc::clone(&supervisor_bridge));
@@ -7891,6 +7897,12 @@ impl MobBuilder {
                     recovered_completion_lifecycle_intent,
                 )?;
             }
+            // The recovered phase and lifecycle intent decide whether member
+            // run starts are held (#1500): publish that before anything else
+            // can bind a member.
+            supervisor_bridge.set_member_run_start_posture(
+                super::supervisor_bridge::MemberRunStartPosture::of(wiring.dsl_authority.state()),
+            );
 
             let restore_diagnostics_snapshot =
                 preview_handle.restore_diagnostics.read().await.clone();

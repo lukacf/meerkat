@@ -93,22 +93,29 @@ impl BridgeRequestFailure {
     }
 }
 
-/// A run-start command owed to a peer that was not bound when it was due
-/// (#1500): the peer's next bind sends it. The latest one wins: a Resume's
-/// release replaces a Stop's hold, and a Stop's hold replaces a release.
-#[derive(Debug, Clone)]
-pub(crate) struct OwedRunStartRelease {
-    pub(crate) command: OwedRunStartCommand,
-    pub(crate) expected_member: Option<super::bridge_protocol::BridgeMemberIncarnation>,
+/// The mob's member run-start posture (#1500), read from MobMachine's
+/// `member_run_starts_held`. A member that was
+/// not bound when the posture changed gets it on its next bind, and a
+/// restored actor sets it from the durable mob phase, so a supervisor
+/// restart cannot lose it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemberRunStartPosture {
+    Held,
+    Released,
 }
 
-/// Which run-start command a peer is owed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OwedRunStartCommand {
-    /// A Stop could not reach the peer: hold its run starts on bind.
-    Hold,
-    /// A Resume could not reach the peer: release its run starts on bind.
-    Release,
+impl MemberRunStartPosture {
+    /// The posture of a MobMachine state: Held iff its
+    /// `member_run_starts_held` is set. Every arm that emits
+    /// `HoldMemberRunStarts` sets it, only ResumeStopped and ResetToRunning
+    /// clear it, and TLC checks that a Stopped mob always has it set.
+    pub(crate) fn of(state: &crate::machines::mob_machine::MobMachineState) -> Self {
+        if state.member_run_starts_held {
+            Self::Held
+        } else {
+            Self::Released
+        }
+    }
 }
 
 pub(crate) struct MobSupervisorBridge {
@@ -176,7 +183,7 @@ pub(crate) struct MobSupervisorBridge {
     /// Run-start releases a Resume owes peers it could not reach because they
     /// were not bound (#1500), by peer id; the peer's next successful bind
     /// sends the release.
-    pending_run_start_releases: StdMutex<HashMap<String, OwedRunStartRelease>>,
+    member_run_start_posture: StdMutex<MemberRunStartPosture>,
 }
 
 /// Linear owner for one bridge request correlation.
@@ -575,7 +582,7 @@ impl MobSupervisorBridge {
             shutdown_complete: std::sync::atomic::AtomicBool::new(false),
             rotation_observe_hold: StdMutex::new(HashMap::new()),
             run_start_hold: StdMutex::new(HashMap::new()),
-            pending_run_start_releases: StdMutex::new(HashMap::new()),
+            member_run_start_posture: StdMutex::new(MemberRunStartPosture::Released),
         })
     }
 
@@ -596,62 +603,20 @@ impl MobSupervisorBridge {
             .insert(peer_id.to_string(), supported);
     }
 
-    /// Owe `peer_id` a run-start release on its next bind (#1500).
-    pub(crate) fn mark_run_start_release_pending(
-        &self,
-        peer_id: &str,
-        expected_member: Option<super::bridge_protocol::BridgeMemberIncarnation>,
-    ) {
-        self.pending_run_start_releases
+    /// Record the mob's member run-start posture (#1500).
+    pub(crate) fn set_member_run_start_posture(&self, posture: MemberRunStartPosture) {
+        *self
+            .member_run_start_posture
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                peer_id.to_string(),
-                OwedRunStartRelease {
-                    command: OwedRunStartCommand::Release,
-                    expected_member,
-                },
-            );
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = posture;
     }
 
-    /// Owe `peer_id` a run-start hold on its next bind (#1500).
-    pub(crate) fn mark_run_start_hold_pending(
-        &self,
-        peer_id: &str,
-        expected_member: Option<super::bridge_protocol::BridgeMemberIncarnation>,
-    ) {
-        self.pending_run_start_releases
+    /// The mob's member run-start posture, which every member bind delivers.
+    pub(crate) fn member_run_start_posture(&self) -> MemberRunStartPosture {
+        *self
+            .member_run_start_posture
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                peer_id.to_string(),
-                OwedRunStartRelease {
-                    command: OwedRunStartCommand::Hold,
-                    expected_member,
-                },
-            );
-    }
-
-    /// Take the run-start command owed to `peer_id`, if any. A hold that
-    /// reaches the peer takes it too: whatever it owed is superseded.
-    pub(crate) fn take_run_start_release_pending(
-        &self,
-        peer_id: &str,
-    ) -> Option<OwedRunStartRelease> {
-        self.pending_run_start_releases
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(peer_id)
-    }
-
-    /// Drop every owed run-start release (mob Shutdown, OB3): the mob is
-    /// Stopped, so no remote peer is owed a release any more. Local map
-    /// operation only; no bridge contact.
-    pub(crate) fn clear_run_start_releases_pending(&self) {
-        self.pending_run_start_releases
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
     }
 
     /// Whether `peer_id` supports the run-start hold; `None` when it has not
@@ -3781,48 +3746,6 @@ mod tests {
     /// mutation) while the `ParticipantNameOccupied` destructure below goes RED.
     /// Assert the variant and its re-carried holder key, never the prose.
     #[cfg(not(target_arch = "wasm32"))]
-    /// #1500: a peer that was not bound when a Stop held or a Resume released
-    /// is owed exactly one run-start command, the latest one, sent on its
-    /// next bind.
-    #[tokio::test]
-    async fn owed_run_start_commands_keep_only_the_latest_per_peer() {
-        let suffix = uuid::Uuid::new_v4();
-        let mob_id = crate::MobId::from(format!("mob/owed-run-start-{suffix}"));
-        let bridge = MobSupervisorBridge::new(
-            &mob_id,
-            SupervisorAuthorityRecord::generate(
-                super::super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
-            ),
-            None,
-        )
-        .await
-        .expect("supervisor bridge should build");
-
-        bridge.mark_run_start_hold_pending("peer-a", None);
-        bridge.mark_run_start_release_pending("peer-a", None);
-        bridge.mark_run_start_release_pending("peer-b", None);
-        bridge.mark_run_start_hold_pending("peer-b", None);
-
-        assert_eq!(
-            bridge
-                .take_run_start_release_pending("peer-a")
-                .map(|owed| owed.command),
-            Some(OwedRunStartCommand::Release),
-            "a Resume's release replaces the Stop's owed hold"
-        );
-        assert_eq!(
-            bridge
-                .take_run_start_release_pending("peer-b")
-                .map(|owed| owed.command),
-            Some(OwedRunStartCommand::Hold),
-            "a Stop's hold replaces the Resume's owed release"
-        );
-        assert!(
-            bridge.take_run_start_release_pending("peer-a").is_none(),
-            "an owed command is sent once"
-        );
-    }
-
     #[tokio::test]
     async fn supervisor_bridge_refuses_to_displace_a_live_foreign_authority_route() {
         let suffix = uuid::Uuid::new_v4();

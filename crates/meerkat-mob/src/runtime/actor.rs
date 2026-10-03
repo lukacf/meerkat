@@ -10914,7 +10914,18 @@ impl MobActor {
     /// a forwarder and health-monitor reconcile (#1250). A roster-only change
     /// (for example a projected backend-peer binding) still wakes watchers,
     /// because list projections combine both.
+    /// The member run-start posture MobMachine state implies (#1500): Held
+    /// from a Stop's quiesce until the mob leaves Stopped, Released
+    /// otherwise. Every member bind delivers it.
+    fn member_run_start_posture(&self) -> super::supervisor_bridge::MemberRunStartPosture {
+        super::supervisor_bridge::MemberRunStartPosture::of(self.dsl_authority.state())
+    }
+
     fn publish_machine_state_projection(&self) {
+        // The single post-apply seam (#1500): every member bind delivers the
+        // run-start posture of the state just published.
+        self.supervisor_bridge
+            .set_member_run_start_posture(self.member_run_start_posture());
         let state = self.dsl_authority.state();
         self.dsl_topology_epoch
             .store(state.topology_epoch, std::sync::atomic::Ordering::Release);
@@ -13378,7 +13389,52 @@ impl MobActor {
                 expected.agent_identity, host_binding_generation
             )));
         }
+        self.deliver_run_start_posture_to_placed_member(
+            &domain_identity,
+            &promoted_expected_member,
+        )
+        .await;
         Ok(())
+    }
+
+    /// Deliver the mob's run-start posture to a placed member whose carrier
+    /// was just re-activated (#1500). No Stop or Resume could reach it while
+    /// the carrier was dormant, and a re-materialized runtime starts unheld.
+    /// Both commands are idempotent on the host; a failure is logged, and the
+    /// next Stop or Resume reaches the member again.
+    async fn deliver_run_start_posture_to_placed_member(
+        &self,
+        identity: &AgentIdentity,
+        expected_member: &super::bridge_protocol::BridgeMemberIncarnation,
+    ) {
+        let Some(member_ref) = self
+            .roster
+            .read()
+            .await
+            .get(identity)
+            .map(|entry| entry.member_ref.clone())
+        else {
+            return;
+        };
+        let delivered = match self.supervisor_bridge.member_run_start_posture() {
+            super::supervisor_bridge::MemberRunStartPosture::Held => self
+                .provisioner
+                .stop_member_runtime(&member_ref, Some(expected_member), false)
+                .await
+                .map(|_| ()),
+            super::supervisor_bridge::MemberRunStartPosture::Released => {
+                self.provisioner
+                    .release_member_run_starts(&member_ref, Some(expected_member))
+                    .await
+            }
+        };
+        if let Err(error) = delivered {
+            tracing::warn!(
+                agent_identity = %identity,
+                error = %error,
+                "delivering the run-start posture to a re-activated placed member failed"
+            );
+        }
     }
 
     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -21338,6 +21394,10 @@ impl MobActor {
         };
         let mut first_error = None;
         for entry in &entries {
+            // A dormant placed carrier is released when it is re-activated.
+            if self.placed_member_carrier_dormant(&entry.agent_identity) {
+                continue;
+            }
             let incarnation = match self.autonomous_stop_interrupt_incarnation(entry) {
                 Ok(incarnation) => incarnation,
                 Err(error) => {
@@ -24793,6 +24853,11 @@ impl MobActor {
                     self.settle_member_turn_admission(&agent_identity, ticket);
                 }
                 #[cfg(test)]
+                MobCommand::BindPeerOnlyMembersForTest { reply_tx } => {
+                    let result = self.adopt_peer_only_direct_members_after_v5_rotation().await;
+                    let _ = reply_tx.send(result);
+                }
+                #[cfg(test)]
                 MobCommand::FailNextResumeReadinessForTest { fault, reply_tx } => {
                     self.resume_readiness_fault = Some(fault);
                     let _ = reply_tx.send(());
@@ -27564,8 +27629,8 @@ impl MobActor {
                         // held through their host only when the member stop
                         // below reaches them, and are reported as
                         // `DelegatedToHost` otherwise. A Stopped mob owes no
-                        // remote member a release.
-                        self.provisioner.clear_owed_run_start_releases();
+                        // remote member a release: a member that binds later
+                        // gets the Held posture its machine state implies.
                         match self.hold_all_member_run_starts(true).await {
                             Ok(outcomes) => {
                                 for (identity, outcome) in outcomes {
@@ -27936,6 +28001,11 @@ impl MobActor {
     pub(super) async fn run(mut self, mut command_rx: mpsc::Receiver<RoutedMobCommand>) {
         self.inline_step_watchdog
             .start_checker(self.definition.id.clone());
+        // Every actor incarnation, a restored one included, starts from its
+        // durable MobMachine state (#1500): a member that binds before the
+        // next lifecycle transition gets the run-start posture it implies.
+        self.supervisor_bridge
+            .set_member_run_start_posture(self.member_run_start_posture());
         if !boxed_arm_future(|| self.prepare_actor_run()).await {
             self.inline_step_watchdog.stop();
             return;

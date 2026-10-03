@@ -281,6 +281,7 @@ impl MobCommand {
             | Self::SpawnPreparationProbe { .. }
             | Self::BeginStopQuiesceForTest { .. }
             | Self::FailNextResumeReadinessForTest { .. }
+            | Self::BindPeerOnlyMembersForTest { .. }
             | Self::MemberStatusLaneProbe { .. }
             | Self::DslT2Snapshot { .. } => None,
         }
@@ -639,6 +640,7 @@ impl MobCommand {
             | Self::SpawnPreparationProbe { .. }
             | Self::BeginStopQuiesceForTest { .. }
             | Self::FailNextResumeReadinessForTest { .. }
+            | Self::BindPeerOnlyMembersForTest { .. }
             | Self::MemberStatusLaneProbe { .. }
             | Self::DslT2Snapshot { .. } => {
                 tracing::error!("scope denial reached a test-only command; dropped");

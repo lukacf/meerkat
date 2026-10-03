@@ -2776,6 +2776,17 @@ fn view_from_authoritative_session(session: &Session) -> SessionView {
     }
 }
 
+/// How a live-authority check observes the live actor's transcript authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveAuthorityObservation {
+    /// A command to the session task, ordered after the caller's earlier
+    /// commands. Waits for a running turn to end.
+    Ordered,
+    /// The authority the task last published between commands and turns.
+    /// Never waits on the task; observation-only readers use it.
+    Published,
+}
+
 enum LiveSessionAuthority {
     NoLive,
     LiveAuthoritative {
@@ -4883,9 +4894,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<LiveSessionAuthority, SessionError> {
+        self.live_session_authority_with(id, LiveAuthorityObservation::Ordered)
+            .await
+    }
+
+    async fn live_session_authority_with(
+        &self,
+        id: &SessionId,
+        observation: LiveAuthorityObservation,
+    ) -> Result<LiveSessionAuthority, SessionError> {
         let mut retry = OptimisticReadRetry::new(id, "live session authority");
         loop {
-            let live_authority = match self.inner.observe_session_transcript_authority(id).await {
+            let observed = match observation {
+                LiveAuthorityObservation::Ordered => {
+                    self.inner.observe_session_transcript_authority(id).await
+                }
+                LiveAuthorityObservation::Published => {
+                    self.inner
+                        .observe_published_session_transcript_authority(id)
+                        .await
+                }
+            };
+            let live_authority = match observed {
                 Ok(authority) => authority,
                 Err(SessionError::NotFound { .. }) => {
                     return Ok(LiveSessionAuthority::NoLive);
@@ -5143,13 +5173,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<LiveSessionAuthority, SessionError> {
-        let mut result = self.live_session_authority(id).await;
+        let mut result = self
+            .live_session_authority_with(id, LiveAuthorityObservation::Published)
+            .await;
         for _ in 1..OBSERVATION_LOAD_ATTEMPTS {
             if !Self::is_transcript_revision_conflict(&result) {
                 break;
             }
             let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
-            result = self.live_session_authority(id).await;
+            result = self
+                .live_session_authority_with(id, LiveAuthorityObservation::Published)
+                .await;
         }
         result
     }
@@ -13602,7 +13636,11 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                             hook().await;
                         }
                     }
-                    match self.inner.observe_session_transcript_authority(id).await {
+                    match self
+                        .inner
+                        .observe_published_session_transcript_authority(id)
+                        .await
+                    {
                         Ok(current) if current == snapshot => {
                             retry.finish();
                             return Ok(view);

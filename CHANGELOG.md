@@ -1314,6 +1314,18 @@ them.
   notice and the result were sent). Such a result now reaches the provider
   as the pending-answer notice followed by the result, with nothing ahead of
   them promising an answer; other results keep their Completed narration.
+- A delegation result that lands while the GPT Live model is still speaking
+  is now read out once the response ends, instead of being lost (Turbo S S97
+  r3). The result's speak cue was sent the moment the result was
+  acknowledged. A result inserted exactly at the end of the output so far
+  (gap 0) counted as silence, so the cue went into a response that was still
+  being voiced and already committed to other content, and nothing re-armed
+  it. A result landing while output ran past it got no cue at all. Now a
+  result acknowledged while the model's response is in progress defers its
+  one cue until the response ends: 1600 ms of output silence measured on the
+  provider's own output audio frames (`OUTPUT_SILENCE_RELEASE_MS`, derived
+  like the user-floor release), never a wall-clock timer. A deferred cue
+  holds nothing a close waits on.
 - GPT Live Turbo S S102 no longer fails a run whose member answered
   correctly. The oracle looked for the text "Peer response from" in the
   executor's history, which appears only when `send_response` carries no

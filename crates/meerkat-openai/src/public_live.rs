@@ -2256,6 +2256,16 @@ struct SessionState {
     /// Delegations whose result was acknowledged and whose cue is not yet
     /// sent, in acknowledgement order.
     due_result_cues: VecDeque<String>,
+    /// Results acknowledged while the model's response was in progress, in
+    /// acknowledgement order. Their cue waits for the response to end
+    /// ([`OUTPUT_SILENCE_RELEASE_MS`] of output silence) instead of landing
+    /// inside it, where the in-progress response absorbs it.
+    deferred_result_cues: VecDeque<String>,
+    /// Audio-clock length of model output silence since its last speech
+    /// frame (`session.output_audio.delta` frames below
+    /// [`USER_FLOOR_SPEECH_DBFS`]). Starts at the release, so a model that
+    /// has not spoken is silent.
+    output_silence_run_ms: u64,
     /// Client delegations created whose in-progress notice is not yet sent,
     /// in creation order ([`LIVE_DELEGATION_IN_PROGRESS`]).
     due_progress_notices: VecDeque<String>,
@@ -2307,6 +2317,8 @@ impl Default for SessionState {
             commentary_ack_start_ms: None,
             result_cue_candidates: HashMap::new(),
             due_result_cues: VecDeque::new(),
+            deferred_result_cues: VecDeque::new(),
+            output_silence_run_ms: OUTPUT_SILENCE_RELEASE_MS,
             due_progress_notices: VecDeque::new(),
             awaiting_peer_results: HashSet::new(),
             unanswered_user_input: false,
@@ -2428,6 +2440,31 @@ impl SessionState {
     /// energy alone (noise) never opens one; it only ends one. A model that
     /// stays silent after the user stopped can no longer keep commentary
     /// held forever.
+    /// Track model output silence on the provider's output audio frames and
+    /// release deferred result cues once the response has ended: a run of
+    /// [`OUTPUT_SILENCE_RELEASE_MS`] below [`USER_FLOOR_SPEECH_DBFS`]. The run
+    /// is counted on provider frames, never a wall-clock timer.
+    fn observe_output_audio_energy(&mut self, audio: &str) {
+        let frame_ms =
+            reflected_pcm16_samples(audio).saturating_mul(1000) / SIDEBAND_INPUT_SAMPLE_RATE_HZ;
+        if reflected_pcm16_dbfs(audio).is_some_and(|dbfs| dbfs >= USER_FLOOR_SPEECH_DBFS) {
+            self.output_silence_run_ms = 0;
+            return;
+        }
+        self.output_silence_run_ms = self.output_silence_run_ms.saturating_add(frame_ms);
+        if self.output_silence_run_ms >= OUTPUT_SILENCE_RELEASE_MS
+            && !self.deferred_result_cues.is_empty()
+        {
+            tracing::info!(
+                silence_ms = self.output_silence_run_ms,
+                cues = self.deferred_result_cues.len(),
+                "public Live response ended; deferred result cues due"
+            );
+            self.due_result_cues
+                .extend(self.deferred_result_cues.drain(..));
+        }
+    }
+
     fn observe_reflected_input_energy(&mut self, audio: &str, samples: u64) {
         let frame_ms = samples.saturating_mul(1000) / SIDEBAND_INPUT_SAMPLE_RATE_HZ;
         let speech = reflected_pcm16_dbfs(audio).is_some_and(|dbfs| dbfs >= USER_FLOOR_SPEECH_DBFS);
@@ -2634,11 +2671,14 @@ impl SessionState {
             // Reflected media, mute state, accounting telemetry, telephony
             // signalling, and informational notices carry no conversational,
             // transcript, delegation, or effect authority.
-            ServerEvent::OutputAudioDelta { .. } => {
+            ServerEvent::OutputAudioDelta { delta, .. } => {
                 // Reflected media is not evidence of transcript or playback
-                // completion; frames may also represent silence.
+                // completion; frames may also represent silence. Its energy
+                // is the provider-clock signal that the model's response has
+                // ended (see `observe_output_audio_energy`).
                 self.reflected_output_audio_frames =
                     self.reflected_output_audio_frames.saturating_add(1);
+                self.observe_output_audio_energy(&delta);
                 if self.reflected_output_audio_frames.is_multiple_of(50) {
                     tracing::debug!(
                         frames = self.reflected_output_audio_frames,
@@ -2820,34 +2860,51 @@ impl SessionState {
     }
 
     /// The result's acknowledgement is the Delivered transition. The cue is
-    /// decided by provider ordering, never by a gap margin:
-    /// - Output already observed running past the result's insertion point
-    ///   (an output transcript delta ending after the acknowledgement's
-    ///   `start_ms`) means the model is speaking after the result landed.
-    ///   No cue: an instructions append during output can cut the answer
-    ///   off mid-sentence (final soak: 5 of 44 such cues stopped the
-    ///   readout dead), and the model is already talking.
-    /// - Otherwise the model was silent at the insertion point. A gap cannot
-    ///   tell "about to voice it" from "never will" (a result 400 ms after
-    ///   the last word was never read out), so the result gets one cue,
-    ///   phrased to be safe either way ([`LIVE_RESULT_CUE`]).
+    /// decided by provider ordering and the provider's output clock, never by
+    /// a wall-clock wait:
+    /// - The model's response is in progress at the result's insertion point:
+    ///   output observed at or past it (an output transcript delta ending at
+    ///   or after the acknowledgement's `start_ms`; gap 0 is the generation
+    ///   frontier, not silence), or fewer than [`OUTPUT_SILENCE_RELEASE_MS`]
+    ///   of output silence since the model's last speech frame. The cue is
+    ///   deferred to the response's end: sent inside the response, it is
+    ///   absorbed by content the response is already committed to (S97 r3),
+    ///   and an instructions append during output can cut the answer off
+    ///   mid-sentence (final soak: 5 of 44 such cues).
+    /// - Otherwise the model is silent. A gap cannot tell "about to voice it"
+    ///   from "never will" (a result 400 ms after the last word was never read
+    ///   out), so the result gets one cue now.
+    ///
+    /// Either way the result gets exactly one cue, phrased to be safe if the
+    /// model already read it ([`LIVE_RESULT_CUE`]).
     fn cue_acknowledged_result(&mut self, delegation_id: String) {
         let ack_start_ms = self.commentary_ack_start_ms;
         let gap_ms = match (ack_start_ms, self.last_output_end_ms) {
             (Some(ack_start_ms), Some(end)) => ack_start_ms - end,
             _ => f64::INFINITY,
         };
-        let speaking_past_insertion = matches!(
+        // Output at or past the insertion point: a result inserted exactly at
+        // the end of the output so far (gap 0) landed at the generation
+        // frontier of a response still being voiced, not into silence.
+        let output_reaches_insertion = matches!(
             (ack_start_ms, self.last_output_end_ms),
-            (Some(ack_start_ms), Some(end)) if end > ack_start_ms
+            (Some(ack_start_ms), Some(end)) if end >= ack_start_ms
         );
-        if speaking_past_insertion {
+        let response_in_progress =
+            output_reaches_insertion || self.output_silence_run_ms < OUTPUT_SILENCE_RELEASE_MS;
+        if response_in_progress {
+            // A cue sent now lands inside the in-progress response, which may
+            // already be committed to other content (S97 r3: absorbed by the
+            // narration's response, then 60 s of silence), and an
+            // instructions append during output can cut the answer off. The
+            // cue waits for the response to end.
             tracing::info!(
                 gap_ms,
+                output_silence_ms = self.output_silence_run_ms,
                 delegation_id = %delegation_id,
-                "public Live result delivered while the model speaks past it; result cue suppressed"
+                "public Live result delivered while the model's response is in progress; result cue deferred to the response end"
             );
-            self.awaiting_peer_results.remove(&delegation_id);
+            self.deferred_result_cues.push_back(delegation_id);
             return;
         }
         tracing::info!(
@@ -3214,6 +3271,22 @@ const USER_FLOOR_SPEECH_DBFS: f64 = -50.0;
 /// Frozen like the Turbo S bounds: an utterance whose own pause exceeds it is
 /// a finding, never a bump.
 const USER_FLOOR_SILENCE_RELEASE_MS: u64 = 1_600;
+
+/// Audio-clock length of model output silence after which a response is
+/// treated as ended and a deferred result cue is sent
+/// ([`SessionState::observe_output_audio_energy`]).
+///
+/// Measured on the provider's `session.output_audio.delta` frames in 15
+/// recorded runs (combined5 S105 x5 and S99 x5, combined3 S99 x5; 200 ms
+/// frames against [`USER_FLOOR_SPEECH_DBFS`]): pauses inside one response
+/// are at most 1000 ms, and silences before the model's next response, with
+/// no user speech between, are at least 4000 ms. 1600 ms clears the longest
+/// pause by three 200 ms frames, the derivation of
+/// [`USER_FLOOR_SILENCE_RELEASE_MS`].
+///
+/// Frozen like the Turbo S bounds: a response whose own pause exceeds it is
+/// a finding, never a bump.
+const OUTPUT_SILENCE_RELEASE_MS: u64 = 1_600;
 
 /// Frame RMS of a reflected PCM16 (little-endian) frame in dBFS, or `None`
 /// when it does not decode. Telemetry and floor input only.
@@ -5152,7 +5225,7 @@ mod tests {
     /// since.
     #[test]
     fn a_result_landing_after_the_last_word_is_cued_whatever_the_gap() {
-        for ack_ms in [2000.0, 2400.0, 2999.0, 3000.0, 9000.0] {
+        for ack_ms in [2400.0, 2999.0, 3000.0, 9000.0] {
             let mut state = state_with_spoken_delegation();
             let result = state
                 .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
@@ -5195,6 +5268,11 @@ mod tests {
             .apply_frame(frame(ack_at(&pending_event_id(result), 1800.0)))
             .unwrap();
         assert!(state.due_result_cues.is_empty(), "no cue during output");
+        assert_eq!(
+            state.deferred_result_cues,
+            ["dlg_cue"],
+            "the cue waits for the response to end instead of being dropped"
+        );
         // The final-soak truncation shape: output observed through 54000 ms
         // before the acknowledgement of a result inserted at 53800 ms.
         let mut state = state_with_spoken_delegation();
@@ -5208,6 +5286,151 @@ mod tests {
             .apply_frame(frame(ack_at(&pending_event_id(result), 53800.0)))
             .unwrap();
         assert!(state.due_result_cues.is_empty());
+    }
+
+    /// One 200 ms provider output audio frame: a tone for speech, digital
+    /// zero for silence.
+    fn output_audio(speech: bool) -> Value {
+        use base64::Engine as _;
+        let samples: Vec<u8> = (0..4_800_u32)
+            .flat_map(|index| {
+                let value = if speech {
+                    (8_000.0 * (f64::from(index) * 0.13).sin()) as i16
+                } else {
+                    0
+                };
+                value.to_le_bytes()
+            })
+            .collect();
+        json!({"type":"session.output_audio.delta",
+            "delta": base64::engine::general_purpose::STANDARD.encode(samples)})
+    }
+
+    fn model_output(state: &mut SessionState, speech: bool, frames: usize) {
+        for _ in 0..frames {
+            state.apply_frame(frame(output_audio(speech))).unwrap();
+        }
+    }
+
+    /// S97 r3: the result landed at the generation frontier (gap 0) of the
+    /// narration's response while it was still being voiced. Sent there, the
+    /// cue was absorbed by the narration and the result was never read. The
+    /// cue now waits for the response to end and is sent exactly once.
+    #[test]
+    fn a_result_at_the_frontier_of_a_voiced_response_is_cued_once_after_it_ends() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_at(&pending_event_id(result), 2000.0)))
+            .unwrap();
+        assert!(
+            state.due_result_cues.is_empty(),
+            "no cue inside the response"
+        );
+        assert_eq!(state.deferred_result_cues, ["dlg_cue"]);
+        // The narration's tail, then a pause shorter than the release: still
+        // the same response.
+        model_output(&mut state, true, 2);
+        model_output(&mut state, false, 5);
+        model_output(&mut state, true, 1);
+        assert!(state.due_result_cues.is_empty(), "a pause is not the end");
+        model_output(&mut state, false, 7);
+        assert!(
+            state.due_result_cues.is_empty(),
+            "1400 ms of silence is not the end"
+        );
+        model_output(&mut state, false, 1);
+        assert_eq!(
+            state.due_result_cues,
+            ["dlg_cue"],
+            "1600 ms of output silence ends the response and releases the cue"
+        );
+        assert!(state.deferred_result_cues.is_empty());
+        drain(&mut state);
+        let (_, delegation_id, _) = state
+            .reserve_due_result_cue()
+            .unwrap()
+            .expect("one cue due");
+        assert_eq!(delegation_id, "dlg_cue");
+        model_output(&mut state, false, 20);
+        assert_eq!(state.reserve_due_result_cue().unwrap(), None, "exactly one");
+    }
+
+    /// A result acknowledged within the release window after the model's last
+    /// speech frame is still inside its response: deferred, then cued.
+    #[test]
+    fn a_result_shortly_after_the_last_speech_frame_waits_for_the_response_end() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        model_output(&mut state, false, 2);
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_at(&pending_event_id(result), 2400.0)))
+            .unwrap();
+        assert_eq!(state.deferred_result_cues, ["dlg_cue"]);
+        model_output(&mut state, false, 6);
+        assert_eq!(state.due_result_cues, ["dlg_cue"]);
+    }
+
+    /// A model silent for the release before the result lands gets its cue at
+    /// once, as before.
+    #[test]
+    fn a_result_landing_into_settled_silence_is_cued_at_once() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        model_output(&mut state, false, 8);
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_at(&pending_event_id(result), 4000.0)))
+            .unwrap();
+        assert_eq!(state.due_result_cues, ["dlg_cue"]);
+        assert!(state.deferred_result_cues.is_empty());
+    }
+
+    /// The user speaking while the cue is deferred does not hold it: the
+    /// model's output is silent, so the response has ended.
+    #[test]
+    fn a_deferred_cue_is_released_by_model_silence_while_the_user_speaks() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_at(&pending_event_id(result), 2000.0)))
+            .unwrap();
+        state.apply_frame(frame(input_delta("and also"))).unwrap();
+        reflect_input(&mut state, true, 4);
+        model_output(&mut state, false, 8);
+        assert_eq!(state.due_result_cues, ["dlg_cue"]);
+    }
+
+    /// A deferred cue holds no provider receipt, so a close never waits on
+    /// it. Closing first means it is never sent.
+    #[test]
+    fn a_deferred_cue_holds_nothing_close_waits_on() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_at(&pending_event_id(result), 2000.0)))
+            .unwrap();
+        assert_eq!(state.deferred_result_cues, ["dlg_cue"]);
+        assert_eq!(
+            state.outstanding_receipt_count(),
+            0,
+            "the result is acknowledged and the deferred cue is not an append"
+        );
+        assert!(state.pending_appends.is_empty());
     }
 
     #[test]

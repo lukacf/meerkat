@@ -833,6 +833,62 @@ async fn two_delegations_run_in_parallel_and_both_complete() {
     fx.close().await;
 }
 
+/// combined5 S102 R3: the worker's turn asked another member, and the voice
+/// answered the "Finished voice request ... The result follows."
+/// announcement with an invented reply before the member had answered. A
+/// result released while the worker's peer request still awaits its answer
+/// carries those members, so the broker sends its pending-answer notice
+/// ahead of the result, and no Completed sentence goes out before them. An
+/// ordinary result keeps its Completed sentence and carries no members.
+#[tokio::test]
+async fn a_result_awaiting_a_peer_answer_is_released_without_the_completed_sentence() {
+    for awaiting in [true, false] {
+        let mut fx = fixture(true).await;
+        *fx.coordinator
+            .awaiting_peer_replies_for_test
+            .lock()
+            .expect("override") = Some(if awaiting {
+            vec!["analyst-pemberton".to_string()]
+        } else {
+            Vec::new()
+        });
+        let operation = fx
+            .delegate("ask", "ask analyst-pemberton what time it is")
+            .await;
+        let call = fx.next_call().await;
+        fx.client.release(call.index);
+        fx.wait_for_completed(std::slice::from_ref(&operation))
+            .await;
+        wait_until(WAIT, || async {
+            !fx.control.releases.lock().await.is_empty()
+        })
+        .await;
+        let narrations = fx.narrations().await;
+        let expected = if awaiting {
+            vec![LiveDelegationNarrationKind::Claimed]
+        } else {
+            vec![
+                LiveDelegationNarrationKind::Claimed,
+                LiveDelegationNarrationKind::Completed,
+            ]
+        };
+        assert_eq!(
+            kinds(&narrations),
+            expected,
+            "awaiting={awaiting}: {narrations:?}"
+        );
+        let awaiting_releases = fx.control.awaiting_peer_replies.lock().await.clone();
+        let expected_members: Vec<Vec<String>> = if awaiting {
+            vec![vec!["analyst-pemberton".to_string()]]
+        } else {
+            vec![Vec::new()]
+        };
+        assert_eq!(awaiting_releases, expected_members, "awaiting={awaiting}");
+        fx.assert_nothing_cancelled();
+        fx.close().await;
+    }
+}
+
 #[tokio::test]
 async fn fifth_delegation_waits_for_a_worker_slot_and_is_narrated_queued() {
     let mut fx = fixture(true).await;

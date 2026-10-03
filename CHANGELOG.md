@@ -1212,6 +1212,13 @@ them.
 
 ### Fixed
 
+- GPT Live no longer announces "Finished voice request ... The result follows."
+  for a result whose work is still waiting on another member's answer
+  (Turbo S combined5 S102 R3: the voice answered that announcement with an
+  invented reply, "They said they don't know", before the pending-answer
+  notice and the result were sent). Such a result now reaches the provider
+  as the pending-answer notice followed by the result, with nothing ahead of
+  them promising an answer; other results keep their Completed narration.
 - GPT Live Turbo S S102 no longer fails a run whose member answered
   correctly. The oracle looked for the text "Peer response from" in the
   executor's history, which appears only when `send_response` carries no

@@ -1987,9 +1987,12 @@ them.
     stutter, journaled as a metric. The browser peer records responses; it no longer raises
     `duplicate_readout` itself, and missing or malformed records fail the
     scenario.
-  - S102 fails when the voice attributes an answer to the peer in a response
-    that opened before the peer's reply reached the provider conversation (a
-    premature claim).
+  - S102 fails when the voice attributes an answer to the peer before the
+    peer's reply reached the provider conversation (a premature claim), by the
+    provider's transcript timing: the peer's name or a pronoun standing for it
+    with an attribution verb ("They said they don't know"), or "according to"
+    the peer. When the reply never arrives, the whole call counts as before
+    it.
   - S98 asks for the code word after the background update with an
     unambiguous question ("What is the code word now?"); the earlier recall
     asked for the word the user asked to remember, which stays the old one.

@@ -6677,11 +6677,21 @@ async fn s102_member_round_trip(
         failures.push(format!(
             "{S102_MEMBER}'s reply never reached the executor as a peer response"
         ));
+        failures.extend(s102_premature_claims(
+            &evidence.provider_stream_lines()?,
+            channel,
+            None,
+        ));
         return Ok(failures);
     }
     let Some(reply) = reply else {
         failures.push(format!(
             "the executor never answered {S102_MEMBER}'s peer response"
+        ));
+        failures.extend(s102_premature_claims(
+            &evidence.provider_stream_lines()?,
+            channel,
+            None,
         ));
         return Ok(failures);
     };
@@ -6730,22 +6740,9 @@ async fn s102_member_round_trip(
         }
         _ => None,
     });
-    if let Some(reply_sent) = reply_sent {
-        let timeline = live.peer.timeline().await?;
-        let offset = sideband_clock_alignment(&timeline, &lines, channel)
-            .map_err(|reason| format!("S102 premature-claim check cannot align clocks: {reason}"))?
-            .offset_ms;
-        let readouts = live.peer.readouts().await?;
-        for claim in peer_claims_before(
-            &readouts.records,
-            reply_sent as i64 - offset,
-            S102_MEMBER_TOKEN,
-        ) {
-            failures.push(format!(
-                "the voice attributed an answer to {S102_MEMBER} before its reply existed: {claim:?}"
-            ));
-        }
-    }
+    // A reply that never reached the provider conversation leaves the whole
+    // call before it: any attribution to the peer is invented.
+    failures.extend(s102_premature_claims(&lines, channel, reply_sent));
     Ok(failures)
 }
 
@@ -6762,32 +6759,67 @@ const PEER_ATTRIBUTION_VERBS: &[&str] = &[
     "estimates",
 ];
 
-/// Responses that attribute an answer to the peer (`peer` followed by an
-/// attribution verb, or "according to <peer>") and opened before the peer's
-/// reply existed in the provider conversation (`reply_at_ms`, the peer
-/// clock). A response opened before the reply cannot be voicing it.
-fn peer_claims_before(
-    records: &[support::ReadoutRecord],
-    reply_at_ms: i64,
+/// Subjects whose attribution verb claims what the peer said: the peer's own
+/// name, or a pronoun standing for it ("They said they don't know").
+const PEER_ATTRIBUTION_PRONOUNS: &[&str] = &["they", "he", "she"];
+
+/// Sentences of assistant speech, as the provider transcribed it on the
+/// sideband, spoken before `reply_at_ms` (the sideband send of the append
+/// carrying the peer's reply; `None` when it never reached the provider
+/// conversation, so the whole call) that attribute an answer to the peer:
+/// the peer or a pronoun followed by an attribution verb, or "according to
+/// <peer>". Speech before the reply cannot be voicing it. Timing is per
+/// transcript delta, so a response that asks the peer and voices the real
+/// reply after it arrives is judged by what it said when.
+fn peer_claims_in_speech_before(
+    lines: &[provider_recording::Line],
+    channel: u32,
+    reply_at_ms: Option<u64>,
     peer: &str,
 ) -> Vec<String> {
-    records
+    let speech: String = lines
         .iter()
-        .filter(|record| {
-            record
-                .opened_ms
-                .is_none_or(|opened| (opened as i64) < reply_at_ms)
+        .filter(|line| line.channel_ordinal == channel)
+        .filter(|line| reply_at_ms.is_none_or(|reply| line.elapsed_ms < reply))
+        .filter_map(|line| match &line.entry {
+            provider_recording::Entry::ServerFrame { raw }
+                if raw["type"] == "session.output_transcript.delta" =>
+            {
+                raw["delta"].as_str()
+            }
+            _ => None,
         })
-        .filter(|record| {
-            let words = normalize_words(&record.text);
+        .collect();
+    speech
+        .split_inclusive(['.', '!', '?'])
+        .map(str::trim)
+        .filter(|sentence| {
+            let words = normalize_words(sentence);
             let words: Vec<&str> = words.split(' ').collect();
-            let attributed = words
-                .windows(2)
-                .any(|pair| pair[0] == peer && PEER_ATTRIBUTION_VERBS.contains(&pair[1]));
+            let attributed = words.windows(2).any(|pair| {
+                (pair[0] == peer || PEER_ATTRIBUTION_PRONOUNS.contains(&pair[0]))
+                    && PEER_ATTRIBUTION_VERBS.contains(&pair[1])
+            });
             let according = words.windows(3).any(|w| w == ["according", "to", peer]);
             attributed || according
         })
-        .map(|record| record.text.clone())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// S102's premature-claim failures (soak c43aa3db run 2: "Pemberton said it
+/// feels like it's around mid-afternoon"; combined5 run 3: "They said they
+/// don't know" before the peer had answered).
+fn s102_premature_claims(
+    lines: &[provider_recording::Line],
+    channel: u32,
+    reply_at_ms: Option<u64>,
+) -> Vec<String> {
+    peer_claims_in_speech_before(lines, channel, reply_at_ms, S102_MEMBER_TOKEN)
+        .into_iter()
+        .map(|claim| {
+            format!("the voice attributed an answer to {S102_MEMBER} before its reply existed: {claim:?}")
+        })
         .collect()
 }
 
@@ -11297,24 +11329,42 @@ mod config_tests {
         assert_eq!(super::sideband_disconnect_elapsed(&lines, 2), None);
     }
 
-    /// A response that attributes an answer to the peer before the peer's
-    /// reply existed is a premature claim (soak c43aa3db S102 run 2); asking
-    /// the peer, or attributing after the reply arrived, is not.
+    /// Speech that attributes an answer to the peer before the peer's reply
+    /// existed is a premature claim (soak c43aa3db S102 run 2; combined5 run
+    /// 3, where a pronoun stood for the peer). Asking the peer, and voicing
+    /// the real reply after it arrived in the same response, are not.
     #[test]
-    fn a_peer_claim_before_the_reply_exists_is_flagged() {
-        let premature = readout(
-            2,
-            Some(3000),
-            "Yeah. On it, I'll ask and let you know. Pemberton said it feels like it's around mid-afternoon.",
-        );
-        let asking = readout(1, Some(1500), "Sure, I'm asking Analyst Pemberton now.");
-        let after = readout(5, Some(6000), "Analyst Pemberton said it's 10 UTC.");
-        let according = readout(3, Some(3500), "According to Pemberton it's mid-afternoon.");
-        let claims =
-            super::peer_claims_before(&[asking, premature, according, after], 4000, "pemberton");
-        assert_eq!(claims.len(), 2, "{claims:?}");
-        assert!(claims[0].contains("Pemberton said it feels like"));
+    fn a_peer_claim_spoken_before_the_reply_exists_is_flagged() {
+        let delta = |seq: u64, elapsed_ms: u64, text: &str| super::provider_recording::Line {
+            seq,
+            channel_ordinal: 1,
+            elapsed_ms,
+            entry: super::provider_recording::Entry::ServerFrame {
+                raw: serde_json::json!({"type": "session.output_transcript.delta", "delta": text}),
+            },
+        };
+        let lines = vec![
+            delta(1, 1000, " Sure, I'm asking Analyst Pemberton now."),
+            delta(2, 2000, " They said they don't know,"),
+            delta(3, 2200, " but I've asked Analyst Pemberton."),
+            delta(4, 3000, " According to Pemberton it's mid-afternoon."),
+            delta(5, 3500, " Pemberton said it feels like mid-afternoon."),
+            delta(6, 5000, " Analyst Pemberton replied, 13 UTC."),
+        ];
+        let claims = super::peer_claims_in_speech_before(&lines, 1, Some(4000), "pemberton");
+        assert_eq!(claims.len(), 3, "{claims:?}");
+        assert!(claims[0].starts_with("They said they don't know"));
         assert!(claims[1].starts_with("According to Pemberton"));
+        assert!(claims[2].starts_with("Pemberton said"));
+        assert!(
+            super::peer_claims_in_speech_before(&lines, 2, None, "pemberton").is_empty(),
+            "another channel's speech is not this call's"
+        );
+        assert_eq!(
+            super::peer_claims_in_speech_before(&lines, 1, None, "pemberton").len(),
+            4,
+            "with no reply ever sent, the voiced reply is invented too"
+        );
     }
 
     /// Scheduler narration on the commentary lane is not a result; the

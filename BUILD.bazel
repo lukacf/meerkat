@@ -579,6 +579,7 @@ test_suite(
         "//crates/meerkat-auth-core:token_store_contract_test",
         "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts_unit_test",
         "//crates/meerkat-authorization:meerkat_authorization_unit_test",
+        "//crates/meerkat-authorization:native_cost_test",
         "//crates/meerkat-authorization:native_governed_loop_test",
         "//crates/meerkat-capabilities:meerkat_capabilities_unit_test",
         "//crates/meerkat-cli:auth_binding_single_parser_test",

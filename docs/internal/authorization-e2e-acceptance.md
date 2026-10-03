@@ -136,10 +136,22 @@ The broader `make e2e-fast`, `make e2e-system`, and normal CI gates remain
 necessary for integrated delivery. Passing the focused native tests is not
 successful governed restart, full E2E registration, or CI acceptance.
 
-After functional validation, use the repository's existing benchmark commands
-in a reserved quiet window against the same candidate and an ungoverned
-control. `make bench` runs workspace benchmarks; use `./scripts/repo-cargo
-bench -p <owner> --bench <benchmark>` for an existing targeted benchmark.
-Apply the accepted workload budgets to the default local profile. Keep raw
-measurements and source identity, and report missing measurements as open;
-compilation time or unit-test duration does not establish cheap authorization.
+The existing `native_cost` integration target includes two ordinary correctness
+tests and two ignored timing matrices. Run the correctness tests with:
+
+```bash
+./scripts/repo-cargo test --locked -p meerkat-authorization --test native_cost -- --test-threads=1
+```
+
+The fixtures compare actual native trusted and governed admission, model
+boundaries, grants, file effects and audit. They include fresh admission,
+continuing work and individual fenced tool calls. Deterministic model transport
+and application resource mapping remain fixtures. The timing matrices require
+an optimized prebuilt binary and a reserved quiet window; their source comments
+document the existing commands, sample counts and raw output requirements.
+
+These matrices cover a measured subset. They do not establish all warm/cold,
+invalidation, concurrency, resource cardinality, streaming/audio or CPU,
+allocation, lock and IO acceptance cells. Keep raw measurements and source
+identity, and report missing measurements as open. Compilation time and
+correctness-test duration do not establish cheap authorization.

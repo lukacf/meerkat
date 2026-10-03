@@ -1177,6 +1177,25 @@ them.
 
 ### Fixed
 
+- GPT Live no longer primes the voice model to delegate questions about the
+  conversation itself (Turbo S S99: after the summary release, a run
+  delegated "now tell me my historical vault phrase" instead of answering it
+  from the context it had just received). #1588's summary-pending notice told
+  the model to answer "without lookup, tool, or delegate", and a measured rule
+  already recorded that naming delegation as something to avoid primes
+  exactly that.
+  - The public client-context session instructions now scope the executor
+    positively, to work the voice layer cannot do itself (tools, files,
+    current information, extended reasoning). They state that everything said
+    in this conversation (this call, the earlier text chat and its summary)
+    is already known and answered directly. "Do not delegate yet" became "do
+    not act yet".
+  - The summary-pending notice and the bootstrap framing drop the
+    delegate-naming phrase.
+  - A unit test keeps every startup and context text free of
+    delegation-as-avoidance wording.
+  - The public protocol offers no structural lever: client delegation has no
+    configurable description and carries no task text or kind.
 - A GPT Live open whose summary is still being prepared tells the model that
   the newest turns of the earlier text conversation it carries are known and
   only the older part of that conversation is summarized and still pending.

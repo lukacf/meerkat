@@ -615,7 +615,8 @@ const LIVE_STARTUP_INPUT_BYTES_PER_TOKEN: usize = 3;
 
 /// Startup notice of a summary-pending seed that carries the newest turns
 /// verbatim ([`PublicLiveOpenConfig::with_pending_context_after_recent`]).
-const LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE: &str = "Voice-channel context availability (factual state, not a new user request):\nThe most recent turns of the earlier text conversation are in the session input. They are part of that text conversation and you know them: answer questions about them directly, without lookup, tool, or delegate. Only the older part of the text conversation is summarized, and that summary is being prepared and is not yet available.";
+const LIVE_PENDING_CONTEXT_NOTICE: &str = "Voice-channel context availability (factual state, not a new user request):\nHistorical session context is being prepared and is not yet available.";
+const LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE: &str = "Voice-channel context availability (factual state, not a new user request):\nThe most recent turns of the earlier text conversation are in the session input. They are part of that text conversation and you know them: answer questions about them yourself, directly. Only the older part of the text conversation is summarized, and that summary is being prepared and is not yet available.";
 
 /// What the startup input budget dropped to fit the provider limits. Recent
 /// turns are dropped oldest first; the summary is never dropped.
@@ -884,10 +885,9 @@ impl PublicLiveContextSeed {
     fn instructions_context(&self) -> Option<String> {
         match self {
             Self::Absent | Self::History(_) | Self::FactualSummary { .. } => None,
-            Self::HistoricalContextPending { recent } if recent.is_empty() => Some(
-                "Voice-channel context availability (factual state, not a new user request):\nHistorical session context is being prepared and is not yet available."
-                    .to_string(),
-            ),
+            Self::HistoricalContextPending { recent } if recent.is_empty() => {
+                Some(LIVE_PENDING_CONTEXT_NOTICE.to_string())
+            }
             // The recent turns are startup input the model has: say so, so a
             // pending summary is not read as "no history at all". Saying only
             // that history "is not yet available" made gpt-live-1 answer
@@ -895,9 +895,9 @@ impl PublicLiveContextSeed {
             // positive control, BuildBuddy 045430ec). The turns are named as
             // part of the earlier text conversation, so a question about "our
             // text chat" is not filed under the pending summary (1139a4ff).
-            Self::HistoricalContextPending { .. } => Some(
-                LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE.to_string(),
-            ),
+            Self::HistoricalContextPending { .. } => {
+                Some(LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE.to_string())
+            }
         }
     }
 }
@@ -4121,7 +4121,7 @@ mod tests {
         assert!(notice.contains(
             "The most recent turns of the earlier text conversation are in the session input"
         ));
-        assert!(notice.contains("you know them: answer questions about them directly"));
+        assert!(notice.contains("you know them: answer questions about them yourself, directly"));
         assert!(notice.contains("Only the older part of the text conversation is summarized"));
         assert_eq!(
             encoded["input"][0]["content"][0]["text"],
@@ -5441,6 +5441,42 @@ mod tests {
         assert_eq!(kind_of(notice), Some(InternalAppend::ProgressNotice));
         assert_eq!(InternalAppend::ResultCue.label(), "result cue");
         assert_eq!(InternalAppend::ProgressNotice.label(), "in-progress notice");
+    }
+
+    /// Measured rule (S99): a context text that names delegating as something
+    /// to avoid ("without lookup, tool, or delegate") primes gpt-live-1 to
+    /// delegate recall questions. #1588's notice carried exactly that phrase
+    /// and S99 went from 0/5 to 3/5 delegated recalls (BuildBuddy c43aa3db).
+    /// The broker's startup and context texts state what the model knows
+    /// positively and never mention delegation as something to avoid.
+    #[test]
+    fn no_startup_or_context_text_names_delegation_as_something_to_avoid() {
+        for (name, text) in [
+            ("LIVE_PENDING_CONTEXT_NOTICE", LIVE_PENDING_CONTEXT_NOTICE),
+            (
+                "LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE",
+                LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE,
+            ),
+        ] {
+            assert_eq!(names_delegation_as_avoided(text), None, "{name}: {text}");
+        }
+    }
+
+    fn names_delegation_as_avoided(text: &str) -> Option<&'static str> {
+        let lower = text.to_lowercase();
+        [
+            "or delegat",
+            "nor delegat",
+            "not delegat",
+            "never delegat",
+            "without delegat",
+            "instead of delegat",
+            "no delegat",
+            "don't delegat",
+            "avoid delegat",
+        ]
+        .into_iter()
+        .find(|phrase| lower.contains(phrase))
     }
 
     #[test]

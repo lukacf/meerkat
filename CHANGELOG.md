@@ -829,6 +829,19 @@ them.
 
 ### Fixed
 
+- The release semver gate (`make semver-breaks`) fails closed on any
+  cargo-semver-checks finding whose message shape it cannot read in full.
+  Such a finding is now an error naming the lint, not a NOTE. Before, it fell
+  back to PascalCase symbols, which cannot see field, method or constant
+  names, so a break of that kind could pass without being declared.
+  - The gate learned the v0.50.0 shapes of `enum_unit_variant_changed_kind`,
+    `trait_missing`, `type_method_marked_deprecated` and
+    `pub_module_level_const_missing`. The fail-closed check caught the last
+    one on the 0.8.51 tip.
+  - A `*_marked_deprecated` finding is a deprecation, not a break: it is
+    satisfied by a name under `### Deprecated`. Real breaks still need
+    `### Breaking`.
+
 - **A short shell timeout is no longer consumed by one-time setup.** A foreground shell call's dispatch deadline was exactly its `timeout_secs`, measured from dispatch, so first-call setup (resolving the shell, which falls back from an absent `nu`, plus the first custodied spawn) could use up a model-chosen 1 s timeout before the command ran (Turbo S S101: a quick `ls` was cut off and retried). The shell path is now resolved when the tool is built, the command's timeout runs from its spawn as before, and the declared dispatch deadline is that timeout plus `SHELL_SETUP_FAILURE_BOUND` (30 s), a failure bound for a hanging setup.
 
 - Reading a session whose turn is in flight no longer waits for the turn to

@@ -344,7 +344,8 @@ Known event types without a handwritten parser class arrive as `UnknownEvent`
 with their wire payload preserved in `event.data`. This includes server-tool
 content, model-fallback, rewrite-receipt, and boundary-append events; they are
 in the generated inventory. `RunStarted.input` preserves the typed content or
-pending-tool-results input. The `Retrying` and `HookFailed` parsers still have
-payload-shape gaps. See the [event compatibility
+pending-tool-results input. `HookFailed.reason` retains the canonical typed
+cause; its `error` is a display projection. `hook_launch_refused` uses the same
+recognized raw-event path. See the [event compatibility
 reference](/sdks/python/reference#event-compatibility-note) for exact behavior.
 </Note>

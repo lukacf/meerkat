@@ -1987,3 +1987,19 @@ const orderedAuthorizationResult: ObservationWireToolResult = {
 // @ts-expect-error The generated provider kind must remain a closed union.
 const inventedAuthorizationKind: ObservationProviderKind = "invented_authorization_kind";
 void [authorizationProviderKind, refusalProviderKind, orderedAuthorizationResult, inventedAuthorizationKind];
+
+
+const canonicalHookFailedEvent: import("../src/index.js").HookFailedEvent = {
+  type: "hook_failed", hookId: "hook-1", point: "post_tool_execution",
+  error: "process exited",
+  reason: { reason_code: "execution_failed", message: "process exited" },
+};
+const canonicalHookLaunchRefusedEvent: Extract<
+  import("../src/generated/event_types.js").AgentEvent,
+  { type: "hook_launch_refused" }
+> = {
+  type: "hook_launch_refused", hook_id: "hook-1", point: "pre_tool_execution",
+  tool_use_id: "  call-1  ",
+  reason: { reason_code: "confinement_refused", refusal: "preparation_failed" },
+};
+void [canonicalHookFailedEvent, canonicalHookLaunchRefusedEvent];

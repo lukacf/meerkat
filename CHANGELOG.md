@@ -421,6 +421,14 @@ them.
 
 ### Fixed
 
+- Python and TypeScript SDK `HookFailed` events now retain the canonical typed
+  `reason` and derive the existing `error` display field from it. Legacy flat
+  error events remain compatible; consumers should use `reason` for typed
+  causes. A malformed present reason cannot fall back to an error string.
+  TypeScript settlement decoding also recognizes the distinct native
+  `confinement_refused` and `hook_denied` terminal kinds. `hook_launch_refused`
+  stays on the recognized raw-event path with its exact cause and call ID.
+
 - An asset recovery dispatched from main (`release-workflow-dispatch --mode
   assets`) can publish its release archives. It runs main's workflow against
   the tag, so its build attestations name main's commit, and the exact-tag

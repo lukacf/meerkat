@@ -8473,3 +8473,88 @@ async def test_mob_turn_start_payload_carries_tool_choice_plan():
         "allowed_tools": ["read"],
         "tool_choice_plan": _TOOL_CHOICE_PLAN,
     }
+
+
+@pytest.mark.parametrize("refusal", [
+    "invalid_requirement", "invalid_launch", "unsupported_requirement",
+    "backend_unavailable", "preparation_failed",
+])
+def test_hook_launch_refusal_raw_event_retains_cause_and_exact_call_id(refusal):
+    from meerkat.generated.event_inventory import KNOWN_AGENT_EVENT_TYPES
+
+    raw = {
+        "type": "hook_launch_refused", "hook_id": "hook-1",
+        "point": "pre_tool_execution", "tool_use_id": "  call-1  ",
+        "reason": {"reason_code": "confinement_refused", "refusal": refusal},
+    }
+    assert raw["type"] in KNOWN_AGENT_EVENT_TYPES
+    event = parse_event(raw)
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "hook_launch_refused"
+    assert event.data == raw
+    control = parse_event({"type": "text_delta", "delta": "continued"})
+    assert isinstance(control, TextDelta)
+    assert control.delta == "continued"
+
+
+def test_hook_failed_canonical_reason_is_not_a_malformed_event():
+    from meerkat.events import HookFailed
+
+    raw = {
+        "type": "hook_failed", "hook_id": "hook-1",
+        "point": "post_tool_execution",
+        "reason": {"reason_code": "execution_failed", "message": "process exited"},
+    }
+    event = parse_event(raw)
+    assert isinstance(event, HookFailed)
+    assert event.reason == raw["reason"]
+
+
+@pytest.mark.parametrize("reason", [
+    {"reason_code": "timeout", "timeout_ms": 10},
+    {"reason_code": "config_invalid", "message": "invalid config"},
+    {"reason_code": "observe_only_violation"},
+    *[{"reason_code": "confinement_refused", "refusal": cause} for cause in [
+        "invalid_requirement", "invalid_launch", "unsupported_requirement",
+        "backend_unavailable", "preparation_failed",
+    ]],
+])
+def test_hook_failed_preserves_each_canonical_reason(reason):
+    from meerkat.events import HookFailed
+
+    event = parse_event({
+        "type": "hook_failed", "hook_id": "hook-1",
+        "point": "post_tool_execution", "reason": reason,
+    })
+    assert isinstance(event, HookFailed)
+    assert event.reason == reason
+    assert isinstance(event.error, str)
+
+
+@pytest.mark.parametrize("reason", [
+    None, {"reason_code": "future"},
+    {"reason_code": "confinement_refused", "refusal": "future"},
+    {"reason_code": "execution_failed"},
+    {"reason_code": "timeout", "timeout_ms": -1},
+])
+def test_hook_failed_malformed_reason_does_not_fall_back_to_legacy_error(reason):
+    raw = {
+        "type": "hook_failed", "hook_id": "hook-1", "point": "post_tool_execution",
+        "reason": reason, "error": "legacy diagnostic",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+    assert event.data == raw
+
+
+def test_hook_failed_legacy_string_wire_remains_compatible():
+    from meerkat.events import HookFailed
+
+    event = parse_event({
+        "type": "hook_failed", "hook_id": "hook-1",
+        "point": "post_tool_execution", "error": "legacy diagnostic",
+    })
+    assert isinstance(event, HookFailed)
+    assert event.error == "legacy diagnostic"
+    assert event.reason is None

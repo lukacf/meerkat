@@ -533,6 +533,8 @@ const SETTLEMENT_FAILURE_KINDS = {
   policy_indeterminate: true,
   other: true,
   callback_pending: true,
+  confinement_refused: true,
+  hook_denied: true,
 } as const satisfies Record<ToolDispatchTerminalErrorKind, true>;
 
 const SETTLEMENT_FIELD_DOMAINS = {

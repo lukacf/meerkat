@@ -6187,3 +6187,70 @@ describe("turn tool-choice plan", () => {
     assert.equal("tool_choice_plan" in calls[0].params.turn_tool_overlay, false);
   });
 });
+
+
+it("hook launch refusal raw events retain every cause and exact call ID", () => {
+  for (const refusal of [
+    "invalid_requirement", "invalid_launch", "unsupported_requirement",
+    "backend_unavailable", "preparation_failed",
+  ]) {
+    const raw = {
+      type: "hook_launch_refused", hook_id: "hook-1",
+      point: "pre_tool_execution", tool_use_id: "  call-1  ",
+      reason: { reason_code: "confinement_refused", refusal },
+    };
+    assert.deepEqual(parseEvent(raw), raw);
+    assert.equal(parseEvent({ type: "text_delta", delta: "continued" }).delta, "continued");
+  }
+});
+
+it("hook failed canonical reason is not a malformed event", () => {
+  const reason = { reason_code: "execution_failed", message: "process exited" };
+  const event = parseEvent({
+    type: "hook_failed", hook_id: "hook-1", point: "post_tool_execution", reason,
+  });
+  assert.equal(event.type, "hook_failed");
+  assert.deepEqual(event.reason, reason);
+});
+
+
+it("hook failed preserves all canonical reason variants", () => {
+  const reasons = [
+    { reason_code: "timeout", timeout_ms: 10 },
+    { reason_code: "config_invalid", message: "invalid config" },
+    { reason_code: "observe_only_violation" },
+    ...["invalid_requirement", "invalid_launch", "unsupported_requirement", "backend_unavailable", "preparation_failed"]
+      .map(refusal => ({ reason_code: "confinement_refused", refusal })),
+  ];
+  for (const reason of reasons) {
+    const event = parseEvent({ type: "hook_failed", hook_id: "hook-1", point: "post_tool_execution", reason });
+    assert.equal(event.type, "hook_failed");
+    assert.deepEqual(event.reason, reason);
+    assert.equal(typeof event.error, "string");
+  }
+});
+
+it("hook failed malformed reasons do not fall back to legacy strings", () => {
+  for (const reason of [null, { reason_code: "future" }, { reason_code: "confinement_refused", refusal: "future" }, { reason_code: "execution_failed" }, { reason_code: "timeout", timeout_ms: -1 }]) {
+    const raw = { type: "hook_failed", hook_id: "hook-1", point: "post_tool_execution", reason, error: "legacy diagnostic" };
+    const event = parseEvent(raw);
+    assert.equal(event.type, "malformed_event");
+    assert.deepEqual(event.raw, raw);
+  }
+});
+
+it("hook failed legacy string wire remains compatible", () => {
+  const event = parseEvent({ type: "hook_failed", hook_id: "hook-1", point: "post_tool_execution", error: "legacy diagnostic" });
+  assert.equal(event.type, "hook_failed");
+  assert.equal(event.error, "legacy diagnostic");
+  assert.equal(event.reason, undefined);
+});
+
+it("native refusal terminal kinds remain valid settlement companions", () => {
+  for (const failure_kind of ["confinement_refused", "hook_denied"]) {
+    const row = settlementHistoryWireRow();
+    row.results[0].settlement_failures = [{ admission_source: "configured_gate", effect_kind: "tool_dispatch", physical_outcome: "failed", failure_kind }];
+    const event = MeerkatClient.parseSessionMessage(row).results[0];
+    assert.deepEqual(event.settlementFailures, row.results[0].settlement_failures);
+  }
+});

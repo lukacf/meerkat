@@ -22,6 +22,16 @@ contract, core and runtime changes. It adds no job or runner; ignored acceptance
 and timing cases retain their explicit commands. Other consumer-only triggers
 remain a coverage task.
 
+SDK inspection then reproduced canonical HookFailed events being rejected by
+obsolete flat-error validation, and TypeScript's exhaustive settlement map
+omitting the two new terminal kinds. The reviewed SDK repair retains the exact
+typed reason, leaves the existing error field as a display projection and
+rejects malformed present reasons without a legacy-string fallback. Focused
+parser RED/GREEN and the existing full TypeScript suite (495 passed) and Python
+type/parser file (463 passed) qualify that compatibility repair. Raw launch
+refusal events preserve their optional call IDs; no event serializer, generated
+contract or native production source changed.
+
 The parallel Console candidate is committed at `42df889d` with current main,
 local-feedback documentation and a browser fixture compatibility fix. Existing
 JS/component/build checks and four mock browser scenarios passed. Production

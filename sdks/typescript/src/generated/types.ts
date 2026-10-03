@@ -1565,6 +1565,7 @@ export interface WireMemberProgressSnapshot {
 export interface WireMobToolConfig {
   builtins?: boolean;
   comms?: boolean;
+  deny?: string[];
   image_generation?: boolean;
   mcp?: string[];
   memory?: boolean;
@@ -2451,6 +2452,7 @@ export interface MobSupervisorSpecInput {
 export interface MobToolConfigInput {
   builtins?: boolean;
   comms?: boolean;
+  deny?: string[];
   image_generation?: boolean;
   mcp?: string[];
   memory?: boolean;
@@ -2646,6 +2648,7 @@ export interface PortableProfile {
 export interface PortableToolConfig {
   builtins?: boolean;
   comms?: boolean;
+  deny?: string[];
   image_generation?: boolean;
   mcp_servers?: Record<string, PortableMcpDecl>;
   memory?: boolean;

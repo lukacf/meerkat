@@ -431,6 +431,136 @@ pub enum ToolAccessPolicy {
     Constraints(Vec<ToolAccessConstraint>),
 }
 
+/// A tool restriction declared by whoever configured the agent (a mob
+/// profile's `tools.read_only` and `tools.deny`), as opposed to the per-launch
+/// [`ToolAccessPolicy`] a host or parent grants.
+///
+/// The factory conjoins it with the launch policy for the execution gate on
+/// every build, but persists only the launch part as the session's spawn
+/// policy, so each build (including a resume) recomputes the declaration from
+/// the current configuration: a removed deny entry or a lifted read-only
+/// declaration takes effect, and a launch narrowing survives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredToolRestriction {
+    /// Who declared it (for example the mob profile name), for errors.
+    pub declared_by: String,
+    /// The tool families the declaring configuration enabled, for errors.
+    pub enabled_families: Vec<String>,
+    /// Only tools their owning dispatcher declares read-only may execute.
+    pub read_only: bool,
+    /// Tool names that may not execute. Each must be a tool the build
+    /// composed or a name in a tool vocabulary: the factory's built-in family
+    /// vocabularies and [`Self::vocabulary`]. A known name the build did not
+    /// mount is inert; any other name fails the build as `DeclaredToolUnknown`.
+    /// The execution gate matches by name, so a denied name refuses whichever
+    /// mounted tool carries it while the tool stays listed.
+    pub deny: ToolNameSet,
+    /// The tool names the declaring configuration owns, by source: the mob
+    /// operator and agent mob tools, the exposed names of the MCP servers it
+    /// declares, and its tool bundles.
+    pub vocabulary: std::collections::BTreeMap<ToolVocabularySource, ToolNameSet>,
+    /// Declared MCP servers that map no tool names, so their tools cannot be
+    /// known before they connect. While any is declared, a deny name in no
+    /// vocabulary is not a build error: its validation is deferred and the
+    /// execution gate enforces it by name.
+    pub deferred_mcp_servers: std::collections::BTreeSet<String>,
+}
+
+/// Where a tool name a deny list may declare comes from.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum ToolVocabularySource {
+    /// A built-in tool family (`shell`, `memory`, ...), named by the factory.
+    Family(String),
+    /// The mob operator tools a mob member mounts.
+    MobOperator,
+    /// The agent-facing mob tools.
+    AgentMob,
+    /// The exposed tool names a declared MCP server config maps.
+    McpServer(String),
+    /// A host tool bundle.
+    Bundle(String),
+}
+
+impl std::fmt::Display for ToolVocabularySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Family(family) => write!(f, "{family} tools"),
+            Self::MobOperator => f.write_str("mob operator tools"),
+            Self::AgentMob => f.write_str("agent mob tools"),
+            Self::McpServer(server) => write!(f, "MCP server '{server}'"),
+            Self::Bundle(bundle) => write!(f, "tool bundle '{bundle}'"),
+        }
+    }
+}
+
+impl DeclaredToolRestriction {
+    /// Whether the declaration restricts nothing.
+    pub fn is_unrestricted(&self) -> bool {
+        !self.read_only && self.deny.is_empty()
+    }
+
+    /// The access policy this declaration imposes, or `None` when it imposes
+    /// none.
+    pub fn policy(&self) -> Result<Option<ToolAccessPolicy>, crate::ToolExecutionPolicyError> {
+        let deny = (!self.deny.is_empty()).then(|| ToolAccessPolicy::DenyList(self.deny.clone()));
+        match (deny, self.read_only) {
+            (None, false) => Ok(None),
+            (Some(deny), false) => Ok(Some(deny)),
+            (None, true) => Ok(Some(ToolAccessPolicy::ReadOnly)),
+            (Some(deny), true) => deny.conjoin(ToolAccessPolicy::ReadOnly).map(Some),
+        }
+    }
+
+    /// Conjoin this declaration with a launch policy into the effective
+    /// policy the execution gate enforces.
+    pub fn conjoin_with_launch_policy(
+        &self,
+        launch: Option<ToolAccessPolicy>,
+    ) -> Result<Option<ToolAccessPolicy>, crate::ToolExecutionPolicyError> {
+        Ok(match (launch, self.policy()?) {
+            (launch, None) => launch,
+            (None, declared) => declared,
+            (Some(launch), Some(declared)) => Some(launch.conjoin(declared)?),
+        })
+    }
+}
+
+/// The launch (spawn-site) part of a session's tool access policy, recorded
+/// beside the effective policy so a resume can recompute the session's
+/// [`DeclaredToolRestriction`] from the current configuration instead of
+/// restoring an old one.
+///
+/// A typed record rather than `Option<ToolAccessPolicy>`: an unrestricted
+/// launch must stay distinguishable from a session persisted before the
+/// launch part was recorded at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SpawnToolAccessPolicy {
+    /// The launch granted no restriction of its own.
+    Unrestricted,
+    /// The launch granted this resolved policy.
+    Restricted { policy: ToolAccessPolicy },
+}
+
+impl SpawnToolAccessPolicy {
+    /// Record a resolved launch policy (`None` is unrestricted).
+    pub fn from_launch(policy: Option<ToolAccessPolicy>) -> Self {
+        match policy {
+            None => Self::Unrestricted,
+            Some(policy) => Self::Restricted { policy },
+        }
+    }
+
+    /// The recorded launch policy (`None` is unrestricted).
+    pub fn into_launch(self) -> Option<ToolAccessPolicy> {
+        match self {
+            Self::Unrestricted => None,
+            Self::Restricted { policy } => Some(policy),
+        }
+    }
+}
+
 impl ToolAccessPolicy {
     /// Conjoin two already resolved policies without discarding either ceiling.
     pub fn conjoin(self, other: Self) -> Result<Self, crate::ToolExecutionPolicyError> {
@@ -589,6 +719,63 @@ pub struct ForkBranch {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_tool_access_policy_keeps_unrestricted_distinct_from_unrecorded() {
+        let unrestricted = SpawnToolAccessPolicy::from_launch(None);
+        assert_eq!(
+            serde_json::to_value(&unrestricted).unwrap(),
+            serde_json::json!({ "kind": "unrestricted" })
+        );
+        let restricted = SpawnToolAccessPolicy::from_launch(Some(ToolAccessPolicy::DenyList(
+            ["shell"].into_iter().collect(),
+        )));
+        let decoded: SpawnToolAccessPolicy =
+            serde_json::from_value(serde_json::to_value(&restricted).unwrap()).unwrap();
+        assert_eq!(decoded, restricted);
+        assert_eq!(unrestricted.into_launch(), None);
+        assert_eq!(
+            decoded.into_launch(),
+            Some(ToolAccessPolicy::DenyList(["shell"].into_iter().collect()))
+        );
+    }
+
+    #[test]
+    fn declared_tool_restriction_composes_deny_read_only_and_launch() {
+        let restriction = DeclaredToolRestriction {
+            declared_by: "profile 'peer'".to_string(),
+            enabled_families: vec!["mob".to_string()],
+            read_only: false,
+            deny: ["mob_wire"].into_iter().collect(),
+            vocabulary: std::collections::BTreeMap::new(),
+            deferred_mcp_servers: std::collections::BTreeSet::new(),
+        };
+        assert!(!restriction.is_unrestricted());
+        assert_eq!(
+            restriction.policy().unwrap(),
+            Some(ToolAccessPolicy::DenyList(
+                ["mob_wire"].into_iter().collect()
+            ))
+        );
+        let launch = ToolAccessPolicy::AllowList(["mob_wire", "mob_list"].into_iter().collect());
+        let effective = crate::ToolExecutionPolicy::resolve(
+            restriction
+                .conjoin_with_launch_policy(Some(launch))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(effective.permits_call("mob_list", crate::ToolMutationClass::Mutating));
+        assert!(!effective.permits_call("mob_wire", crate::ToolMutationClass::Mutating));
+        assert!(!effective.permits_call("other", crate::ToolMutationClass::ReadOnly));
+
+        let open = DeclaredToolRestriction {
+            deny: ToolNameSet::new(),
+            ..restriction
+        };
+        assert!(open.is_unrestricted());
+        assert_eq!(open.conjoin_with_launch_policy(None).unwrap(), None);
+    }
 
     fn generated_mob_authority_for_test() -> crate::service::MobToolAuthorityContext {
         crate::service::MobToolAuthorityContext::generated_for_test(

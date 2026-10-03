@@ -5382,6 +5382,7 @@ async fn create_session_inner(
     let mut build = SessionBuildOptions {
         model_fallback: None,
         tool_access_policy: None,
+        declared_tool_restriction: None,
         tool_dispatch_admission: None,
         application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
         tool_consequence_policy_registry: None,
@@ -6605,6 +6606,7 @@ async fn continue_session_inner(
         let mut build = SessionBuildOptions {
             model_fallback: None,
             tool_access_policy: None,
+            declared_tool_restriction: None,
             tool_dispatch_admission: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,

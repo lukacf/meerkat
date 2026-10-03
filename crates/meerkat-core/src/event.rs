@@ -505,7 +505,9 @@ impl From<&AgentError> for AgentErrorClass {
             // rather than misclassifying it as a provider/config failure.
             AgentError::StickyModelFallbackAuthorityUnknown { .. }
             | AgentError::SessionDurableProjectionAuthorityUnknown { .. } => Self::Internal,
-            AgentError::BuildError(_) | AgentError::SessionIdentityInUse(_) => Self::Build,
+            AgentError::BuildError(_)
+            | AgentError::SessionIdentityInUse(_)
+            | AgentError::DeclaredToolUnknown(_) => Self::Build,
             AgentError::AuthReauthRequired { .. } => Self::Auth,
             AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. } => {
                 Self::CallbackPending

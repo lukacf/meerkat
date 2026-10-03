@@ -2027,6 +2027,7 @@ class WireMobToolConfig:
     """Tool configuration embedded in a wire mob profile override."""
     builtins: Optional[bool] = None
     comms: Optional[bool] = None
+    deny: Optional[list[str]] = None
     image_generation: Optional[bool] = None
     mcp: Optional[list[str]] = None
     memory: Optional[bool] = None
@@ -3270,6 +3271,7 @@ class MobToolConfigInput:
     """Request payload for MobToolConfigInput."""
     builtins: Optional[bool] = None
     comms: Optional[bool] = None
+    deny: Optional[list[str]] = None
     image_generation: Optional[bool] = None
     mcp: Optional[list[str]] = None
     memory: Optional[bool] = None
@@ -3571,6 +3573,7 @@ v1 rejects every non-portable category instead of silently disabling it,
 so production v1 specs carry an empty list."""
     builtins: Optional[bool] = None
     comms: Optional[bool] = None
+    deny: Optional[list[str]] = None
     image_generation: Optional[bool] = None
     mcp_servers: Optional[dict[str, PortableMcpDecl]] = None
     memory: Optional[bool] = None

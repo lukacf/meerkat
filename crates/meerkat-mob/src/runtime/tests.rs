@@ -3615,6 +3615,7 @@ impl MockSessionService {
                         .map(|b| b.override_web_search)
                         .unwrap_or(ToolCategoryOverride::Inherit),
                     tool_access_policy: build.and_then(|b| b.tool_access_policy.clone()),
+                    spawn_tool_access_policy: None,
                     application_tool_policy: build
                         .map(|b| b.application_tool_policy.clone())
                         .unwrap_or(meerkat_core::ApplicationToolPolicyBinding::Unmanaged),
@@ -7159,6 +7160,7 @@ fn sample_definition() -> MobDefinition {
                 schedule: false,
                 image_generation: false,
                 read_only: false,
+                deny: Vec::new(),
                 mcp: vec![],
                 mcp_servers: vec![],
                 rust_bundles: vec![],
@@ -33734,6 +33736,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: Some(vec![meerkat_core::skills::SkillKey::builtin(
                     meerkat_core::skills::SkillName::parse("mob-communication")
@@ -57767,6 +57770,7 @@ impl RealCommsSessionService {
                             .unwrap_or(ToolCategoryOverride::Inherit),
                         tool_access_policy: build
                             .and_then(|options| options.tool_access_policy.clone()),
+                        spawn_tool_access_policy: None,
                         application_tool_policy: build
                             .map(|options| options.application_tool_policy.clone())
                             .unwrap_or(meerkat_core::ApplicationToolPolicyBinding::Unmanaged),

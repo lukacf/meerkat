@@ -324,6 +324,8 @@ mod supervisor;
 mod supervisor_bridge;
 mod terminalization;
 mod tools;
+pub(crate) use tools::mob_operator_tool_names;
+pub use tools::{AGENT_MOB_TOOL_NAMES, agent_mob_tool_names};
 pub mod topology;
 mod transaction;
 pub mod turn_executor;

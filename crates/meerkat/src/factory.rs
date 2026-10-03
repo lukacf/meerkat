@@ -696,6 +696,13 @@ pub struct AgentBuildConfig {
     /// `SessionMetadata.tooling.tool_access_policy` so children can inherit
     /// it transitively.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    /// Tool restriction declared by the agent's configuration (a mob
+    /// profile's read-only and deny declarations). The factory conjoins it
+    /// with `tool_access_policy` into the effective gate policy, persists the
+    /// launch part separately as `SessionMetadata.tooling.spawn_tool_access_policy`,
+    /// and rejects a deny name that no statically composed tool family
+    /// provides. Recomputed by every build, never restored from metadata.
+    pub declared_tool_restriction: Option<meerkat_core::ops::DeclaredToolRestriction>,
     /// Process-local authority awaited at the outermost actual dispatcher.
     /// It is not persisted; live delegation reconstructs it from generated
     /// operation admission when rematerialization is supported.
@@ -933,6 +940,7 @@ impl AgentBuildConfig {
             initial_tool_visibility_state: None,
             initial_tool_filter: None,
             tool_access_policy: None,
+            declared_tool_restriction: None,
             tool_dispatch_admission: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
@@ -1058,6 +1066,7 @@ impl AgentBuildConfig {
         self.initial_metadata_entries = build.initial_metadata_entries.clone();
         self.initial_tool_filter = build.initial_tool_filter.clone();
         self.tool_access_policy = build.tool_access_policy.clone();
+        self.declared_tool_restriction = build.declared_tool_restriction.clone();
         self.tool_dispatch_admission = build.tool_dispatch_admission.clone();
         self.application_tool_policy = build.application_tool_policy.clone();
         self.tool_consequence_policy_registry = build.tool_consequence_policy_registry.clone();
@@ -1134,6 +1143,7 @@ impl AgentBuildConfig {
             initial_metadata_entries: self.initial_metadata_entries.clone(),
             initial_tool_filter: self.initial_tool_filter.clone(),
             tool_access_policy: self.tool_access_policy.clone(),
+            declared_tool_restriction: self.declared_tool_restriction.clone(),
             tool_dispatch_admission: self.tool_dispatch_admission.clone(),
             application_tool_policy: self.application_tool_policy.clone(),
             tool_consequence_policy_registry: self.tool_consequence_policy_registry.clone(),
@@ -1172,6 +1182,48 @@ fn metadata_memory_override_for_realm(
     } else {
         ToolCategoryOverride::Disable
     }
+}
+
+/// Tool names of the memory family (`meerkat_memory::MemorySearchDispatcher`),
+/// known whatever the compiled features so a deny list means the same thing
+/// on every build; pinned by a drift test where the family is compiled.
+pub(crate) const MEMORY_TOOL_NAMES: &[&str] = &["memory_search"];
+
+/// The built-in tool families' vocabularies: every tool name a family can
+/// provide, whether or not a given build compiles or enables the family. Each
+/// list is owned by its family and pinned to the family's tool definitions by
+/// a drift test wherever the family is compiled.
+fn builtin_tool_vocabulary() -> Vec<(meerkat_core::ToolVocabularySource, Vec<&'static str>)> {
+    use meerkat_tools::builtin;
+    let family = |name: &str| meerkat_core::ToolVocabularySource::Family(name.to_string());
+    vec![
+        (family("shell"), builtin::SHELL_TOOL_NAMES.to_vec()),
+        (family("tasks"), builtin::tasks::tool_names().to_vec()),
+        (family("utility"), builtin::UTILITY_TOOL_NAMES.to_vec()),
+        (family("comms"), builtin::COMMS_TOOL_NAMES.to_vec()),
+        (family("skills"), builtin::SKILL_TOOL_NAMES.to_vec()),
+        (
+            family("web_search"),
+            builtin::WEB_SEARCH_TOOL_NAMES.to_vec(),
+        ),
+        (
+            family("brain_swap"),
+            builtin::BRAIN_SWAP_TOOL_NAMES.to_vec(),
+        ),
+        (
+            family("image_generation"),
+            builtin::image_generation::tool_names().to_vec(),
+        ),
+        (family("memory"), MEMORY_TOOL_NAMES.to_vec()),
+        (
+            family("workgraph"),
+            meerkat_workgraph::workgraph_tool_names(),
+        ),
+        (
+            family("schedule"),
+            meerkat_schedule::schedule_tool_names().to_vec(),
+        ),
+    ]
 }
 
 /// Errors that can occur when building an agent via [`AgentFactory::build_agent()`].
@@ -1216,6 +1268,11 @@ pub enum BuildAgentError {
     /// Configuration error.
     #[error("Config error: {0}")]
     Config(String),
+
+    /// The build's declared tool restriction denies a tool the build neither
+    /// composed nor finds in any tool vocabulary.
+    #[error(transparent)]
+    DeclaredToolUnknown(Box<meerkat_core::error::DeclaredToolUnknown>),
 
     /// An explicit tool-category `Enable` could not be satisfied.
     ///
@@ -4253,11 +4310,20 @@ impl AgentFactory {
         if !mask.preload_skills {
             build_config.preload_skills = metadata.tooling.active_skills.clone();
         }
-        // Effective call-level tool access policy: restore the persisted
-        // policy unless the caller supplied an explicit one — a restricted
-        // session must not escape its execution gate by being resumed.
+        // Launch tool access policy: restore the persisted launch part unless
+        // the caller supplied an explicit one - a restricted session must not
+        // escape its execution gate by being resumed. The declared
+        // restriction (a mob profile's read-only/deny) is not restored: the
+        // build recomputes it from the current configuration. A session
+        // persisted before the launch part was recorded separately has only
+        // the effective policy, which may include an older declaration; it is
+        // restored as the launch policy (contained, possibly narrower).
         if !mask.tool_access_policy && build_config.tool_access_policy.is_none() {
-            build_config.tool_access_policy = metadata.tooling.tool_access_policy.clone();
+            build_config.tool_access_policy =
+                match metadata.tooling.spawn_tool_access_policy.clone() {
+                    Some(spawn) => spawn.into_launch(),
+                    None => metadata.tooling.tool_access_policy.clone(),
+                };
         }
         if !mask.application_tool_policy {
             build_config.application_tool_policy = metadata.tooling.application_tool_policy.clone();
@@ -6538,6 +6604,48 @@ impl AgentFactory {
             ));
         }
 
+        // Effective call-level policy: the launch part conjoined with the
+        // configuration's declared restriction. Every consumer below (the
+        // execution gate, the scheduler's and mob tools' creator policy, the
+        // parent authority children inherit from, and the persisted
+        // effective policy) sees the effective policy; only the launch part is
+        // additionally persisted as the session's spawn policy.
+        let spawn_tool_access_policy = build_config.tool_access_policy.clone();
+        let declared_tool_restriction = build_config
+            .declared_tool_restriction
+            .clone()
+            .filter(|restriction| !restriction.is_unrestricted());
+        if let Some(restriction) = &declared_tool_restriction {
+            build_config.tool_access_policy = restriction
+                .conjoin_with_launch_policy(build_config.tool_access_policy.take())
+                .map_err(|err| {
+                    BuildAgentError::Config(format!(
+                        "failed to compose the tool restriction declared by {}: {err}",
+                        restriction.declared_by
+                    ))
+                })?;
+        }
+        // External tools (MCP servers, host bundles) are not part of the
+        // composed surface a declared deny list may name; only the names a
+        // tool vocabulary declares for them are. Deferred catalog entries
+        // count too: a deferred external tool (an MCP tool not yet loaded) is
+        // still external, never a composed family tool.
+        let external_tool_names: std::collections::HashSet<String> =
+            match (&declared_tool_restriction, &build_config.external_tools) {
+                (Some(_), Some(external)) => external
+                    .tools()
+                    .iter()
+                    .map(|tool| tool.name.to_string())
+                    .chain(
+                        external
+                            .tool_catalog()
+                            .iter()
+                            .map(|entry| entry.tool.name.to_string()),
+                    )
+                    .collect(),
+                _ => std::collections::HashSet::new(),
+            };
+
         // Build the tool dispatcher. Wait-tool-specific binding was removed
         // along with the generic wait tool.
         //
@@ -7328,6 +7436,10 @@ impl AgentFactory {
             // Effective (resolved) policy only — an unresolved `Inherit`
             // failed the build above, so `Inherit` can never persist here.
             metadata.tooling.tool_access_policy = build_config.tool_access_policy.clone();
+            metadata.tooling.spawn_tool_access_policy =
+                Some(meerkat_core::ops::SpawnToolAccessPolicy::from_launch(
+                    spawn_tool_access_policy.clone(),
+                ));
             metadata.tooling.application_tool_policy = build_config.application_tool_policy.clone();
             if build_config.resume_override_mask.preload_skills || active_skill_ids.is_some() {
                 metadata.tooling.active_skills = active_skill_ids.clone();
@@ -7368,6 +7480,11 @@ impl AgentFactory {
                     // Effective (resolved) policy only — an unresolved
                     // `Inherit` failed the build above.
                     tool_access_policy: build_config.tool_access_policy.clone(),
+                    spawn_tool_access_policy: Some(
+                        meerkat_core::ops::SpawnToolAccessPolicy::from_launch(
+                            spawn_tool_access_policy.clone(),
+                        ),
+                    ),
                     application_tool_policy: build_config.application_tool_policy.clone(),
                     active_skills: active_skill_ids.clone(),
                 },
@@ -7669,6 +7786,77 @@ impl AgentFactory {
                 control_dispatcher,
             ]));
             hoisted_control_visibility_provider = Some(visibility_provider);
+        }
+
+        // 12i-pre. A declared deny list names tools this build composed or
+        // names in a tool vocabulary: the built-in families' (every tool a
+        // family can provide, enabled here or not) and the declaring
+        // configuration's own (mob operator and agent mob tools, declared MCP
+        // server tools, tool bundles). A known name this build did not mount
+        // is inert; any other name (stale or mistyped) is a typed
+        // configuration error, never a silently inert entry. External tools
+        // outside every vocabulary (a host's undeclared MCP or provider
+        // tools) stay unknown.
+        if let Some(restriction) = &declared_tool_restriction {
+            let builtin_vocabulary = builtin_tool_vocabulary();
+            let tool_defs = tools.tools();
+            let catalog = tools.tool_catalog();
+            let composed = tool_defs
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .chain(catalog.iter().map(|entry| entry.tool.name.as_str()))
+                .filter(|name| !external_tool_names.contains(*name));
+            let known: std::collections::HashSet<&str> = composed
+                .chain(
+                    builtin_vocabulary
+                        .iter()
+                        .flat_map(|(_, names)| names.iter().copied()),
+                )
+                .chain(
+                    restriction
+                        .vocabulary
+                        .values()
+                        .flat_map(|names| names.iter().map(|name| name.as_str())),
+                )
+                .collect();
+            let mut unknown = restriction
+                .deny
+                .iter()
+                .map(|name| name.as_str())
+                .filter(|name| !known.contains(name))
+                .collect::<Vec<_>>();
+            unknown.sort_unstable();
+            if !restriction.deferred_mcp_servers.is_empty() {
+                // A declared MCP server without a tool list may provide any
+                // name once it connects: the gate enforces these by name.
+                let servers = restriction
+                    .deferred_mcp_servers
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                for tool in unknown.drain(..) {
+                    tracing::info!(
+                        declared_by = %restriction.declared_by,
+                        "deny name {tool} deferred to runtime (server {servers} declares no tool list)"
+                    );
+                }
+            }
+            if let Some(tool) = unknown.first() {
+                return Err(BuildAgentError::DeclaredToolUnknown(Box::new(
+                    meerkat_core::error::DeclaredToolUnknown {
+                        declared_by: restriction.declared_by.clone(),
+                        tool: (*tool).to_string(),
+                        enabled_families: restriction.enabled_families.clone(),
+                        vocabulary: builtin_vocabulary
+                            .iter()
+                            .map(|(source, _)| source)
+                            .chain(restriction.vocabulary.keys())
+                            .map(ToString::to_string)
+                            .collect(),
+                    },
+                )));
+            }
         }
 
         // 12i. Call-level tool execution gate — the OUTERMOST composition.
@@ -17837,5 +18025,16 @@ mod host_prompt_sections_tests {
                 })
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "memory-store-session"))]
+mod memory_vocabulary_tests {
+    #[test]
+    fn memory_tool_names_match_the_memory_family() {
+        assert_eq!(
+            super::MEMORY_TOOL_NAMES,
+            meerkat_memory::MemorySearchDispatcher::tool_names()
+        );
     }
 }

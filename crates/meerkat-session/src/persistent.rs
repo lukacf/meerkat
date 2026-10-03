@@ -6382,6 +6382,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             metadata.peer_meta = None;
             metadata.mob_member_binding = target_binding;
             metadata.keep_alive = false;
+            // The branch's launch policy is what it inherited: the source's
+            // effective policy (which includes any restriction the source's
+            // configuration declared) or the requested replacement. Copying
+            // the source's launch part instead would let a resumed branch
+            // shed the source's declared restriction.
+            metadata.tooling.spawn_tool_access_policy = Some(
+                meerkat_core::ops::SpawnToolAccessPolicy::from_launch(effective_policy.clone()),
+            );
             metadata.tooling.tool_access_policy = effective_policy;
             forked.set_session_metadata(metadata).map_err(|error| {
                 SessionError::Agent(AgentError::InternalError(format!(

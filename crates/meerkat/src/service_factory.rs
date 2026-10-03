@@ -98,6 +98,9 @@ fn build_agent_error_to_session_error(
         BuildAgentError::LlmClient(error) => {
             SessionError::build_llm_identity_unresolvable(error.to_string())
         }
+        BuildAgentError::DeclaredToolUnknown(unknown) => SessionError::Agent(
+            meerkat_core::error::AgentError::DeclaredToolUnknown(unknown),
+        ),
         other => SessionError::Agent(meerkat_core::error::AgentError::BuildError(
             other.to_string(),
         )),

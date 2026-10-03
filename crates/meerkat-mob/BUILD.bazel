@@ -3198,6 +3198,87 @@ rust_test(
 )
 
 rust_test(
+    name = "profile_tool_deny_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-mob",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "profile_tool_deny",
+    crate_root = "tests/profile_tool_deny.rs",
+    crate_features = [
+        "integration-real-tests",
+        "openai-live",
+        "runtime-adapter",
+        "schema",
+        "test-support",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/runtime/actor.rs",
+        "src/runtime/actor/retirement_io.rs",
+        "src/runtime/builder.rs",
+        "src/runtime/flow_frame_engine.rs",
+        "src/runtime/handle.rs",
+        "src/runtime/provisioner.rs",
+        "src/runtime/recovery.rs",
+        "src/runtime/state.rs",
+    ],
+    srcs = [
+        "tests/profile_tool_deny.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_BIN_NAME": "profile_tool_deny",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-derive:meerkat_machine_derive",
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-mob",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_atif_agent_factory_build",
+        "//crates/meerkat:meerkat_client_agent_factory_build",
+        "//crates/meerkat:meerkat_comms_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_live_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_kernels_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_models_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_sqlite_agent_factory_build",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
+        "//crates/meerkat:meerkat_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-mob",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "remote_spawn_ladder_test",
     aliases = aliases(
         package_name = "crates/meerkat-mob",
@@ -4480,6 +4561,7 @@ test_suite(
         ":multi_host_machine_test",
         ":placed_member_respawn_test",
         ":placed_spawn_carrier_store_test",
+        ":profile_tool_deny_test",
         ":remote_spawn_ladder_test",
         ":remote_spawn_materialization_test",
         ":scope_matrix_test",

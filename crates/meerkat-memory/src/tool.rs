@@ -69,6 +69,11 @@ pub struct MemorySearchDispatcher {
 
 impl MemorySearchDispatcher {
     /// Create a new memory search dispatcher backed by the given store.
+    /// The names of the tools this dispatcher provides.
+    pub fn tool_names() -> &'static [&'static str] {
+        &[TOOL_NAME]
+    }
+
     pub fn new(store: Arc<dyn MemoryStore>, scope: MemorySearchScope) -> Self {
         let tool_def = Arc::new(ToolDef {
             name: TOOL_NAME.into(),
@@ -238,6 +243,18 @@ mod tests {
         let tools = dispatcher.tools();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "memory_search");
+    }
+
+    #[test]
+    fn tool_names_match_the_tool_definitions() {
+        let store: Arc<dyn MemoryStore> = Arc::new(crate::SimpleMemoryStore::new());
+        let dispatcher = dispatcher(store, &SessionId::new());
+        let defined: Vec<String> = dispatcher
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert_eq!(defined, MemorySearchDispatcher::tool_names());
     }
 
     #[test]

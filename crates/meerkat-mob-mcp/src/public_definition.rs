@@ -144,6 +144,7 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
             schedule: input.tools.schedule,
             image_generation: input.tools.image_generation,
             read_only: input.tools.read_only,
+            deny: input.tools.deny,
             mcp: input.tools.mcp,
             mcp_servers: vec![],
             rust_bundles: Vec::new(),

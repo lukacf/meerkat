@@ -297,6 +297,11 @@ impl ArchiveRuntimeCleanup {
     }
 }
 
+/// Where a staleness check runs relative to the session's turn-finalization
+/// boundary (owned by `meerkat-session`).
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use meerkat_session::LiveStalenessPosition;
+
 /// `RuntimeStateOps` orchestrator (gated on `session-store`).
 ///
 /// Owns the surface-agnostic session-state observers ([`discard_live_session`],
@@ -313,6 +318,11 @@ mod ops {
     use meerkat_core::service::SessionError;
     use meerkat_core::types::SessionId;
     use meerkat_runtime::MeerkatMachine;
+
+    use meerkat_core::session_document::LiveSessionAuthorityReason;
+    use meerkat_session::LiveSessionExport;
+
+    use meerkat_session::LiveStalenessPosition;
 
     use crate::PersistentSessionService;
     use crate::service_factory::FactoryAgentBuilder;
@@ -499,6 +509,16 @@ mod ops {
         /// `Ok(false)` once the synchronization shortcut has fired or
         /// the live snapshot already mirrors the durable record.
         ///
+        /// A live actor holding transcript rows the store has not committed
+        /// (`LiveUncommittedTranscript`) is either a turn whose boundary
+        /// commit is pending or a turn that ended without committing.
+        /// `position` says which the caller can tell apart: holding the
+        /// turn-finalization boundary, no commit can be pending, so the
+        /// uncommitted image is stale and is resynced; outside it the two
+        /// cannot be told apart, so the actor is not stale (a pending commit
+        /// must never lose its actor, and an uncommitted terminal is resynced
+        /// by the next turn's in-loop entry, which holds the boundary).
+        ///
         /// `recovery_ctx` provides the
         /// [`RecoveryContext::load_persisted_session`] flow used to
         /// cross-check the durable snapshot — surfaces pass their own
@@ -507,6 +527,7 @@ mod ops {
             &self,
             session_id: &SessionId,
             recovery_ctx: &RecoveryContext<'_>,
+            position: LiveStalenessPosition,
         ) -> Result<bool, SessionError> {
             if self
                 .service
@@ -516,15 +537,30 @@ mod ops {
                 return Ok(false);
             }
 
-            let live = match self.service.export_live_session(session_id).await {
-                Ok(session) => session,
-                Err(SessionError::NotFound { .. }) => {
+            let live = match self.service.live_session_export(session_id).await? {
+                LiveSessionExport::Live(session) => session,
+                LiveSessionExport::DurableAuthoritative {
+                    reason: LiveSessionAuthorityReason::LiveUncommittedTranscript,
+                } => {
+                    return Ok(match position {
+                        LiveStalenessPosition::TurnBoundaryHeld => recovery_ctx
+                            .load_persisted_session(session_id)
+                            .await?
+                            .is_some(),
+                        LiveStalenessPosition::OutsideTurnBoundary => false,
+                    });
+                }
+                LiveSessionExport::NoLive
+                | LiveSessionExport::DurableAuthoritative {
+                    reason:
+                        LiveSessionAuthorityReason::StoredArchived
+                        | LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged,
+                } => {
                     return Ok(recovery_ctx
                         .load_persisted_session(session_id)
                         .await?
                         .is_some());
                 }
-                Err(err) => return Err(err),
             };
             let Some(stored) = recovery_ctx.load_persisted_session(session_id).await? else {
                 return Ok(false);

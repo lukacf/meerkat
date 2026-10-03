@@ -2877,6 +2877,43 @@ enum LiveSessionAuthority {
     },
 }
 
+/// Where a live-session staleness judgement runs relative to the session's
+/// turn-finalization boundary.
+///
+/// A live actor holding transcript rows the store has not committed
+/// (`LiveUncommittedTranscript`) is either a run whose boundary commit is
+/// pending or a run that ended without committing. Holding the boundary, no
+/// commit can be pending, so the uncommitted image is resynced. Outside it
+/// the two cannot be told apart, so the actor is left alone: a pending
+/// commit must keep its actor and checkpoint receipt, and an uncommitted
+/// terminal is resynced by the next turn's in-loop entry, which holds the
+/// boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveStalenessPosition {
+    /// The caller holds the turn-finalization boundary (or runs inside the
+    /// runtime loop's turn, which holds it).
+    TurnBoundaryHeld,
+    /// The caller does not hold it: a run may be between its apply and its
+    /// boundary commit.
+    OutsideTurnBoundary,
+}
+
+/// What [`PersistentSessionService::live_session_export`] observed.
+///
+/// A live session that durable authority outranks has no live export; that
+/// is a typed answer distinct from "no live session", so a staleness reader
+/// can apply the authority reason (for example a turn whose rows the store
+/// has not committed yet) instead of reading it as an absent actor.
+#[derive(Debug)]
+pub enum LiveSessionExport {
+    /// The live actor's transcript is authoritative.
+    Live(Box<Session>),
+    /// No live actor exists for the session.
+    NoLive,
+    /// Durable authority outranks the live actor, for `reason`.
+    DurableAuthoritative { reason: LiveSessionAuthorityReason },
+}
+
 /// Typed diagnostic cause for synchronizing a live session from durable truth.
 /// Carried purely as a `tracing` label by the shared sync helpers — it is NOT a
 /// verdict. The live-vs-durable authority verdict + its precedence reason are
@@ -3720,7 +3757,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         request_policy: meerkat_core::SessionLlmRequestPolicy,
     ) -> Result<(), SessionError> {
         let _recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
@@ -5344,12 +5383,30 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     async fn discard_stale_live_session_if_needed(
         &self,
         id: &SessionId,
+        position: LiveStalenessPosition,
     ) -> Result<bool, SessionError> {
         let LiveSessionAuthority::DurableAuthoritative { session, reason } =
             self.live_session_authority(id).await?
         else {
             return Ok(false);
         };
+        match (reason, position) {
+            // A run may be between its apply and its boundary commit: its
+            // actor and checkpoint receipt are what that commit promotes.
+            (
+                LiveSessionAuthorityReason::LiveUncommittedTranscript,
+                LiveStalenessPosition::OutsideTurnBoundary,
+            ) => return Ok(false),
+            (
+                LiveSessionAuthorityReason::LiveUncommittedTranscript,
+                LiveStalenessPosition::TurnBoundaryHeld,
+            )
+            | (
+                LiveSessionAuthorityReason::StoredArchived
+                | LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged,
+                _,
+            ) => {}
+        }
 
         if self
             .synchronize_runtime_backed_live_from_durable_authority(id, session.as_ref(), reason)
@@ -5472,7 +5529,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<bool, SessionError> {
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _recovery_guard = recovery_gate.lock().await;
-        self.discard_stale_live_session_if_needed(id).await
+        self.discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await
     }
 
     pub async fn synchronize_live_session_from_durable_authority_if_needed(
@@ -5534,19 +5592,36 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         )))
     }
 
+    /// The live session's transcript, or [`SessionError::NotFound`] when
+    /// there is no live session or durable authority outranks it (see
+    /// [`Self::live_session_export`] for the typed distinction).
     pub async fn export_live_session(&self, id: &SessionId) -> Result<Session, SessionError> {
+        match self.live_session_export(id).await? {
+            LiveSessionExport::Live(session) => Ok(*session),
+            LiveSessionExport::NoLive | LiveSessionExport::DurableAuthoritative { .. } => {
+                Err(SessionError::NotFound { id: id.clone() })
+            }
+        }
+    }
+
+    /// Export the live session's transcript when the live actor is
+    /// authoritative, or say typed why there is no live export.
+    pub async fn live_session_export(
+        &self,
+        id: &SessionId,
+    ) -> Result<LiveSessionExport, SessionError> {
         loop {
             match self.live_session_authority(id).await? {
-                LiveSessionAuthority::NoLive
-                | LiveSessionAuthority::DurableAuthoritative { .. } => {
-                    return Err(SessionError::NotFound { id: id.clone() });
+                LiveSessionAuthority::NoLive => return Ok(LiveSessionExport::NoLive),
+                LiveSessionAuthority::DurableAuthoritative { reason, .. } => {
+                    return Ok(LiveSessionExport::DurableAuthoritative { reason });
                 }
                 LiveSessionAuthority::LiveAuthoritative { snapshot } => {
                     if let Some(session) = self
                         .export_session_with_labels_if_transcript_authority(id, snapshot)
                         .await?
                     {
-                        return Ok(session);
+                        return Ok(LiveSessionExport::Live(Box::new(session)));
                     }
                 }
             }
@@ -5686,7 +5761,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Err(error) => return Err(error),
         }
 
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         Ok(SessionMutationGuard {
             _turn_finalization_guard: Some(turn_finalization_guard),
             _recovery_guard: Some(recovery_guard),
@@ -5822,7 +5899,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Err(error) => return Err(error),
         }
 
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         Ok(SessionMutationGuard {
             _turn_finalization_guard: Some(turn_finalization_guard),
             _recovery_guard: Some(recovery_guard),
@@ -7440,7 +7519,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<usize, SessionError> {
         let _recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
@@ -7467,7 +7548,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         record: meerkat_core::types::SystemNoticeRecord,
     ) -> Result<meerkat_core::service::AppendSystemContextStatus, SessionError> {
         let _recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         if !self.inner.has_live_session(id).await? {
             let mut session = self
                 .load_persisted_session_for_control(id, "append_system_notice")
@@ -7523,7 +7606,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         state: Option<meerkat_core::SessionToolVisibilityState>,
     ) -> Result<(), SessionError> {
         let _recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
@@ -7553,7 +7638,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         record: meerkat_core::session::model_routing_control::SessionModelRoutingControlRecord,
     ) -> Result<(), SessionError> {
         let recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
@@ -8977,7 +9064,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _turn_guard = recovery_gate.lock().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::OutsideTurnBoundary)
+            .await?;
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
@@ -9697,7 +9786,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let turn_guard = recovery_gate.lock().await;
         let _ = self
-            .discard_stale_live_session_if_needed(id)
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
             .await
             .map_err(|error| (error, admission.take()))?;
         let _ = self
@@ -11095,7 +11184,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let recovery_guard = recovery_gate.lock_owned().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
@@ -12023,7 +12114,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _turn_guard = recovery_gate.lock().await;
         let _ = self
-            .discard_stale_live_session_if_needed(id)
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
             .await
             .map_err(|error| (error, None))?;
         // A new runtime turn owns the live image from here; its boundary
@@ -12138,7 +12229,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Self::bind_runtime_turn_identity(&mut req, &run_id)?;
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _turn_guard = recovery_gate.lock().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         // A new runtime turn owns the live image from here; its boundary
         // commit may be coming again.
         self.clear_live_uncommitted_terminal(id);
@@ -13321,7 +13414,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 continue;
             }
 
-            let _ = self.discard_stale_live_session_if_needed(id).await?;
+            let _ = self
+                .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+                .await?;
             let stored_only_publication_handle: Option<Arc<dyn CoreExecutorPublicationHandle>> =
                 if self.inner.has_live_session(id).await? {
                     None
@@ -15067,7 +15162,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<bool, SessionError> {
         let _recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         let Some(state) = self.inner.deferred_turn_state(id).await else {
             return Ok(false);
         };
@@ -39024,7 +39121,7 @@ mod tests {
             .expect("projection snapshot should save");
 
         let discarded = service
-            .discard_stale_live_session_if_needed(&id)
+            .discard_stale_live_session_if_needed(&id, LiveStalenessPosition::TurnBoundaryHeld)
             .await
             .expect("discard check should succeed");
 

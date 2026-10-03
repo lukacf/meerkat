@@ -4518,6 +4518,15 @@ impl RuntimeLoopAuthorityBinding {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    async fn run_before_boundary_acknowledgement_test_hook(&self) {
+        if let Some(machine) = self.machine.upgrade() {
+            machine
+                .run_runtime_loop_before_boundary_acknowledgement_test_hook(&self.session_id)
+                .await;
+        }
+    }
+
     /// Tell the session's interrupted-run evidence store that `run_id`
     /// reached a durable terminal (committed, failed, cancelled or stopped),
     /// off the loop's critical path. Best effort: a marker left behind is
@@ -7136,6 +7145,10 @@ async fn process_queue(
                         // is a metadata-only head mutation). Otherwise the
                         // executor re-reads a newer cleaned head and rejects
                         // the just-committed token as stale.
+                        #[cfg(any(test, feature = "test-support"))]
+                        authority_binding
+                            .run_before_boundary_acknowledgement_test_hook()
+                            .await;
                         let checkpoint_result = publish_committed_session_boundary(
                             executor,
                             None,

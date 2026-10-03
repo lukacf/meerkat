@@ -111,12 +111,23 @@ pub(crate) enum LlmReconfigureBoundaryOwnership {
     AlreadyHeld,
 }
 
+impl LlmReconfigureBoundaryOwnership {
+    /// Where this apply's pre-turn staleness check runs.
+    fn staleness_position(self) -> LiveStalenessPosition {
+        match self {
+            Self::Acquire => LiveStalenessPosition::OutsideTurnBoundary,
+            Self::AlreadyHeld => LiveStalenessPosition::TurnBoundaryHeld,
+        }
+    }
+}
+
 // W2-A: surface-agnostic LiveOpenPrecheckError + precheck_identity +
 // apply_precheck_gates moved to `meerkat::session_runtime::errors` and
 // `meerkat::session_runtime::live_orchestration`. RPC keeps a re-export
 // so existing handlers/tests resolve the same type.
 pub use meerkat::session_runtime::errors::LiveOpenPrecheckError;
 use meerkat::session_runtime::live_orchestration::{apply_precheck_gates, precheck_identity};
+use meerkat::session_runtime::runtime_state::LiveStalenessPosition;
 
 #[cfg(test)]
 type ServiceStartTurnResultReceiver =
@@ -2743,11 +2754,15 @@ impl SessionRuntime {
         Ok(metadata.keep_alive)
     }
 
-    async fn live_session_is_stale(&self, session_id: &SessionId) -> Result<bool, RpcError> {
+    async fn live_session_is_stale(
+        &self,
+        session_id: &SessionId,
+        position: LiveStalenessPosition,
+    ) -> Result<bool, RpcError> {
         let snapshot = self.realm_context_snapshot();
         let recovery_ctx = self.recovery_context(&snapshot, Some(session_id));
         self.runtime_state_ops()
-            .live_session_is_stale(session_id, &recovery_ctx)
+            .live_session_is_stale(session_id, &recovery_ctx, position)
             .await
             .map_err(session_error_to_rpc)
     }
@@ -2845,7 +2860,8 @@ impl SessionRuntime {
         let stale = if archived {
             false
         } else {
-            self.live_session_is_stale(session_id).await?
+            self.live_session_is_stale(session_id, LiveStalenessPosition::TurnBoundaryHeld)
+                .await?
         };
         drop(turn_boundary);
 
@@ -7339,7 +7355,10 @@ impl SessionRuntime {
             .await?;
         let workgraph_service = self.workgraph_service().ok();
 
-        if self.live_session_is_stale(session_id).await? {
+        if self
+            .live_session_is_stale(session_id, LiveStalenessPosition::OutsideTurnBoundary)
+            .await?
+        {
             self.discard_stale_live_session(session_id).await?;
         }
 
@@ -7804,7 +7823,10 @@ impl SessionRuntime {
         let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
         let staged_session_existed = self.staged_sessions.contains(session_id).await;
 
-        if self.live_session_is_stale(session_id).await? {
+        if self
+            .live_session_is_stale(session_id, LiveStalenessPosition::OutsideTurnBoundary)
+            .await?
+        {
             self.discard_stale_live_session(session_id).await?;
         }
         if let Err(primary) = self.ensure_runtime_executor(session_id).await {
@@ -8234,7 +8256,11 @@ impl SessionRuntime {
                 data: None,
             })?;
 
-        if pending_session.is_none() && !self.live_session_is_stale(session_id).await? {
+        if pending_session.is_none()
+            && !self
+                .live_session_is_stale(session_id, llm_reconfigure_boundary.staleness_position())
+                .await?
+        {
             let active_turn = match pre_admission.as_mut() {
                 Some(admission) => {
                     Self::take_runtime_pre_admission_guard(admission, session_id)?.into_admission()
@@ -9439,7 +9465,10 @@ impl SessionRuntime {
             Some(effective_identity.provider.as_str()),
         ));
 
-        if self.live_session_is_stale(session_id).await? {
+        if self
+            .live_session_is_stale(session_id, LiveStalenessPosition::OutsideTurnBoundary)
+            .await?
+        {
             return Box::pin(self.try_recover_persisted_session(
                 session_id,
                 turn_prompt,
@@ -14479,6 +14508,134 @@ mod tests {
         AgentBuildConfig {
             llm_client_override: Some(Arc::new(MockLlmClient)),
             ..AgentBuildConfig::new("claude-sonnet-4-5")
+        }
+    }
+
+    /// Where a run of the racing test is held.
+    #[derive(Clone, Copy, Debug)]
+    enum InFlightRunWindow {
+        /// The run applied (its rows are in the live actor) and its boundary
+        /// commit has not landed.
+        BeforeBoundaryCommit,
+        /// The commit landed and the executor has not acknowledged it.
+        BeforeBoundaryAcknowledgement,
+    }
+
+    /// A text `turn/start` that arrives while another run on the session
+    /// is between its apply and its boundary acknowledgement keeps that run
+    /// and the session (turbo-live combined3 S99: an ExistingMember live
+    /// delegation worker on its source session, raced by the user typing).
+    ///
+    /// Before the fix, `turn/start`'s pre-admission staleness check saw the
+    /// live actor's uncommitted rows (`LiveUncommittedTranscript`), read the
+    /// missing live export as an absent actor, and judged the session stale:
+    /// it discarded the actor, dropping the checkpointer the run's
+    /// provisional promotion acknowledges through ("promoted WholeBlob
+    /// boundary has no exact live checkpointer"), and unregistered the
+    /// session.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn turn_start_racing_an_in_flight_runs_boundary_keeps_the_run_and_the_session() {
+        const STEP: Duration = Duration::from_secs(30);
+        for window in [
+            InFlightRunWindow::BeforeBoundaryCommit,
+            InFlightRunWindow::BeforeBoundaryAcknowledgement,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let runtime = make_runtime(AgentFactory::new(temp.path().join("sessions")), 4);
+            let session_id = runtime
+                .create_or_resume_session_without_turn(
+                    mock_build_config(),
+                    None,
+                    None,
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            let adapter = runtime.runtime_adapter();
+            let (entered, release) = match window {
+                InFlightRunWindow::BeforeBoundaryCommit => {
+                    adapter.arm_runtime_loop_before_terminal_commit_test_hook(session_id.clone())
+                }
+                InFlightRunWindow::BeforeBoundaryAcknowledgement => adapter
+                    .arm_runtime_loop_before_boundary_acknowledgement_test_hook(session_id.clone()),
+            };
+            let turn = |prompt: &'static str| {
+                let runtime = Arc::clone(&runtime);
+                let session_id = session_id.clone();
+                tokio::spawn(async move {
+                    let (event_tx, _event_rx) = mpsc::channel(100);
+                    runtime
+                        .start_turn_via_runtime(
+                            &session_id,
+                            prompt.into(),
+                            Vec::new(),
+                            event_tx,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                })
+            };
+            let first = turn("first in-flight run");
+            tokio::time::timeout(STEP, entered)
+                .await
+                .unwrap_or_else(|_| panic!("{window:?}: the first run reaches its hold"))
+                .unwrap();
+
+            // The check a racing turn/start runs before admission.
+            assert!(
+                !runtime
+                    .live_session_is_stale(&session_id, LiveStalenessPosition::OutsideTurnBoundary)
+                    .await
+                    .unwrap(),
+                "{window:?}: a run between its apply and its boundary acknowledgement is not \
+                 a stale live session"
+            );
+            let second = turn("second racing turn");
+            release.send(()).unwrap();
+            let first = tokio::time::timeout(STEP, first)
+                .await
+                .unwrap_or_else(|_| panic!("{window:?}: the first run finishes"))
+                .unwrap();
+            assert!(
+                first.is_ok(),
+                "{window:?}: the in-flight run commits and acknowledges its boundary: {first:?}"
+            );
+            let second = tokio::time::timeout(STEP, second)
+                .await
+                .unwrap_or_else(|_| panic!("{window:?}: the racing turn finishes"))
+                .unwrap();
+            assert!(
+                second.is_ok(),
+                "{window:?}: the racing turn runs: {second:?}"
+            );
+            assert!(
+                runtime
+                    .service
+                    .live_session_actor_registered(&session_id)
+                    .await,
+                "{window:?}: the live actor survives"
+            );
+            assert!(
+                adapter.contains_session(&session_id).await,
+                "{window:?}: the runtime registration survives"
+            );
+            let transcript = serde_json::to_string(
+                runtime
+                    .service
+                    .export_live_session(&session_id)
+                    .await
+                    .unwrap()
+                    .messages(),
+            )
+            .unwrap();
+            assert!(
+                transcript.contains("first in-flight run")
+                    && transcript.contains("second racing turn"),
+                "{window:?}: both turns are in the transcript: {transcript}"
+            );
         }
     }
 
@@ -22051,7 +22208,10 @@ mod tests {
 
         assert!(
             !runtime
-                .live_session_is_stale(&direct.session_id)
+                .live_session_is_stale(
+                    &direct.session_id,
+                    LiveStalenessPosition::OutsideTurnBoundary,
+                )
                 .await
                 .expect("query timestamp-only stale predicate"),
             "timestamp-only durable projection must not evict live runtime mechanics"

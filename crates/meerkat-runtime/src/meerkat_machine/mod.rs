@@ -6279,6 +6279,60 @@ impl MeerkatMachine {
         }
     }
 
+    /// Deterministically pause the runtime loop's next terminal run commit
+    /// of `session_id` after the store commit landed and before the
+    /// committed boundary is acknowledged to the session executor. The
+    /// turn-finalization boundary stays held. The first receiver resolves
+    /// when the commit reaches the gate; sending on (or dropping) the
+    /// returned sender lets it go on. Exposed only by test builds.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_runtime_loop_before_boundary_acknowledgement_test_hook(
+        &self,
+        session_id: SessionId,
+    ) -> (
+        crate::tokio::sync::oneshot::Receiver<()>,
+        crate::tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = crate::tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
+        let mut hook = self
+            .test_runtime_loop_before_boundary_acknowledgement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            hook.is_none(),
+            "runtime-loop boundary-acknowledgement test hook already armed"
+        );
+        *hook = Some((session_id, entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn run_runtime_loop_before_boundary_acknowledgement_test_hook(
+        &self,
+        session_id: &SessionId,
+    ) {
+        let armed = {
+            let mut hook = self
+                .test_runtime_loop_before_boundary_acknowledgement
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if hook
+                .as_ref()
+                .is_some_and(|(armed_session_id, _, _)| armed_session_id == session_id)
+            {
+                hook.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, entered_tx, release_rx)) = armed {
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+        }
+    }
+
     /// Runtime-loop parks on held run starts (#1500). Test support: wait for
     /// the park as a positive event instead of a quiet period.
     #[cfg(any(test, feature = "test-support"))]
@@ -9017,6 +9071,18 @@ pub struct MeerkatMachineShared {
     /// reasons still outstanding.
     registration_run_start_holds:
         std::sync::Mutex<HashMap<SessionId, std::collections::BTreeSet<dsl::RunStartHoldReason>>>,
+    /// One-shot deterministic gate after the runtime loop's terminal run
+    /// commit landed in the store but before the committed boundary is
+    /// acknowledged to the session executor (the turn-finalization boundary
+    /// is still held).
+    #[cfg(any(test, feature = "test-support"))]
+    test_runtime_loop_before_boundary_acknowledgement: StdMutex<
+        Option<(
+            SessionId,
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     /// Runtime-loop parks on held run starts (#1500), counted so tests can
     /// wait for the park as a positive event.
     #[cfg(any(test, feature = "test-support"))]
@@ -10579,6 +10645,8 @@ impl MeerkatMachine {
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_terminal_commit: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_before_boundary_acknowledgement: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 registration_run_start_holds: std::sync::Mutex::new(HashMap::new()),
                 #[cfg(any(test, feature = "test-support"))]
@@ -10685,6 +10753,8 @@ impl MeerkatMachine {
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_terminal_commit: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_before_boundary_acknowledgement: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 registration_run_start_holds: std::sync::Mutex::new(HashMap::new()),
                 #[cfg(any(test, feature = "test-support"))]
@@ -10790,6 +10860,8 @@ impl MeerkatMachine {
                 ),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_terminal_commit: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_before_boundary_acknowledgement: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 registration_run_start_holds: std::sync::Mutex::new(HashMap::new()),

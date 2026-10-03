@@ -37,6 +37,10 @@ them.
 
 ### Breaking
 
+- `meerkat::session_runtime::runtime_state::RuntimeStateOps::live_session_is_stale`
+  takes a `LiveStalenessPosition` (`TurnBoundaryHeld` or
+  `OutsideTurnBoundary`): whether the caller holds the session's
+  turn-finalization boundary. See Fixed.
 - MobMachine state records that member run starts are held (#1500):
   `MobMachineState` (meerkat-machine-schema) and the kernel `State`
   (meerkat-machine-kernels) gain the field `member_run_starts_held`, so code
@@ -1241,6 +1245,24 @@ them.
     result reporting someone was asked does not carry their answer, to be
     reported (correcting anything said before) once it arrives; the result
     cue reports only what the result itself says.
+- A text `turn/start` (or external event) that arrives while another run on
+  the same session is between its apply and its boundary acknowledgement no
+  longer destroys that run and the session. Typical case: the user types
+  while a live voice delegation's ExistingMember worker runs on its source
+  session.
+  - Before, the pre-admission staleness check saw the live actor's
+    uncommitted rows (`LiveUncommittedTranscript`), read the missing live
+    export as an absent actor, and discarded the actor and unregistered the
+    session. The worker's turn then failed finalization with "promoted
+    WholeBlob boundary has no exact live checkpointer", and the live channel
+    closed.
+  - `PersistentSessionService::live_session_export` now answers with a typed
+    `LiveSessionExport` (`Live`, `NoLive` or `DurableAuthoritative { reason
+    }`).
+  - Staleness applies the reason by caller position: outside the
+    turn-finalization boundary an uncommitted transcript is never stale (the
+    next turn's in-loop entry resyncs an uncommitted terminal); holding the
+    boundary it is resynced as before.
 - Generated TLA+ models applied a set insert or remove to only one branch of a
   field that a conditional update had already changed in the same transition.
   The pending value `IF c THEN a ELSE b` was spliced unparenthesized as the

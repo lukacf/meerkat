@@ -68,8 +68,9 @@ pub use persistent::{
     CommittedBoundaryRecovery, CommittedBoundaryResumePreparationReceipt,
     DEFAULT_WHOLE_BLOB_BODY_CACHE_BYTES, DurableSessionForkWithProvenance,
     LiveContextCommittedBoundary, LiveResyncRelease, LiveSessionActorTurnBoundaryLease,
-    MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PendingLiveResync,
-    PersistentSessionService, PreparedActorSessionSeed, PreparedCommittedBoundaryResume,
+    LiveSessionExport, LiveStalenessPosition, MachineServiceTurnCommitProtocol,
+    MachineSessionArchiveProtocol, PendingLiveResync, PersistentSessionService,
+    PreparedActorSessionSeed, PreparedCommittedBoundaryResume,
     PreparedCommittedBoundaryResumeMaterialization, PreparedCommittedBoundaryResumeUnavailable,
     RealtimeOpenSnapshot, RealtimeRefreshSnapshot,
 };

@@ -655,6 +655,8 @@ them.
   `session_cleanup_policy`, ...), a host-path skill source, a blob image
   reference or a video URI is now refused with `InvalidArguments` before anything is
   created; previously such input was accepted.
+- Child mobs created by an agent no longer run without the host's
+  application tool policy on managed hosts (#1531; see Breaking).
 
 ### Added
 

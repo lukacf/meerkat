@@ -1284,6 +1284,15 @@ them.
   newest seeded turn first, the model answered "I don't know" or delegated).
   The notice claims the seeded turns as known; the late summary arrives with
   its own framing.
+- GPT Live no longer voices text chat typed during a call (Turbo S S105 R3:
+  a typed correction mirrored into the channel made the voice read it aloud
+  and replay stale results, "the number is forty-seven ... and forty-two",
+  over the user's next question). A host-typed turn (`turn/start`, a
+  session's initial prompt) stamps `TranscriptTurnInput::TypedText` on its
+  rows; the live mirror delivers them on the quiet thinking lane as text-chat
+  context ("the user typed it and read the reply there"), never as voiced
+  commentary. Spoken rows and peer-driven replies (such as the executor's
+  answer to a delegated question) are still voiced.
 - `MobHandle::force_cancel_member` and `MobHandle::cancel_all_work` no longer
   fail with `Internal("... Runtime not ready: attached")` on a member whose
   runtime is attached but has no run. Both now cancel the member's current

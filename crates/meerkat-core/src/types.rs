@@ -50,8 +50,9 @@ pub struct TranscriptMessageIdentity {
     pub turn_input: Option<TranscriptTurnInput>,
 }
 
-/// Non-conversational authorship of a turn's input (see
-/// [`TranscriptMessageIdentity::turn_input`]).
+/// Authorship of a turn's input that readers act on (see
+/// [`TranscriptMessageIdentity::turn_input`]). Absent for every other turn
+/// (spoken, peer-driven, or a batch whose inputs disagree).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +61,11 @@ pub enum TranscriptTurnInput {
     /// Runtime-authored injected execution context, such as a voice job's
     /// result merged into its source member after the voice channel closed.
     RuntimeAuthored,
+    /// Text a host submitted as a turn (`turn/start`, a session's initial
+    /// prompt): the text chat. Its user row and its reply are shown in the
+    /// chat, so a live voice channel takes them as context, never as speech
+    /// to voice.
+    TypedText,
 }
 
 /// Session-scoped identity of one committed assistant message occurrence.

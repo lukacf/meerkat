@@ -2296,6 +2296,109 @@ mod live_context_mirror_tests {
             .expect("seal the merge turn")
     }
 
+    /// A host-typed turn (`TranscriptTurnInput::TypedText` on its user row and
+    /// reply): the text chat.
+    fn typed_turn_commit(
+        session_id: &SessionId,
+        typed: &str,
+        reply_text: &str,
+    ) -> meerkat_core::lifecycle::core_executor::BoundSessionCommit {
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        let mut user = meerkat_core::UserMessage::text(typed);
+        user.identity.turn_input = Some(meerkat_core::types::TranscriptTurnInput::TypedText);
+        session.push(meerkat_core::Message::User(user));
+        let mut reply = meerkat_core::types::BlockAssistantMessage::snapshot(vec![
+            meerkat_core::AssistantBlock::Text {
+                text: reply_text.into(),
+                meta: None,
+            },
+        ]);
+        reply.identity.turn_input = Some(meerkat_core::types::TranscriptTurnInput::TypedText);
+        session.push(meerkat_core::Message::BlockAssistant(reply));
+        meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+            .expect("seal the typed turn")
+    }
+
+    /// #1614 (S105 R3): a typed correction committed mid-call reaches the
+    /// channel as quiet text-chat context, both its user row and its reply,
+    /// never as an ordinary (voiced) append: voiced, the model read it aloud
+    /// and replayed stale results with it.
+    #[tokio::test]
+    async fn a_typed_turn_mid_call_is_quiet_text_chat_context() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let host = Arc::new(RecordingMirrorHost::default());
+        machine.set_live_context_mirror_host(host.clone());
+        let key = (session_id.clone(), channel_id.clone());
+        // The conversation has started: the user's first turn finished.
+        let (provider_binding, turn) = first_user_turn(&machine, &session_id, &channel_id).await;
+        machine
+            .observe_live_provider_turn_started(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding.clone(),
+                meerkat_live::LiveSidebandObservationKind::TurnStarted {
+                    turn: turn.clone(),
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ))
+            .await
+            .expect("the user's first turn starts");
+        machine
+            .observe_live_provider_turn_finished(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding,
+                meerkat_live::LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: "pick a number and double it".into(),
+                },
+            ))
+            .await
+            .expect("the user's first turn finishes");
+        let finished = machine
+            .shared
+            .live_context_drain_tasks
+            .lock()
+            .expect("drain tasks")
+            .get(&key)
+            .cloned();
+        if let Some(finished) = finished {
+            finished
+                .wait()
+                .await
+                .expect("the turn-finish drain completes");
+        }
+        machine
+            .enqueue_committed_parent_session_boundary(
+                &session_id,
+                &typed_turn_commit(
+                    &session_id,
+                    "Correction: the numbers are 21 and 42.",
+                    "The numbers are 21 and 42.",
+                ),
+                "store-commit",
+            )
+            .await
+            .expect("enqueue the typed turn");
+        machine
+            .drain_live_context_outbox_for_channel(&session_id, &channel_id)
+            .await
+            .expect("drain the typed turn");
+        let appends = host.appends.lock().expect("appends");
+        assert_eq!(appends.len(), 2, "{appends:?}");
+        assert!(
+            appends[0]
+                .1
+                .contains("Correction: the numbers are 21 and 42.")
+        );
+        assert!(appends[1].1.contains("The numbers are 21 and 42."));
+        assert_eq!(
+            host.append_kinds.lock().expect("kinds").as_slice(),
+            &[
+                crate::live_execution::LiveContextAppendKind::TextChatReplay,
+                crate::live_execution::LiveContextAppendKind::TextChatReplay,
+            ],
+            "quiet text chat, never an Ordinary (voiced) append"
+        );
+    }
+
     /// On a channel seeded at open, runtime work output committed after the
     /// provider session was created is never appended into silence (it was
     /// read aloud over the user's first question) nor mid-utterance: queued

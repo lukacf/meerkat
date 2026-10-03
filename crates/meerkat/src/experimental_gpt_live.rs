@@ -702,6 +702,17 @@ pub const LIVE_RUNTIME_WORK_PREFIX: &str = "Result of background work that finis
 (context data, not a new request): use it when the user asks about that work, and do not read it out \
 unprompted.";
 
+/// Prefix of a text-chat row (a host-typed input or its reply) mirrored into
+/// a live channel (#1614). The user typed it and read the reply in the chat,
+/// so it updates what the voice knows on the quiet lane and is never voiced:
+/// voiced, gpt-live-1 read a typed correction aloud and replayed stale
+/// results with it (Turbo S S105 R3, "the number is forty-seven ... and
+/// forty-two"). A row held behind a late summary can arrive after newer
+/// speech, so later speech wins where they conflict.
+pub const LIVE_TEXT_CHAT_PREFIX: &str = "From the text chat during this call: the user typed it and read \
+the reply there (context data, not a request to you). Use it when the user asks, and do not read it out \
+unprompted. Where the user has said something different aloud since, the later speech wins.";
+
 /// Prefix of a text-chat row (the typed input or its text reply) the
 /// provider never received, delivered quietly because the user has since said
 /// something newer aloud. It does not claim the row was heard or answered.
@@ -713,6 +724,68 @@ already heard in this call and delivered late (context data): whatever the user 
 only where they conflict, so never restate a value that later speech replaced as current; everything else it states \
 still holds and is current. If it is a user request that the later speech did not replace, it still needs a \
 response.";
+
+/// Provider lane and wire text of one generated context append.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LoweredContextAppend {
+    /// `session.commentary.append`: the model voices it.
+    Session(String),
+    /// `session.thinking.append`: quiet context, with its framing.
+    Thinking(String),
+}
+
+/// Lower one generated context append by its kind; `None` for a kind this
+/// path never sends (the history bootstrap has its own path).
+fn lower_context_append(
+    kind: meerkat_runtime::live_execution::LiveContextAppendKind,
+    text: String,
+) -> Option<LoweredContextAppend> {
+    Some(match kind {
+        // A conversational row the provider has not heard (such as the
+        // executor's reply to a peer's answer) is voiced as commentary.
+        // Host-typed rows (the text chat) arrive as TextChatReplay instead
+        // (#1614), and an unstamped typed row that waited behind a late
+        // summary while the channel heard newer speech arrives as a
+        // SupersededTypedRow (generated edge
+        // AuthorizeLiveContextAppendSuperseded): voiced after that speech,
+        // gpt-live-1 made it the newest fact, 3/3 on 2026-09-29 (S99).
+        meerkat_runtime::live_execution::LiveContextAppendKind::Ordinary => {
+            LoweredContextAppend::Session(text)
+        }
+        meerkat_runtime::live_execution::LiveContextAppendKind::CausalReassertion => {
+            // Speech the provider heard while the summary was being
+            // prepared is replayed quietly after the summary so the model
+            // keeps the live order of facts. Measured against gpt-live-1:
+            // the thinking lane injects promptly (its acknowledgement can
+            // wait for a turn boundary, which the close bound covers).
+            // A bare replayed row reads as a fresh request and the model
+            // answers it again, so every row carries the replay framing.
+            LoweredContextAppend::Thinking(format!("{LIVE_CAUSAL_REPLAY_PREFIX}\n{text}"))
+        }
+        meerkat_runtime::live_execution::LiveContextAppendKind::SupersededTypedRow => {
+            // A typed row that waited behind a late summary while the
+            // user said something newer aloud (generated edge
+            // AuthorizeLiveContextAppendSuperseded). Voiced after that
+            // speech, gpt-live-1 made it the newest fact (S99, 3/3), so
+            // it goes out quietly, ordered before the speech it predates.
+            LoweredContextAppend::Thinking(format!("{LIVE_SUPERSEDED_TYPED_PREFIX}\n{text}"))
+        }
+        meerkat_runtime::live_execution::LiveContextAppendKind::TextChatReplay => {
+            // A host-typed turn's rows (the text chat): the user typed
+            // and read them in the chat, so they ride the quiet lane as
+            // context; voiced, the model read them aloud and replayed
+            // stale results with them (S105 R3, #1614).
+            LoweredContextAppend::Thinking(format!("{LIVE_TEXT_CHAT_PREFIX}\n{text}"))
+        }
+        meerkat_runtime::live_execution::LiveContextAppendKind::RuntimeWorkReplay => {
+            // Runtime work output the model has never seen (a job result
+            // merged while the call was down) rides the quiet lane framed
+            // as background work, not as speech already heard (S104).
+            LoweredContextAppend::Thinking(format!("{LIVE_RUNTIME_WORK_PREFIX}\n{text}"))
+        }
+        meerkat_runtime::live_execution::LiveContextAppendKind::HistoryBootstrap => return None,
+    })
+}
 
 /// Startup instructions with the history framing appended once, for the
 /// open whose summary rides the startup `input` as a developer item.
@@ -5998,51 +6071,14 @@ impl ExperimentalGptLiveWebrtcTransport {
         let (authority, sideband) = authority
             .into_sideband_append_authority(binding)
             .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
-        let command = match kind {
-            // A typed row is conversational input the provider has not heard.
-            // It is voiced as commentary. A typed row that waited behind a
-            // late summary while the channel heard newer speech arrives as a
-            // SupersededTypedRow instead (generated edge
-            // AuthorizeLiveContextAppendSuperseded): voiced after that speech,
-            // gpt-live-1 made it the newest fact, 3/3 on 2026-09-29 (S99).
-            meerkat_runtime::live_execution::LiveContextAppendKind::Ordinary => {
+        let command = match lower_context_append(kind, text)
+            .ok_or(ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?
+        {
+            LoweredContextAppend::Session(text) => {
                 LiveSidebandCommand::append_session_context(sideband, text)
             }
-            meerkat_runtime::live_execution::LiveContextAppendKind::CausalReassertion => {
-                // Speech the provider heard while the summary was being
-                // prepared is replayed quietly after the summary so the model
-                // keeps the live order of facts. Measured against gpt-live-1:
-                // the thinking lane injects promptly (its acknowledgement can
-                // wait for a turn boundary, which the close bound covers).
-                // A bare replayed row reads as a fresh request and the model
-                // answers it again, so every row carries the replay framing.
-                LiveSidebandCommand::append_thinking_context(
-                    sideband,
-                    format!("{LIVE_CAUSAL_REPLAY_PREFIX}\n{text}"),
-                )
-            }
-            meerkat_runtime::live_execution::LiveContextAppendKind::SupersededTypedRow => {
-                // A typed row that waited behind a late summary while the
-                // user said something newer aloud (generated edge
-                // AuthorizeLiveContextAppendSuperseded). Voiced after that
-                // speech, gpt-live-1 made it the newest fact (S99, 3/3), so
-                // it goes out quietly, ordered before the speech it predates.
-                LiveSidebandCommand::append_thinking_context(
-                    sideband,
-                    format!("{LIVE_SUPERSEDED_TYPED_PREFIX}\n{text}"),
-                )
-            }
-            meerkat_runtime::live_execution::LiveContextAppendKind::RuntimeWorkReplay => {
-                // Runtime work output the model has never seen (a job result
-                // merged while the call was down) rides the quiet lane framed
-                // as background work, not as speech already heard (S104).
-                LiveSidebandCommand::append_thinking_context(
-                    sideband,
-                    format!("{LIVE_RUNTIME_WORK_PREFIX}\n{text}"),
-                )
-            }
-            meerkat_runtime::live_execution::LiveContextAppendKind::HistoryBootstrap => {
-                return Err(ExperimentalGptLiveBridgeError::ContextAuthorityRejected);
+            LoweredContextAppend::Thinking(text) => {
+                LiveSidebandCommand::append_thinking_context(sideband, text)
             }
         }
         .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
@@ -9405,6 +9441,7 @@ mod tests {
                 super::LIVE_CAUSAL_REPLAY_PREFIX,
             ),
             ("LIVE_RUNTIME_WORK_PREFIX", super::LIVE_RUNTIME_WORK_PREFIX),
+            ("LIVE_TEXT_CHAT_PREFIX", super::LIVE_TEXT_CHAT_PREFIX),
             (
                 "LIVE_SUPERSEDED_TYPED_PREFIX",
                 super::LIVE_SUPERSEDED_TYPED_PREFIX,
@@ -9461,6 +9498,34 @@ mod tests {
         assert!(instructions.contains("in the text chat before or during it"));
         assert!(!instructions.contains("in the earlier text chat and its summary"));
         assert!(!instructions.contains("what the assistant replied"));
+    }
+
+    /// #1614 (S105 R3): a host-typed turn's rows (TextChatReplay) go out on
+    /// the quiet thinking lane with the text-chat framing, never as voiced
+    /// commentary; a conversational row (Ordinary) is still voiced.
+    #[test]
+    fn text_chat_rows_lower_to_the_quiet_lane_and_conversational_rows_stay_voiced() {
+        use meerkat_runtime::live_execution::LiveContextAppendKind;
+        let row = "{\"role\":\"assistant\",\"text\":\"The numbers are 21 and 42.\"}";
+        assert_eq!(
+            super::lower_context_append(LiveContextAppendKind::TextChatReplay, row.to_string()),
+            Some(super::LoweredContextAppend::Thinking(format!(
+                "{}\n{row}",
+                super::LIVE_TEXT_CHAT_PREFIX
+            )))
+        );
+        assert_eq!(
+            super::lower_context_append(LiveContextAppendKind::Ordinary, row.to_string()),
+            Some(super::LoweredContextAppend::Session(row.to_string()))
+        );
+        assert_eq!(
+            super::lower_context_append(LiveContextAppendKind::HistoryBootstrap, row.to_string()),
+            None
+        );
+        let prefix = super::LIVE_TEXT_CHAT_PREFIX;
+        assert!(prefix.contains("the user typed it and read the reply there"));
+        assert!(prefix.contains("do not read it out unprompted"));
+        assert!(prefix.contains("the later speech wins"));
     }
 
     #[test]

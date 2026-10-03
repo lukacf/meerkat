@@ -4034,6 +4034,10 @@ pub enum LiveContextAppendKind {
     /// while the call was down): delivered quietly as background context,
     /// never described as heard or answered.
     RuntimeWorkReplay,
+    /// A row of a host-typed turn (the text chat: the typed input or its
+    /// reply), which the user typed and read in the chat: delivered quietly
+    /// as text-chat context, never voiced (#1614).
+    TextChatReplay,
     HistoryBootstrap,
 }
 
@@ -4642,7 +4646,11 @@ impl LiveContextAppendAuthority {
                     );
                     LiveContextAppendKind::SupersededTypedRow
                 } else if queued.is_runtime_work_replay() {
-                    LiveContextAppendKind::RuntimeWorkReplay
+                    if queued.row().is_text_chat() {
+                        LiveContextAppendKind::TextChatReplay
+                    } else {
+                        LiveContextAppendKind::RuntimeWorkReplay
+                    }
                 } else if queued.is_causal_reassertion() {
                     LiveContextAppendKind::CausalReassertion
                 } else {

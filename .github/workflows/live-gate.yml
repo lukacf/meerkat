@@ -39,7 +39,11 @@ jobs:
     name: Live gate
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # BUILDBUDDY_API_KEY is job-level: the setup-buildbuddy-ci composite
+    # action checks it from the job environment (a step's env does not reach
+    # another step), as in release-turbo-s.yml.
     env:
+      BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
       MEERKAT_CLEAN_E2E_SCENARIO_TARGETS: "1"
     steps:
       - name: Checkout pull request head
@@ -78,7 +82,6 @@ jobs:
         if: steps.classify.outputs.live == 'true'
         shell: bash
         env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           for key in BUILDBUDDY_API_KEY OPENAI_API_KEY; do
@@ -98,7 +101,6 @@ jobs:
         if: steps.classify.outputs.live == 'true'
         shell: bash
         env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           provider_overrides="OPENAI_API_KEY=${OPENAI_API_KEY}"

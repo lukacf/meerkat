@@ -73,4 +73,12 @@ section 104 "GPT_LIVE_VERDICT scenario=S104 verdict=provider_degraded exchange=e
 { section 104 "GPT_LIVE_VERDICT scenario=S104 verdict=provider_degraded exchange=e2"; section 101 "S101 deterministic checks failed"; } > "$work/red.log"
 [[ "$(run_verdict "$work/red.log" 3)" == 1 ]] || fail "a real failure next to a void was not RED"
 
+# The setup-buildbuddy-ci composite action reads BUILDBUDDY_API_KEY from the
+# job environment; a step-level env never reaches it (#1544's first runs
+# failed at "Require BuildBuddy API key" with the secret configured).
+workflow="${ROOT}/.github/workflows/live-gate.yml"
+job_env="$(awk '/^    env:$/{f=1; next} f && /^    [a-z]/{exit} f' "$workflow")"
+grep -q '^      BUILDBUDDY_API_KEY: \${{ secrets.BUILDBUDDY_API_KEY }}$' <<<"$job_env" \
+  || fail "live-gate.yml must set BUILDBUDDY_API_KEY in the job env for setup-buildbuddy-ci"
+
 echo "live gate selftest: ok"

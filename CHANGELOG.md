@@ -1216,6 +1216,13 @@ them.
 
 ### Fixed
 
+- The LLM reconfigure host's turn-finalization boundary now keeps its session
+  service alive. The host holds the service weakly and upgraded it only to
+  acquire the boundary, so a caller that dropped its last service handle while
+  holding the boundary left the later hydrate, live and persist steps of the
+  same transaction unable to reach the service (`Destroyed`). The boundary now
+  retains the service and releases before it. No current caller hit this; they
+  keep the service alive for the whole transaction.
 - `MobHandle::force_cancel_member` and `MobHandle::cancel_all_work` no longer
   fail with `Internal("... Runtime not ready: attached")` on a member whose
   runtime is attached but has no run. Both now cancel the member's current

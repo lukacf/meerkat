@@ -1419,9 +1419,10 @@ class RealtimeMessageOrigin(TypedDict, total=False):
     session_id: Required[SessionId]
 
 
-# Non-conversational authorship of a turn's input (see
-# [`TranscriptMessageIdentity::turn_input`]).
-TranscriptTurnInput = Literal['runtime_authored']
+# Authorship of a turn's input that readers act on (see
+# [`TranscriptMessageIdentity::turn_input`]). Absent for every other turn
+# (spoken, peer-driven, or a batch whose inputs disagree).
+TranscriptTurnInput = Literal['runtime_authored', 'typed_text']
 
 
 class TranscriptMessageIdentity(TypedDict, total=False):

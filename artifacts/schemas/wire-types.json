@@ -6525,11 +6525,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]
@@ -29450,11 +29455,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]
@@ -44098,11 +44108,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]
@@ -62825,11 +62840,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]
@@ -81221,11 +81241,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]
@@ -91286,11 +91311,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]
@@ -148966,11 +148996,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]

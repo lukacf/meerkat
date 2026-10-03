@@ -1078,10 +1078,11 @@ export type ToolCallArguments = Record<string, unknown>;
 export type ObjectiveId = string;
 
 /**
- * Non-conversational authorship of a turn's input (see
- * [`TranscriptMessageIdentity::turn_input`]).
+ * Authorship of a turn's input that readers act on (see
+ * [`TranscriptMessageIdentity::turn_input`]). Absent for every other turn
+ * (spoken, peer-driven, or a batch whose inputs disagree).
  */
-export type TranscriptTurnInput = "runtime_authored";
+export type TranscriptTurnInput = "runtime_authored" | "typed_text";
 
 /**
  * Stable runtime identity for a transcript message.

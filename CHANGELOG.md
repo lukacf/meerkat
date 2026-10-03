@@ -2021,6 +2021,10 @@ them.
     output transcript delta must follow that row. The old baseline was taken
     after the harness noticed the worker retire, so a prompt readout could
     finish before it and fail a correct run.
+  - The browser peer attaches overlap facts to every fixture end, so a
+    barge-in that lands just after the assistant went quiet still gets its
+    talk-over-start check; S106 counts the reopen's append lanes from the old
+    channel's close; S97 keeps its scratch workspace alive for the whole run.
   - A failed scenario (an error or a panic) closes its live channel through
     the exact close before teardown, so the provider's `session.closed`
     drains the sideband and the provider stream records every frame sent

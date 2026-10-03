@@ -1648,6 +1648,10 @@ async fn run_s97_client_context_vertical(
         channel_id,
         mob_id,
         server_task,
+        // The scratch workspace lives as long as the scenario: dropped here,
+        // the executor's working directory vanished and every S97 result was
+        // "the working directory does not exist" (verdict 5e6cdc16).
+        _temp,
         ..
     } = open_public_live_with(PublicLiveOpen {
         temp_prefix: "gpt-live-public-e2e-",
@@ -8817,8 +8821,6 @@ async fn s106_reopen_cycle(
     user_text: &mut Vec<String>,
     deterministic_failures: &mut Vec<String>,
 ) -> Result<(S106Cycle, u32, Option<SeedCase>), Box<dyn std::error::Error>> {
-    let before = evidence.owner_appends()?;
-    let texts_before = evidence.instructions_append_attempt_texts()?.len();
     evidence.stage(EvidenceStage::HaulReopen)?;
     // Let every executor turn and its result delivery settle before the
     // close: a result still in flight at close hits the runtime's
@@ -8842,6 +8844,12 @@ async fn s106_reopen_cycle(
     );
     live.record_uplink("S106").await?;
     let close = close_or_record(live, evidence, channel, "S106", deterministic_failures).await?;
+    // The reopen's append accounting starts once the old channel is closed:
+    // anything the old channel still sent before its close (a result cue
+    // deferred to its response end, #1615) is not the reopen's (verdict
+    // 5e6cdc16 S106, 10/10: "instructions 3 -> 4" was channel 2's cue).
+    let before = evidence.owner_appends()?;
+    let texts_before = evidence.instructions_append_attempt_texts()?.len();
     if let Some(prompt) = typed_prompt {
         user_text.push(normalize_words(prompt));
         let typed = live

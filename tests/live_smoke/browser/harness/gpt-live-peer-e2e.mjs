@@ -344,7 +344,10 @@ async function prepare(command) {
       const ended = new Promise((resolve) => {
         source.onended = () => {
           state.playing.delete(id);
-          const facts = play.overlap_ms > 0 ? state.overlapFacts(id, play.started_ms) : null;
+          // Facts on every fixture end, overlapped or not: a barge-in that
+          // lands just after the assistant went quiet still needs its
+          // talk-over-start check (verdict 5e6cdc16 S103 run 4).
+          const facts = state.overlapFacts(id, play.started_ms);
           state.pushTimeline('fixture_end', { id, name: fixtureName, overlap_ms: play.overlap_ms, overlap_bound_ms: play.overlap_bound_ms, facts });
           if (play.overlap_ms > play.overlap_bound_ms) {
             state.pushFault({ overlap: { ms: play.overlap_ms, fixture: fixtureName, bound_ms: play.overlap_bound_ms, facts } });

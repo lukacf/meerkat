@@ -8107,7 +8107,6 @@ mod tests {
         Ok(())
     }
 
-
     /// Results on one channel are released one at a time. Result B, refused
     /// while result A waits for its provider acknowledgement, is released by
     /// the commit of A's acknowledgement. The clock is paused, and no

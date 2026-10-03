@@ -488,8 +488,8 @@ for (const path of [
   );
   assert.deepEqual(
     names(planFor(["crates/meerkat-machine-schema/src/lib.rs"])),
-    ["meerkat-runtime", "meerkat-machine-codegen"],
-    "a machine schema or DSL change runs both suites",
+    ["meerkat-runtime", "meerkat-machine-codegen", "meerkat-machine-kernels"],
+    "a machine schema or DSL change runs the runtime, codegen parity and kernel oracle suites",
   );
   assert.deepEqual(
     names(planFor(["crates/meerkat-mob/src/lib.rs"])),
@@ -501,7 +501,7 @@ for (const path of [
   assert.deepEqual(names(planFor(["docs/index.mdx"])), []);
   assert.deepEqual(
     names(planFor(["Cargo.toml"])),
-    ["meerkat-runtime", "meerkat-machine-codegen", "xtask", "meerkat-integration-tests"],
+    ["meerkat-runtime", "meerkat-machine-codegen", "xtask", "meerkat-machine-kernels", "meerkat-integration-tests"],
     "workspace mode runs every suite",
   );
   // The gpt-live replays: a public Live path package or a fixture change

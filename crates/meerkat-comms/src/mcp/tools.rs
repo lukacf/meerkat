@@ -2463,6 +2463,38 @@ mod tests {
         );
     }
 
+    /// An unwired member is not a trusted peer: `send_request` to it fails at
+    /// once with the typed, model-visible refusal, never a silent wait. A
+    /// voice executor told to ask an unwired member reports exactly this
+    /// (Turbo S S102 round 1).
+    #[tokio::test]
+    async fn test_send_request_fails_typed_when_recipient_is_not_trusted() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, _trusted_peer) = make_trusted_runtime_less_context(&peer_keypair).await;
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+        let unwired_peer = PeerId::new();
+
+        let error = handle_tools_call(
+            &ctx,
+            "send_request",
+            &json!({
+                "peer_id": unwired_peer,
+                "intent": "checksum_token",
+                "params": {"subject": "what time is it"},
+                "handling_mode": "queue"
+            }),
+        )
+        .await
+        .expect_err("send_request to an untrusted peer must fail");
+
+        assert!(
+            error.starts_with("peer_not_found_or_not_trusted:"),
+            "expected the typed trust refusal, got: {error}"
+        );
+        assert_eq!(runtime.sent_len(), 0, "nothing may be dispatched");
+    }
+
     #[tokio::test]
     async fn test_send_message_invalid_handling_mode_fails_at_serde_boundary() {
         let keypair = Keypair::generate();

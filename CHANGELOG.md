@@ -37,6 +37,13 @@ them.
 
 ### Breaking
 
+- `meerkat::session_runtime::llm_reconfigure::SessionRuntimeLlmReconfigureHost::service`
+  now takes `std::sync::Weak<dyn SessionRuntimeLlmReconfigureService>` instead
+  of `Arc<dyn SessionRuntimeLlmReconfigureService>`. Explicit host literals must
+  supply a weak reference to the real service owner. The installed host no
+  longer retains that owner in a cycle; each call upgrades it, and the returned
+  finalization guard retains the service through the transaction. A destroyed
+  service returns the existing typed `meerkat_runtime::RuntimeDriverError::Destroyed`.
 - Exhaustive matches must handle `meerkat_core::ToolError::HookDenied` and
   `meerkat_core::ToolDispatchTerminalErrorKind::HookDenied`. An explicit pre-tool
   hook decision now refuses only the attempted call, returning `hook_denied`
@@ -311,9 +318,12 @@ them.
   The supported memory-backed composition uses the actual stock
   `PersistenceBundle`, `PersistentSessionService` and persistent executor for
   process-lifetime input, session and audit commits. Persistent controller/grant
-  administration remains unavailable. SQLite admission, restart recovery,
-  durable grant recovery, consent, OS confinement and full execution-mode
-  coverage remain separate work. See `docs/rust/native-authorization.mdx` for
+  administration remains unavailable. Stock SQLite WholeBlob admission,
+  physical execution custody and same-process close/reopen with fresh work
+  passed local controls using current host authority. Required native shell
+  confinement covers supported macOS requirements. Process restart, durable
+  grant recovery, consent, command-hook confinement and full execution-mode
+  and platform coverage remain separate work. See `docs/rust/native-authorization.mdx` for
   the integration boundary; performance acceptance remains unmeasured.
 - The additive `meerkat_rpc::governed_jsonl` entry provides a fixed-host,
   single-connection profile with native input admission and a fixed callback
@@ -411,6 +421,26 @@ them.
 
 ### Fixed
 
+- An asset recovery dispatched from main (`release-workflow-dispatch --mode
+  assets`) can publish its release archives. It runs main's workflow against
+  the tag, so its build attestations name main's commit, and the exact-tag
+  provenance check refused every archive (v0.8.50 run 36988090176). Each build
+  job now checks that its checkout is the tag commit and stamps every archive
+  with it (`<archive>.source-commit`, attested with the archive); for those
+  recovery runs the publisher verifies each archive and stamp against
+  release.yml at the run's commit on `refs/heads/main` and requires the stamp
+  to name the tag commit. Tag pushes and dispatches on the tag ref keep the
+  exact-tag check.
+
+- The GitHub-hosted Linux release binary jobs work again. The release
+  container marked the workspace safe for Git only after setup-rust-ci had
+  already asked Git for the repository root ("detected dubious ownership",
+  every run since 2026-08-28), and on the 16 GB runners the release build of
+  `meerkat-machine-schema` (8.7 GB peak) overlapping `meerkat-mob` (9.0 GB)
+  was OOM-killed on aarch64. The workspace is now trusted right after
+  Checkout, and the Linux build runs two jobs with the schema crate at
+  `opt-level = 1` (6.3 GB) through `--config`, so asset recovery dispatches
+  can build older tags too.
 - The machine TLA generator parenthesizes a field's pending value when a
   later expression in the same update block reads it. A conditionally
   updated field was spliced bare as `IF c THEN a ELSE b`, so TLA+ precedence

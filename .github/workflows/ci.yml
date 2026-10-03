@@ -40,8 +40,9 @@ name: CI
 #   gate            - "CI gate": fail-closed aggregate; on pull requests a
 #                     1500-second lane execution budget (classification plus
 #                     each lane's own run time, runner queue excluded) and a
-#                     2700-second push-to-terminal runaway ceiling; runner
-#                     queue wait is reported as a warning (the critical path,
+#                     2700-second push-to-terminal runaway ceiling, also
+#                     runner queue excluded; runner queue wait is reported as
+#                     a warning (the critical path,
 #                     slowest lane and queue are reported on every run that
 #                     was not cancelled, failed runs included); schema-4
 #                     exact-tree attestation on main
@@ -73,12 +74,19 @@ name: CI
 # and in the release workflow; PR CI never starts the remote Bazel fleet.
 
 on:
-  # Pushes run only on main (the attestation boundary). Every other branch
-  # gets CI through its pull request, so one head runs once: a push run and
-  # a pull_request run of the same head would each publish a "CI gate" check.
+  # Pushes run on main (the attestation boundary) and on release
+  # integration branches. Pull requests into a release branch unit-test only
+  # the crates they change, so a merge there must run the push-only lanes
+  # (main-unit over the whole workspace, wasm-check, sdk-host) or
+  # reverse-dependency suites first run at the final merge to main: #1541
+  # broke two facade tests that no release-branch run executed. A merge
+  # commit is never a PR head, so no head runs twice; every other branch
+  # still gets CI only through its pull request. Attestation stays
+  # main-only (its steps check refs/heads/main).
   push:
     branches:
       - main
+      - 'release/**'
   pull_request:
     types:
       - opened
@@ -176,7 +184,11 @@ env:
   # account runs at most 40 hosted jobs at once, shared by every pull
   # request, main push and nightly, and a busy hour fills that cap.
   # CI_MAX_TERMINAL_SECONDS is the runaway backstop on the latest lane
-  # terminal, queue included, so a CI that is truly stuck still fails.
+  # terminal minus the runner queue on that lane's path (its own queue plus
+  # the classification's, in the same attempt): a CI whose jobs are stuck
+  # still fails, but one that only waited for runners does not. Queue is
+  # reported, never budgeted (#1526 run 37062437146 failed this ceiling at
+  # 3167 s with every lane green and 2817 s of runner queue).
   # Queue wait on the critical path at or above CI_QUEUE_WARN_SECONDS is a
   # warning with a typed verdict (queue_delayed), never a failure.
   #
@@ -1753,7 +1765,8 @@ jobs:
         # classification's (every lane but classification and format +
         # governance waits for the plan). The budgets:
         #   - execution path <= CI_MAX_EXEC_SECONDS: fails (exec_over_budget)
-        #   - terminal <= CI_MAX_TERMINAL_SECONDS: fails (runaway)
+        #   - terminal minus path queue <= CI_MAX_TERMINAL_SECONDS: fails
+        #     (runaway); runner queue never counts toward a failure
         #   - critical-path queue >= CI_QUEUE_WARN_SECONDS: warns
         #     (queue_delayed), never fails
         # Run times belong to the job, so re-running only this gate cannot
@@ -1880,16 +1893,22 @@ jobs:
               # carried-over classification's runner.
               same_attempt = upstream is not None and upstream["attempt"] == lane["attempt"]
               lane["path_queued"] = lane["queued"] + (upstream["queued"] if same_attempt else 0)
+              # The runaway ceiling is measured without runner queue: the
+              # 40-job account cap is shared, so queue is reported, never
+              # budgeted.
+              lane["exec_terminal"] = max(0, lane["terminal"] - lane["path_queued"])
 
           exec_critical = max(lanes, key=lambda lane: lane["exec_path"])
           critical = max(lanes, key=lambda lane: lane["terminal"])
+          runaway_critical = max(lanes, key=lambda lane: lane["exec_terminal"])
           slowest = max(lanes, key=lambda lane: lane["duration"])
           exec_path = exec_critical["exec_path"]
           terminal = critical["terminal"]
           queued = critical["path_queued"]
+          exec_terminal = runaway_critical["exec_terminal"]
 
           # The verdict is the measurement; only pull requests fail on it.
-          if terminal > max_terminal:
+          if exec_terminal > max_terminal:
               verdict_type = "runaway"
           elif exec_path > max_exec:
               verdict_type = "exec_over_budget"
@@ -1900,16 +1919,18 @@ jobs:
 
           rows = sorted(lanes, key=lambda lane: lane["terminal"], reverse=True)
           table = [
-              "| lane | attempt | queued s | ran s | exec path s | terminal s | result |",
-              "| --- | --- | --- | --- | --- | --- | --- |",
+              "| lane | attempt | queued s | ran s | exec path s | terminal s | terminal excl. queue s | result |",
+              "| --- | --- | --- | --- | --- | --- | --- | --- |",
           ] + [
-              f"| {r['name']} | {r['attempt']} | {r['queued']} | {r['duration']} | {r['exec_path']} | {r['terminal']} | {r['conclusion']} |"
+              f"| {r['name']} | {r['attempt']} | {r['queued']} | {r['duration']} | {r['exec_path']} | {r['terminal']} | {r['exec_terminal']} | {r['conclusion']} |"
               for r in rows[:12]
           ]
           verdict = (
               f"Lane execution: {exec_path}/{max_exec} s (execution critical path: {exec_critical['name']}); "
-              f"push-to-terminal: {terminal}/{max_terminal} s (critical path: {critical['name']}, "
+              f"push-to-terminal: {terminal} s (critical path: {critical['name']}, "
               f"attempt {critical['attempt']}, {queued} s of it runner queue); "
+              f"push-to-terminal excluding runner queue: {exec_terminal}/{max_terminal} s "
+              f"(critical path: {runaway_critical['name']}); "
               f"slowest lane: {slowest['name']}, ran {slowest['duration']} s; verdict: {verdict_type}"
           )
           print(verdict)
@@ -1924,6 +1945,7 @@ jobs:
                   handle.write(
                       f"exec_path_seconds={exec_path}\n"
                       f"terminal_seconds={terminal}\n"
+                      f"terminal_excluding_queue_seconds={exec_terminal}\n"
                       f"queue_seconds={queued}\n"
                       f"budget_verdict={verdict_type}\n"
                   )
@@ -1941,10 +1963,11 @@ jobs:
                   f"{slowest['name']} at {slowest['duration']} s)."
               )
               failed = True
-          if enforce and terminal > max_terminal:
+          if enforce and exec_terminal > max_terminal:
               print(
                   f"::error::CI exceeded the {max_terminal}-second push-to-terminal runaway ceiling "
-                  f"({terminal} s, {queued} s of it runner queue; critical path {critical['name']})."
+                  f"excluding runner queue ({exec_terminal} s; critical path {runaway_critical['name']}, "
+                  f"which also waited {runaway_critical['path_queued']} s for runners, not counted)."
               )
               failed = True
           if failed:

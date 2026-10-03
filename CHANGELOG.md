@@ -1188,6 +1188,15 @@ them.
   replacements were present), and on the mob compositions that embed them. The
   set updates now delimit the pending value, as field reads already did
   (#1513).
+- Closing a live channel never waits on a delegation result that has not been
+  dispatched. A result waiting to be released (on the bootstrap barrier or the
+  delegation lane) used to be awaited by the close, while that wait could end
+  only once the close committed, so the close stalled until its bounded local
+  retirement (Turbo S S99: 5 s and more). The release now ends as closed
+  before dispatch and the result merges into the source member, as an
+  interrupted-by-close result does. Every outcome of a release attempt is
+  typed and handled, so a result can no longer end a release silently.
+
 - GPT Live no longer primes the voice model to delegate questions about the
   conversation itself (Turbo S S99: after the summary release, a run
   delegated "now tell me my historical vault phrase" instead of answering it

@@ -138,6 +138,30 @@ export const INTEGRATION_SUITES = [
     triggers: [...MACHINE_AUTHORITY_PACKAGES, "meerkat-runtime", "meerkat-mob", "meerkat-machine-codegen"],
   },
   { package: "xtask", features: ["machine-authority"], triggers: ["xtask"], paths: [".github/workflows/"] },
+  // Deterministic replays of recorded Turbo S gpt-live-1 provider streams
+  // (tests/integration/fixtures/gpt_live_replay): the S104/S106 voice
+  // contracts without a provider or a key. `tests` names the one target, so
+  // the lane does not build every integration binary. Triggered by the
+  // packages on the public Live path, its fixtures and its harness.
+  {
+    package: "meerkat-integration-tests",
+    name: "gpt-live-replay",
+    features: ["gpt-live-replay"],
+    tests: ["gpt_live_replay"],
+    triggers: [
+      "meerkat",
+      "meerkat-core",
+      "meerkat-openai",
+      "meerkat-live",
+      "meerkat-runtime",
+      "meerkat-session",
+      "meerkat-mob",
+      "meerkat-mob-mcp",
+      "meerkat-rpc",
+      "meerkat-integration-tests",
+    ],
+    paths: ["tests/integration/fixtures/gpt_live_replay/"],
+  },
 ];
 
 // Packages whose own lib-test binary dominates their push-to-main lane. On
@@ -777,6 +801,12 @@ function plan(args) {
         throw new Error(`integration suite ${suite.package} names unknown feature ${feature}`);
       }
     }
+    for (const test of suite.tests ?? []) {
+      const known = byName
+        .get(suite.package)
+        .targets.some((target) => target.kind.includes("test") && target.name === test);
+      if (!known) throw new Error(`integration suite ${suite.package} names unknown test target ${test}`);
+    }
   }
   const changedPaths = changed ?? [];
   result.integration_suites = INTEGRATION_SUITES.filter(
@@ -784,9 +814,10 @@ function plan(args) {
       (result.rust_changed && suite.triggers.some((name) => result.packages.includes(name))) ||
       (suite.paths ?? []).some((prefix) => changedPaths.some((path) => path.startsWith(prefix))),
   ).map((suite) => ({
-    name: shortName(suite.package),
+    name: suite.name ?? shortName(suite.package),
     packages: [suite.package],
     package_flags: `-p ${suite.package}${suite.features?.length ? ` --features ${suite.features.join(",")}` : ""}`,
+    ...(suite.tests?.length ? { test_flags: suite.tests.map((test) => `--test ${test}`).join(" ") } : {}),
   }));
 
   result.closure_flags = result.closure.map((name) => `-p ${name}`).join(" ");
@@ -869,6 +900,7 @@ function matrixOf(shards, { placeholder = true } = {}) {
   const include = shards.map((shard) => ({
     name: shard.name,
     packages: shard.package_flags,
+    ...(shard.test_flags ? { tests: shard.test_flags } : {}),
     ...(shard.rust_min_stack ? { rust_min_stack: String(shard.rust_min_stack) } : {}),
   }));
   if (include.length === 0 && placeholder) include.push({ name: "none", packages: "" });

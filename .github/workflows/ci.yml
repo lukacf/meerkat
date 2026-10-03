@@ -737,13 +737,20 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
-      - name: Integration tests (tests/*.rs binaries of the suite package)
+      - name: Integration tests (tests/*.rs binaries of the suite package, or its named targets)
         shell: bash
         env:
           PACKAGES: ${{ matrix.packages }}
+          # A suite may name its test targets; otherwise every tests/*.rs one.
+          TESTS: ${{ matrix.tests }}
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in an integration lane"; exit 1; }
+          if [[ -n "${TESTS}" ]]; then
+            read -r -a test_flags <<<"${TESTS}"
+          else
+            test_flags=(--test '*')
+          fi
           # --no-tests=fail: a suite whose package lost its tests/ binaries
           # must be removed from INTEGRATION_SUITES, not pass silently.
           # Tests of crates that dev-depend on mcp-test-server spawn this exact
@@ -757,7 +764,7 @@ jobs:
           # shellcheck disable=SC2086
           # Status level slow: the suites hold known heavy tests with exact-case
           # timeout overrides in .config/nextest.toml; their durations stay visible.
-          ./scripts/repo-cargo nextest run ${PACKAGES} --test '*' --profile ci-pr \
+          ./scripts/repo-cargo nextest run ${PACKAGES} "${test_flags[@]}" --profile ci-pr \
             --no-tests=fail --no-fail-fast --status-level slow --final-status-level slow
 
       - name: Upload sccache server log

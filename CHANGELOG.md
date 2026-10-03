@@ -37,6 +37,10 @@ them.
 
 ### Breaking
 
+- `meerkat_runtime::live_execution::LiveContextAppendKind` gains
+  `TextChatReplay`, the quiet text-chat append of a host-typed turn's rows
+  (#1614); `HistoryBootstrap`'s discriminant shifts. Exhaustive matches must
+  handle the new variant. See Fixed.
 - `meerkat::session_runtime::runtime_state::RuntimeStateOps::live_session_is_stale`
   takes a `meerkat_session::LiveStalenessPosition` (`TurnBoundaryHeld` or
   `OutsideTurnBoundary`): whether the caller holds the session's

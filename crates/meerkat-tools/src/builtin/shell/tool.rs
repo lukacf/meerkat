@@ -410,6 +410,7 @@ impl ShellTool {
             .map_err(BuiltinToolError::invalid_args)?;
 
         info!(
+            tool_call_id = tool_call_id.unwrap_or_default(),
             background = input.background,
             timeout_secs,
             has_working_dir = input.working_dir.is_some(),
@@ -478,6 +479,17 @@ impl ShellTool {
                 warn!(%error, "Command execution failed");
                 BuiltinToolError::execution_failed(error.to_string())
             })?;
+        // Completion metadata only (never the command or its output): with
+        // the start line it attributes a slow tool round to its call.
+        tracing::debug!(
+            tool_call_id = tool_call_id.unwrap_or_default(),
+            exit_code = ?output.exit_code,
+            timed_out = output.timed_out,
+            duration_ms = (output.duration_secs * 1000.0) as u64,
+            stdout_bytes = output.stdout.len(),
+            stderr_bytes = output.stderr.len(),
+            "Shell command finished"
+        );
         let text = output.render_for_model();
         let value = serde_json::to_value(output)
             .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;

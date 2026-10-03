@@ -741,6 +741,16 @@ them.
     grows by about 640 KB per 1,000 compactions. Missing-receipt repair
     writes those commit values, so they stay; folding them below an
     audit-coverage watermark is tracked in #1534.
+- The mob actor keeps serving commands while a spawn's supervisor
+  private-trust install waits on a slow member runtime or comms.
+  - The install used to run inside `finalize_spawn_admit` on the actor, so
+    one parked install held every other command behind it. A host saw a
+    mob-phase query and five spawns go unserved for 70 s.
+  - The install now runs off the actor, with the spawn's endpoint
+    observation, through the actor's member-effect lane (ticket-fenced
+    commit). `finalize_spawn_admit` consumes the outcome at the same point in
+    its ladder, so failure handling is unchanged. An install that finalize
+    never reached (an earlier failure) is revoked.
 - A member spawn no longer waits for another member's turn to end.
   - Many `EphemeralSessionService` operations (also used inside
     `PersistentSessionService`) held the service-wide session map while

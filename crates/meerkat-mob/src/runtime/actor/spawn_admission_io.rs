@@ -7,6 +7,26 @@ use super::*;
 pub(super) struct SpawnAdmissionIo {
     pub(super) session_comms: Option<Arc<dyn CoreCommsRuntime>>,
     pub(super) provisioner_comms: Option<Arc<dyn CoreCommsRuntime>>,
+    /// The supervisor private-trust install, realized off the actor with the
+    /// rest of the endpoint observation so a slow member runtime or comms
+    /// never parks the actor's command loop. `finalize_spawn_admit` consumes
+    /// it at the point where it used to install.
+    pub(super) supervisor_trust: SpawnSupervisorTrust,
+}
+
+/// Outcome of the off-actor supervisor private-trust install for one spawn.
+#[derive(Default)]
+pub(super) enum SpawnSupervisorTrust {
+    /// Nothing to install: a run-scoped flow member, a remote member, or a
+    /// member without a local session and comms runtime.
+    #[default]
+    NotApplicable,
+    Installed {
+        session_id: SessionId,
+        comms: Arc<dyn CoreCommsRuntime>,
+        install: SupervisorPrivateTrustInstall,
+    },
+    Failed(SupervisorPrivateTrustInstallError),
 }
 
 struct SpawnAdmissionCommit {
@@ -53,6 +73,7 @@ impl MobActor {
         let members = vec![self.member_fence_or_absent(&ctx.agent_identity).await];
         let service = Arc::clone(&self.session_service);
         let provisioner = Arc::clone(&self.provisioner);
+        let trust_installer = self.supervisor_trust_installer();
         self.dispatch_member_effect(MemberEffectRequest {
             context: "spawn_admission_endpoint_observation",
             members,
@@ -70,9 +91,43 @@ impl MobActor {
                     } else {
                         None
                     };
+                    let supervisor_trust =
+                        match (member.bridge_session_id(), provisioner_comms.as_ref()) {
+                            (Some(session_id), Some(comms))
+                                if !ctx.agent_identity.is_flow_member_namespace() =>
+                            {
+                                tracing::debug!(
+                                    agent_identity = %ctx.agent_identity,
+                                    session_id = %session_id,
+                                    "spawn admission installing supervisor private trust"
+                                );
+                                match trust_installer
+                                    .install_supervisor_private_trust_for_session(
+                                        session_id, comms, None,
+                                    )
+                                    .await
+                                {
+                                    Ok(install) => {
+                                        tracing::debug!(
+                                            agent_identity = %ctx.agent_identity,
+                                            session_id = %session_id,
+                                            "spawn admission installed supervisor private trust"
+                                        );
+                                        SpawnSupervisorTrust::Installed {
+                                            session_id: session_id.clone(),
+                                            comms: Arc::clone(comms),
+                                            install,
+                                        }
+                                    }
+                                    Err(error) => SpawnSupervisorTrust::Failed(error),
+                                }
+                            }
+                            _ => SpawnSupervisorTrust::NotApplicable,
+                        };
                     Ok(SpawnAdmissionIo {
                         session_comms,
                         provisioner_comms,
+                        supervisor_trust,
                     })
                 })
                 .catch_unwind()

@@ -1970,9 +1970,11 @@ them.
     reflected input stream's cadence slot so sideband jitter is excluded,
     500 ms) and the playout segment (the provider's last voiced output frame
     to last audible, 900 ms) are bounded on their own, and the provider's
-    turn-taking segment is journaled on every yield. Assistant speech that
-    starts during the user's utterance fails unless it is a classified
-    backchannel. The bounds are frozen: each is the maximum of a stated
+    turn-taking segment is journaled on every yield. A reply already in
+    flight when the provider hears the user is measured as the yield.
+    Assistant speech that starts after the provider could react, while the
+    user is still speaking, fails unless it is a classified backchannel, and
+    a wordless burst there must end within the talk-over bound. The bounds are frozen: each is the maximum of a stated
     healthy population (73 yields of the 0.8.51 soak) plus the browser's
     100 ms energy window, and an exceedance is a finding to attribute, never
     a reason to raise the number. The old rule, that the audio ends before

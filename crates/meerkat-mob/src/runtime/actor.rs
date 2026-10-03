@@ -1940,6 +1940,10 @@ pub(super) struct AutonomousMemberStopOutcome {
     identity: AgentIdentity,
     target: AutonomousStopInterrupted,
     result: Result<(), MobError>,
+    /// A Shutdown's dispatched cancel, resolved from the run's recorded
+    /// terminal once the run settled (`None` when there was nothing to
+    /// resolve or the run recorded no terminal in time).
+    resolved_run: Option<super::stop_report::MemberStopRun>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2081,6 +2085,32 @@ impl AutonomousMemberStopStage {
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// What a Shutdown reports for a run its immediate cancel was dispatched to,
+/// from the run's recorded turn terminal: the cancel, or the run's own end.
+/// `None` (no terminal recorded for that run) leaves it reported as
+/// dispatched.
+#[cfg(feature = "runtime-adapter")]
+fn shutdown_cancel_outcome(
+    terminal: Option<meerkat_core::turn_execution_authority::TurnTerminalOutcome>,
+    run_id: &meerkat_core::lifecycle::RunId,
+) -> Option<super::stop_report::MemberStopRun> {
+    use super::stop_report::MemberStopRun;
+    use meerkat_core::turn_execution_authority::TurnTerminalOutcome;
+    let run_id = run_id.clone();
+    match terminal? {
+        TurnTerminalOutcome::Cancelled => Some(MemberStopRun::CancelledByShutdown { run_id }),
+        TurnTerminalOutcome::Completed
+        | TurnTerminalOutcome::Failed
+        | TurnTerminalOutcome::BudgetExhausted
+        | TurnTerminalOutcome::TimeBudgetExceeded
+        | TurnTerminalOutcome::StructuredOutputValidationFailed => {
+            Some(MemberStopRun::RunEndedBeforeCancel { run_id })
+        }
+        // No terminal was classified for the run: its outcome stays unknown.
+        TurnTerminalOutcome::None => None,
     }
 }
 
@@ -17128,6 +17158,7 @@ impl DetachedMemberReadinessContext {
         agent_identity: &AgentIdentity,
         target: &AutonomousStopInterrupted,
         stage: &AutonomousMemberStopStage,
+        resolved_run: &std::sync::Mutex<Option<super::stop_report::MemberStopRun>>,
     ) -> Result<(), MobError> {
         let member_ref = &target.incarnation.member_ref;
         let expected_member = target.incarnation.expected_member.as_ref();
@@ -17184,6 +17215,20 @@ impl DetachedMemberReadinessContext {
             {
                 stage.enter(AUTONOMOUS_MEMBER_STOP_RUN_SETTLEMENT_STAGE);
                 adapter.wait_current_run_settled(session_id).await;
+                // A Shutdown's dispatched cancel is reported from the run's
+                // recorded terminal: the executor may have finished the run on
+                // its own before the cancel reached it.
+                if let super::stop_report::MemberStopRun::CancelDispatched { run_id } =
+                    &target.outcome.run
+                {
+                    let resolved = shutdown_cancel_outcome(
+                        adapter.run_turn_terminal(session_id, run_id).await,
+                        run_id,
+                    );
+                    *resolved_run
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = resolved;
+                }
             }
         }
         Ok(())
@@ -17202,17 +17247,21 @@ impl DetachedMemberReadinessContext {
         let remaining = deadline.saturating_duration_since(Instant::now());
         futures::future::join_all(targets.into_iter().map(|(identity, target)| async move {
             let stage = AutonomousMemberStopStage::default();
+            let resolved_run = std::sync::Mutex::new(None);
             let result = member_stop_within_hang_guard_at(
                 &identity,
                 remaining,
                 &stage,
-                self.finish_autonomous_member_stop(&identity, &target, &stage),
+                self.finish_autonomous_member_stop(&identity, &target, &stage, &resolved_run),
             )
             .await;
             AutonomousMemberStopOutcome {
                 identity,
                 target,
                 result,
+                resolved_run: resolved_run
+                    .into_inner()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
             }
         }))
         .await
@@ -18108,6 +18157,12 @@ impl MobActor {
                     ),
                 });
                 continue;
+            }
+            // Only a Shutdown dispatches the immediate cancel resolved here.
+            if let Some(run) = outcome.resolved_run {
+                self.shutdown_report
+                    .runs
+                    .insert(outcome.identity.clone(), run);
             }
             match outcome.result {
                 Ok(()) => {

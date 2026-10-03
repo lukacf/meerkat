@@ -357,6 +357,12 @@ them.
   cover the retained occurrences only, and `materialize_revision` of a retired
   revision returns `TranscriptRevisionRetired`. `commits()`, `commit_count()`,
   `commit(i)`, `rewrite_prefix()` and `graph_prefix()` are unchanged.
+  Code that walks `commits()` and projects a commit's parent
+  (`Session::with_validated_transcript_rewrite_parent_projection`) now gets
+  `TranscriptRevisionRetired` for every commit before the cut, where it used
+  to get the parent: it must skip such a commit (it has no body to prove
+  against) rather than fail. MobKit's durable-behind admission failed its
+  store write here until it skipped them.
 - The SQLite session store's schema domain moves to v5 (table
   `session_transcript_retirements`). Opening a store migrates it forward.
   Binaries from before this release refuse a v5 file, as they refuse any
@@ -540,6 +546,10 @@ them.
     ends through its typed cancelled terminal, and
     `MobShutdownReport::runs` reports it as
     `MemberStopRun::CancelledByShutdown`.
+    The report reads the run's recorded terminal: a run that ended on its own
+    before the cancel landed is `RunEndedBeforeCancel`, and a dispatched
+    cancel whose run has no recorded terminal by the deadline is the new
+    `MemberStopRun::CancelDispatched`.
   - Shutdown holds the run starts of the members the mob hosts before its
     interrupts, as Stop does (#1500), so an input admitted before the
     Shutdown cannot start a run afterwards. MobMachine's `ShutdownRunning`,
@@ -1143,6 +1153,17 @@ them.
   `-D warnings`): `meerkat::surface::live_media_health_rms_micros` is now
   compiled only with its users, under `live-webrtc` and `openai-live`.
 
+- `MobHandle::shutdown` no longer fails when its immediate cancel of a
+  member's run reports `InterruptDispatchOutcomeUnknown` (the executor saw
+  the run end while machine authority still bound it, or its callback
+  outlasted the acknowledgement bound). The runtime owns that cancel's
+  outcome: the Shutdown waits for the run's recorded end, as for any
+  cancelled run, and reports the run from its recorded terminal.
+- Archiving a mob member's session (RPC `session/archive`, REST
+  `DELETE /sessions/{id}`, MCP `meerkat_archive`) whose retirement is stuck
+  re-drives that retirement once per archive request, as the archive
+  re-drove it before owned retirement. A cause that still fails is
+  surfaced as `MemberRetirementStuck`, never looped and never masked.
 - The release semver gate (`make semver-breaks`) fails closed on any
   cargo-semver-checks finding whose message shape it cannot read in full.
   Such a finding is now an error naming the lint, not a NOTE. Before, it fell

@@ -54,8 +54,14 @@ pub enum MemberStopRun {
     /// The run was cancelled at its next boundary; the stop waits for it.
     CancelledAtBoundary { run_id: RunId },
     /// A mob Shutdown cancelled the run immediately rather than at its next
-    /// boundary; the run still ends through its typed cancelled terminal.
+    /// boundary: the run's recorded terminal is the cancel.
     CancelledByShutdown { run_id: RunId },
+    /// A mob Shutdown dispatched its immediate cancel and the runtime owns
+    /// its outcome. Shutdown resolves it from the run's recorded terminal once
+    /// the run has settled (`CancelledByShutdown`, or `RunEndedBeforeCancel`
+    /// when the run ended on its own first); it is reported as is only when
+    /// the run recorded no terminal before the Shutdown's deadline.
+    CancelDispatched { run_id: RunId },
     /// The run ended on its own between the hold and the cancel.
     RunEndedBeforeCancel { run_id: RunId },
     /// A turn-driven member's run: Stop does not cancel it, and it finishes

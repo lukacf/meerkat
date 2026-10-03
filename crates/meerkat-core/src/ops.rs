@@ -459,6 +459,11 @@ pub struct DeclaredToolRestriction {
     /// operator and agent mob tools, the exposed names of the MCP servers it
     /// declares, and its tool bundles.
     pub vocabulary: std::collections::BTreeMap<ToolVocabularySource, ToolNameSet>,
+    /// Declared MCP servers that map no tool names, so their tools cannot be
+    /// known before they connect. While any is declared, a deny name in no
+    /// vocabulary is not a build error: its validation is deferred and the
+    /// execution gate enforces it by name.
+    pub deferred_mcp_servers: std::collections::BTreeSet<String>,
 }
 
 /// Where a tool name a deny list may declare comes from.
@@ -743,6 +748,7 @@ mod tests {
             read_only: false,
             deny: ["mob_wire"].into_iter().collect(),
             vocabulary: std::collections::BTreeMap::new(),
+            deferred_mcp_servers: std::collections::BTreeSet::new(),
         };
         assert!(!restriction.is_unrestricted());
         assert_eq!(

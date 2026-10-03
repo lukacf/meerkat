@@ -420,6 +420,7 @@ pub async fn build_agent_config(
             deny
         },
         vocabulary: profile_tool_vocabulary(&profile.tools),
+        deferred_mcp_servers: deferred_mcp_servers(&profile.tools),
     };
     config.declared_tool_restriction = (!restriction.is_unrestricted()).then_some(restriction);
 
@@ -451,6 +452,18 @@ fn profile_tool_vocabulary(
         }
     }
     vocabulary
+}
+
+/// The profile's declared MCP servers that map no tool names: their tools are
+/// unknown until they connect, so the factory defers deny names in no
+/// vocabulary to the execution gate while any is declared.
+fn deferred_mcp_servers(tools: &crate::profile::ToolConfig) -> std::collections::BTreeSet<String> {
+    tools
+        .mcp_servers
+        .iter()
+        .filter(|server| server.tool_names.is_empty())
+        .map(|server| server.name.clone())
+        .collect()
 }
 
 /// The tool families a profile enables, in declaration order, for errors that
@@ -1835,11 +1848,16 @@ mod tests {
             &vocabulary[&meerkat_core::ToolVocabularySource::McpServer("lookup-server".into())];
         assert!(declared.contains("lookup"));
         assert!(!declared.contains("raw_lookup"));
-        // A server that maps no names declares none.
+        // A server that maps no names declares none; deny names in no
+        // vocabulary are deferred to the gate because of it.
         assert!(
             !vocabulary.contains_key(&meerkat_core::ToolVocabularySource::McpServer(
                 "unmapped".into()
             ))
+        );
+        assert_eq!(
+            deferred_mcp_servers(&tools),
+            std::collections::BTreeSet::from(["unmapped".to_string()])
         );
     }
 

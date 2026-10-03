@@ -190,6 +190,15 @@ mod tests {
         Keypair::generate()
     }
 
+    #[test]
+    fn comms_tool_names_match_the_tool_definitions() {
+        let defined: Vec<String> = comms_tool_defs()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert_eq!(defined, crate::builtin::COMMS_TOOL_NAMES);
+    }
+
     fn make_tool_context() -> (Arc<Router>, TrustedPeersView) {
         let keypair = make_keypair();
         let (_, inbox_sender) = meerkat_comms::Inbox::new_transport_only();

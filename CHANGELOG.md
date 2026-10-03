@@ -373,7 +373,9 @@ them.
   handle the new variants.
 - Per-profile tool deny list (see Added). Struct literals and exhaustive
   matches must handle the new members:
-  - `meerkat_tools::builtin::SHELL_TOOL_NAMES`, `ShellToolSet::tool_names`,
+  - `meerkat_tools::builtin::{SHELL_TOOL_NAMES, COMMS_TOOL_NAMES,
+    UTILITY_TOOL_NAMES, SKILL_TOOL_NAMES, WEB_SEARCH_TOOL_NAMES,
+    BRAIN_SWAP_TOOL_NAMES}`, `ShellToolSet::tool_names`,
     `builtin::tasks::tool_names`, `builtin::image_generation::{TOOL_NAMES,
     tool_names}`, `meerkat_memory::MemorySearchDispatcher::tool_names`,
     `meerkat_workgraph::workgraph_tool_names`,
@@ -391,7 +393,8 @@ them.
   - `meerkat::AgentBuildConfig` and `meerkat_core::service::SessionBuildOptions`
     gain `declared_tool_restriction: Option<DeclaredToolRestriction>`; the new
     `meerkat_core::ops::DeclaredToolRestriction` carries it, including its
-    `vocabulary` keyed by the new `meerkat_core::ToolVocabularySource`. The new
+    `vocabulary` keyed by the new `meerkat_core::ToolVocabularySource` and its
+    `deferred_mcp_servers`. The new
     types are re-exported at the `meerkat_core` root.
   - `meerkat_core::SessionTooling` gains `spawn_tool_access_policy:
     Option<SpawnToolAccessPolicy>` (omitted when absent); the new
@@ -846,15 +849,20 @@ them.
   policy. It is carried by portable specs, RPC/MCP mob definitions and
   `mob.toml`.
   - Each name must be a tool the member's build composed or a name in a tool
-    vocabulary: the built-in families' tools (shell, tasks, memory, workgraph,
-    schedule, image generation; enabled or not), the mob operator tools
+    vocabulary: the built-in families' tools (shell, tasks, utility, comms,
+    skills, web search, brain swap, image generation, memory, workgraph,
+    schedule; whether compiled or enabled or not), the mob operator tools
     (`spawn_member`, `spawn_many_members`, `wire_members`, ...), the agent mob
     tools (`mob_spawn_member`, `mob_wire`, `mob_create`, ...) and the exposed
     tool names the profile's declared MCP servers map. A known name the member
-    does not mount is inert, so one deny set works on every composition. Any
-    other name (stale or mistyped, or an undeclared external tool) fails the
-    member's build with the typed `DeclaredToolUnknown` error naming the
-    profile, the tool, the vocabularies and the enabled families. Empty or
+    does not mount is inert, so one deny set works on every composition and
+    build. While the profile declares an MCP server that maps no tool names,
+    any other name is deferred to the execution gate and logged at build
+    ("deny name X deferred to runtime (server Y declares no tool list)"); map
+    the tool in the server's `tool_names` to validate it at build. Without
+    such a server, any other name (stale or mistyped, or an undeclared external
+    tool) fails the member's build with the typed `DeclaredToolUnknown` error
+    naming the profile, the tool, the vocabularies and the enabled families. Empty or
     whitespace entries are a `malformed_tool_deny` definition diagnostic.
   - The declaration is recomputed from the current definition on every build,
     including a resume, so adding or removing a deny entry or toggling

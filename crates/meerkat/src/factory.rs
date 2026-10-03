@@ -1184,26 +1184,37 @@ fn metadata_memory_override_for_realm(
     }
 }
 
-/// Errors that can occur when building an agent via [`AgentFactory::build_agent()`].
+/// Tool names of the memory family (`meerkat_memory::MemorySearchDispatcher`),
+/// known whatever the compiled features so a deny list means the same thing
+/// on every build; pinned by a drift test where the family is compiled.
+pub(crate) const MEMORY_TOOL_NAMES: &[&str] = &["memory_search"];
+
 /// The built-in tool families' vocabularies: every tool name a family can
-/// provide, whether or not a given build enables the family. Each list is
-/// owned by its family and pinned to the family's tool definitions there.
+/// provide, whether or not a given build compiles or enables the family. Each
+/// list is owned by its family and pinned to the family's tool definitions by
+/// a drift test wherever the family is compiled.
 fn builtin_tool_vocabulary() -> Vec<(meerkat_core::ToolVocabularySource, Vec<&'static str>)> {
+    use meerkat_tools::builtin;
     let family = |name: &str| meerkat_core::ToolVocabularySource::Family(name.to_string());
-    #[allow(unused_mut)]
-    let mut vocabulary = vec![
+    vec![
+        (family("shell"), builtin::SHELL_TOOL_NAMES.to_vec()),
+        (family("tasks"), builtin::tasks::tool_names().to_vec()),
+        (family("utility"), builtin::UTILITY_TOOL_NAMES.to_vec()),
+        (family("comms"), builtin::COMMS_TOOL_NAMES.to_vec()),
+        (family("skills"), builtin::SKILL_TOOL_NAMES.to_vec()),
         (
-            family("shell"),
-            meerkat_tools::builtin::SHELL_TOOL_NAMES.to_vec(),
+            family("web_search"),
+            builtin::WEB_SEARCH_TOOL_NAMES.to_vec(),
         ),
         (
-            family("tasks"),
-            meerkat_tools::builtin::tasks::tool_names().to_vec(),
+            family("brain_swap"),
+            builtin::BRAIN_SWAP_TOOL_NAMES.to_vec(),
         ),
         (
             family("image_generation"),
-            meerkat_tools::builtin::image_generation::tool_names().to_vec(),
+            builtin::image_generation::tool_names().to_vec(),
         ),
+        (family("memory"), MEMORY_TOOL_NAMES.to_vec()),
         (
             family("workgraph"),
             meerkat_workgraph::workgraph_tool_names(),
@@ -1212,15 +1223,10 @@ fn builtin_tool_vocabulary() -> Vec<(meerkat_core::ToolVocabularySource, Vec<&'s
             family("schedule"),
             meerkat_schedule::schedule_tool_names().to_vec(),
         ),
-    ];
-    #[cfg(feature = "memory-store-session")]
-    vocabulary.push((
-        family("memory"),
-        meerkat_memory::MemorySearchDispatcher::tool_names().to_vec(),
-    ));
-    vocabulary
+    ]
 }
 
+/// Errors that can occur when building an agent via [`AgentFactory::build_agent()`].
 #[derive(Debug, thiserror::Error)]
 pub enum BuildAgentError {
     /// The selected runtime composition excludes an explicitly requested capability.
@@ -7831,6 +7837,22 @@ impl AgentFactory {
                 .filter(|name| !known.contains(name))
                 .collect::<Vec<_>>();
             unknown.sort_unstable();
+            if !restriction.deferred_mcp_servers.is_empty() {
+                // A declared MCP server without a tool list may provide any
+                // name once it connects: the gate enforces these by name.
+                let servers = restriction
+                    .deferred_mcp_servers
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                for tool in unknown.drain(..) {
+                    tracing::info!(
+                        declared_by = %restriction.declared_by,
+                        "deny name {tool} deferred to runtime (server {servers} declares no tool list)"
+                    );
+                }
+            }
             if let Some(tool) = unknown.first() {
                 return Err(BuildAgentError::DeclaredToolUnknown {
                     declared_by: restriction.declared_by.clone(),
@@ -18012,5 +18034,16 @@ mod host_prompt_sections_tests {
                 })
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "memory-store-session"))]
+mod memory_vocabulary_tests {
+    #[test]
+    fn memory_tool_names_match_the_memory_family() {
+        assert_eq!(
+            super::MEMORY_TOOL_NAMES,
+            meerkat_memory::MemorySearchDispatcher::tool_names()
+        );
     }
 }

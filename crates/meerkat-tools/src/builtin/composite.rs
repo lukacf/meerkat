@@ -90,9 +90,9 @@ struct BlobToolBinding {
 #[cfg(not(target_arch = "wasm32"))]
 const IMAGE_GENERATION_TOOL_NAMES: &[&str] = crate::builtin::image_generation::TOOL_NAMES;
 #[cfg(not(target_arch = "wasm32"))]
-const BRAIN_SWAP_TOOL_NAMES: &[&str] = &[crate::builtin::brain_swap::BRAIN_SWAP_TOOL_NAME];
+const BRAIN_SWAP_TOOL_NAMES: &[&str] = crate::builtin::BRAIN_SWAP_TOOL_NAMES;
 #[cfg(not(target_arch = "wasm32"))]
-const WEB_SEARCH_TOOL_NAMES: &[&str] = &["web_search"];
+const WEB_SEARCH_TOOL_NAMES: &[&str] = crate::builtin::WEB_SEARCH_TOOL_NAMES;
 #[cfg(not(target_arch = "wasm32"))]
 const BLOB_FILE_TOOL_NAMES: &[&str] = &["blob_save_file", "blob_load_file", "blob_inspect"];
 
@@ -2304,6 +2304,64 @@ mod tests {
             .await
             .expect("external tool dispatch should succeed even with a stale allow-set entry");
         assert_eq!(result.result.text_content(), "{}");
+    }
+
+    /// The builtin utility names a deny list may declare are exactly the
+    /// utilities a default builtin composition provides (with blob tools),
+    /// beside the task tools.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn utility_tool_names_match_the_composed_utilities() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(temp_dir.path().to_path_buf()),
+            None,
+            None,
+            Some(SessionId::new().to_string()),
+        )
+        .unwrap();
+        dispatcher.register_blob_file_tools(Arc::new(TestBlobStore::default()));
+        let tasks: std::collections::BTreeSet<&str> = crate::builtin::tasks::tool_names()
+            .iter()
+            .copied()
+            .collect();
+        let composed: std::collections::BTreeSet<String> = dispatcher
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .filter(|name| !tasks.contains(name.as_str()))
+            .collect();
+        let declared: std::collections::BTreeSet<String> = crate::builtin::UTILITY_TOOL_NAMES
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        assert_eq!(composed, declared);
+    }
+
+    #[cfg(feature = "skills")]
+    #[test]
+    fn skill_tool_names_match_the_tool_definitions() {
+        let tool_set = stub_skill_tool_set();
+        let defined: Vec<String> = tool_set
+            .tools()
+            .iter()
+            .map(|tool| tool.def().name.to_string())
+            .collect();
+        assert_eq!(defined, crate::builtin::SKILL_TOOL_NAMES);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn web_search_tool_names_match_the_tool_definition() {
+        let tool = crate::builtin::web_search::WebSearchTool::new(Arc::new(
+            crate::builtin::web_search::EmptyWebSearchExecutor,
+        ));
+        assert_eq!(
+            [tool.def().name.to_string()],
+            crate::builtin::WEB_SEARCH_TOOL_NAMES
+        );
     }
 
     fn tool_name_count(dispatcher: &dyn AgentToolDispatcher, name: &str) -> usize {

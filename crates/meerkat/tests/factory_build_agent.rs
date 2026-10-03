@@ -4174,6 +4174,7 @@ fn declared_restriction(
         read_only,
         deny: deny.iter().copied().collect(),
         vocabulary: std::collections::BTreeMap::new(),
+        deferred_mcp_servers: std::collections::BTreeSet::new(),
     }
 }
 
@@ -4714,6 +4715,100 @@ async fn declared_deny_refuses_a_mounted_declared_mcp_tool() {
         .collect();
     assert!(visible.iter().any(|name| name == "lookup"), "{visible:?}");
     assert!(!gate_admits(&mut agent, "lookup").await);
+    assert!(gate_admits(&mut agent, "echo").await);
+    assert_eq!(*dispatched.lock().unwrap(), ["echo"]);
+}
+
+/// Every provider-owned family is vocabulary whatever the build composes:
+/// with comms and the builtin utilities off, denying `send_message` and
+/// `apply_patch` is inert, not `DeclaredToolUnknown`.
+#[tokio::test]
+async fn declared_deny_of_unmounted_comms_and_utility_tools_is_inert() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(
+                &["alpha"],
+                &dispatched,
+                None,
+                Some(declared_restriction(
+                    &["send_message", "apply_patch", "memory_search"],
+                    false,
+                )),
+                None,
+            ),
+            &Config::default(),
+        )
+        .await
+        .expect("known but unmounted family tools are inert deny entries");
+    assert!(gate_admits(&mut agent, "alpha").await);
+}
+
+#[derive(Clone, Default)]
+struct LogSink(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+    type Writer = LogSink;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// A declared MCP server without a tool list may provide any name once it
+/// connects, so a deny name in no vocabulary is deferred to the gate: the
+/// build logs the deferral, the tool stays listed, and a call is refused.
+#[tokio::test]
+async fn declared_deny_defers_unknown_names_while_a_declared_mcp_server_maps_no_tools() {
+    let sink = LogSink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let mut restriction = declared_restriction(&["raw_lookup"], false);
+    restriction
+        .deferred_mcp_servers
+        .insert("lookup-server".to_string());
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                external_tools: Some(Arc::new(PolicyProbeDispatcher::new(
+                    &["raw_lookup", "echo"],
+                    Arc::clone(&dispatched),
+                ))),
+                declared_tool_restriction: Some(restriction),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .expect("a deny name is deferred while a declared server maps no tools");
+    let log = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        log.contains(
+            "deny name raw_lookup deferred to runtime (server lookup-server declares no tool list)"
+        ),
+        "{log}"
+    );
+    assert!(!gate_admits(&mut agent, "raw_lookup").await);
     assert!(gate_admits(&mut agent, "echo").await);
     assert_eq!(*dispatched.lock().unwrap(), ["echo"]);
 }

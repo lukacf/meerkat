@@ -120,7 +120,6 @@ them.
   and `LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY` are removed. The deferred
   close settlement no longer retries on a timer (see Fixed);
   `LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND` remains as its single hang guard.
-
 - `meerkat::experimental_gpt_live::ExperimentalLivePumpRetirementError`
   replaces `SemanticUncommitted(String)` with typed retry kinds:
   `CloseInFlight(String)`, `SessionBusy(String)` and `Permanent(String)`
@@ -771,7 +770,6 @@ them.
 - `meerkat_mob_mcp::live_delegation::LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE`
   is public, so live end-to-end checks can strip the speech-transcript note
   exactly instead of copying its wording.
-
 - `meerkat_runtime::MeerkatMachine::begin_live_channel_close` (returning
   `LiveChannelCloseInFlightGuard`), `live_channel_close_in_flight` and
   `live_channel_close_ended`: every live channel close path is registered
@@ -1028,7 +1026,15 @@ them.
   and the declared dispatch deadline is that timeout plus
   `SHELL_SETUP_FAILURE_BOUND` (30 s), a failure bound for a hanging setup
   (#1575).
-- **A busy delegation worker no longer stalls the live channel.** Steering a continuation into a running delegation waited, inside the channel's observation loop, for that worker's next model boundary, which a running tool call (a long shell command) holds for its whole duration; every later delegation request on the channel queued behind it (Turbo S S101: a quick question waited 16.6 s behind a 25 s job). The steer is authorized in order and its delivery runs per delegation (FIFO), with a typed outcome (`Delivered`, `MissedRun`, `Failed`) joined at the worker's terminal.
+- A busy delegation worker no longer stalls the live channel. Steering a
+  continuation into a running delegation waited, inside the channel's
+  observation loop, for that worker's next model boundary, which a running
+  tool call (a long shell command) holds for its whole duration; every later
+  delegation request on the channel queued behind it (Turbo S S101: a quick
+  question waited 16.6 s behind a 25 s job). The steer is authorized in order
+  and its delivery runs per delegation (FIFO), with a typed outcome
+  (`Delivered`, `MissedRun`, `Failed`) joined at the worker's terminal
+  (#1563).
 - Reading a session whose turn is in flight no longer waits for the turn to
   end.
   - `PersistentSessionService::read` and `has_live_session` checked the live
@@ -1087,7 +1093,6 @@ them.
   Every acknowledged result now gets one instructions-lane cue, bound to the
   result's `delegation_id`. It is phrased to be safe either way: tell the
   user the result unless it was already told.
-
 - Opening or refreshing a live channel on a member whose turn is in flight no
   longer waits for the turn to end.
   - The realtime open and refresh projections took the session's turn
@@ -1149,7 +1154,6 @@ them.
   every live delegation's result is acknowledged `Delivered` and its
   commentary reached the peer, both before the typed correction and again
   before the recall (covering the correction's own result).
-
 - A live delegation result that has to wait for the channel's result slot
   (the previous result's provider acknowledgement) is released as soon as
   that acknowledgement commits. Previously it retried on a doubling timer of
@@ -1157,7 +1161,6 @@ them.
   commit signal and re-checks after each committed transition. The release
   guards change only through committed transitions, so no timer is needed.
   New: `meerkat_runtime::MeerkatMachine::subscribe_session_machine_commits`.
-
 - Three meerkat-mob-mcp tests no longer fail on a loaded host (#1509). They
   now assert ordering with events instead of wall-clock margins.
   `relink_past_max_run_retires_a_child_still_running` relies on the child's
@@ -1409,7 +1412,6 @@ them.
   gate, so the commit fails typed instead of hanging. A start or cancel that
   landed between the wait's checks and its registration could also be missed;
   the wait now re-reads both after registering.
-
 - An experimental GPT Live pump-exit retirement no longer retries on a timer.
   Every close failure used to retry with exponential backoff (25 ms to 2 s),
   with no attempt cap. Each failure is now typed where the close error is
@@ -1580,6 +1582,9 @@ them.
   as `main` (workspace unit tests in eight shards, wasm-check, sdk-host and
   the other push-gated lanes), so reverse-dependency suites run before the
   final merge to `main`. Attestation stays `main`-only (#1560).
+- Push CI on `release/**` integration branches is never superseded by a
+  later push, so every merge commit on the branch gets a complete run
+  (#1581).
 - The CI gate's 2700 s runaway ceiling no longer counts runner queue: it
   applies to each lane's terminal minus the queue on its path, so a pull
   request whose lanes all pass is not failed while hosted runners are
@@ -1592,7 +1597,9 @@ them.
   `meerkat-machine-schema` Bazel BUILD file is regenerated (#1515); and the
   GPT Live Turbo S S102, S104 and S106 checks assert typed delivery
   contracts instead of wording, with the S102 harness now wiring its extra
-  member (#1539).
+  member (#1539); and the live end-to-end lane can record real GPT Live
+  provider streams for deterministic replay (`test-realtime-fixtures`,
+  test-only) (#1545).
 - A GPT Live WebRTC session whose media track carries silence while the model
   speaks (transcripts present, decoded audio silent; about 1 in 30-40 public
   opens) no longer leaves the user in a silent call. The runtime judges the
@@ -1604,11 +1611,21 @@ them.
   Turbo S harness answers every request with real decoded counters (a media
   fault on an audible channel fails the run) and retries an exchange only
   after a journaled media-fault close and reopen.
-
+- `live/status` for a closed channel keeps answering `Closed { reason }`
+  (including `media_fault`) for as long as the machine keeps the channel's
+  Closed record, that is until finalized unregister removes the session's
+  runtime entry. It used to switch to `ChannelNotFound` 60 s after the
+  close, when `LiveAdapterHost` reaped its closed-channel state on a timer.
+  The host now keeps a typed closed tombstone with no TTL, and the runtime
+  releases a session's tombstones from the point the entry is removed
+  (#1519).
 ### Changed
 
-- **Model calls and shell rounds are attributable in debug logs.** The agent loop logs each model call's session, turn, attempt, elapsed time and outcome ("model call settled"); shell tool calls log their tool call id at start and their exit code, timeout and duration at completion (never the command or its output).
-
+- Model calls and shell rounds are attributable in debug logs. The agent loop
+  logs each model call's session, turn, attempt, elapsed time and outcome
+  ("model call settled"); shell tool calls log their tool call id at start and
+  their exit code, timeout and duration at completion (never the command or
+  its output) (#1563).
 - Generated machine TLA models lead each quantified `Next` disjunct with its
   transition's source-phase guard. The meaning is unchanged (the guard is also
   the first conjunct of the action), but TLC no longer enumerates every
@@ -1651,42 +1668,6 @@ them.
   - the registration chain went from 1,490,216 B to 697,224 B.
 
   The canary now also passes at 1536 KiB and 1280 KiB. No behaviour change.
-
-
-- rkat-rpc over TCP: a new connection no longer overwrites the shared
-  runtime's callback channel, id counter and tool registry (#1451). Before,
-  callbacks for an older connection's new sessions went to the newest
-  connection, its registered tools were cleared, and callback ids restarted
-  in another connection's id space. On connection close the server now fails
-  pending callbacks before its graceful request shutdown, so a session waiting
-  on a gone client gets the typed failure immediately.
-
-- `live/status` for a closed channel keeps answering `Closed { reason }`
-  (including `media_fault`) for as long as the machine keeps the channel's
-  Closed record, that is until finalized unregister removes the session's
-  runtime entry. It used to switch to `ChannelNotFound` 60 s after the
-  close, when `LiveAdapterHost` reaped its closed-channel state on a timer.
-  The host now keeps a typed closed tombstone with no TTL, and the runtime
-  releases a session's tombstones from the point the entry is removed.
-
-- Debug worker-stack headroom (#1446): the unregister teardown saga and the
-  session registration chain no longer reserve every section's temporaries
-  in one poll frame. Their numbered phases and sections now run in boxed
-  async blocks, and the registration path's large child futures are built in
-  their own frames, with bodies unchanged. Measured on the 2 MiB stack canary
-  (debug), at the deepest machine apply:
-  - the teardown chain went from 1,487,592 B to 597,784 B (the saga's own
-    poll frame from 787,560 B to 58,584 B);
-  - the registration chain went from 1,490,216 B to 697,224 B.
-
-  The canary now also passes at 1536 KiB and 1280 KiB. No behaviour change.
-- rkat-rpc over TCP: a new connection no longer overwrites the shared
-  runtime's callback channel, id counter and tool registry (#1451). Before,
-  callbacks for an older connection's new sessions went to the newest
-  connection, its registered tools were cleared, and callback ids restarted
-  in another connection's id space. On connection close the server now fails
-  pending callbacks before its graceful request shutdown, so a session waiting
-  on a gone client gets the typed failure immediately.
 - Debug worker-stack headroom (#1462): four more chains no longer reserve
   their callees' futures and every section's temporaries in one poll frame.
   Large child futures are built in their own boxed frames

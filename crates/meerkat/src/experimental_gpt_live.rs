@@ -4287,14 +4287,22 @@ impl ExperimentalGptLiveDeferredAdapter {
     /// client delegation joined to it: the delegation is that turn's
     /// terminal observation and no finish follows it, so without this the
     /// delegation's own narration waited out the whole bound (about 8 s
-    /// late on every delegated request). A late tail continuing the
-    /// delegation's utterance holds spoken context again until its finish.
+    /// late on every delegated request).
+    ///
+    /// Any user speech after that reopens it: a user transcript fragment
+    /// (the broker keeps the delegated turn open, so a new utterance with no
+    /// assistant speech in between arrives as more input deltas of the same
+    /// turn, never as a new turn start) or a late tail continuing the
+    /// delegation's utterance. It ends again on that turn's own finish or
+    /// on the next delegation joined to it. Otherwise an earlier
+    /// delegation's narration would be spoken over the user's next request.
     fn track_user_turn(&self, kind: &LiveSidebandObservationKind) {
         let open = match kind {
             LiveSidebandObservationKind::TurnStarted {
                 role: LiveSidebandTurnRole::User,
                 ..
             }
+            | LiveSidebandObservationKind::UserTranscriptFragment { .. }
             | LiveSidebandObservationKind::UserTurnContinuesDelegation { .. } => true,
             LiveSidebandObservationKind::TurnFinished {
                 role: LiveSidebandTurnRole::User,
@@ -9468,6 +9476,69 @@ mod tests {
         // Spoken context after the delegation does not wait at all.
         let after = spawn_quiet_user_waiter(&adapter).await;
         assert_eq!(after.await.expect("waiter"), std::time::Duration::ZERO);
+    }
+
+    fn user_fragment(text: &str) -> LiveSidebandObservationKind {
+        LiveSidebandObservationKind::UserTranscriptFragment {
+            item: LiveSidebandTranscriptItemRef::__from_provider_observation(
+                "adapter-1".to_string(),
+                format!("input:{text}"),
+            )
+            .expect("item ref"),
+            text: text.to_string(),
+        }
+    }
+
+    /// A second utterance after a delegation, with no assistant speech in
+    /// between, arrives only as more input deltas of the delegated turn (no
+    /// new turn start). It is the user speaking: spoken context, an earlier
+    /// delegation's narration among it, is held until that turn finishes.
+    #[tokio::test(start_paused = true)]
+    async fn a_second_utterance_after_a_delegation_holds_spoken_context_until_it_finishes() {
+        let adapter = quiet_user_test_adapter();
+        let turn = user_turn_test_ref("turn-user-1");
+        adapter.track_user_turn(&LiveSidebandObservationKind::TurnStarted {
+            turn: turn.clone(),
+            role: LiveSidebandTurnRole::User,
+        });
+        adapter.track_user_turn(&user_fragment("write a note"));
+        adapter.track_user_turn(&LiveSidebandObservationKind::DelegationRequested {
+            turn: turn.clone(),
+            delegation: delegation_test_ref(),
+            final_transcript: "write a note".to_string(),
+            request_transcript: "write a note".to_string(),
+            assistant_context: String::new(),
+            represented_user_rows: Vec::new(),
+        });
+        // The first delegation's narration goes out at once.
+        let first = spawn_quiet_user_waiter(&adapter).await;
+        assert_eq!(first.await.expect("waiter"), std::time::Duration::ZERO);
+        // The user starts a second request before the assistant spoke.
+        adapter.track_user_turn(&user_fragment(" and then email it"));
+        let narration = spawn_quiet_user_waiter(&adapter).await;
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        assert!(
+            !narration.is_finished(),
+            "the second utterance holds the earlier delegation's narration"
+        );
+        // The turn finishes as a continuation of the delegated utterance.
+        adapter.track_user_turn(&LiveSidebandObservationKind::UserTurnContinuesDelegation {
+            turn: turn.clone(),
+            delegation: delegation_test_ref(),
+            transcript: " and then email it".to_string(),
+        });
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(!narration.is_finished(), "still the user's turn");
+        adapter.track_user_turn(&LiveSidebandObservationKind::TurnFinished {
+            turn,
+            role: LiveSidebandTurnRole::User,
+            transcript: "write a note and then email it".to_string(),
+        });
+        assert_eq!(
+            narration.await.expect("waiter"),
+            std::time::Duration::from_secs(3),
+            "released at the second utterance's finish, inside the bound"
+        );
     }
 
     /// A late tail that continues the delegation's utterance is the user

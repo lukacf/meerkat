@@ -730,6 +730,8 @@ them.
 
 ### Fixed
 
+- **A short shell timeout is no longer consumed by one-time setup.** A foreground shell call's dispatch deadline was exactly its `timeout_secs`, measured from dispatch, so first-call setup (resolving the shell, which falls back from an absent `nu`, plus the first custodied spawn) could use up a model-chosen 1 s timeout before the command ran (Turbo S S101: a quick `ls` was cut off and retried). The shell path is now resolved when the tool is built, the command's timeout runs from its spawn as before, and the declared dispatch deadline is that timeout plus `SHELL_SETUP_FAILURE_BOUND` (30 s), a failure bound for a hanging setup.
+
 - Reading a session whose turn is in flight no longer waits for the turn to
   end.
   - `PersistentSessionService::read` and `has_live_session` checked the live

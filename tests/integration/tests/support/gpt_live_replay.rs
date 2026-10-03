@@ -381,7 +381,10 @@ impl Cassette {
     }
 }
 
-/// Expand a scrubbed `<silence-bytes:N>` audio payload to N zero bytes.
+/// Expand a scrubbed audio payload: `<silence-bytes:N>` to N zero bytes,
+/// `<speech-bytes:N>` (a reflected input frame that carried speech energy)
+/// to N bytes of a fixed -12 dBFS PCM16 tone, so the broker's floor rule sees
+/// the recorded speech/silence pattern without any voice.
 fn expand_silence(mut frame: Value) -> Value {
     let is_audio = frame["type"]
         .as_str()
@@ -393,16 +396,31 @@ fn expand_silence(mut frame: Value) -> Value {
         let Some(text) = frame[field].as_str() else {
             continue;
         };
-        if let Some(size) = text
-            .strip_prefix("<silence-bytes:")
-            .and_then(|rest| rest.strip_suffix('>'))
-            .and_then(|size| size.parse::<usize>().ok())
-        {
-            frame[field] =
-                Value::String(base64::engine::general_purpose::STANDARD.encode(vec![0_u8; size]));
-        }
+        let expanded = if let Some(size) = placeholder_size(text, "silence") {
+            vec![0_u8; size]
+        } else if let Some(size) = placeholder_size(text, "speech") {
+            (0..size / 2)
+                .flat_map(|index| {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                    let sample = (8_000.0 * (index as f64 * 0.13).sin()) as i16;
+                    sample.to_le_bytes()
+                })
+                .collect()
+        } else {
+            continue;
+        };
+        frame[field] = Value::String(base64::engine::general_purpose::STANDARD.encode(expanded));
     }
     frame
+}
+
+fn placeholder_size(text: &str, kind: &str) -> Option<usize> {
+    text.strip_prefix('<')?
+        .strip_prefix(kind)?
+        .strip_prefix("-bytes:")?
+        .strip_suffix('>')?
+        .parse()
+        .ok()
 }
 
 async fn create_session(AxumState(shared): AxumState<Arc<Shared>>, body: Bytes) -> Response {
@@ -560,12 +578,21 @@ pub fn fixture_findings(text: &str) -> Vec<String> {
             .as_str()
             .is_some_and(|kind| kind.contains("audio"))
         {
+            let reflected_input = frame["type"] == "session.input_audio.append";
             for field in ["audio", "delta"] {
-                if let Some(value) = frame[field].as_str()
-                    && !is_silence_placeholder(value)
-                {
-                    findings.push(format!("{number}: voice-audio"));
+                let Some(value) = frame[field].as_str() else {
+                    continue;
+                };
+                if placeholder_size(value, "silence").is_some() {
+                    continue;
                 }
+                if placeholder_size(value, "speech").is_some() {
+                    if !reflected_input {
+                        findings.push(format!("{number}: speech-bit-outside-reflected-input"));
+                    }
+                    continue;
+                }
+                findings.push(format!("{number}: voice-audio"));
             }
         }
     }
@@ -614,13 +641,6 @@ fn collect_strings<'a>(
         }
         _ => {}
     }
-}
-
-fn is_silence_placeholder(value: &str) -> bool {
-    value
-        .strip_prefix("<silence-bytes:")
-        .and_then(|rest| rest.strip_suffix('>'))
-        .is_some_and(|size| !size.is_empty() && size.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn value_rules(key: Option<&str>, value: &str) -> Vec<&'static str> {

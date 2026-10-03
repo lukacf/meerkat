@@ -59,9 +59,15 @@ audio garbles under heavy load), then review the diff and commit.
   tokens, JWTs), SDP ICE lines, email addresses, home-directory paths and IPv4
   addresses;
 - voice audio: every audio payload (`session.input_audio.append` reflected
-  uplink, `session.output_audio.delta` model speech) becomes
-  `<silence-bytes:N>`, N being its decoded length; replay expands it to N
-  zero bytes, so audio timing and latency accounting are preserved;
+  uplink, `session.output_audio.delta` model speech) becomes a placeholder
+  of its decoded length N, so audio timing and latency accounting are
+  preserved:
+  - model speech becomes `<silence-bytes:N>`, expanded to N zero bytes;
+  - a reflected input frame keeps one bit, no content: `<speech-bytes:N>` if
+    its RMS is at least -50 dBFS (`USER_FLOOR_SPEECH_DBFS`), else
+    `<silence-bytes:N>`. Replay expands speech to a fixed -12 dBFS tone.
+    The broker ends the user's floor on reflected-input silence, so a
+    replay must reproduce where the user was speaking;
 - the exact values of `OPENAI_API_KEY`, `RKAT_OPENAI_API_KEY` and
   `BUILDBUDDY_API_KEY` when set.
 

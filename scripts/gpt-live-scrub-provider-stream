@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import base64
 import json
+import math
+import struct
 import os
 import re
 import sys
@@ -69,8 +71,15 @@ FORBIDDEN = [
 # reflected uplink, `session.output_audio.delta` model speech). Replay needs
 # their decoded length (timing and latency are derived from it), never the
 # voice: scrub replaces each with `<silence-bytes:N>` (N decoded bytes), which
-# the replay server expands to N zero bytes; check rejects any other value.
+# the replay server expands to N zero bytes. A reflected input frame
+# (`session.input_audio.append`) carrying speech energy keeps one bit of it:
+# `<speech-bytes:N>`, which the replay server expands to N bytes of a fixed
+# tone. The broker ends the user's floor on reflected-input silence, so the
+# speech/silence bit (never the voice) is part of what a replay must
+# reproduce. Check rejects any other value.
 AUDIO_FIELDS = ("audio", "delta")
+# meerkat_openai::public_live::USER_FLOOR_SPEECH_DBFS: the same floor.
+SPEECH_DBFS = -50.0
 
 ENV_SECRETS = ("OPENAI_API_KEY", "RKAT_OPENAI_API_KEY", "BUILDBUDDY_API_KEY")
 
@@ -113,24 +122,36 @@ def audio_field(frame: Any) -> str | None:
     return None
 
 
-SILENCE = re.compile(r"<silence-bytes:[0-9]+>")
+PLACEHOLDER = re.compile(r"<(silence|speech)-bytes:[0-9]+>")
 
 
-def silence(payload: str) -> str:
-    if SILENCE.fullmatch(payload):
+def frame_dbfs(data: bytes) -> float:
+    samples = len(data) // 2
+    if samples == 0:
+        return float("-inf")
+    total = sum(v * v for (v,) in struct.iter_unpack("<h", data[: samples * 2]))
+    rms = math.sqrt(total / samples)
+    return 20 * math.log10(rms / 32768) if rms > 0 else float("-inf")
+
+
+def placeholder(payload: str, keep_speech_bit: bool) -> str:
+    """The content-free stand-in for one audio payload."""
+    if PLACEHOLDER.fullmatch(payload):
         return payload
     try:
-        size = len(base64.b64decode(payload, validate=True))
+        data = base64.b64decode(payload, validate=True)
     except ValueError:
-        size = len(payload) * 3 // 4
-    return f"<silence-bytes:{size}>"
+        return f"<silence-bytes:{len(payload) * 3 // 4}>"
+    kind = "speech" if keep_speech_bit and frame_dbfs(data) >= SPEECH_DBFS else "silence"
+    return f"<{kind}-bytes:{len(data)}>"
 
 
 def zero_fill_audio(line: Any) -> Any:
     frame = line.get("entry", {}).get("raw") if isinstance(line, dict) else None
     field = audio_field(frame)
     if field:
-        frame[field] = silence(frame[field])
+        reflected_input = frame.get("type") == "session.input_audio.append"
+        frame[field] = placeholder(frame[field], reflected_input)
     return line
 
 
@@ -141,8 +162,13 @@ def audio_findings(raw: str) -> list[str]:
         return ["not-json"]
     frame = line.get("entry", {}).get("raw") if isinstance(line, dict) else None
     field = audio_field(frame)
-    if field and frame[field] != silence(frame[field]):
+    if not field:
+        return []
+    match = PLACEHOLDER.fullmatch(frame[field])
+    if not match:
         return ["voice-audio"]
+    if match.group(1) == "speech" and frame.get("type") != "session.input_audio.append":
+        return ["speech-bit-outside-reflected-input"]
     return []
 
 

@@ -10221,10 +10221,20 @@ impl MeerkatMachine {
         }
     }
 
+    /// Whether both handles are the same live runtime owner: clones share
+    /// every machine-owned session fact, live session map and control plane.
+    /// A separately constructed machine is a different owner even over the
+    /// same runtime store.
+    #[must_use]
+    pub fn is_same_runtime_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
     /// Whether this adapter shares the same runtime persistence authority as
     /// another adapter. Runtime-backed composition surfaces use this to reject
     /// mismatched adapters before visible terminal events can outrun the store
-    /// that owns their durable commit.
+    /// that owns their durable commit. Two distinct owners can share a store;
+    /// use [`Self::is_same_runtime_owner`] to decide ownership.
     #[must_use]
     pub fn shares_runtime_persistence_with(&self, other: &Self) -> bool {
         match (&self.store, &other.store) {

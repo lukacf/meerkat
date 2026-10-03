@@ -1145,6 +1145,15 @@ pub enum MobError {
         kind: FlowStepDispatchRejectKind,
     },
 
+    /// An explicit runtime adapter is a different live runtime owner than
+    /// the session service's, even if both use the same runtime store. One
+    /// owner of record holds a mob's sessions, so the build is refused before
+    /// anything is provisioned (#1550).
+    #[error(
+        "explicit mob runtime adapter is a different runtime owner than the session service's runtime owner"
+    )]
+    RuntimeOwnerConflict,
+
     /// An internal error (unexpected state, logic errors).
     #[error("internal error: {0}")]
     Internal(String),

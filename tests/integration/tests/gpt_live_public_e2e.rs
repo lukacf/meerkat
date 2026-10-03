@@ -3695,10 +3695,6 @@ const PLAYOUT_BOUND_MS: u64 = 700;
 /// threshold the derivation used: silent frames measured 0-10, speech
 /// frames 200-3000.
 const VOICED_FRAME_RMS: f64 = 300.0;
-/// Bound on the spread of the sideband-minus-browser clock offsets over the
-/// commentary.appended events both clocks saw (measured 1-31 ms). A larger
-/// spread means the events were mispaired, so no segment can be trusted.
-const SIDEBAND_CLOCK_SPREAD_BOUND_MS: i64 = 100;
 
 /// One barge-in yield split at the points we can observe, on the browser
 /// clock. `turn_taking_ms` (onset to the provider's last voiced output frame
@@ -3777,41 +3773,58 @@ fn sideband_server_frames<'a>(
     })
 }
 
-/// Sideband elapsed_ms minus browser t_ms, from the commentary.appended
-/// events both saw (paired in order; the provider sends each on both
-/// channels). The median offset; an unpaired or widely spread set is an
-/// error, never a guess.
+/// The sideband clock against the browser peer's clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClockAlignment {
+    /// Sideband elapsed_ms minus browser t_ms (median over the pairs).
+    offset_ms: i64,
+    /// Max minus min offset over the pairs: transport jitter of either
+    /// channel (a sideband frame is stamped when meerkat's observation loop
+    /// takes it), journaled, not judged.
+    spread_ms: i64,
+    pairs: usize,
+}
+
+/// Align the sideband with the browser clock through the commentary.appended
+/// events both saw: the provider sends each on both channels, in the same
+/// order. The k-th on one is the k-th on the other only when both saw the
+/// same number, so unequal counts are an error, never a guess; the median
+/// offset is robust to one late stamp.
+fn sideband_clock_alignment(
+    timeline: &[TimelineEntry],
+    lines: &[provider_recording::Line],
+    channel: u32,
+) -> Result<ClockAlignment, String> {
+    let browser: Vec<i64> = timeline
+        .iter()
+        .filter(|e| e.kind == TimelineKind::CommentaryAppended)
+        .map(|e| e.t_ms as i64)
+        .collect();
+    let sideband: Vec<i64> = sideband_server_frames(lines, channel, "session.commentary.appended")
+        .map(|(elapsed_ms, _)| elapsed_ms as i64)
+        .collect();
+    if browser.is_empty() || browser.len() != sideband.len() {
+        return Err(format!(
+            "cannot pair commentary.appended events to align the clocks: the browser saw {} and the sideband {}",
+            browser.len(),
+            sideband.len()
+        ));
+    }
+    let mut offsets: Vec<i64> = sideband.iter().zip(&browser).map(|(s, b)| s - b).collect();
+    offsets.sort_unstable();
+    Ok(ClockAlignment {
+        offset_ms: offsets[offsets.len() / 2],
+        spread_ms: offsets[offsets.len() - 1] - offsets[0],
+        pairs: offsets.len(),
+    })
+}
+
 fn sideband_clock_offset(
     timeline: &[TimelineEntry],
     lines: &[provider_recording::Line],
     channel: u32,
 ) -> Result<i64, String> {
-    let browser: Vec<u64> = timeline
-        .iter()
-        .filter(|e| e.kind == TimelineKind::CommentaryAppended)
-        .map(|e| e.t_ms)
-        .collect();
-    let mut offsets: Vec<i64> =
-        sideband_server_frames(lines, channel, "session.commentary.appended")
-            .map(|(elapsed_ms, _)| elapsed_ms as i64)
-            .zip(browser.iter().map(|t| *t as i64))
-            .map(|(sideband, browser)| sideband - browser)
-            .collect();
-    if offsets.is_empty() {
-        return Err(
-            "no commentary.appended event on both the sideband and the browser timeline to align their clocks"
-                .to_owned(),
-        );
-    }
-    offsets.sort_unstable();
-    let spread = offsets[offsets.len() - 1] - offsets[0];
-    if spread > SIDEBAND_CLOCK_SPREAD_BOUND_MS {
-        return Err(format!(
-            "sideband/browser clock offsets spread {spread} ms over {} commentary.appended pairs (bound {SIDEBAND_CLOCK_SPREAD_BOUND_MS} ms): the pairs do not match",
-            offsets.len()
-        ));
-    }
-    Ok(offsets[offsets.len() / 2])
+    sideband_clock_alignment(timeline, lines, channel).map(|alignment| alignment.offset_ms)
 }
 
 /// RMS of one base64 PCM16 little-endian provider audio payload.
@@ -4207,9 +4220,20 @@ async fn readout_contract(
     }
     let offset = if deliveries.iter().any(|d| d.channel == channel) {
         let timeline = live.peer.timeline().await?;
-        sideband_clock_offset(&timeline, &lines, channel).map_err(|reason| {
+        let alignment = sideband_clock_alignment(&timeline, &lines, channel).map_err(|reason| {
             format!("{scenario}: readout rule cannot order deliveries: {reason}")
-        })?
+        })?;
+        record_metric(
+            evidence,
+            channel,
+            scenario,
+            "sideband_clock",
+            format!(
+                "pairs={} offset_ms={} spread_ms={}",
+                alignment.pairs, alignment.offset_ms, alignment.spread_ms
+            ),
+        )?;
+        alignment.offset_ms
     } else {
         0
     };
@@ -10531,18 +10555,50 @@ mod config_tests {
         lines.retain(|line| !matches!(&line.entry, super::provider_recording::Entry::ServerFrame { raw } if raw["type"] == "session.input_audio.append"));
         assert!(super::yield_segments(&entries, &lines, 1, 7).is_err());
         let (entries, mut lines) = yield_fixture(10_750, 11_200);
-        // A second commentary pair 400 ms off the first: mispaired clocks.
+        // The sideband saw a commentary.appended the browser did not: the
+        // pairs cannot be matched, so nothing is measured.
         lines.push(server_frame(
             7,
             2900,
             serde_json::json!({"type": "session.commentary.appended"}),
         ));
-        let mut entries = entries;
+        assert!(super::yield_segments(&entries, &lines, 1, 7).is_err());
+        // One late sideband stamp (a 127 ms outlier, soak 35728bf0 S100 run
+        // 3) leaves the median offset, so the yield is still measured.
+        let (mut entries, mut lines) = yield_fixture(10_750, 11_200);
         entries.insert(
             1,
             timeline(&[(2000, "commentary_appended", serde_json::json!({}))]).remove(0),
         );
-        assert!(super::yield_segments(&entries, &lines, 1, 7).is_err());
+        lines.insert(
+            1,
+            server_frame(
+                7,
+                2627,
+                serde_json::json!({"type": "session.commentary.appended"}),
+            ),
+        );
+        entries.insert(
+            2,
+            timeline(&[(3000, "commentary_appended", serde_json::json!({}))]).remove(0),
+        );
+        lines.insert(
+            2,
+            server_frame(
+                8,
+                3500,
+                serde_json::json!({"type": "session.commentary.appended"}),
+            ),
+        );
+        let alignment = super::sideband_clock_alignment(&entries, &lines, 1).unwrap();
+        assert_eq!(
+            (alignment.offset_ms, alignment.spread_ms, alignment.pairs),
+            (500, 127, 3)
+        );
+        assert!(matches!(
+            super::yield_segments(&entries, &lines, 1, 7),
+            Ok(super::YieldObservation::Yield(_))
+        ));
         let quiet = timeline(&[
             (1000, "commentary_appended", serde_json::json!({})),
             (

@@ -2077,6 +2077,9 @@ struct MockSessionService {
     create_session_in_flight: AtomicU64,
     create_session_max_in_flight: AtomicU64,
     create_session_gates: RwLock<HashMap<SessionId, Arc<TestRuntimeControlBarrier>>>,
+    /// Parks the supervisor-publish trust install on the next created
+    /// session's comms runtime (see `park_next_session_supervisor_publish`).
+    next_session_supervisor_publish_gate: std::sync::Mutex<Option<Arc<TestRuntimeControlBarrier>>>,
     archive_delay_ms: AtomicU64,
     start_turn_delay_ms: AtomicU64,
     /// Typed turn hold: while set, every non-host `start_turn` parks until
@@ -2258,6 +2261,7 @@ impl MockSessionService {
             create_session_in_flight: AtomicU64::new(0),
             create_session_max_in_flight: AtomicU64::new(0),
             create_session_gates: RwLock::new(HashMap::new()),
+            next_session_supervisor_publish_gate: std::sync::Mutex::new(None),
             archive_delay_ms: AtomicU64::new(0),
             start_turn_delay_ms: AtomicU64::new(0),
             hold_start_turns: AtomicBool::new(false),
@@ -2904,6 +2908,18 @@ impl MockSessionService {
             .store(delay_ms, Ordering::Relaxed);
     }
 
+    /// Park the supervisor private-trust publish on the next session this
+    /// service creates (the spawn's `finalize_spawn_admit` trust stage), and
+    /// only that install: other trust traffic on the runtime proceeds.
+    fn park_next_session_supervisor_publish(&self) -> Arc<TestRuntimeControlBarrier> {
+        let gate = Arc::new(TestRuntimeControlBarrier::new());
+        *self
+            .next_session_supervisor_publish_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
+        gate
+    }
+
     async fn park_session_creation(&self, session_id: SessionId) -> Arc<TestRuntimeControlBarrier> {
         let gate = Arc::new(TestRuntimeControlBarrier::new());
         self.create_session_gates
@@ -3508,6 +3524,17 @@ impl MockSessionService {
         comms.default_name.clone_from(&comms_name);
         comms.default_address = format!("inproc://{comms_name}");
         let comms = Arc::new(comms);
+        if let Some(gate) = self
+            .next_session_supervisor_publish_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            comms.park_trust_mutations_from(
+                gate,
+                [meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish],
+            );
+        }
         let transient_turn_context_state = meerkat_core::TransientTurnContextStateHandle::new();
         let local_actor_witness_slot = meerkat_session::LiveSessionActorWitnessSlot::default();
         let actor_witness_slot = actor_witness_slot.unwrap_or(&local_actor_witness_slot);
@@ -21450,6 +21477,83 @@ async fn test_rotate_supervisor_final_commit_failure_preserves_attempted_authori
         .expect("retried authority");
     assert!(retried.pending_rotation.is_none());
     assert_eq!(retried.public_peer_id, attempted_public_peer_id);
+}
+
+/// Regression (OB3): the mob actor serves other commands while one spawn's
+/// supervisor private-trust install is parked. OB3 saw a mob-phase query and
+/// five spawns go unserved for 70 s behind one `finalize_spawn_admit` whose
+/// trust stage awaited a slow member runtime on the actor. The install now
+/// runs off the actor with the spawn's endpoint observation; finalize
+/// consumes its outcome.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parked_spawn_supervisor_trust_install_does_not_freeze_the_actor() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let gate = service.park_next_session_supervisor_publish();
+    let parked = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .spawn(
+                    ProfileName::from("worker"),
+                    AgentIdentity::from("trust-parked-worker"),
+                    None,
+                )
+                .await
+        }
+    });
+    let entered = tokio::time::timeout(Duration::from_secs(10), async {
+        while gate.boundary_calls.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        entered.is_ok(),
+        "the spawn's supervisor trust install parks"
+    );
+
+    // The actor answers a phase query and admits another spawn meanwhile.
+    let phase = tokio::time::timeout(Duration::from_secs(10), handle.status())
+        .await
+        .expect("a phase query must not wait behind a parked spawn admit")
+        .expect("phase");
+    assert_eq!(phase, MobState::Running);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        handle.spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("trust-free-worker"),
+            None,
+        ),
+    )
+    .await
+    .expect("another spawn must not wait behind a parked spawn admit")
+    .expect("spawn the second worker");
+    assert!(
+        !parked.is_finished(),
+        "the first spawn is still parked in its trust install"
+    );
+
+    gate.release_all();
+    tokio::time::timeout(Duration::from_secs(10), parked)
+        .await
+        .expect("the parked spawn completes once released")
+        .expect("spawn task")
+        .expect("spawn the parked worker");
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from("trust-parked-worker"))
+            .await
+            .unwrap()
+            .is_some(),
+        "the parked worker is seated after release"
+    );
 }
 
 #[tokio::test]

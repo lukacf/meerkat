@@ -613,6 +613,10 @@ pub const LIVE_STARTUP_VERBATIM_ITEMS_MAX: usize = 4;
 pub const LIVE_STARTUP_INPUT_TOKEN_BUDGET: usize = 8192;
 const LIVE_STARTUP_INPUT_BYTES_PER_TOKEN: usize = 3;
 
+/// Startup notice of a summary-pending seed that carries the newest turns
+/// verbatim ([`PublicLiveOpenConfig::with_pending_context_after_recent`]).
+const LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE: &str = "Voice-channel context availability (factual state, not a new user request):\nThe most recent conversation turns are in the session input: you know them, so answer questions about them directly. Only the earlier history is still pending: its summary is being prepared and is not yet available.";
+
 /// What the startup input budget dropped to fit the provider limits. Recent
 /// turns are dropped oldest first; the summary is never dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -884,9 +888,13 @@ impl PublicLiveContextSeed {
                 "Voice-channel context availability (factual state, not a new user request):\nHistorical session context is being prepared and is not yet available."
                     .to_string(),
             ),
+            // The recent turns are startup input the model has: say so, so a
+            // pending summary is not read as "no history at all". Saying only
+            // that history "is not yet available" made gpt-live-1 answer
+            // "I don't know that yet" about a fact in those very turns (S99
+            // positive control, BuildBuddy 045430ec).
             Self::HistoricalContextPending { .. } => Some(
-                "Voice-channel context availability (factual state, not a new user request):\nThe most recent conversation turns are in the session input. A summary of the earlier history is being prepared and is not yet available."
-                    .to_string(),
+                LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE.to_string(),
             ),
         }
     }
@@ -3741,7 +3749,7 @@ mod tests {
             encoded["instructions"]
                 .as_str()
                 .unwrap()
-                .contains("A summary of the earlier history is being prepared")
+                .contains("its summary is being prepared and is not yet available")
         );
         // No recent turns: the original pending notice and no input.
         let empty = PublicLiveOpenConfig::new("v=0", "marin")
@@ -3749,6 +3757,37 @@ mod tests {
             .with_pending_context_after_recent(&[]);
         let encoded = serde_json::to_value(factory.session_config(&empty)).unwrap();
         assert!(encoded.get("input").is_none());
+    }
+
+    /// A summary-pending seed with recent turns tells the model those turns
+    /// are known and only the earlier history is pending, so a question about
+    /// the seeded turns is answered directly (S99 positive control).
+    #[test]
+    fn pending_context_after_recent_says_the_recent_turns_are_known() {
+        use meerkat_core::types::UserMessage;
+        let factory = PublicLiveBrokerFactory::try_from_target(realtime_target(
+            "gpt-live-1",
+            OpenAiBackendKind::OpenAiApi,
+        ))
+        .unwrap();
+        let config = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_instructions("Catalog behavior.")
+            .with_pending_context_after_recent(&[Message::User(UserMessage::text(
+                "today I parked on level nine",
+            ))]);
+        let encoded = serde_json::to_value(factory.session_config(&config)).unwrap();
+        assert_eq!(
+            encoded["instructions"],
+            format!("Catalog behavior.\n\n{LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE}")
+        );
+        let notice = LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE;
+        assert!(notice.contains("you know them, so answer questions about them directly"));
+        assert!(notice.contains("Only the earlier history is still pending"));
+        assert_eq!(
+            encoded["input"][0]["content"][0]["text"],
+            "today I parked on level nine"
+        );
     }
 
     #[test]

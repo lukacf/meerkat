@@ -2000,6 +2000,12 @@ them.
     released, and a fact inside the window is recalled at once as a positive
     control. The phrase used to sit inside the seed, so the old "unknown
     before release" probe only passed while the model ignored history it had.
+  - A failed scenario (an error or a panic) closes its live channel through
+    the exact close before teardown, so the provider's `session.closed`
+    drains the sideband and the provider stream records every frame sent
+    before the failure. Before, the teardown aborted the server and could lose
+    frames the browser had already acted on (a delegation the sideband had
+    not yet read).
 - Model calls and shell rounds are attributable in debug logs. The agent loop
   logs each model call's session, turn, attempt, elapsed time and outcome
   ("model call settled"); shell tool calls log their tool call id at start and

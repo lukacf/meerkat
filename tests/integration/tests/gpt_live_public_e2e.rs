@@ -19,7 +19,9 @@
 #[path = "support/gpt_live_e2e.rs"]
 mod support;
 
+use futures::FutureExt;
 use std::collections::BTreeMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -712,6 +714,35 @@ impl PublicLiveHarness {
         .await
         .map_err(|_| "S98 playback completion exceeded its 45-second observation bound")??;
         Ok(())
+    }
+
+    /// After a failed scenario body: close the active channel through the
+    /// product's exact close, which ends only at the provider's
+    /// `session.closed`, so the sideband drains and every server frame the
+    /// provider sent before the failure is in `provider-stream.jsonl`.
+    /// Combined5 S99 b R5: the browser saw a delegation the sideband had not
+    /// yet read, the failure aborted the server, and the stream ended at
+    /// `session.started`. Evidence only: the outcome is printed, never
+    /// asserted, and the journal keeps the failing stage.
+    async fn close_after_failure(&mut self) {
+        let Ok((shared, exact)) = self.shared() else {
+            return;
+        };
+        let outcome = timeout(
+            Duration::from_secs(5),
+            shared.member_host.close_experimental_live_active_channel(
+                shared.authority.as_ref(),
+                &exact.id,
+                &exact.activation_receipt,
+            ),
+        )
+        .await;
+        let outcome = match outcome {
+            Ok(Ok(status)) => format!("{status:?}"),
+            Ok(Err(error)) => format!("error: {error}"),
+            Err(_) => "exceeded the 5000 ms harness ceiling".to_owned(),
+        };
+        println!("GPT_LIVE_FAILURE_CLOSE outcome={outcome}");
     }
 
     async fn close_exact(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -2314,6 +2345,25 @@ impl Drop for SummaryJobGuard {
     }
 }
 
+/// A scenario body's outcome, with a panic caught so that the failure close
+/// runs before the panic resumes. See [`PublicLiveHarness::close_after_failure`].
+async fn settle_scenario_body<T>(
+    live: &mut PublicLiveHarness,
+    outcome: std::thread::Result<Result<T, Box<dyn std::error::Error>>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    match outcome {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => {
+            live.close_after_failure().await;
+            Err(error)
+        }
+        Err(panic) => {
+            live.close_after_failure().await;
+            std::panic::resume_unwind(panic)
+        }
+    }
+}
+
 struct AbortScenarioServer(tokio::task::AbortHandle);
 
 impl Drop for AbortScenarioServer {
@@ -2928,7 +2978,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // Declared after the owner: cancellation/panic flushes this guard before
     // the browser, runtime, or scenario TempDir can be dropped.
     let _failure_guard = evidence::FailureGuard(evidence.clone());
-    let result = async {
+    let result = AssertUnwindSafe(async {
     evidence.stage(EvidenceStage::Connected)?;
     let first_capture = next_summary_capture(&mut captured).await?;
     assert_eq!(first_capture.session_id, live.session_id);
@@ -3173,7 +3223,10 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
         elapsed.as_millis()
     );
     Ok::<(), Box<dyn std::error::Error>>(())
-    }.await;
+    })
+    .catch_unwind()
+    .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -5855,7 +5908,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
     let mut seen_executor_turns = std::collections::BTreeSet::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
         let history = live
@@ -6437,8 +6490,10 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -6891,7 +6946,7 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
     let mut seen_executor_turns = std::collections::BTreeSet::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
 
@@ -7039,8 +7094,10 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -7211,7 +7268,7 @@ async fn run_s103_interrupt_and_recover(
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
     let mut seen_executor_turns = std::collections::BTreeSet::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
 
@@ -7545,8 +7602,10 @@ async fn run_s103_interrupt_and_recover(
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -7656,7 +7715,7 @@ async fn run_s107_stuck_close_convergence(
     let channel = evidence.current_channel()?;
     let mut deterministic_failures: Vec<String> = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
 
@@ -7872,8 +7931,10 @@ async fn run_s107_stuck_close_convergence(
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -8025,7 +8086,7 @@ async fn run_s104_handoff_voice_typed_voice(
     let channel = evidence.current_channel()?;
     let mut deterministic_failures: Vec<String> = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
 
@@ -8438,8 +8499,10 @@ async fn run_s104_handoff_voice_typed_voice(
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -8742,7 +8805,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
     let mut user_text = vec![normalize_words(&s106_seed_prompt())];
     let mut delegation_windows: Vec<(String, usize)> = Vec::new();
     let mut stage_ms: Vec<(String, u128)> = vec![("connected".to_owned(), connected_ms)];
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
         if silence_hold_greeting(&mut live, &evidence, channel, "S106", S106_REOPEN_HOLD_MS).await? {
@@ -9055,8 +9118,10 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -9161,7 +9226,7 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
     let mut deterministic_failures: Vec<String> = Vec::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
 
         // Job 1, then the quick question and job 2 anchored on job 1's
@@ -9460,8 +9525,10 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -9613,7 +9680,7 @@ async fn run_s105_fork_and_merge_parallel(
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
     let mut deterministic_failures: Vec<String> = Vec::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
 
         // A, then B 4 s after A's delegation.
@@ -9891,8 +9958,10 @@ async fn run_s105_fork_and_merge_parallel(
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;

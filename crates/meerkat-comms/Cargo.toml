@@ -40,9 +40,9 @@ thiserror = { workspace = true }
 
 # Utilities
 uuid = { workspace = true, features = ["v4"] }
-base64 = "0.22"
+base64 = "0.23"
 sha2 = { workspace = true }
-rand_core = { version = "0.6", features = ["getrandom"] }
+rand_core = { version = "0.10", features = ["getrandom"] }
 parking_lot = "0.12"
 tracing = { workspace = true }
 
@@ -54,8 +54,8 @@ bytes = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }
-getrandom = { version = "0.3", features = ["wasm_js"] }
-getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.4", features = ["js"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros", "time", "test-util"] }

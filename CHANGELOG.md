@@ -1222,6 +1222,16 @@ them.
   before dispatch and the result merges into the source member, as an
   interrupted-by-close result does. Every outcome of a release attempt is
   typed and handled, so a result can no longer end a release silently.
+- A refused live delegation result release no longer retries in a hot loop.
+  The release waits for the session machine's commit signal, which advanced
+  after every applied transition, including observations that change no
+  state. The delivery authorization applies such an observation on each
+  attempt, so a refused attempt woke its own retry (Turbo S S99: 405 refused
+  attempts in 350 ms). The commit signal now advances only when a transition
+  changes the machine state. The live delegation channel loop also logs why
+  it ended (cancelled, stream ended, stream failed, or binding mismatch);
+  before, it could end and close the channel without a trace.
+
 - GPT Live no longer primes the voice model to delegate questions about the
   conversation itself (Turbo S S99: after the summary release, a run
   delegated "now tell me my historical vault phrase" instead of answering it

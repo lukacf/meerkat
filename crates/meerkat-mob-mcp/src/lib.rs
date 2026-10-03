@@ -6959,6 +6959,7 @@ mod tests {
                         "mob-mcp-local-comms-test",
                     ),
                     runtime_epoch_id: None,
+                    initial_run_start_holds: std::collections::BTreeSet::new(),
                 },
             )
             .expect("RegisterSession input");

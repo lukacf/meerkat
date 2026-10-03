@@ -31828,7 +31828,7 @@ control_mob_ShutdownRunning ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownRunning"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownRunning"], [machine |-> "control_mob", variant |-> "HoldMemberRunStarts", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ShutdownRunning", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Stopped"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
@@ -31850,7 +31850,7 @@ control_mob_ShutdownStopped ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownStopped"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownStopped"], [machine |-> "control_mob", variant |-> "HoldMemberRunStarts", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownStopped"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ShutdownStopped", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Stopped"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
@@ -31872,7 +31872,7 @@ control_mob_ShutdownCompleted ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownCompleted"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownCompleted"], [machine |-> "control_mob", variant |-> "HoldMemberRunStarts", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownCompleted"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ShutdownCompleted", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Completed"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
@@ -67574,7 +67574,7 @@ layer_mob_ShutdownRunning ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownRunning"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownRunning"], [machine |-> "layer_mob", variant |-> "HoldMemberRunStarts", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ShutdownRunning", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Stopped"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
@@ -67596,7 +67596,7 @@ layer_mob_ShutdownStopped ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownStopped"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownStopped"], [machine |-> "layer_mob", variant |-> "HoldMemberRunStarts", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownStopped"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ShutdownStopped", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Stopped"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
@@ -67618,7 +67618,7 @@ layer_mob_ShutdownCompleted ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownCompleted"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownCompleted"], [machine |-> "layer_mob", variant |-> "HoldMemberRunStarts", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownCompleted"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ShutdownCompleted", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Completed"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1

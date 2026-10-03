@@ -1401,6 +1401,17 @@ pub(super) fn classify_stop_member_cancel(
     }
 }
 
+/// What a member stop does to the run its run-start hold found current.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemberRunCancel {
+    /// Leave it running (a turn-driven member under Stop).
+    Leave,
+    /// Cancel it at its next boundary (Stop).
+    AtBoundary,
+    /// Cancel it immediately (Shutdown).
+    Now,
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait MobProvisioner: Send + Sync {
@@ -1557,6 +1568,26 @@ pub trait MobProvisioner: Send + Sync {
             },
         })
     }
+    /// [`Self::stop_member_runtime`] for a mob Shutdown: hold the member's run
+    /// starts and cancel the run the hold found current immediately, not at
+    /// its next boundary. Shutdown means stop now; Stop keeps the boundary
+    /// cancel so the member can resume its work.
+    ///
+    /// The default has no immediate cancel and cancels as Stop does.
+    async fn stop_member_runtime_now(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+    ) -> Result<super::stop_report::MemberStopOutcome, MobError> {
+        self.stop_member_runtime(member_ref, expected_member, true)
+            .await
+    }
+
+    /// Drop every run-start release owed to a remote member (mob Shutdown):
+    /// a Stopped mob owes none. Local bookkeeping only; the default owes
+    /// nothing.
+    fn clear_owed_run_start_releases(&self) {}
+
     /// Release a hold taken by [`Self::stop_member_runtime`] (Resume).
     async fn release_member_run_starts(
         &self,
@@ -3813,6 +3844,12 @@ impl MemberSessionDisposalArc {
         // cancellation; one still queued afterwards fails closed instead of
         // being retried in a loop.
         let mut cancelled_queued_inputs = std::collections::HashSet::new();
+        // A boundary cancel whose acknowledgement wait expired (its exact run's
+        // control path was not deliverable). Its later settlement while the
+        // same run is still current is the signal that the control path is
+        // deliverable again: the exact-run cancel is then re-issued, so one
+        // owned retirement never depends on its first cancel converging.
+        let mut pending_cancel_result = None;
 
         loop {
             tracing::info!(
@@ -3882,6 +3919,7 @@ impl MemberSessionDisposalArc {
                 // fenced, but its result cannot authorize control of the
                 // newly observed run. Drop only our observer.
                 pending_hard_cancel_result = None;
+                pending_cancel_result = None;
                 escalate_at = Instant::now() + MEMBER_RETIRE_COOPERATIVE_GRACE;
             }
 
@@ -3921,6 +3959,21 @@ impl MemberSessionDisposalArc {
                 }
             }
 
+            if let Some(pending) = pending_cancel_result.as_mut() {
+                let pending: &mut oneshot::Receiver<_> = pending;
+                if !matches!(
+                    pending.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                ) {
+                    tracing::info!(
+                        session_id = %session_id,
+                        run_id = %active_run_id,
+                        "blocked boundary cancel settled while its run is still current; re-issuing the exact-run cancel"
+                    );
+                    pending_cancel_result = None;
+                    cancel_requested_for = None;
+                }
+            }
             if cancel_requested_for.as_ref() != Some(&active_run_id) {
                 tracing::info!(
                     session_id = %session_id,
@@ -3933,14 +3986,14 @@ impl MemberSessionDisposalArc {
                 let task_adapter = Arc::clone(adapter);
                 let task_session_id = session_id.clone();
                 let task_run_id = active_run_id.clone();
-                let (cancel_result_tx, cancel_result_rx) = oneshot::channel();
+                let (cancel_result_tx, mut cancel_result_rx) = oneshot::channel();
                 cleanup_spawner.spawn_detached(async move {
                     let result = task_adapter
                         .cancel_after_boundary_run_if_current(&task_session_id, &task_run_id)
                         .await;
                     let _ = cancel_result_tx.send(result);
                 });
-                match tokio::time::timeout(callback_wait, cancel_result_rx).await {
+                match tokio::time::timeout(callback_wait, &mut cancel_result_rx).await {
                     Ok(Ok(Ok(_))) => {}
                     Ok(Ok(Err(error))) => {
                         let still_exact = adapter
@@ -3982,6 +4035,7 @@ impl MemberSessionDisposalArc {
                             run_id = %active_run_id,
                             "cooperative retire cancellation callback exceeded grace; exact task retained while escalation proceeds"
                         );
+                        pending_cancel_result = Some(cancel_result_rx);
                     }
                 }
                 cancel_requested_for = Some(active_run_id.clone());
@@ -4593,6 +4647,83 @@ fn member_runtime_detachment(
 
 #[cfg(feature = "runtime-adapter")]
 impl SessionBackend {
+    /// Hold the member's run starts (#1500) and treat the run the hold found
+    /// current as `cancel` says.
+    async fn stop_member_runtime_with(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+        cancel: MemberRunCancel,
+    ) -> Result<super::stop_report::MemberStopOutcome, MobError> {
+        use super::stop_report::{MemberRunStarts, MemberStopOutcome, MemberStopRun};
+        let session_id = Self::require_session(member_ref, "stop")?;
+        let Some(adapter) = &self.runtime_adapter else {
+            // No runtime authority to hold: interrupt as before, and say so.
+            if cancel != MemberRunCancel::Leave {
+                self.interrupt_member(member_ref, expected_member).await?;
+            }
+            return Ok(MemberStopOutcome {
+                run: MemberStopRun::Interrupted,
+                starts: MemberRunStarts::NotHoldable {
+                    reason: super::stop_report::NotHoldableReason::ProvisionerLacksCapability,
+                },
+            });
+        };
+        if !adapter.contains_session(&session_id).await {
+            // An unregistered runtime has no queue and no run.
+            return Ok(MemberStopOutcome {
+                run: MemberStopRun::NoRun,
+                starts: MemberRunStarts::Held,
+            });
+        }
+        let hold = adapter
+            .hold_run_starts(&session_id)
+            .await
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "holding run starts for '{session_id}' failed: {error}"
+                ))
+            })?;
+        let run = match (hold.current_run, cancel) {
+            (None, _) => MemberStopRun::NoRun,
+            (Some(run_id), MemberRunCancel::Leave) => MemberStopRun::LeftRunning { run_id },
+            // Shutdown: the exact-run hard cancel the runtime unregister would
+            // otherwise deliver later. The run still ends through its typed
+            // cancelled terminal.
+            (Some(run_id), MemberRunCancel::Now) => match adapter
+                .hard_cancel_run_if_current(&session_id, &run_id, "mob shutdown")
+                .await
+            {
+                Ok(true) => MemberStopRun::CancelledByShutdown { run_id },
+                Ok(false)
+                | Err(
+                    meerkat_runtime::RuntimeDriverError::StaleAuthority { .. }
+                    | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+                ) => MemberStopRun::RunEndedBeforeCancel { run_id },
+                Err(error) => {
+                    return Err(MobError::Internal(format!(
+                        "cancelling a run of '{session_id}' for shutdown failed: {error}"
+                    )));
+                }
+            },
+            (Some(run_id), MemberRunCancel::AtBoundary) => classify_stop_member_cancel(
+                adapter
+                    .cancel_after_boundary_run_if_current(&session_id, &run_id)
+                    .await,
+                run_id,
+            )
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "cancelling a run of '{session_id}' failed: {error}"
+                ))
+            })?,
+        };
+        Ok(MemberStopOutcome {
+            run,
+            starts: MemberRunStarts::Held,
+        })
+    }
+
     #[cfg(test)]
     pub(super) async fn pending_turn_finalization_boundary_followers(
         &self,
@@ -12616,54 +12747,22 @@ impl MobProvisioner for SessionBackend {
         expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
         cancel_current_run: bool,
     ) -> Result<super::stop_report::MemberStopOutcome, MobError> {
-        use super::stop_report::{MemberRunStarts, MemberStopOutcome, MemberStopRun};
-        let session_id = Self::require_session(member_ref, "stop")?;
-        let Some(adapter) = &self.runtime_adapter else {
-            // No runtime authority to hold: interrupt as before, and say so.
-            if cancel_current_run {
-                self.interrupt_member(member_ref, expected_member).await?;
-            }
-            return Ok(MemberStopOutcome {
-                run: MemberStopRun::Interrupted,
-                starts: MemberRunStarts::NotHoldable {
-                    reason: super::stop_report::NotHoldableReason::ProvisionerLacksCapability,
-                },
-            });
+        let cancel = if cancel_current_run {
+            MemberRunCancel::AtBoundary
+        } else {
+            MemberRunCancel::Leave
         };
-        if !adapter.contains_session(&session_id).await {
-            // An unregistered runtime has no queue and no run.
-            return Ok(MemberStopOutcome {
-                run: MemberStopRun::NoRun,
-                starts: MemberRunStarts::Held,
-            });
-        }
-        let hold = adapter
-            .hold_run_starts(&session_id)
+        self.stop_member_runtime_with(member_ref, expected_member, cancel)
             .await
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "holding run starts for '{session_id}' failed: {error}"
-                ))
-            })?;
-        let run = match hold.current_run {
-            None => MemberStopRun::NoRun,
-            Some(run_id) if !cancel_current_run => MemberStopRun::LeftRunning { run_id },
-            Some(run_id) => classify_stop_member_cancel(
-                adapter
-                    .cancel_after_boundary_run_if_current(&session_id, &run_id)
-                    .await,
-                run_id,
-            )
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "cancelling a run of '{session_id}' failed: {error}"
-                ))
-            })?,
-        };
-        Ok(MemberStopOutcome {
-            run,
-            starts: MemberRunStarts::Held,
-        })
+    }
+
+    async fn stop_member_runtime_now(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+    ) -> Result<super::stop_report::MemberStopOutcome, MobError> {
+        self.stop_member_runtime_with(member_ref, expected_member, MemberRunCancel::Now)
+            .await
     }
 
     async fn release_member_run_starts(
@@ -16302,6 +16401,32 @@ impl MobProvisioner for MultiBackendProvisioner {
             _ => {
                 self.session
                     .stop_member_runtime(member_ref, expected_member, cancel_current_run)
+                    .await
+            }
+        }
+    }
+
+    fn clear_owed_run_start_releases(&self) {
+        self.supervisor_bridge.clear_run_start_releases_pending();
+    }
+
+    async fn stop_member_runtime_now(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+    ) -> Result<super::stop_report::MemberStopOutcome, MobError> {
+        match member_ref {
+            // A remote member is held and cancelled through its host, at the
+            // boundary its host serves.
+            MemberRef::BackendPeer { session_id, .. }
+                if expected_member.is_some() || session_id.is_none() =>
+            {
+                self.stop_member_runtime(member_ref, expected_member, true)
+                    .await
+            }
+            _ => {
+                self.session
+                    .stop_member_runtime_now(member_ref, expected_member)
                     .await
             }
         }

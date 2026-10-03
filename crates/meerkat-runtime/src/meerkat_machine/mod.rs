@@ -1601,6 +1601,12 @@ struct RuntimeSessionEntry {
     /// including several Maps/Sets) so holding a reference to a
     /// `RuntimeSessionEntry` does not bloat async future sizes.
     dsl_authority: Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
+    /// Commit generation of `dsl_authority`. It advances once after every
+    /// transition committed through the session's apply seam
+    /// (`apply_session_dsl_input*`), which carries every live delegation
+    /// result-release guard input. Waiters re-check a refused guarded
+    /// transition on each advance instead of on a timer.
+    dsl_commits: Arc<crate::tokio::sync::watch::Sender<u64>>,
     /// Per-session comms drain lifecycle slot.
     ///
     /// Collapsed from the sibling `MeerkatMachine.comms_drain_slots:
@@ -6811,6 +6817,51 @@ impl MeerkatMachine {
         Self::preview_dsl_input_on_state(&state, input, context)
     }
 
+    /// The run the machine currently records for `session_id`, if any (`None`
+    /// also for a session that is not registered).
+    pub async fn current_run(&self, session_id: &SessionId) -> Option<RunId> {
+        let authority = self.session_dsl_authority(session_id).await.ok()?;
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        dsl_authority::current_run_id_from_authority(&authority)
+    }
+
+    /// Wait until `run_id` is no longer the run the machine records for
+    /// `session_id`.
+    ///
+    /// The runtime records a run's end in the session's machine state; a
+    /// session service reporting its turn inactive precedes that record, so a
+    /// caller that must act only once a run is over (a stopped member about
+    /// to be unregistered or resumed) waits here instead. Typed and event
+    /// driven: the runtime loop that executes the run signals after recording
+    /// its end, and this re-reads machine truth on every signal, subscribing
+    /// before the first read so no signal between read and wait is lost.
+    /// Unbounded: callers bound it with their own deadline.
+    pub async fn wait_run_settled(&self, session_id: &SessionId, run_id: &RunId) {
+        let mut settlements = self.run_settlements.subscribe();
+        while self.current_run(session_id).await.as_ref() == Some(run_id) {
+            if settlements.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Wait until the run current for `session_id` when this is called is no
+    /// longer current, and return its id; `None` when no run was current.
+    /// See [`Self::wait_run_settled`].
+    pub async fn wait_current_run_settled(&self, session_id: &SessionId) -> Option<RunId> {
+        let run_id = self.current_run(session_id).await?;
+        self.wait_run_settled(session_id, &run_id).await;
+        Some(run_id)
+    }
+
+    /// Wake every [`Self::wait_run_settled`] waiter to re-check.
+    pub(crate) fn publish_run_settlement(&self) {
+        self.run_settlements
+            .send_modify(|settlements| *settlements = settlements.wrapping_add(1));
+    }
+
     async fn session_dsl_state(
         &self,
         session_id: &SessionId,
@@ -8823,6 +8874,12 @@ pub struct MeerkatMachineShared {
     /// it for their lifetime; the registry is scoped to this `MeerkatMachine`
     /// instance, so tests / multi-runtime processes get clean isolation.
     session_claims: Arc<crate::handles::RuntimeSessionClaimRegistry>,
+    /// Wake signal for [`MeerkatMachine::wait_run_settled`]. The
+    /// runtime loops of this machine, which execute every run and record its
+    /// end, bump it after each run iteration, each loop iteration and at loop
+    /// exit. It carries no state: waiters re-check the session's DSL
+    /// `current_run_id` after every wake.
+    run_settlements: crate::tokio::sync::watch::Sender<u64>,
     /// One-shot deterministic fault for the materializer's executor-attach
     /// publication window. Test-support only; production builds compile the
     /// post-ensure hook to a no-op and carry no field.
@@ -9232,6 +9289,17 @@ impl MeerkatMachine {
             };
         }
         slot.lock_owned().await
+    }
+
+    /// Hold `session_id`'s registration transaction until the guard drops, so
+    /// a test can stand a session's unregister admission behind it.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn hold_session_registration_transaction_for_test(
+        &self,
+        session_id: &SessionId,
+    ) -> crate::tokio::sync::OwnedMutexGuard<()> {
+        self.lock_session_registration_transaction(session_id).await
     }
 
     #[cfg(test)]
@@ -10390,6 +10458,7 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_unbound_rejection_authority: live_unbound_rejection_authority(),
                 session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
+                run_settlements: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(feature = "test-support")]
                 test_stop_executor_after_ensure: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "test-support")]
@@ -10492,6 +10561,7 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_unbound_rejection_authority: live_unbound_rejection_authority(),
                 session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
+                run_settlements: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(feature = "test-support")]
                 test_stop_executor_after_ensure: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "test-support")]
@@ -10594,6 +10664,7 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_unbound_rejection_authority: live_unbound_rejection_authority(),
                 session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
+                run_settlements: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(feature = "test-support")]
                 test_stop_executor_after_ensure: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "test-support")]

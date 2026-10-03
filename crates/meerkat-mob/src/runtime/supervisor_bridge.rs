@@ -644,6 +644,16 @@ impl MobSupervisorBridge {
             .remove(peer_id)
     }
 
+    /// Drop every owed run-start release (mob Shutdown, OB3): the mob is
+    /// Stopped, so no remote peer is owed a release any more. Local map
+    /// operation only; no bridge contact.
+    pub(crate) fn clear_run_start_releases_pending(&self) {
+        self.pending_run_start_releases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
     /// Whether `peer_id` supports the run-start hold; `None` when it has not
     /// advertised capabilities to this process.
     pub(crate) fn peer_run_start_hold(&self, peer_id: &str) -> Option<bool> {

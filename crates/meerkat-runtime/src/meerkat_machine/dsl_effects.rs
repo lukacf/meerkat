@@ -481,6 +481,9 @@ impl MeerkatMachine {
             );
             (previous_snapshot, effects)
         };
+        entry
+            .dsl_commits
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
         let signal_dispatcher = entry.composition_signal_dispatcher.clone();
         drop(sessions);
         // Terminal recording currently emits a local-only authority receipt.
@@ -542,6 +545,9 @@ impl MeerkatMachine {
             );
             (previous_snapshot, effects)
         };
+        entry
+            .dsl_commits
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
         let signal_dispatcher = entry.composition_signal_dispatcher.clone();
         drop(sessions);
         if let Err(error) = self
@@ -649,6 +655,9 @@ impl MeerkatMachine {
             );
             (previous_snapshot, effects)
         };
+        entry
+            .dsl_commits
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
         let signal_dispatcher = entry.composition_signal_dispatcher.clone();
         drop(sessions);
         if let Err(error) = self

@@ -181,19 +181,19 @@ async fn failed_release_is_typed_and_retry_converges_at_the_recorded_tuple() {
         .retire(AgentIdentity::from("b2"))
         .await
         .expect_err("a failed release must surface typed — ArchiveSession is critical");
+    // The retirement durably started, so the failed release leaves it owned
+    // and stuck with the generic typed cause (OB3); the exact retry is an
+    // explicit re-drive.
     assert!(
-        matches!(
-            &error,
-            meerkat_mob::MobError::SharedRetirementFailure(shared)
-                if matches!(
-                    shared.as_ref(),
-                    meerkat_mob::MobError::BridgeCommandRejected {
-                        cause: BridgeRejectionCause::Unavailable,
-                        ..
-                    }
-                )
-        ),
-        "generic ReleaseMember Unavailable must not claim retained retirement authority, got {error:?}"
+        matches!(&error, meerkat_mob::MobError::MemberRetirementStuck { .. })
+            && matches!(
+                error.retirement_root_cause(),
+                meerkat_mob::MobError::BridgeCommandRejected {
+                    cause: BridgeRejectionCause::Unavailable,
+                    ..
+                }
+            ),
+        "a generic ReleaseMember Unavailable surfaces as its typed cause, got {error:?}"
     );
     assert_eq!(
         scripted.release_count(),
@@ -209,12 +209,12 @@ async fn failed_release_is_typed_and_retry_converges_at_the_recorded_tuple() {
     );
     let error = controlling
         .handle
-        .retire(AgentIdentity::from("b2"))
+        .redrive_retirement(AgentIdentity::from("b2"))
         .await
         .expect_err("retained exact retirement must surface typed in-progress");
     assert!(
         matches!(
-            &error,
+            error.retirement_root_cause(),
             meerkat_mob::MobError::MemberRetirementInProgress {
                 member_id,
                 stage,
@@ -228,7 +228,7 @@ async fn failed_release_is_typed_and_retry_converges_at_the_recorded_tuple() {
     // (generation, fence, host) facts — SAME tuple on the wire (ADJ-10).
     controlling
         .handle
-        .retire(AgentIdentity::from("b2"))
+        .redrive_retirement(AgentIdentity::from("b2"))
         .await
         .expect("retire retry converges");
     let payloads = scripted.received_release_payloads();

@@ -631,21 +631,47 @@ impl MobActor {
         &mut self,
     ) -> Result<(), MobError> {
         self.member_effect_shutdown = true;
-        // Give live effects a chance to publish their commit before any abort:
-        // an aborted future cannot hand back a resource it already created.
-        loop {
-            self.resolve_queued_member_effects(
-                "actor teardown reached before the effect could start",
-            )
+        self.resolve_queued_member_effects("actor teardown reached before the effect could start")
             .await;
-            let Some(joined) = self.member_effect_tasks.join_next().await else {
-                break;
-            };
+        // Teardown is bounded: an effect that never settles must not hold
+        // the Shutdown. A Shutdown defers until the lane is empty, and it
+        // interrupts in-flight retirement stages cooperatively first, so the
+        // effects still running here were dispatched during teardown itself.
+        // Each is aborted; its custody stays owned (resolved by the orphan
+        // pass) and is reported per member as `EffectCustodyRetained`.
+        self.interrupt_owned_retirements();
+        self.member_effect_tasks.abort_all();
+        while let Some(joined) = self.member_effect_tasks.join_next().await {
             self.reconcile_joined_member_effect(joined).await;
         }
         self.fail_orphaned_member_effects("actor teardown ended without an effect result")
             .await;
+        self.record_retained_member_effect_custody_for_shutdown();
         self.member_effect_custody_barrier()
+    }
+
+    /// Report each member whose effect custody survived teardown.
+    fn record_retained_member_effect_custody_for_shutdown(&mut self) {
+        let retained = self.member_effect_inflight.read(|inflight| {
+            inflight
+                .values()
+                .flat_map(|effect| {
+                    effect.members.iter().map(move |fence| {
+                        let identity = match fence {
+                            MemberFence::Exact(fence) => fence.identity.clone(),
+                            MemberFence::ExpectedAbsent(identity) => identity.clone(),
+                        };
+                        (identity, effect.context)
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        for (identity, context) in retained {
+            self.record_shutdown_outcome(
+                identity,
+                crate::runtime::MemberShutdownOutcome::EffectCustodyRetained { context },
+            );
+        }
     }
 
     /// Resume every retained commit that carries an owned continuation.

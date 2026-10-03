@@ -640,6 +640,16 @@ pub(crate) enum ResumeReadinessFaultForTest {
     TicketExhausted,
 }
 
+/// See [`MobCommand::shutdown_answer_class`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ShutdownAnswerClass {
+    /// Sent by a caller that waits for the reply: refused typed while a
+    /// Shutdown joins its work.
+    CallerRequest,
+    /// The result of work the actor owns: retained for the actor.
+    ActorCompletion,
+}
+
 pub(super) enum MobCommand {
     Spawn {
         spec: Box<super::handle::SpawnMemberSpec>,
@@ -708,6 +718,9 @@ pub(super) enum MobCommand {
     Retire {
         agent_identity: AgentIdentity,
         expected_incarnation: RetireMemberIncarnation,
+        /// Re-drive a stuck retirement instead of answering
+        /// `MemberRetirementStuck` (typed re-drive transition).
+        redrive: bool,
         deadline: meerkat_core::time_compat::Instant,
         admission_tx: tokio::sync::watch::Sender<bool>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
@@ -854,6 +867,13 @@ pub(super) enum MobCommand {
     AutonomousMemberStopsResolved {
         ticket: u64,
         outcomes: Vec<super::actor::AutonomousMemberStopOutcome>,
+    },
+    /// Internal re-entry carrying every session's runtime-unregister outcome
+    /// for a Shutdown parked on its off-actor teardown. `ticket` fences a
+    /// stale resolution.
+    ShutdownTeardownResolved {
+        ticket: u64,
+        outcomes: Vec<(SessionId, super::actor::ShutdownUnregisterOutcome)>,
     },
     ResumeLifecycleMemberObserved {
         work: std::sync::Arc<super::actor::ExplicitResumeMemberWork>,
@@ -1194,6 +1214,26 @@ pub(super) enum MobCommand {
     LifecycleNotificationBurst {
         count: usize,
         message: String,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// Test-only: an actor-owned member-live task that, once a Shutdown is
+    /// admitted, sends this actor a phase query and awaits its reply. The
+    /// answer it observes is forwarded on `observed_tx`.
+    /// Test-only actor completion: records that the actor processed it.
+    #[cfg(test)]
+    HonourCompletionForTest {
+        honoured: Arc<tokio::sync::watch::Sender<bool>>,
+    },
+    /// Test-only: an actor-owned member-live task that, once a Shutdown is
+    /// admitted, sends this actor a `HonourCompletionForTest` completion.
+    #[cfg(test)]
+    SpawnLiveMutationSendingCompletionForTest {
+        honoured: Arc<tokio::sync::watch::Sender<bool>>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    #[cfg(test)]
+    SpawnLiveMutationAwaitingActorForTest {
+        observed_tx: oneshot::Sender<Result<MobState, MobError>>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     #[cfg(test)]
@@ -1616,6 +1656,9 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     Shutdown {
+        /// Caller-owned bound for the Shutdown's waits; `None` uses the
+        /// member lifecycle hang guard.
+        deadline: Option<meerkat_core::time_compat::Instant>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     /// Test-support-only process-death simulation. Unlike `Shutdown`, this
@@ -1677,6 +1720,208 @@ impl MobCommand {
         }
     }
 
+    /// Who is waiting on this command, for a Shutdown that keeps answering
+    /// while it joins actor-owned work (OB3). A caller request is refused
+    /// typed; an actor completion carries the result of work the actor owns
+    /// and is retained for the actor to process, never refused. Exhaustive,
+    /// so a new command has to be classified.
+    pub(super) fn shutdown_answer_class(&self) -> ShutdownAnswerClass {
+        match self {
+            #[cfg(test)]
+            Self::HonourCompletionForTest { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::SpawnProvisioned { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::SpawnPreparationSettled { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::RevivePlacedMember { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::HostStatusPollCompleted { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::HostOrphanReleaseCompleted { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::PlacedBehaviorCompleted { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::PolicySpawnSettled { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::PendingSpawnAnchorSettled { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::SpawnCleanupSettled { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::SpawnActivationStageSettled { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::MemberTurnAdmissionSettled { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ResumeLifecycleReadinessResolved { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ResumeLifecyclePreparationResolved { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::AutonomousStopInterruptSettled => ShutdownAnswerClass::ActorCompletion,
+            Self::AutonomousMemberStopsResolved { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ShutdownTeardownResolved { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ResumeLifecycleMemberObserved { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ResumeLifecycleMemberReady { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ResumeLifecycleMemberSettled { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ResumeLifecycleMemberCleanupHeld { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ResumeLifecycleMemberUnproven { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ResumeLifecycleRollbackStep { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ResumeLifecycleRollbackFinalized { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ResumePostCommitMemberCompleted { .. } => ShutdownAnswerClass::ActorCompletion,
+            #[cfg(feature = "runtime-adapter")]
+            Self::ResumeTopologyAuthority { .. } => ShutdownAnswerClass::ActorCompletion,
+            #[cfg(feature = "runtime-adapter")]
+            Self::ResumeTopologyCompleted { .. } => ShutdownAnswerClass::ActorCompletion,
+            #[cfg(feature = "runtime-adapter")]
+            Self::ResumeTopologyEffectHeld { .. } => ShutdownAnswerClass::ActorCompletion,
+            #[cfg(feature = "runtime-adapter")]
+            Self::KickoffOutcomeResolved { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ProjectMachineSignal { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::RecordMissingMemberBridgeSession { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::FlowFinished { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::FlowCanceledCleanup { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ProjectMemberStatusObserved { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::Spawn { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::HostRuntimeIncarnationObserved { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::Retire { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::Respawn { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RetireAll { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::SubmitWork { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
+            Self::BeginStopQuiesceForTest { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
+            Self::FailNextResumeReadinessForTest { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
+            Self::SpawnPreparationProbe { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
+            Self::SpawnActivationCustodyProbe { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
+            Self::MemberStatusLaneProbe { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ReviveMemberLiveMaterialization { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ReloadMemberRegistration { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(feature = "openai-live")]
+            Self::StartLiveBridgeOperation { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(feature = "openai-live")]
+            Self::ValidateLiveBridgeMemberEligibility { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(feature = "openai-live")]
+            Self::ValidateLiveDurableSourceAvailability { .. } => {
+                ShutdownAnswerClass::CallerRequest
+            }
+            Self::SendPeerMessage { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::DeclareMemberOutboundTaint { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::CancelAllWork { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RunFlow { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::PreviewRunFlowAdmission { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::CancelFlow { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::FlowStatus { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::CommitFlowRunCommand { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::CommitFlowTerminalization { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::CommitFlowFrameStorePlan { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ProjectMachineInput { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ApplyMachineInputEffects { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ValidateCommandAuthority { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::AdmitControlScope { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::PruneStaleMemberOperatorRequests { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ReserveRemoteTurnObligation { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::CommitRemoteTurnReceipt { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::CloseRemoteTurnAfterTrackedCancel { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::EnsureRemoteTurnRecord { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::FinalizeRemoteTurnPrivacyCleanup { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ConvergeRecoveredFlowRun { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ResolveRemoteTurnOutcome { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::AcknowledgeRemoteTurnOutcome { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RequestPlacedCompletionCancellation { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ResolvePlacedCompletionOutcome { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ClosePlacedCompletionOutcome { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::AcknowledgePlacedCompletionOutcome { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ResolvePlacedKickoffOutcome { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ResolvePlacedKickoffCancelled { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::AcknowledgePlacedKickoffOutcome { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RejectPlacedKickoffBeforeAdmission { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::PreviewMachineInput { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::QueryMachineState { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
+            Self::AuthorizeMemberTrustCleanupForTest { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
+            Self::StagePendingSpawnForRetireTest { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ApplyExternalPeerReciprocalTrust { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
+            Self::FlowTrackerCounts { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
+            Self::OrchestratorSnapshot { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
+            Self::LifecycleSnapshot { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
+            Self::LifecycleNotificationBurst { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
+            Self::SpawnLiveMutationAwaitingActorForTest { .. } => {
+                ShutdownAnswerClass::CallerRequest
+            }
+            #[cfg(test)]
+            Self::SpawnLiveMutationSendingCompletionForTest { .. } => {
+                ShutdownAnswerClass::CallerRequest
+            }
+            #[cfg(test)]
+            Self::ParkActorForObservationTest { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
+            Self::DslT2Snapshot { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::StartupKickoffSnapshot { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ProjectMemberList { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ProjectMemberStatus { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::GetIdentityIntent { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::GetIdentityConvergenceStatus { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::AdoptMemberIdentityDeclaration { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ApplyMemberToolDeclaration { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ResolveIdentityConvergenceBlock { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ConcludeObjective { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::BindObjectiveOwner { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::MemberMachineProjection { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::MemberHistory { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::CreateForkedParticipant { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RevokeForkedParticipant { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::AttachForkedParticipant { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ReleaseForkedParticipant { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::SpawnAttachedForkedParticipant { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::CompleteAttachedForkedParticipantSpawn { .. } => {
+                ShutdownAnswerClass::CallerRequest
+            }
+            Self::CompleteHostForkedParticipantSpawn { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::HardCancelMember { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::StopMemberRun { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::MemberLiveOpen { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::MemberLiveClose { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::MemberLiveStatus { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::MemberLiveControl { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::EnsureMemberEventPump { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::EnsureMemberEventTap { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::Stop { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ResumeLifecycle { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::Complete { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::Destroy { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::Reset { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RotateSupervisor { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::BindHost { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::IssueHostBindingDescriptor { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RevokeHost { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::GrantScopes { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RevokeScopes { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::Grants { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::PollEvents { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ReplayAllEvents { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RecordOperatorActionProvenance { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ForceCancel { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::Wire { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::WireMembersBatch { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::Unwire { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::DriveRouteInstalls { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::SetSpawnPolicy { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::Shutdown { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::CrashStopPreservingDurableWorkForTest { .. } => {
+                ShutdownAnswerClass::CallerRequest
+            }
+            Self::QueryPhase { .. } => ShutdownAnswerClass::CallerRequest,
+        }
+    }
+
+    /// Whether this command creates a member or starts member work, which a
+    /// Shutdown in progress refuses.
+    pub(super) fn starts_member_work(&self) -> bool {
+        matches!(
+            self,
+            Self::Spawn { .. }
+                | Self::Respawn { .. }
+                | Self::SpawnAttachedForkedParticipant { .. }
+                | Self::SubmitWork { .. }
+                | Self::RunFlow { .. }
+        )
+    }
+
     pub(super) fn kind(&self) -> &'static str {
         match self {
             Self::Spawn { .. } => "Spawn",
@@ -1712,6 +1957,7 @@ impl MobCommand {
             Self::ResumeLifecyclePreparationResolved { .. } => "ResumeLifecyclePreparationResolved",
             Self::AutonomousMemberStopsResolved { .. } => "AutonomousMemberStopsResolved",
             Self::AutonomousStopInterruptSettled => "AutonomousStopInterruptSettled",
+            Self::ShutdownTeardownResolved { .. } => "ShutdownTeardownResolved",
             Self::ResumeLifecycleMemberObserved { .. } => "ResumeLifecycleMemberObserved",
             Self::ResumeLifecycleMemberReady { .. } => "ResumeLifecycleMemberReady",
             Self::ResumeLifecycleMemberSettled { .. } => "ResumeLifecycleMemberSettled",
@@ -1793,6 +2039,16 @@ impl MobCommand {
             Self::LifecycleNotificationBurst { .. } => "LifecycleNotificationBurst",
             #[cfg(test)]
             Self::ParkActorForObservationTest { .. } => "ParkActorForObservationTest",
+            #[cfg(test)]
+            Self::SpawnLiveMutationAwaitingActorForTest { .. } => {
+                "SpawnLiveMutationAwaitingActorForTest"
+            }
+            #[cfg(test)]
+            Self::HonourCompletionForTest { .. } => "HonourCompletionForTest",
+            #[cfg(test)]
+            Self::SpawnLiveMutationSendingCompletionForTest { .. } => {
+                "SpawnLiveMutationSendingCompletionForTest"
+            }
             #[cfg(test)]
             Self::DslT2Snapshot { .. } => "DslT2Snapshot",
             Self::StartupKickoffSnapshot { .. } => "StartupKickoffSnapshot",

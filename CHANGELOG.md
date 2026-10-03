@@ -116,7 +116,6 @@ them.
   `meerkat_machine_schema::MachineSchemaError` gains the variant
   `InvalidInputFieldDomain { variant, field, reason }`, so exhaustive matches
   need an arm.
-
 - `meerkat::session_runtime::live_orchestration::LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS`
   and `LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY` are removed. The deferred
   close settlement no longer retries on a timer (see Fixed);
@@ -409,6 +408,47 @@ them.
   `meerkat_mob` build helpers. It travels as `declared_tool_restriction` and
   the factory conjoins it, so the effective gate is unchanged but code that
   read `tool_access_policy` off a built config no longer sees it.
+- Owned member retirement (OB3, see Added and Fixed). Exhaustive matches
+  must handle the new `meerkat_mob::MobError` variants
+  `MemberRetirementStuck { member_id, stage, cause }` and
+  `RetirementInterrupted { member_id, stage }`. Behaviour-only (not measured
+  by the gate):
+  - A retirement that durably started and then failed is no longer dropped:
+    the first caller receives `MemberRetirementStuck` (its typed cause is
+    preserved, see `MobError::retirement_root_cause`), and a later plain
+    `MobHandle::retire` answers `MemberRetirementStuck` instead of re-driving
+    it implicitly. `MobHandle::redrive_retirement` (or a mob resume) drives it.
+  - `MemberRetirementInProgress.stage` names the retirement stage in flight
+    instead of `actor_retirement_saga`.
+  - `MobHandle::shutdown` no longer answers `LifecycleOperationPending
+    { intent: "shutdown_runtime_unregister" }` while a runtime unregister is
+    pending: it awaits each session's unregister within its budget and
+    completes, reporting an unfinished one as `UnregisterPending`. It no longer
+    defers behind in-flight retirements: it interrupts them cooperatively.
+  - Shutdown cancels members' in-flight runs immediately instead of waiting
+    for their next boundary; use Stop to let them finish. The cancelled run
+    ends through its typed cancelled terminal, and
+    `MobShutdownReport::runs` reports it as
+    `MemberStopRun::CancelledByShutdown`.
+  - Shutdown holds the run starts of the members the mob hosts before its
+    interrupts, as Stop does (#1500), so an input admitted before the
+    Shutdown cannot start a run afterwards. MobMachine's `ShutdownRunning`,
+    `ShutdownStopped` and `ShutdownCompleted` emit `HoldMemberRunStarts`.
+    Remote members keep the previous Shutdown behaviour: Shutdown does not
+    contact their host for a hold. A remote member the Shutdown stops is held
+    through its host; any other is reported in the new
+    `MobShutdownReport::run_starts` as `MemberRunStarts::DelegatedToHost`.
+    Run-start releases owed to remote members are dropped.
+  - A member's Stop (and Shutdown's member stop) completes only once the
+    runtime has recorded the interrupted run's end, not when the member's
+    session reports its turn inactive; a run still unrecorded when the hang
+    guard passes is reported at stage `runtime_run_settlement`.
+  - While Shutdown drains and joins its actor-owned work, the actor keeps
+    answering commands: a second Shutdown joins it, and every other command
+    (status queries such as member status projection included) is refused
+    with `MobError::ActorCommandChannelClosed`, the answer it gets once the
+    actor exits. Treat it as "mob shutting down". A task the Shutdown joins
+    can therefore never wait on the actor that joins it.
 
 ### Security
 
@@ -717,7 +757,6 @@ them.
     `WorkItemAdmissionInsert::{Inserted, Existing}`. It defaults to
     unsupported; the memory and SQLite stores implement it.
   - `ExternalWorkRef` stays provenance only and is never a dedupe key.
-
 - `meerkat_session::PersistentSessionService::live_authority_advanced`: a
   typed wakeup for callers refused with `SessionError::Busy` because the live
   transcript is ahead of the store. It completes when a runtime turn's
@@ -726,7 +765,6 @@ them.
 - `meerkat_mob_mcp::live_delegation::LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE`
   is public, so live end-to-end checks can strip the speech-transcript note
   exactly instead of copying its wording.
-
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a
@@ -789,8 +827,6 @@ them.
   through one shared projection, so no path drops it. The Python SDK already
   passes the generated overlay through on all three paths, now pinned by
   payload tests.
-
-
 - `meerkat_runtime::MeerkatMachine::wait_input_admitted_by_idempotency_key`
   waits until a live session's runtime has admitted an input for an
   idempotency key and returns its id. The driver signals every accepted
@@ -835,13 +871,6 @@ them.
   `meerkat_session::LiveChannelClosedNotPublished` (`SessionNotRunning`,
   `ActorExited`, `ActorDraining`). When a close is not published, the reason
   is logged.
-
-
-- `meerkat_runtime::MeerkatMachine::wait_input_admitted_by_idempotency_key`
-  waits until a live session's runtime has admitted an input for an
-  idempotency key and returns its id. The driver signals every accepted
-  input, so the wait is woken by the admission rather than re-reading on a
-  timer. It returns `Ok(None)` for a session without a live registration.
 - Per-profile tool deny list for mob members: `[profiles.<name>.tools]
   deny = ["mob_wire", "mob_unwire"]`. Members of the profile cannot execute
   the named tools although their families stay enabled. Denied tools stay
@@ -894,6 +923,41 @@ them.
 - `meerkat_contracts::wire` now re-exports `WireImageData` and
   `WireVideoData`, the inline media types the agent mob tools decode
   (#1538, see Security).
+- Owned member retirement and an accountable mob Shutdown (OB3):
+  - A durably started retirement is owned by the mob actor until it settles.
+    The caller's 30 s budget only bounds the caller's wait; the stages run on
+    their own typed signals, with the member lifecycle hang guard (600 s) as
+    the failure bound for a stage whose signal never arrives. A stage failure
+    leaves it `Stuck` in an owned registry, re-driven by
+    `MobHandle::redrive_retirement` or on mob resume (including cold start,
+    which now issues one typed re-drive and awaits its settlement instead of
+    re-issuing `retire` on a timer).
+  - `MobHandle::retirement_settlement(identity)` returns a
+    `RetirementSettlementWatch` (per incarnation, `generation()`), whose
+    `settled()` resolves to `RetirementSettlement::{Retired, Stuck,
+    NotStarted}`; `InProgress { stage }` names the stage in flight.
+  - `MobHandle::shutdown_with_report(ShutdownOptions)` returns a per-member
+    `MobShutdownReport` (`MemberShutdownOutcome::{Unregistered,
+    RetirementInterrupted, RetirementStuck, UnregisterPending,
+    EffectCustodyRetained}`). `ShutdownOptions::with_deadline` bounds every
+    Shutdown wait by the caller's own deadline (for example below a k8s
+    termination grace period); members still waited on are reported. Each
+    member's outcome is logged as it settles.
+  - Shutdown's runtime teardown runs off the actor loop: every session's
+    registration transaction and unregister are admitted and awaited
+    concurrently within the Shutdown's budget, so one slow session cannot
+    freeze the actor or the others; it also unregisters Retiring members'
+    sessions, which it used to skip.
+  - Diagnostics: each retirement stage start/settle and each Shutdown step
+    are logged at info with elapsed times.
+- `meerkat_runtime::MeerkatMachine::{current_run, wait_run_settled,
+  wait_current_run_settled}`: the run the machine records for a session, and
+  a typed wait until a run is no longer current. The runtime loop that
+  executes the run signals after recording its end, and the wait re-reads
+  machine truth on every signal, so it never misses one between its read and
+  its wait.
+- `MobProvisioner::stop_member_runtime_now` (defaulted): the Shutdown member
+  stop, holding run starts and cancelling the current run immediately.
 
 ### Deprecated
 
@@ -904,6 +968,23 @@ them.
 
 ### Fixed
 
+- GPT Live: the narration and other spoken context that follow a client
+  delegation no longer arrive about 8 s late. Spoken context waits while the
+  provider reports an open user turn, so the assistant does not talk over the
+  user. That turn is closed by its finish, or by the client delegation joined
+  to it, because the delegation is the user turn's terminal observation and no
+  finish follows it. The delegation never closed it, so every delegated
+  request's "Started voice request" narration waited out the full
+  `SPOKEN_CONTEXT_USER_TURN_BOUND`.
+  - Any user speech after the delegation reopens the turn until that turn's
+    own finish. This covers a new utterance, which the provider reports as more
+    input deltas of the delegated turn rather than as a new turn start. It also
+    covers a late tail continuing the delegation's utterance. So an earlier
+    delegation's narration is never spoken over the user's next request.
+  - The 8 s bound remains only as the failure bound for a user turn the
+    provider never closes.
+  - The observation pump now follows the user turn in provider order, before
+    adapter fan-out.
 - The release semver gate (`make semver-breaks`) fails closed on any
   cargo-semver-checks finding whose message shape it cannot read in full.
   Such a finding is now an error naming the lint, not a NOTE. Before, it fell
@@ -916,9 +997,16 @@ them.
   - A `*_marked_deprecated` finding is a deprecation, not a break: it is
     satisfied by a name under `### Deprecated`. Real breaks still need
     `### Breaking`.
-
-- **A short shell timeout is no longer consumed by one-time setup.** A foreground shell call's dispatch deadline was exactly its `timeout_secs`, measured from dispatch, so first-call setup (resolving the shell, which falls back from an absent `nu`, plus the first custodied spawn) could use up a model-chosen 1 s timeout before the command ran (Turbo S S101: a quick `ls` was cut off and retried). The shell path is now resolved when the tool is built, the command's timeout runs from its spawn as before, and the declared dispatch deadline is that timeout plus `SHELL_SETUP_FAILURE_BOUND` (30 s), a failure bound for a hanging setup.
-
+- A short shell timeout is no longer consumed by one-time setup. A
+  foreground shell call's dispatch deadline was exactly its `timeout_secs`,
+  measured from dispatch, so first-call setup (resolving the shell, which
+  falls back from an absent `nu`, plus the first custodied spawn) could use
+  up a model-chosen 1 s timeout before the command ran (Turbo S S101: a
+  quick `ls` was cut off and retried). The shell path is now resolved when
+  the tool is built, the command's timeout runs from its spawn as before,
+  and the declared dispatch deadline is that timeout plus
+  `SHELL_SETUP_FAILURE_BOUND` (30 s), a failure bound for a hanging setup
+  (#1575).
 - Reading a session whose turn is in flight no longer waits for the turn to
   end.
   - `PersistentSessionService::read` and `has_live_session` checked the live
@@ -977,7 +1065,6 @@ them.
   Every acknowledged result now gets one instructions-lane cue, bound to the
   result's `delegation_id`. It is phrased to be safe either way: tell the
   user the result unless it was already told.
-
 - The runtime store test `contended_unregister_finalization_does_not_starve_runtime_worker`
   no longer fails on a loaded host. Its two 1 s wall-clock waits are replaced
   by typed handoffs. The heartbeat now fires on a test-only signal sent when
@@ -1017,6 +1104,14 @@ them.
   every live delegation's result is acknowledged `Delivered` and its
   commentary reached the peer, both before the typed correction and again
   before the recall (covering the correction's own result).
+
+- A live delegation result that has to wait for the channel's result slot
+  (the previous result's provider acknowledgement) is released as soon as
+  that acknowledgement commits. Previously it retried on a doubling timer of
+  up to 1 s per queued result. The release waits on the session machine's
+  commit signal and re-checks after each committed transition. The release
+  guards change only through committed transitions, so no timer is needed.
+  New: `meerkat_runtime::MeerkatMachine::subscribe_session_machine_commits`.
 
 - Three meerkat-mob-mcp tests no longer fail on a loaded host (#1509). They
   now assert ordering with events instead of wall-clock margins.
@@ -1125,6 +1220,31 @@ them.
     closure (or a cloned handle fact), so no guard can be held across an
     `.await`. Every session-task round trip takes the task's command sender
     and sends and waits with the map released.
+- A member retirement whose stage outlived the caller's 30 s budget was
+  dropped after its durable start: the member stayed `Retiring` with no
+  owner, its session was never unregistered, and graceful Shutdown never
+  touched it and could hang behind its teardown (OB3). The retirement is now
+  owned until it settles, and Shutdown progresses past any member it cannot
+  settle and reports it.
+- A retirement's quiesce stage now re-issues its exact-run boundary cancel
+  when an earlier cancel that was blocked behind an undeliverable control path
+  settles while the same run is still current, instead of relying on its first
+  cancel converging.
+- A joined mob Shutdown no longer interrupts a member again (pre-existing,
+  reproduced on 0.8.51 at about 1 in 14 iterations on two cores). Shutdown
+  interrupted autonomous members without holding their run starts, so an
+  admitted kickoff could start a run after the interrupt, and the runtime
+  unregister then hard-cancelled that run. Shutdown now holds run starts
+  first, cancels the current run itself, and completes each member's stop
+  only once the runtime has recorded the run's end.
+- Work submitted to a member whose retirement is durably started is refused
+  at once by the Retiring fence instead of waiting for the retirement to
+  settle.
+- A mob Shutdown could wedge the mob actor until the process was killed: its
+  lifecycle drains and final joins ran inline on the actor, so a joined task
+  waiting on the actor's reply to a command it had sent could never finish
+  (OB3's twin run: every runtime session unregistered within 10 s, then the
+  actor answered nothing more until SIGKILL at about 330 s).
 - The machine TLA generator parenthesizes a field's pending value when a
   later expression in the same update block reads it. A conditionally
   updated field was spliced bare as `IF c THEN a ELSE b`, so TLA+ precedence
@@ -1163,7 +1283,6 @@ them.
 - Turning a mob profile's `read_only` off now takes effect when its members
   resume. The declaration used to be folded into the persisted tool access
   policy, which a resume restored, so the old restriction stayed in force.
-
 - A prompt admitted to a session while its executor attachment was still
   being prepared could stay queued forever. The attachment read its queue to
   decide whether to wake its runtime loop, then handed the session mutation
@@ -1224,7 +1343,6 @@ them.
     They now wait for the server with `wait_until_ready`, and wait for the
     drain with typed waits instead of fixed sleeps. Each passes 30/30 at 10
     copies on two pinned cores.
-
 - A deferred live close settlement no longer retries on a timer. When it won
   the member turn's boundary while that turn's commit was still landing in
   the store, it slept 250 ms and tried again, at most six times, then gave up
@@ -1246,7 +1364,6 @@ them.
   gate, so the commit fails typed instead of hanging. A start or cancel that
   landed between the wait's checks and its registration could also be missed;
   the wait now re-reads both after registering.
-
 - A delivery whose caller left while it was parked behind a member's
   in-flight admission no longer runs as a ghost turn. The admission lane
   skips such a delivery by checking its reply channel, but `SubmitWork` ran
@@ -1414,8 +1531,11 @@ them.
   bridge tests derive their target versions from each domain instead of a
   literal (#1559); the queued-steer mob test waits for the steer's admission
   receipt instead of a 50 ms sleep (#1554); the barge-in recovered fixture
-  registers the session its live channel is bound to (#1510); and the
-  `meerkat-machine-schema` Bazel BUILD file is regenerated (#1515).
+  registers the session its live channel is bound to (#1510); the
+  `meerkat-machine-schema` Bazel BUILD file is regenerated (#1515); and the
+  GPT Live Turbo S S102, S104 and S106 checks assert typed delivery
+  contracts instead of wording, with the S102 harness now wiring its extra
+  member (#1539).
 - A GPT Live WebRTC session whose media track carries silence while the model
   speaks (transcripts present, decoded audio silent; about 1 in 30-40 public
   opens) no longer leaves the user in a silent call. The runtime judges the

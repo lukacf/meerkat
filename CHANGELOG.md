@@ -243,6 +243,33 @@ them.
     to a binding status. The `auth/status/get` binding arm (`BindingIdParams`)
     deliberately keeps tolerating other unknown fields for compatibility; only
     the MCP target arms deny unknown fields.
+- Runtime delivery acknowledgement (#1507, fixing #1497) extends the
+  generated RuntimeDelivery machine. In `meerkat_machine_schema`:
+  `RuntimeDeliveryMachineState` gains the public field
+  `acknowledged_sequences`; `RuntimeDeliveryInput` and
+  `RuntimeDeliveryInputVariant` gain `AcknowledgeDelivery` and
+  `AdvanceAcknowledgedPrefix`; `RuntimeDeliveryEffect` and
+  `RuntimeDeliveryEffectVariant` gain `DeliveryAcknowledged`,
+  `AcknowledgedPrefixAdvanced` and `AcknowledgedPrefixAtRest`. In the
+  generated kernel `meerkat_machine_kernels::generated::runtime_delivery`:
+  `State` gains `acknowledged_sequences`; `Input` and `InputKind` gain
+  `AcknowledgeDelivery` and `AdvanceAcknowledgedPrefix`; `Effect` and
+  `EffectKind` gain `DeliveryAcknowledged`, `AcknowledgedPrefixAdvanced` and
+  `AcknowledgedPrefixAtRest`; `TransitionId` gains `AcknowledgeNextDelivery`,
+  `AcknowledgeAheadOfCursor`, `ObserveAlreadyAppliedAcknowledgement`,
+  `AdvanceOverAcknowledgedDelivery` and
+  `AdvanceAcknowledgedPrefixNothingParked`. Struct literals and exhaustive
+  matches must handle them.
+- Owner drain feedback is bound to obligation members (#1481):
+  - `meerkat_machine_schema::FeedbackFieldSource` gains `ObligationMember`.
+    Exhaustive matches must handle it.
+  - `meerkat_runtime::protocol_auth_release_oauth_flow_drain::submit_expire_o_auth_browser_flow`
+    and `submit_expire_o_auth_device_flow` take the drained `flow_id` and now
+    return `Result<AuthMachineTransition,
+    ObligationMemberFeedbackError<AuthMachineTransitionError>>` (was
+    `Result<AuthMachineTransition, AuthMachineTransitionError>`). A flow id
+    outside the obligation is refused with
+    `ObligationMemberFeedbackError::NotObligationMember`.
 
 ### Security
 

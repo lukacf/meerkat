@@ -411,9 +411,10 @@ impl Cassette {
 }
 
 /// Expand a scrubbed audio payload: `<silence-bytes:N>` to N zero bytes,
-/// `<speech-bytes:N>` (a reflected input frame that carried speech energy)
-/// to N bytes of a fixed -12 dBFS PCM16 tone, so the broker's floor rule sees
-/// the recorded speech/silence pattern without any voice.
+/// `<speech-bytes:N>` (a reflected input or model output frame that carried
+/// speech energy) to N bytes of a fixed -12 dBFS PCM16 tone, so the broker's
+/// floor and response-end rules see the recorded speech/silence pattern
+/// without any voice.
 fn expand_silence(mut frame: Value) -> Value {
     let is_audio = frame["type"]
         .as_str()
@@ -614,7 +615,13 @@ pub fn fixture_findings(text: &str) -> Vec<String> {
             .as_str()
             .is_some_and(|kind| kind.contains("audio"))
         {
-            let reflected_input = frame["type"] == "session.input_audio.append";
+            // Reflected input and model output keep their speech bit: the
+            // broker's user floor and its response end (where a deferred
+            // result cue is released) are read from those energies.
+            let speech_bit_stream = matches!(
+                frame["type"].as_str(),
+                Some("session.input_audio.append" | "session.output_audio.delta")
+            );
             for field in ["audio", "delta"] {
                 let Some(value) = frame[field].as_str() else {
                     continue;
@@ -623,8 +630,8 @@ pub fn fixture_findings(text: &str) -> Vec<String> {
                     continue;
                 }
                 if placeholder_size(value, "speech").is_some() {
-                    if !reflected_input {
-                        findings.push(format!("{number}: speech-bit-outside-reflected-input"));
+                    if !speech_bit_stream {
+                        findings.push(format!("{number}: speech-bit-outside-audio-stream"));
                     }
                     continue;
                 }

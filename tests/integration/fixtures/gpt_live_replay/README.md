@@ -61,13 +61,13 @@ audio garbles under heavy load), then review the diff and commit.
 - voice audio: every audio payload (`session.input_audio.append` reflected
   uplink, `session.output_audio.delta` model speech) becomes a placeholder
   of its decoded length N, so audio timing and latency accounting are
-  preserved:
-  - model speech becomes `<silence-bytes:N>`, expanded to N zero bytes;
-  - a reflected input frame keeps one bit, no content: `<speech-bytes:N>` if
-    its RMS is at least -50 dBFS (`USER_FLOOR_SPEECH_DBFS`), else
-    `<silence-bytes:N>`. Replay expands speech to a fixed -12 dBFS tone.
-    The broker ends the user's floor on reflected-input silence, so a
-    replay must reproduce where the user was speaking;
+  preserved. Each frame keeps one bit, no content: `<speech-bytes:N>` if its
+  RMS is at least -50 dBFS (`USER_FLOOR_SPEECH_DBFS`), else
+  `<silence-bytes:N>`. Replay expands silence to N zero bytes and speech to a
+  fixed -12 dBFS tone. The broker ends the user's floor on reflected-input
+  silence, and ends the model's response (releasing a result cue deferred
+  while it spoke) on model-output silence, so a replay must reproduce where
+  the user and the model were speaking;
 - the exact values of `OPENAI_API_KEY`, `RKAT_OPENAI_API_KEY` and
   `BUILDBUDDY_API_KEY` when set.
 

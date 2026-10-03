@@ -41,12 +41,10 @@ them.
   `UnsupportedDatabaseFile { path, detail }`, the typed refusal for a
   database path SQLite cannot safely address by one name (#1551, see Fixed).
   Exhaustive matches must handle it.
-
 - `meerkat_mob_mcp::detached_delivery::OwnerRevivalDeferral::LifecycleOperationPending`
   gains `member: meerkat_mob::AgentIdentity`, the member whose
   explicit-resume work defers the revival, so the wait can observe that
   operation's own completion.
-
 - `meerkat_machine_codegen::CompositionTlaError` gains the variants
   `InvalidSuppliedMachine`, `DuplicateSuppliedMachine`,
   `ShadowsCanonicalMachine`, `CanonicalNamedTypeMismatch`,
@@ -303,7 +301,6 @@ them.
   `session_cleanup_policy`, ...), a host-path skill source, a blob image
   reference or a video URI is now refused with `InvalidArguments` before anything is
   created; previously such input was accepted.
-- `meerkat_contracts::wire` now re-exports `WireImageData` and `WireVideoData`.
 
 ### Added
 
@@ -415,7 +412,6 @@ them.
 - `meerkat` feature `test-mcp-oauth-fixtures`:
   `meerkat::test_fixtures::mcp_oauth`, an OAuth-protected MCP fixture server
   for the MCP OAuth canaries (test-support only).
-
 - `meerkat_machine_schema::SymbolRef::parse` is a public constructor for a
   coverage anchor path, so a crate outside Meerkat can build a coverage
   manifest for its own machines. The check is lexical and never touches the
@@ -455,7 +451,6 @@ them.
     admission, mid-conversation System lowering) and of the session-error
     classes. The facade session runtime's `activate_instruction` now calls
     them too, with unchanged behaviour.
-
 - `meerkat_machine_codegen` renders a composition against a caller-supplied
   machine catalog: `render_composition_semantic_model_with_catalog`,
   `render_composition_ci_cfg_with_catalog`,
@@ -528,7 +523,6 @@ them.
     (`TranscriptRowRetention::{RetiresToCut, KeepsAll}`). A `KeepsAll` store
     stays correct but unbounded, and `PersistentSessionService` warns about
     it once at construction.
-
 - Exact keyed WorkGraph item admission (#1496):
   `meerkat_workgraph::WorkGraphService::create_idempotent(admission_key, request)`
   returns `WorkAdmissionOutcome::{Created, Replayed, Conflict { admission_key,
@@ -627,21 +621,11 @@ them.
   through one shared projection, so no path drops it. The Python SDK already
   passes the generated overlay through on all three paths, now pinned by
   payload tests.
-
-
 - `meerkat_runtime::MeerkatMachine::wait_input_admitted_by_idempotency_key`
   waits until a live session's runtime has admitted an input for an
   idempotency key and returns its id. The driver signals every accepted
   input, so the wait is woken by the admission rather than re-reading on a
   timer. It returns `Ok(None)` for a session without a live registration.
-
-
-- `meerkat_runtime::MeerkatMachine::wait_input_admitted_by_idempotency_key`
-  waits until a live session's runtime has admitted an input for an
-  idempotency key and returns its id. The driver signals every accepted
-  input, so the wait is woken by the admission rather than re-reading on a
-  timer. It returns `Ok(None)` for a session without a live registration.
-
 - `release-workflow-dispatch --mode assets --assets-run-id RUN_ID` (workflow
   input `assets_run_id`, or `ASSETS_RUN_ID=RUN_ID make release-assets`)
   publishes the archives an earlier asset recovery run built, instead of
@@ -654,6 +638,9 @@ them.
   its commit and every path changed between them is under `.github/` or
   `CHANGELOG.md`. Every publish also checks again that each binary in each
   archive embeds the release version.
+- `meerkat_contracts::wire` now re-exports `WireImageData` and
+  `WireVideoData`, the inline media types the agent mob tools decode
+  (#1538, see Security).
 
 ### Deprecated
 
@@ -679,7 +666,6 @@ them.
   - A REST test also pins that stopping an in-flight run
     (`POST /sessions/{id}/runs/{run_id}/stop`) reaches the interrupt without
     waiting for the run to end on its own.
-
 - The runtime store test `contended_unregister_finalization_does_not_starve_runtime_worker`
   no longer fails on a loaded host. Its two 1 s wall-clock waits are replaced
   by typed handoffs. The heartbeat now fires on a test-only signal sent when
@@ -712,7 +698,6 @@ them.
     opens leave every database, WAL, SHM and journal file byte-identical.
   - The check keeps a cooperating owner's namespace honest. It is not a
     defense against an adversary replacing paths concurrently.
-
 - Three meerkat-mob-mcp tests no longer fail on a loaded host (#1509). They
   now assert ordering with events instead of wall-clock margins.
   `relink_past_max_run_retires_a_child_still_running` relies on the child's
@@ -753,7 +738,6 @@ them.
   release.yml at the run's commit on `refs/heads/main` and requires the stamp
   to name the tag commit. Tag pushes and dispatches on the tag ref keep the
   exact-tag check.
-
 - A session document no longer grows without bound. The transcript rewrite
   graph in session metadata kept one full pre-rewrite transcript plus every
   message appended between rewrites, forever. Compaction shrank the live
@@ -821,7 +805,6 @@ them.
     closure (or a cloned handle fact), so no guard can be held across an
     `.await`. Every session-task round trip takes the task's command sender
     and sends and waits with the map released.
-
 - The machine TLA generator parenthesizes a field's pending value when a
   later expression in the same update block reads it. A conditionally
   updated field was spliced bare as `IF c THEN a ELSE b`, so TLA+ precedence
@@ -851,14 +834,12 @@ them.
     `RuntimeDeliveryAcknowledgement` are new.
   - Delivering an off-RPC monitor notification itself still needs the library
     applier, which is held with the ingress work.
-
 - `rkat auth login`'s browser step for provider OAuth no longer writes the
   authorize URL, with its one-time `state` and PKCE challenge, to debug
   logs. It opened the URL through `webbrowser::open`, which logs the
   spawned command (URL included) at debug level, and the CLI forwards
   `log` records into its tracing output under `RUST_LOG=debug`. It now uses
   the same non-logging `open_system_browser` as the MCP login.
-
 - A prompt admitted to a session while its executor attachment was still
   being prepared could stay queued forever. The attachment read its queue to
   decide whether to wake its runtime loop, then handed the session mutation
@@ -869,8 +850,8 @@ them.
   gate again through commit.
 - The post-restore temporary council sweep no longer ends with an outcome
   still owed when its first pass runs before the host registers the
-  convener's mob (MobKit inserts restored mob handles after constructing the
-  state). The sweep now also waits for the managed-mob set to change and
+  convener's mob (a host may insert restored mob handles after constructing
+  the state). The sweep now also waits for the managed-mob set to change and
   delivers once the mob is registered and running.
 - A repeated `council` call that arrived just as the original run finished no
   longer joins the finished execution and reports `replayed: false`. The
@@ -901,7 +882,6 @@ them.
     (Idle, Attached, Running, Retired, Stopped, and Retired and Stopped with
     a recovery owed) with abandoned admission banned. A state-graph check
     proves every reachable state can still unregister.
-
 - MCP server removal and readiness waits are event-driven (#1461).
   - The removal drain in meerkat-rpc and meerkat-rest slept 100 ms between
     passes. `McpRouterAdapter::wait_until_ready` polled every 100 ms. Both now
@@ -960,7 +940,6 @@ them.
     (run in the canonical TLC lane) proves unregister stays reachable through
     the close transitions from an admitted, staged and bound channel, and
     from a session running a turn or retired during one.
-
 - The GitHub-hosted Linux release binary jobs no longer fail in their first
   minute with "detected dubious ownership": the release container marks the
   workspace safe for Git before setup-rust-ci asks Git for the repository
@@ -971,7 +950,6 @@ them.
   (9.0 GB) and was SIGKILLed on aarch64. The catalog crate now builds at
   `opt-level = 1` in release (6.3 GB; it is not on a hot path) and the
   Linux build runs two jobs.
-
 - Composition owner feedback can no longer discharge a handoff obligation by
   naming a value the obligation does not carry. The OAuth release drain bound
   each expired flow id with an owner-context source drawn from the whole string
@@ -1027,7 +1005,6 @@ them.
   (discard the actor, release its exact registration) and re-attempts. It
   still waits on in-flight claims. The competitor's old bindings and
   registration witness are refused typed afterwards.
-
 - `MeerkatMachine::wait_input_terminal_receipt` resolves a directed
   (peer-request) batch's input when its receipt is finalized, not only once
   its interaction terminals publish. The runtime finalizes a directed
@@ -1062,6 +1039,36 @@ them.
   group. Elsewhere only the direct child is killed. A close that fails or
   panics is reported through `tracing`. `meerkat-mcp` depends on `nix` on
   Unix.
+- rkat-rpc over TCP: a new connection no longer overwrites the shared
+  runtime's callback channel, id counter and tool registry (#1451). Before,
+  callbacks for an older connection's new sessions went to the newest
+  connection, its registered tools were cleared, and callback ids restarted
+  in another connection's id space. On connection close the server now fails
+  pending callbacks before its graceful request shutdown, so a session waiting
+  on a gone client gets the typed failure immediately.
+- A dropped `EphemeralSessionService`'s runtime machine is never handed to a
+  new service (#1450). `MobSessionService::runtime_adapter` answered from a
+  process-global cache keyed by the service's address, so a new service
+  allocated at a freed address while the old machine was still held got that
+  machine. The service now owns its machine in a per-instance slot created on
+  first use, and the global cache is gone. `meerkat-session`'s optional
+  `meerkat-runtime` dependency moves behind a new `runtime-machine` feature on
+  every target (`session-store` implies it), so wasm mobs get the same typed
+  slot (#1457).
+- Pushes to `release/**` integration branches run the same push-only CI lanes
+  as `main` (workspace unit tests in eight shards, wasm-check, sdk-host and
+  the other push-gated lanes), so reverse-dependency suites run before the
+  final merge to `main`. Attestation stays `main`-only (#1560).
+- The CI gate's 2700 s runaway ceiling no longer counts runner queue: it
+  applies to each lane's terminal minus the queue on its path, so a pull
+  request whose lanes all pass is not failed while hosted runners are
+  saturated. Queue is still reported (#1548).
+- Test and build hygiene with no product change: the facade's pre-ledger
+  bridge tests derive their target versions from each domain instead of a
+  literal (#1559); the queued-steer mob test waits for the steer's admission
+  receipt instead of a 50 ms sleep (#1554); the barge-in recovered fixture
+  registers the session its live channel is bound to (#1510); and the
+  `meerkat-machine-schema` Bazel BUILD file is regenerated (#1515).
 
 ### Changed
 
@@ -1074,22 +1081,6 @@ them.
 - The GitHub-hosted release builds each surface binary in its own job (16
   jobs: 4 targets x rkat, rkat-rpc, rkat-rest, rkat-mcp) instead of four
   sequential `cargo build -p` runs per target, so a target takes the slowest
-  single package instead of the sum (the v0.8.50 asset run spent 3+ hours per
-  Linux target). The binaries are unchanged: one `cargo build` for all four
-- The GitHub-hosted release builds each surface binary in its own job on the
-  free runners (12 jobs: both Linux targets and arm64 macOS x rkat,
-  rkat-rpc, rkat-rest, rkat-mcp) instead of four sequential `cargo build -p`
-  runs per target, so those targets take the slowest single package instead
-  of the sum (the v0.8.50 asset run spent 3+ hours per Linux target). x86_64
-  macOS runs on the billed macos-15-large runner and keeps the sequential
-  loop, which shares units between packages (257 billed min on v0.8.50,
-  against an estimated 320-330 split). The binaries are unchanged: one `cargo build` for all four
-  would unify features across them, and the unit graphs show every binary
-  would link different code (rkat-mcp would gain live/mcp, native keyring and
-  OAuth), so each package still builds alone.
-- The GitHub-hosted release builds each surface binary in its own job (16
-  jobs: 4 targets x rkat, rkat-rpc, rkat-rest, rkat-mcp) instead of four
-  sequential `cargo build -p` runs per target, so a target takes the slowest
   single package instead of the sum (the v0.8.50 asset run spent 3-4+ hours
   per target). x86_64 macOS now builds natively on the free `macos-15-intel`
   label instead of the billed `macos-15-large` runner (257 billed minutes per
@@ -1097,7 +1088,6 @@ them.
   four would unify features across them, and the unit graphs show every
   binary would link different code (rkat-mcp would gain live/mcp, native
   keyring and OAuth), so each package still builds alone.
-
 - Supervisor rotation no longer polls a member for convergence. A member
   advertising `rotation_observe_hold` answers a held
   `ObserveSupervisorRotation` when the operation is terminal, waking on a
@@ -1124,32 +1114,6 @@ them.
   - the registration chain went from 1,490,216 B to 697,224 B.
 
   The canary now also passes at 1536 KiB and 1280 KiB. No behaviour change.
-- rkat-rpc over TCP: a new connection no longer overwrites the shared
-  runtime's callback channel, id counter and tool registry (#1451). Before,
-  callbacks for an older connection's new sessions went to the newest
-  connection, its registered tools were cleared, and callback ids restarted
-  in another connection's id space. On connection close the server now fails
-  pending callbacks before its graceful request shutdown, so a session waiting
-  on a gone client gets the typed failure immediately.
-
-- Debug worker-stack headroom (#1446): the unregister teardown saga and the
-  session registration chain no longer reserve every section's temporaries
-  in one poll frame. Their numbered phases and sections now run in boxed
-  async blocks, and the registration path's large child futures are built in
-  their own frames, with bodies unchanged. Measured on the 2 MiB stack canary
-  (debug), at the deepest machine apply:
-  - the teardown chain went from 1,487,592 B to 597,784 B (the saga's own
-    poll frame from 787,560 B to 58,584 B);
-  - the registration chain went from 1,490,216 B to 697,224 B.
-
-  The canary now also passes at 1536 KiB and 1280 KiB. No behaviour change.
-- rkat-rpc over TCP: a new connection no longer overwrites the shared
-  runtime's callback channel, id counter and tool registry (#1451). Before,
-  callbacks for an older connection's new sessions went to the newest
-  connection, its registered tools were cleared, and callback ids restarted
-  in another connection's id space. On connection close the server now fails
-  pending callbacks before its graceful request shutdown, so a session waiting
-  on a gone client gets the typed failure immediately.
 - Debug worker-stack headroom (#1462): four more chains no longer reserve
   their callees' futures and every section's temporaries in one poll frame.
   Large child futures are built in their own boxed frames

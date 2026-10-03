@@ -9533,6 +9533,54 @@ async fn create_persistent_runtime_test_mob(
     (handle, service)
 }
 
+/// #1550: an explicit runtime adapter must be the session service's actual
+/// runtime owner. A cloned handle shares that owner and is accepted; a second
+/// machine over the same store is a different live owner and is refused
+/// before anything is provisioned.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn explicit_runtime_adapter_must_be_the_session_service_owner() {
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let owner = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        Arc::clone(&runtime_store),
+    ));
+    let service = Arc::new(MockSessionService::new());
+    service.set_runtime_adapter(Arc::clone(&owner));
+
+    // A different outer Arc around a clone of the owner: same owner.
+    let shared_owner = Arc::new((*owner).clone());
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "runtime-owner-shared"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service.clone())
+    .with_runtime_adapter(shared_owner)
+    .create()
+    .await
+    .expect("a cloned handle to the service's runtime owner is accepted");
+    handle.shutdown().await.expect("shutdown test mob");
+
+    // A separately constructed machine over the exact same store.
+    let other_owner = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        Arc::clone(&runtime_store),
+    ));
+    assert!(other_owner.shares_runtime_persistence_with(&owner));
+    let refused = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "runtime-owner-conflict"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service.clone())
+    .with_runtime_adapter(other_owner)
+    .create()
+    .await;
+    assert!(
+        matches!(refused, Err(MobError::RuntimeOwnerConflict)),
+        "a different live runtime owner over the same store must be refused typed, got {:?}",
+        refused.err()
+    );
+}
+
 #[cfg(feature = "openai-live")]
 #[tokio::test]
 async fn callback_bearing_member_is_available_as_durable_fork_source_but_not_direct_bridge() {
@@ -45079,8 +45127,9 @@ async fn test_builder_rejects_runtime_adapter_with_mismatched_persistence_author
         Err(err) => err,
     };
 
+    // A different persistence authority is necessarily a different owner.
     assert!(
-        err.to_string().contains("runtime persistence authority"),
+        matches!(err, MobError::RuntimeOwnerConflict),
         "unexpected error: {err}"
     );
 }
@@ -45089,7 +45138,9 @@ async fn test_builder_rejects_runtime_adapter_with_mismatched_persistence_author
 async fn test_autonomous_host_loop_uses_builder_runtime_adapter_for_comms_drain() {
     let service = Arc::new(MockSessionService::new());
     let service_adapter = service.enable_runtime_adapter();
-    let builder_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+    // The explicit adapter must be the service's runtime owner (#1550): a
+    // separately constructed machine is refused, so pass a cloned handle.
+    let builder_adapter = Arc::new((*service_adapter).clone());
     let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
         .with_session_service(service)
         .with_runtime_adapter(builder_adapter.clone())
@@ -45116,8 +45167,8 @@ async fn test_autonomous_host_loop_uses_builder_runtime_adapter_for_comms_drain(
         "the builder-selected runtime adapter should own the autonomous member session"
     );
     assert!(
-        !service_adapter.contains_session(&session_id).await,
-        "the session service's default adapter must stay unused when an explicit mob runtime adapter override is provided"
+        service_adapter.contains_session(&session_id).await,
+        "the session service and the builder resolve one runtime owner"
     );
 
     tokio::time::timeout(Duration::from_secs(2), handle.stop())
@@ -78319,6 +78370,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::HostCapabilityContractViolation { .. } => {
             "host_capability_contract_violation".to_string()
         }
+        MobError::RuntimeOwnerConflict => "runtime_owner_conflict".to_string(),
         MobError::Internal(reason) => format!("internal:{reason}"),
         MobError::ScopeDenied(denial) => format!("scope_denied:{:?}", denial.required),
         MobError::FlowStepDispatchRejected { kind, .. } => {

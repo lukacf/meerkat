@@ -191,6 +191,12 @@ them.
   `session_transcript_retirements`). Opening a store migrates it forward.
   Binaries from before this release refuse a v5 file, as they refuse any
   newer schema.
+- `meerkat_mob::MobError` gains `RuntimeOwnerConflict` (#1550). An explicit
+  `MobBuilder::with_runtime_adapter` must now be the session service's actual
+  runtime owner (a clone of its `MeerkatMachine`), not merely another machine
+  over the same runtime store. A different live owner is refused with
+  `RuntimeOwnerConflict` before anything is provisioned, so a mob's sessions
+  and the service's archive path always resolve the same owner.
 - MCP OAuth login is host-driven (security batch). The native authority no
   longer binds a listener or opens a browser:
   - `meerkat_auth_core::BrowserOpener`, `meerkat_auth_core::SystemBrowserOpener`
@@ -304,6 +310,9 @@ them.
 
 ### Added
 
+- `meerkat_runtime::MeerkatMachine::is_same_runtime_owner`: whether two
+  handles are the same live runtime owner (clones share it; a separately
+  constructed machine over the same store does not).
 - One runtime delivery inbox per persistence bundle, with an in-process
   commit signal (#1497):
   - `meerkat::PersistenceBundle::runtime_delivery_inbox()` returns a clone of

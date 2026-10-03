@@ -254,6 +254,9 @@ pub enum ToolError {
     ConfinementRefused {
         refusal: crate::confinement::ConfinementRefusal,
     },
+    /// An entered hook refused this attempted operation by explicit policy.
+    #[error("{denial}")]
+    HookDenied { denial: crate::hooks::HookDenial },
 }
 
 impl From<crate::OperationAuthorizationError> for ToolError {
@@ -344,6 +347,7 @@ impl ToolError {
             Self::AccessDenied { .. } => "access_denied",
             Self::AuthorizationRefused { .. } => "operation_refused",
             Self::ConfinementRefused { .. } => "confinement_refused",
+            Self::HookDenied { .. } => "hook_denied",
             Self::OperationObservationUnavailable => "operation_observation_unavailable",
             Self::OperationAuthorizationUnavailable => "operation_authorization_unavailable",
             Self::PolicyDenied { .. } => "policy_denied",
@@ -414,6 +418,17 @@ impl ToolError {
             Self::WithSettlementFailures { .. } => self.primary_error().structured_data(),
             Self::ExecutionFailedWithData { data, .. } => Some(data.clone()),
             Self::ConfinementRefused { refusal } => Some(serde_json::json!({"refusal": refusal})),
+            Self::HookDenied { denial } => {
+                let mut data = serde_json::json!({
+                    "hook_id": denial.hook_id,
+                    "point": denial.point,
+                    "reason_code": denial.reason_code,
+                });
+                if let Some(payload) = &denial.payload {
+                    data["payload"] = payload.clone();
+                }
+                Some(data)
+            }
             Self::PolicyDenied { denial } => serde_json::to_value(denial).ok(),
             Self::PolicyIndeterminate { failure } => serde_json::to_value(failure).ok(),
             _ => None,

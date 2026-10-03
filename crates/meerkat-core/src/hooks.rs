@@ -637,7 +637,11 @@ pub enum HookDecision {
         hook_id: HookId,
         reason_code: HookReasonCode,
         message: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_hook_payload",
+            skip_serializing_if = "Option::is_none"
+        )]
         payload: Option<Value>,
     },
 }
@@ -656,6 +660,33 @@ impl HookDecision {
             payload,
         }
     }
+}
+
+/// Exact facts of an authoritative hook decision that refuses an operation.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+#[error("Hook '{hook_id}' denied at {point:?}: {reason_code:?} - {message}")]
+pub struct HookDenial {
+    pub hook_id: HookId,
+    pub point: HookPoint,
+    pub reason_code: HookReasonCode,
+    pub message: String,
+    // A present JSON null remains distinct from an absent payload on transport.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_hook_payload",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub payload: Option<Value>,
+}
+
+pub(crate) fn deserialize_present_hook_payload<'de, D>(
+    deserializer: D,
+) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 /// LLM request view exposed to hooks.
@@ -1023,13 +1054,24 @@ impl HookExecutionReport {
     /// This projection only preserves the denial facts emitted by the hook
     /// engine without reclassifying them through string matching.
     pub fn denial_error(&self, point: HookPoint) -> Option<AgentError> {
+        self.denial(point).map(|denial| AgentError::HookDenied {
+            hook_id: denial.hook_id,
+            point: denial.point,
+            reason_code: denial.reason_code,
+            message: denial.message,
+            payload: denial.payload,
+        })
+    }
+
+    /// Retain the engine-owned decision without deciding the run disposition.
+    pub fn denial(&self, point: HookPoint) -> Option<HookDenial> {
         match self.decision.as_ref()? {
             HookDecision::Deny {
                 hook_id,
                 reason_code,
                 message,
                 payload,
-            } => Some(AgentError::HookDenied {
+            } => Some(HookDenial {
                 hook_id: hook_id.clone(),
                 point,
                 reason_code: *reason_code,

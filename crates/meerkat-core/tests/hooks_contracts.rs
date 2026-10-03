@@ -484,3 +484,191 @@ fn explicit_pre_tool_policy_denial_retains_hook_denied_contract() {
         }) if denied_hook_id == hook_id
     ));
 }
+
+#[test]
+fn hook_denial_retains_owner_facts_payload_presence_and_canonical_settlement()
+-> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_core::error::ToolError;
+    use meerkat_core::hooks::HookExecutionReport;
+    use meerkat_core::{HookDenial, ToolDispatchTerminalErrorKind};
+
+    let marker = meerkat_core::ToolDispatchSettlementFailure {
+        admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
+        effect_kind: meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+        physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Failed,
+        failure_kind: ToolDispatchTerminalErrorKind::Unavailable,
+    };
+    for reason_code in [
+        HookReasonCode::PolicyViolation,
+        HookReasonCode::SafetyViolation,
+        HookReasonCode::SchemaViolation,
+        HookReasonCode::Timeout,
+        HookReasonCode::RuntimeError,
+    ] {
+        for payload in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(json!({"nested": [null, 4]})),
+        ] {
+            let report = HookExecutionReport {
+                decision: Some(HookDecision::deny(
+                    HookId::new("policy-hook"),
+                    reason_code,
+                    "same message across typed causes",
+                    payload.clone(),
+                )),
+                ..HookExecutionReport::empty()
+            };
+            let denial = report
+                .denial(HookPoint::PreToolExecution)
+                .ok_or("missing denial")?;
+            let wire = serde_json::to_value(&denial)?;
+            assert_eq!(wire.get("payload"), payload.as_ref());
+            let restored: HookDenial = serde_json::from_value(wire)?;
+            assert_eq!(restored, denial);
+            let primary = ToolError::HookDenied { denial };
+            assert_eq!(
+                primary.to_string(),
+                report
+                    .denial_error(HookPoint::PreToolExecution)
+                    .ok_or("missing agent denial")?
+                    .to_string()
+            );
+            let error = primary
+                .clone()
+                .with_settlement_failures(vec![marker.clone()]);
+            assert_eq!(error.error_code(), "hook_denied");
+            assert_eq!(
+                ToolDispatchTerminalErrorKind::from(&error),
+                ToolDispatchTerminalErrorKind::HookDenied
+            );
+            let data = error.structured_data().ok_or("missing feedback facts")?;
+            assert_eq!(data["hook_id"], "policy-hook");
+            assert_eq!(data["point"], "pre_tool_execution");
+            assert_eq!(data["reason_code"], serde_json::to_value(reason_code)?);
+            assert_eq!(data.get("payload"), payload.as_ref());
+            let outcome =
+                meerkat_core::ops::terminal_tool_outcome_for_error("blocked-call", error.clone());
+            assert_eq!(outcome.result.tool_use_id, "blocked-call");
+            assert_eq!(
+                outcome.result.text_content(),
+                primary.to_transcript_content()
+            );
+            assert!(outcome.result.is_error);
+            assert_eq!(outcome.result.settlement_failures, vec![marker.clone()]);
+            assert_eq!(error.primary_error(), &primary);
+        }
+    }
+    assert_eq!(
+        ToolDispatchTerminalErrorKind::HookDenied as usize,
+        ToolDispatchTerminalErrorKind::ConfinementRefused as usize + 1
+    );
+    assert_eq!(
+        serde_json::to_value(ToolDispatchTerminalErrorKind::HookDenied)?,
+        json!("hook_denied")
+    );
+    for invalid in [
+        json!({}),
+        json!({"hook_id":"h","point":"pre_tool_execution",
+        "reason_code":"invented", "message":"same message"}),
+        json!({"hook_id":"h","point":"pre_tool_execution","reason_code":"policy_violation",
+            "message":"same message", "authority":true}),
+    ] {
+        assert!(serde_json::from_value::<HookDenial>(invalid).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn hook_decision_transport_keeps_absent_null_and_structured_payload()
+-> Result<(), Box<dyn std::error::Error>> {
+    for payload in [
+        None,
+        Some(serde_json::Value::Null),
+        Some(json!({
+            "nested": [null, {"allowed": false}], "sequence": [3, 1, 2],
+        })),
+    ] {
+        let decision = HookDecision::deny(
+            HookId::new("transport-policy-hook"),
+            HookReasonCode::PolicyViolation,
+            "same diagnostic for every transport case",
+            payload.clone(),
+        );
+        let wire = serde_json::to_value(&decision)?;
+        assert_eq!(wire.get("payload"), payload.as_ref());
+        let decoded: HookDecision = serde_json::from_slice(&serde_json::to_vec(&wire)?)?;
+        assert_eq!(
+            decoded, decision,
+            "HookDecision transport lost payload presence"
+        );
+
+        // RuntimeHookResponse's actual adapter shape contains only this optional
+        // decision. Exercise its nested decision bytes without a core-to-hooks
+        // dependency or a second response parser/owner in this core test target.
+        let response = json!({"decision": wire});
+        let nested = response
+            .get("decision")
+            .ok_or("missing adapter decision")?
+            .clone();
+        let decoded_from_response: HookDecision =
+            serde_json::from_slice(&serde_json::to_vec(&nested)?)?;
+        assert_eq!(decoded_from_response, decision);
+        let report = meerkat_core::HookExecutionReport {
+            decision: Some(decoded_from_response),
+            ..meerkat_core::HookExecutionReport::empty()
+        };
+        let denial = report
+            .denial(HookPoint::PreToolExecution)
+            .ok_or("missing denial")?;
+        assert_eq!(denial.hook_id, HookId::new("transport-policy-hook"));
+        assert_eq!(denial.point, HookPoint::PreToolExecution);
+        assert_eq!(denial.reason_code, HookReasonCode::PolicyViolation);
+        assert_eq!(denial.message, "same diagnostic for every transport case");
+        assert_eq!(denial.payload, payload);
+    }
+    Ok(())
+}
+
+#[test]
+fn hook_denied_event_transport_keeps_absent_null_and_structured_payload()
+-> Result<(), Box<dyn std::error::Error>> {
+    for payload in [
+        None,
+        Some(serde_json::Value::Null),
+        Some(json!({
+            "nested": [null, {"allowed": false}], "sequence": [3, 1, 2],
+        })),
+    ] {
+        let event = AgentEvent::HookDenied {
+            hook_id: HookId::new("transport-policy-hook"),
+            point: HookPoint::PreToolExecution,
+            reason_code: HookReasonCode::PolicyViolation,
+            message: "same diagnostic for every transport case".into(),
+            payload: payload.clone(),
+        };
+        let wire = serde_json::to_value(&event)?;
+        assert_eq!(wire.get("payload"), payload.as_ref());
+        let decoded: AgentEvent = serde_json::from_slice(&serde_json::to_vec(&wire)?)?;
+        let AgentEvent::HookDenied {
+            hook_id,
+            point,
+            reason_code,
+            message,
+            payload: decoded_payload,
+        } = &decoded
+        else {
+            return Err("event transport changed the denial variant".into());
+        };
+        assert_eq!(hook_id, &HookId::new("transport-policy-hook"));
+        assert_eq!(*point, HookPoint::PreToolExecution);
+        assert_eq!(*reason_code, HookReasonCode::PolicyViolation);
+        assert_eq!(message, "same diagnostic for every transport case");
+        assert_eq!(
+            decoded_payload, &payload,
+            "event transport lost payload presence"
+        );
+        assert_eq!(serde_json::to_value(&decoded)?, wire);
+    }
+    Ok(())
+}

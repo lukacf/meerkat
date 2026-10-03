@@ -183,6 +183,7 @@ pub(crate) enum UpcallToolErrorClass {
     PolicyIndeterminate,
     Other,
     ConfinementRefused,
+    HookDenied,
 }
 
 /// Typed error payload: enough atoms to reconstruct the exact `ToolError`
@@ -302,6 +303,15 @@ impl UpcallToolOutcome {
                 timeout_ms: None,
                 unavailable_reason: None,
                 data: Some(serde_json::json!(refusal)),
+                settlement_failures: Vec::new(),
+            },
+            ToolError::HookDenied { denial } => UpcallToolError {
+                class: UpcallToolErrorClass::HookDenied,
+                message: denial.to_string(),
+                name: None,
+                timeout_ms: None,
+                unavailable_reason: None,
+                data: Some(serde_json::json!(denial)),
                 settlement_failures: Vec::new(),
             },
             ToolError::AuthorizationRefused { refusal } => UpcallToolError {
@@ -469,6 +479,13 @@ impl UpcallToolError {
                     ToolError::execution_failed(
                         "member upcall carried malformed confinement_refused data",
                     )
+                }),
+            UpcallToolErrorClass::HookDenied => self
+                .data
+                .and_then(|data| serde_json::from_value(data).ok())
+                .map(|denial| ToolError::HookDenied { denial })
+                .unwrap_or_else(|| {
+                    ToolError::execution_failed("member upcall carried malformed hook_denied data")
                 }),
             UpcallToolErrorClass::AuthorizationRefused => ToolError::AuthorizationRefused {
                 refusal: meerkat_core::authorization::OperationRefused::new(
@@ -1628,6 +1645,87 @@ mod tests {
             assert_eq!(error.error_code(), "execution_failed");
             assert!(error.structured_data().is_none());
             assert!(!matches!(error, ToolError::ConfinementRefused { .. }));
+        }
+    }
+
+    #[test]
+    fn hook_denial_upcall_roundtrip_keeps_exact_owner_facts_and_payload_presence() {
+        use meerkat_core::{HookDenial, HookId, HookPoint, HookReasonCode};
+        let marker = meerkat_core::ToolDispatchSettlementFailure {
+            admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
+            effect_kind: meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Failed,
+            failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Unavailable,
+        };
+        for reason_code in [
+            HookReasonCode::PolicyViolation,
+            HookReasonCode::SafetyViolation,
+            HookReasonCode::SchemaViolation,
+            HookReasonCode::Timeout,
+            HookReasonCode::RuntimeError,
+        ] {
+            for payload in [
+                None,
+                Some(serde_json::Value::Null),
+                Some(json!({"nested": [null, 4]})),
+            ] {
+                let primary = ToolError::HookDenied {
+                    denial: HookDenial {
+                        hook_id: HookId::new("policy-hook"),
+                        point: HookPoint::PreToolExecution,
+                        reason_code,
+                        message: "same diagnostic across all typed reasons".into(),
+                        payload,
+                    },
+                };
+                let error = primary
+                    .clone()
+                    .with_settlement_failures(vec![marker.clone()]);
+                let envelope = UpcallToolOutcome::from_tool_error(&error);
+                let wire = WireOpaqueJson::from_value(&serde_json::to_value(&envelope).unwrap());
+                let back: UpcallToolOutcome =
+                    serde_json::from_value(wire.to_value().unwrap()).unwrap();
+                let restored = back
+                    .into_dispatch_outcome("blocked-call", "tool")
+                    .unwrap_err();
+                assert_eq!(restored.primary_error(), &primary);
+                assert_eq!(restored.to_error_payload(), error.to_error_payload());
+                assert_eq!(
+                    restored.settlement_failures().cloned().collect::<Vec<_>>(),
+                    vec![marker.clone()]
+                );
+                let expected =
+                    meerkat_core::ops::terminal_tool_outcome_for_error("blocked-call", error);
+                let actual =
+                    meerkat_core::ops::terminal_tool_outcome_for_error("blocked-call", restored);
+                assert_eq!(actual.result, expected.result);
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_upcall_hook_denial_does_not_fabricate_a_policy_decision() {
+        for data in [
+            None,
+            Some(json!({})),
+            Some(json!({
+                "hook_id": "copied-name", "point": "pre_tool_execution",
+                "reason_code": "invented", "message": "copied diagnostic",
+            })),
+        ] {
+            let error = UpcallToolError {
+                class: UpcallToolErrorClass::HookDenied,
+                message: "copied diagnostic".into(),
+                name: None,
+                timeout_ms: None,
+                unavailable_reason: None,
+                data,
+                settlement_failures: Vec::new(),
+            }
+            .into_tool_error("tool");
+            assert_eq!(error.error_code(), "execution_failed");
+            assert!(error.structured_data().is_none());
+            assert!(!matches!(error, ToolError::HookDenied { .. }));
         }
     }
 

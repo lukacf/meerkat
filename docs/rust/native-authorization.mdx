@@ -157,9 +157,14 @@ from an injected hook engine. It skips that tool and returns the exact
 `confinement_refused` or ordinary `execution_failed` feedback; permitted
 siblings and the next model turn continue. `HookLaunchRefused` retains the
 attempted tool call ID without emitting hook start or completion events.
+An explicit pre-tool hook decision likewise refuses only its attempted call,
+using `hook_denied` feedback with the exact hook ID, point, reason code and
+optional JSON payload. An absent payload and a present JSON null remain distinct,
+including across the member upcall bridge. The entered deciding hook retains its
+start, completion and denial events; its decision is not a launch failure.
 This core integration does not yet wire required confinement into the native
-command-hook engine or record the refusal in protected audit. Explicit hook
-decisions and other hook points still need their own local-refusal integration.
+command-hook engine or record the refusal in protected audit. Other hook points
+still need their own local-refusal integration.
 
 ## Attach and pin the controller before submitting work
 

@@ -37,6 +37,12 @@ them.
 
 ### Breaking
 
+- Exhaustive matches must handle `meerkat_core::ToolError::HookDenied` and
+  `meerkat_core::ToolDispatchTerminalErrorKind::HookDenied`. An explicit pre-tool
+  hook decision now refuses only the attempted call, returning `hook_denied`
+  feedback with the exact hook, point, reason and optional payload. Siblings and
+  the same model controller continue. Existing terminal error ordinals and
+  other hook-point dispositions are preserved.
 - Exhaustive matches must handle `meerkat_core::HookFailureReason::ConfinementRefused`,
   `meerkat_core::HookEngineError::LaunchRefused`,
   `meerkat_core::AgentError::HookLaunchRefused`,

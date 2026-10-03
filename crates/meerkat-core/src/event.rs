@@ -2248,7 +2248,11 @@ pub enum AgentEvent {
         point: HookPoint,
         reason_code: HookReasonCode,
         message: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "crate::hooks::deserialize_present_hook_payload",
+            skip_serializing_if = "Option::is_none"
+        )]
         payload: Option<Value>,
     },
 

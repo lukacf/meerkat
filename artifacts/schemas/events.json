@@ -4646,7 +4646,8 @@
           "policy_indeterminate",
           "other",
           "callback_pending",
-          "confinement_refused"
+          "confinement_refused",
+          "hook_denied"
         ],
         "type": "string"
       },
@@ -12857,7 +12858,8 @@
           "policy_indeterminate",
           "other",
           "callback_pending",
-          "confinement_refused"
+          "confinement_refused",
+          "hook_denied"
         ],
         "type": "string"
       },

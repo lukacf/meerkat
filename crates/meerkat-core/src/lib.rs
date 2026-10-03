@@ -268,7 +268,7 @@ pub use handles::{
     peer_response_terminal_context_key,
 };
 pub use hooks::{
-    HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,
+    HookCapability, HookDecision, HookDenial, HookEngine, HookEngineError, HookExecutionMode,
     HookExecutionReport, HookFailureReason, HookId, HookInteractionCompleted, HookInvocation,
     HookLlmRequest, HookLlmResponse, HookObservation, HookOutcome, HookPeerEgressCommitted,
     HookPeerEgressKind, HookPeerIngressCommitted, HookPoint, HookReasonCode,

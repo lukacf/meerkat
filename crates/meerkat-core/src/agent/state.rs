@@ -6962,10 +6962,11 @@ where
                 }
             };
 
-            if let Some(error) = pre_tool_report.denial_error(HookPoint::PreToolExecution) {
-                self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
-                    .await?;
-                return Err(error);
+            if let Some(denial) = pre_tool_report.denial(HookPoint::PreToolExecution) {
+                // The entered guardrail's decision refuses only this attempted
+                // tool. The same settlement path retains ordering and siblings.
+                refused_tool_calls.push((tool_index, tc, Err(ToolError::HookDenied { denial }), 0));
+                continue;
             }
 
             if let Err(error) = precheck_visible_tool_call(
@@ -16283,10 +16284,11 @@ mod tests {
         dispatch_refusal: Option<crate::confinement::ConfinementRefusal>,
         confinement_refusal: Option<crate::confinement::ConfinementRefusal>,
         pre_entry_io_failure: bool,
+        explicit_hook_denial: Option<crate::HookDecision>,
     ) {
         use crate::hooks::{
-            HookEngine, HookEngineError, HookExecutionReport, HookFailureReason, HookId,
-            HookInvocation, HookPoint,
+            HookDecision, HookEngine, HookEngineError, HookExecutionReport, HookFailureReason,
+            HookId, HookInvocation, HookOutcome, HookPoint,
         };
 
         let launch_reason = if pre_entry_io_failure {
@@ -16297,14 +16299,15 @@ mod tests {
             confinement_refusal.map(|refusal| HookFailureReason::ConfinementRefused { refusal })
         };
 
-        struct LaunchRefusedHook {
-            reason: HookFailureReason,
+        struct PrerequisiteHook {
+            reason: Option<HookFailureReason>,
+            denial: Option<HookDecision>,
             pre_tool_invocations: Mutex<Vec<HookInvocation>>,
         }
 
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-        impl HookEngine for LaunchRefusedHook {
+        impl HookEngine for PrerequisiteHook {
             async fn execute(
                 &self,
                 invocation: HookInvocation,
@@ -16322,9 +16325,24 @@ mod tests {
                     .as_ref()
                     .is_some_and(|call| call.name == "blocked_tool")
                 {
+                    if let Some(decision) = &self.denial {
+                        return Ok(HookExecutionReport {
+                            started: vec![HookId::new("policy-command-hook")],
+                            outcomes: vec![HookOutcome {
+                                hook_id: HookId::new("policy-command-hook"),
+                                point: HookPoint::PreToolExecution,
+                                priority: 0,
+                                registration_index: 0,
+                                decision: Some(decision.clone()),
+                                failure_reason: None,
+                                duration_ms: Some(1),
+                            }],
+                            decision: Some(decision.clone()),
+                        });
+                    }
                     return Err(HookEngineError::LaunchRefused {
                         hook_id: HookId::new("required-command-hook"),
-                        reason: self.reason.clone(),
+                        reason: self.reason.clone().expect("fixture launch refusal"),
                     });
                 }
                 Ok(HookExecutionReport::empty())
@@ -16463,7 +16481,10 @@ mod tests {
             dispatched: Mutex::new(Vec::new()),
             dispatch_refusal,
         });
-        let access_policy = if launch_reason.is_some() || dispatch_refusal.is_some() {
+        let access_policy = if launch_reason.is_some()
+            || dispatch_refusal.is_some()
+            || explicit_hook_denial.is_some()
+        {
             // A policy denial would mask the hook refusal under test.
             crate::ops::ToolAccessPolicy::AllowList(
                 ["blocked_tool", "open_tool"].into_iter().collect(),
@@ -16486,9 +16507,10 @@ mod tests {
             observed_messages: Mutex::new(Vec::new()),
             observed_tools: Mutex::new(Vec::new()),
         });
-        let hook = launch_reason.clone().map(|reason| {
-            Arc::new(LaunchRefusedHook {
-                reason,
+        let hook = (launch_reason.is_some() || explicit_hook_denial.is_some()).then(|| {
+            Arc::new(PrerequisiteHook {
+                reason: launch_reason.clone(),
+                denial: explicit_hook_denial.clone(),
                 pre_tool_invocations: Mutex::new(Vec::new()),
             })
         });
@@ -16556,6 +16578,56 @@ mod tests {
         );
         for result in follow_up_results {
             if result.tool_use_id == "call-blocked" {
+                if let Some(decision) = &explicit_hook_denial {
+                    let HookDecision::Deny {
+                        hook_id,
+                        reason_code,
+                        payload,
+                        ..
+                    } = decision
+                    else {
+                        panic!("explicit-denial fixture must contain an actual Deny");
+                    };
+                    let denial = HookExecutionReport {
+                        decision: Some(decision.clone()),
+                        ..HookExecutionReport::empty()
+                    }
+                    .denial_error(HookPoint::PreToolExecution)
+                    .unwrap();
+                    let mut expected_data = serde_json::json!({
+                        "hook_id": hook_id,
+                        "point": HookPoint::PreToolExecution,
+                        "reason_code": reason_code,
+                    });
+                    if let Some(payload) = payload {
+                        expected_data["payload"] = payload.clone();
+                    }
+                    let expected = serde_json::json!({
+                        "error": "hook_denied",
+                        "message": denial.to_string(),
+                        "data": expected_data,
+                    });
+                    assert!(result.is_error);
+                    assert_eq!(
+                        crate::types::text_content(&result.content),
+                        expected.to_string()
+                    );
+                    let actual: serde_json::Value =
+                        serde_json::from_str(&crate::types::text_content(&result.content))
+                            .expect("hook denial uses the canonical model feedback envelope");
+                    assert_eq!(actual["error"], "hook_denied");
+                    assert_eq!(actual["data"]["hook_id"], serde_json::json!(hook_id));
+                    assert_eq!(actual["data"]["point"], "pre_tool_execution");
+                    assert_eq!(
+                        actual["data"]["reason_code"],
+                        serde_json::json!(reason_code)
+                    );
+                    match payload {
+                        Some(payload) => assert_eq!(actual["data"]["payload"], *payload),
+                        None => assert!(actual["data"].get("payload").is_none()),
+                    }
+                    continue;
+                }
                 let error = if pre_entry_io_failure {
                     ToolError::execution_failed("native spawn setup IO failed")
                 } else {
@@ -16625,6 +16697,9 @@ mod tests {
         let mut blocked_started = false;
         let mut run_completed = false;
         let mut hook_launch_refusals = 0;
+        let mut hook_denials = 0;
+        let mut policy_hook_started = 0;
+        let mut policy_hook_completed = 0;
         while let Ok(event) = rx.try_recv() {
             match event {
                 crate::event::AgentEvent::ToolExecutionStarted { id, .. } => {
@@ -16650,6 +16725,46 @@ mod tests {
                     assert_eq!(tool_use_id.as_deref(), Some("call-blocked"));
                     hook_launch_refusals += 1;
                 }
+                crate::event::AgentEvent::HookDenied {
+                    hook_id,
+                    point,
+                    reason_code,
+                    message,
+                    payload,
+                } => {
+                    let Some(HookDecision::Deny {
+                        hook_id: expected_id,
+                        reason_code: expected_code,
+                        message: expected_message,
+                        payload: expected_payload,
+                    }) = &explicit_hook_denial
+                    else {
+                        panic!("only the explicit hook decision may produce this denial");
+                    };
+                    assert_eq!(&hook_id, expected_id);
+                    assert_eq!(point, HookPoint::PreToolExecution);
+                    assert_eq!(&reason_code, expected_code);
+                    assert_eq!(&message, expected_message);
+                    assert_eq!(&payload, expected_payload);
+                    hook_denials += 1;
+                }
+                crate::event::AgentEvent::HookStarted { hook_id, point }
+                    if hook_id == HookId::new("policy-command-hook") =>
+                {
+                    assert_eq!(point, HookPoint::PreToolExecution);
+                    policy_hook_started += 1;
+                }
+                crate::event::AgentEvent::HookCompleted { hook_id, point, .. }
+                    if hook_id == HookId::new("policy-command-hook") =>
+                {
+                    assert_eq!(point, HookPoint::PreToolExecution);
+                    policy_hook_completed += 1;
+                }
+                crate::event::AgentEvent::HookFailed { hook_id, .. }
+                    if hook_id == HookId::new("policy-command-hook") =>
+                {
+                    panic!("an explicit decision must not become an engine failure");
+                }
                 crate::event::AgentEvent::HookStarted { hook_id, .. }
                 | crate::event::AgentEvent::HookCompleted { hook_id, .. }
                 | crate::event::AgentEvent::HookFailed { hook_id, .. }
@@ -16668,9 +16783,18 @@ mod tests {
         assert_eq!(result_ids, expected_ids);
         assert_eq!(
             blocked_started,
-            !hide_blocked_tool && launch_reason.is_none()
+            !hide_blocked_tool && launch_reason.is_none() && explicit_hook_denial.is_none()
         );
         assert_eq!(hook_launch_refusals, usize::from(launch_reason.is_some()));
+        assert_eq!(hook_denials, usize::from(explicit_hook_denial.is_some()));
+        assert_eq!(
+            policy_hook_started,
+            usize::from(explicit_hook_denial.is_some())
+        );
+        assert_eq!(
+            policy_hook_completed,
+            usize::from(explicit_hook_denial.is_some())
+        );
         assert!(run_completed);
     }
 
@@ -16683,6 +16807,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
             .await;
         }
@@ -16697,6 +16822,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
             .await;
         }
@@ -16720,6 +16846,7 @@ mod tests {
                     None,
                     Some(refusal),
                     false,
+                    None,
                 )
                 .await;
             }
@@ -16735,6 +16862,7 @@ mod tests {
                 None,
                 None,
                 true,
+                None,
             )
             .await;
         }
@@ -16758,8 +16886,50 @@ mod tests {
                     Some(refusal),
                     None,
                     false,
+                    None,
                 )
                 .await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_pre_tool_hook_denial_preserves_sibling_and_model_turn() {
+        use crate::hooks::{HookDecision, HookId, HookReasonCode};
+
+        for reason_code in [
+            HookReasonCode::PolicyViolation,
+            HookReasonCode::SafetyViolation,
+            HookReasonCode::SchemaViolation,
+            HookReasonCode::Timeout,
+            HookReasonCode::RuntimeError,
+        ] {
+            // None, explicit JSON null, and a structured value remain distinct.
+            for payload in [
+                None,
+                Some(serde_json::Value::Null),
+                Some(serde_json::json!({
+                    "fixture_rule": { "allowed": false, "note": "same message for every typed cause" },
+                    "sequence": [3, 1, 2],
+                    "explicit_null": null,
+                })),
+            ] {
+                for denied_first in [true, false] {
+                    assert_tool_denial_preserves_sibling_and_model_turn(
+                        false,
+                        denied_first,
+                        None,
+                        None,
+                        false,
+                        Some(HookDecision::deny(
+                            HookId::new("policy-command-hook"),
+                            reason_code,
+                            "blocked by an explicit pre-tool policy hook",
+                            payload.clone(),
+                        )),
+                    )
+                    .await;
+                }
             }
         }
     }

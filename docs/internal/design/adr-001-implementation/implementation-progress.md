@@ -1,5 +1,58 @@
 # ADR-001 implementation checkpoint
 
+## Current local shell and hook checkpoint, 2026-10-03
+
+The native shell continuation is committed locally through
+`6cfa8cbbbe428ef3d51b4b8bdf8098c3725ec632`, tree
+`c23875f3f0479c384cc8c79dced0695185e9957d`, on
+`codex/security-shell-confinement`. The stock factory Required-shell E1 has
+executed authenticated ingress, actual OS refusal after command entry,
+permitted sibling execution, ordered feedback, a second loopback model request
+and completion of the same run. Typed mechanical refusal causes remain distinct
+from permission decisions and ordinary IO across shell and member upcall paths.
+The core pre-tool launch-refusal slice has behavioral RED/GREEN for all five
+confinement causes and ordinary pre-entry IO. Its normal commit hooks, broader
+Clippy, schema/SDK freshness and 18 wire regressions passed. The broader Clippy
+command spent 43m01s compiling/checking; the wire test body took 0.01s after
+2m53s compilation. Raw results remain in the existing evidence directory below.
+These are local checkpoints; publication, native PR CI and overhead remain open.
+
+The next explicit pre-tool policy-denial slice is uncommitted. Its behavioral
+RED aborted the run with HookDenied; after repair, five selected pre-tool tests
+and thirteen hook contract tests passed. Eleven member-upcall controls then
+passed in 0.01s after 15m54s compile. Adversarial review found existing decision
+and event decoders collapsed a present JSON null payload into absence. Both
+transport regressions reproduced the defect; their repair passed all fifteen
+hook contracts. Schema/SDK generation, SDK freshness, event inventory, docs and
+Bazel generation checks passed. Final core/Mob all-targets, all-features Clippy
+passed in 26m36s. All twelve existing hook behavior controls passed (37.00s
+compile, 0.16s body). Final schema freshness passed.
+Native command-hook confinement, protected hook
+refusal audit and other hook-point locality remain incomplete.
+
+The bus monitor is active. Publication clearance and a quiet performance window
+are specific scheduling dependencies, not a halt on independent work. Root owns
+the serial Rust lane while agents prepare and review child-process cleanup,
+physical SQLite custody, documentation and existing E2E registration. SQLite
+ordinary admission has a real-backend test staged; neither that test nor physical
+custody preparation is yet an executed persistence/restart pass.
+
+[Meerkat issue 1618](https://github.com/lukacf/meerkat/issues/1618) is part of
+full default-profile coverage: effective per-identity policy must survive fresh,
+restored, child and scheduled/delegated paths, refuse peer/reply/cross-mob sends
+before delivery, and retain permitted private memory, schedule and scoped
+callbacks. Initial source inspection confirms MobKit DurableAgentSpec,
+AgentBuildDraft and build_spawn_spec lack this binding. Native SessionBuildOptions
+already carries tool_access_policy and application_tool_policy, so these existing
+owners should be composed. Remote member upcalls already conjoin explicit child
+policy with the parent; the separate local agent-tools resolver still accepts
+explicit overrides without that ceiling. Current model-tool spawn/fork/delegate
+paths pass an inherited policy; the unchecked explicit branch is a contract gap,
+not an established model-reachable widening exploit. Python customization can also drop
+the missing binding, and direct host comms handles need a stated authority scope
+before claiming all-route restriction.
+No integrated acceptance for this issue is claimed.
+
 ## Recorded checkpoint, 2026-10-03
 
 The latest recorded normal native push was

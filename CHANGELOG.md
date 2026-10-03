@@ -991,6 +991,7 @@ them.
   and the declared dispatch deadline is that timeout plus
   `SHELL_SETUP_FAILURE_BOUND` (30 s), a failure bound for a hanging setup
   (#1575).
+- **A busy delegation worker no longer stalls the live channel.** Steering a continuation into a running delegation waited, inside the channel's observation loop, for that worker's next model boundary, which a running tool call (a long shell command) holds for its whole duration; every later delegation request on the channel queued behind it (Turbo S S101: a quick question waited 16.6 s behind a 25 s job). The steer is authorized in order and its delivery runs per delegation (FIFO), with a typed outcome (`Delivered`, `MissedRun`, `Failed`) joined at the worker's terminal.
 - Reading a session whose turn is in flight no longer waits for the turn to
   end.
   - `PersistentSessionService::read` and `has_live_session` checked the live
@@ -1535,6 +1536,8 @@ them.
   after a journaled media-fault close and reopen.
 
 ### Changed
+
+- **Model calls and shell rounds are attributable in debug logs.** The agent loop logs each model call's session, turn, attempt, elapsed time and outcome ("model call settled"); shell tool calls log their tool call id at start and their exit code, timeout and duration at completion (never the command or its output).
 
 - Generated machine TLA models lead each quantified `Next` disjunct with its
   transition's source-phase guard. The meaning is unchanged (the guard is also

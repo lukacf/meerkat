@@ -1583,11 +1583,6 @@ pub trait MobProvisioner: Send + Sync {
             .await
     }
 
-    /// Drop every run-start release owed to a remote member (mob Shutdown):
-    /// a Stopped mob owes none. Local bookkeeping only; the default owes
-    /// nothing.
-    fn clear_owed_run_start_releases(&self) {}
-
     /// Release a hold taken by [`Self::stop_member_runtime`] (Resume).
     async fn release_member_run_starts(
         &self,
@@ -16381,10 +16376,6 @@ impl MobProvisioner for MultiBackendProvisioner {
                     .await
             }
         }
-    }
-
-    fn clear_owed_run_start_releases(&self) {
-        self.supervisor_bridge.clear_run_start_releases_pending();
     }
 
     async fn stop_member_runtime_now(

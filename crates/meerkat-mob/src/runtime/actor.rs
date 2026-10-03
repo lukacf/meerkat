@@ -27575,8 +27575,8 @@ impl MobActor {
                         // held through their host only when the member stop
                         // below reaches them, and are reported as
                         // `DelegatedToHost` otherwise. A Stopped mob owes no
-                        // remote member a release.
-                        self.provisioner.clear_owed_run_start_releases();
+                        // remote member a release: a member that binds later
+                        // gets the Held posture its machine state implies.
                         match self.hold_all_member_run_starts(true).await {
                             Ok(outcomes) => {
                                 for (identity, outcome) in outcomes {

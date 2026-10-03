@@ -1783,6 +1783,8 @@ impl MobCommand {
             #[cfg(test)]
             Self::FailNextResumeReadinessForTest { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(test)]
+            Self::BindPeerOnlyMembersForTest { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
             Self::SpawnPreparationProbe { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(test)]
             Self::SpawnActivationCustodyProbe { .. } => ShutdownAnswerClass::CallerRequest,

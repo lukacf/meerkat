@@ -10488,7 +10488,7 @@ ConvergeRecoveredRosterTopologyPrune(edge, a_identity, b_identity) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ wiring_edges' = (wiring_edges \ {edge})
-    /\ pending_respawn_topology' = IF ((b_identity \in DOMAIN identity_to_runtime) = FALSE) THEN (IF ((a_identity \in DOMAIN identity_to_runtime) = FALSE) THEN (pending_respawn_topology \ {a_identity}) ELSE pending_respawn_topology \ {b_identity}) ELSE IF ((a_identity \in DOMAIN identity_to_runtime) = FALSE) THEN (pending_respawn_topology \ {a_identity}) ELSE pending_respawn_topology
+    /\ pending_respawn_topology' = IF ((b_identity \in DOMAIN identity_to_runtime) = FALSE) THEN ((IF ((a_identity \in DOMAIN identity_to_runtime) = FALSE) THEN (pending_respawn_topology \ {a_identity}) ELSE pending_respawn_topology) \ {b_identity}) ELSE IF ((a_identity \in DOMAIN identity_to_runtime) = FALSE) THEN (pending_respawn_topology \ {a_identity}) ELSE pending_respawn_topology
     /\ topology_epoch' = (topology_epoch) + 1
     /\ UnchangedFrame_8eb3aad11e21462f
 

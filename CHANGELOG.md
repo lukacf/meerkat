@@ -1180,13 +1180,19 @@ them.
 - GPT Live no longer voices an invented answer from another member while a
   request to that member is still pending (Turbo S S102 r2: "Pemberton said
   it feels like it's around mid-afternoon" the moment the "I asked Analyst
-  Pemberton" result landed, 6.7 s before Pemberton's real answer). The
-  in-progress notice sent at every client delegation now also says that when
-  a result reports someone else was asked, their answer is not part of it:
-  the model must not state, guess, or imply it until it arrives as its own
-  update, and then reports what they actually said, correcting anything said
-  before. The result cue adds that it reports only what the result itself
-  says.
+  Pemberton" result landed, 6.7 s before Pemberton's real answer).
+  - When a delegation result is released while the worker's own turn has a
+    peer request with no committed terminal response (read from the worker
+    session's typed rows: a `PeerRequestSent` receipt for a call of that turn,
+    no `ResponseTerminal` notice for its request id), the provider first gets
+    a notice bound to the delegation, ordered ahead of the result: the
+    result reports asking that member, their answer has not arrived, tell
+    the user only that you asked. The result's cue then asks for exactly
+    that instead of "the actual outcome".
+  - The in-progress notice sent at every client delegation also says a
+    result reporting someone was asked does not carry their answer, to be
+    reported (correcting anything said before) once it arrives; the result
+    cue reports only what the result itself says.
 - Generated TLA+ models applied a set insert or remove to only one branch of a
   field that a conditional update had already changed in the same transition.
   The pending value `IF c THEN a ELSE b` was spliced unparenthesized as the

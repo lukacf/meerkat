@@ -1267,7 +1267,10 @@ them.
   transcript: an output transcript delta that started before the user's
   utterance is the tail of the previous reply and clears neither the
   user's floor nor the open request, and a deferred cue waits while
-  reflected input still carries the user's speech (S99 on #1630 r3).
+  reflected input still carries the user's speech (S99 on #1630 r3). The
+  cue is a thinking append, not an instructions append: instructions
+  persist as standing session instructions, and a persisted cue's
+  delegation framing carried into the next question.
 
 - The LLM reconfigure host's turn-finalization boundary now keeps its session
   service alive. The host holds the service weakly and upgraded it only to

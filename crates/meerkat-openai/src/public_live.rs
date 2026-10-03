@@ -1618,10 +1618,11 @@ impl PublicLiveBrokerSession {
     /// tells the two apart: there is no assistant completion event, and
     /// output audio streams continuously, silence included. So at the
     /// result's acknowledgement (the Delivered transition) the broker always
-    /// follows the result with one short instructions-lane cue (the lane the
-    /// provider documents for prompting speech), bound to the result's
-    /// delegation and phrased so it is safe either way: tell the user the
-    /// result unless it was already told. The cue is broker-owned: its
+    /// follows the result with one short thinking-lane cue, bound to the
+    /// result's delegation and phrased so it is safe either way: tell the
+    /// user the result unless it was already told. The cue is not an
+    /// instructions append: instructions persist, and a persisted cue's
+    /// delegation framing carried into the next question (S99). The cue is broker-owned: its
     /// receipt is consumed here and never surfaced.
     ///
     /// Delegation commentary (this result, or a narration through
@@ -1768,8 +1769,8 @@ impl PublicLiveBrokerSession {
             };
             for (index, content) in result_cue_fragments(wording).into_iter().enumerate() {
                 let event = ClientEvent {
-                    event_id: Field::Value(instructions_event_id(token, index)),
-                    command: Command::InstructionsAppend {
+                    event_id: Field::Value(thinking_event_id(token, index)),
+                    command: Command::ThinkingAppend {
                         content,
                         delegation_id: Nullable(Some(delegation_id.clone())),
                     },
@@ -2455,7 +2456,6 @@ impl SessionState {
         Ok(token)
     }
 
-    /// Reserve the next due result cue as a broker-owned instructions append.
     /// Reserve the next due in-progress notice as a broker-owned
     /// instructions append.
     fn reserve_due_progress_notice(
@@ -2477,8 +2477,8 @@ impl SessionState {
         Ok(Some((token, delegation_id)))
     }
 
-    /// Reserve the next due result cue as a broker-owned instructions
-    /// append, with whether its result awaits members' answers.
+    /// Reserve the next due result cue as a broker-owned thinking append,
+    /// with the typed wording it is sent with.
     fn reserve_due_result_cue(
         &mut self,
     ) -> Result<Option<(GptLiveAppendToken, String, ResultCueWording)>, GptLiveBrokerError> {
@@ -2504,7 +2504,12 @@ impl SessionState {
             output_since_result,
             user_request_open: self.user_request_open,
         };
-        let token = match self.reserve_instructions_append(result_cue_fragments(wording).len()) {
+        // The thinking lane, not the instructions lane: instructions persist
+        // as standing session instructions, and a persisted cue's
+        // delegation framing carried into the next question (S99 A/B: recall
+        // delegated 0/10 without the deferred cue, 3-5/10 with it on the
+        // instructions lane).
+        let token = match self.reserve_thinking_append(result_cue_fragments(wording).len()) {
             Ok(token) => token,
             Err(error) => {
                 self.due_result_cues.push_front(delegation_id);
@@ -5430,12 +5435,6 @@ mod tests {
         assert_eq!(context_fragments(&"x".repeat(501)).len(), 2);
     }
 
-    fn instructions_ack(client_event_id: &str) -> Value {
-        let mut value = ack(Some(client_event_id));
-        value["type"] = json!("session.instructions.appended");
-        value
-    }
-
     /// A commentary acknowledgement landing at `start_ms` on the session
     /// timeline.
     fn ack_at(client_event_id: &str, start_ms: f64) -> Value {
@@ -5484,7 +5483,7 @@ mod tests {
         assert_eq!(delegation_id, "dlg_cue", "the cue is bound to its result");
         assert_eq!(state.reserve_due_result_cue().unwrap(), None, "exactly one");
         state
-            .apply_frame(frame(instructions_ack(&instructions_event_id(cue, 0))))
+            .apply_frame(frame(thinking_ack(Some(&thinking_event_id(cue, 0)))))
             .unwrap();
         assert!(
             drain(&mut state).is_empty(),
@@ -5921,12 +5920,13 @@ mod tests {
         state.due_result_cues.push_back("dlg_cue".to_owned());
         let (cue, _, _) = state.reserve_due_result_cue().unwrap().unwrap();
         state
-            .apply_frame(frame(append_rejected(Some(&instructions_event_id(cue, 0)))))
+            .apply_frame(frame(append_rejected(Some(&thinking_event_id(cue, 0)))))
             .unwrap();
         assert!(
             !drain(&mut state).iter().any(|observation| matches!(
                 observation,
                 GptLiveBrokerObservation::InstructionsContextAppendRejected { .. }
+                    | GptLiveBrokerObservation::ThinkingContextAppendRejected { .. }
             )),
             "a rejected cue is not a rejected owner append"
         );
@@ -7595,7 +7595,8 @@ mod tests {
                 send_json(&mut socket, notice_ack).await;
                 send_json(&mut socket, ack(result["event_id"].as_str())).await;
                 let cue = recv_json(&mut socket, &capture).await;
-                assert_eq!(cue["type"], "session.instructions.append");
+                // The cue is a thinking append: instructions persist (S99).
+                assert_eq!(cue["type"], "session.thinking.append");
                 assert_eq!(cue["delegation_id"], "dlg_peer");
                 // Nothing was spoken after the result landed: the awaiting
                 // cue carries no "already said so" exception.
@@ -7608,7 +7609,7 @@ mod tests {
                     })
                 );
                 let mut cue_ack = ack(cue["event_id"].as_str());
-                cue_ack["type"] = json!("session.instructions.appended");
+                cue_ack["type"] = json!("session.thinking.appended");
                 send_json(&mut socket, cue_ack).await;
                 let mute = recv_json(&mut socket, &capture).await;
                 assert_eq!(mute["type"], "session.input_audio.mute");
@@ -7663,7 +7664,7 @@ mod tests {
             [
                 "session.instructions.append",
                 "session.commentary.append",
-                "session.instructions.append",
+                "session.thinking.append",
                 "session.input_audio.mute",
                 "session.close",
             ],

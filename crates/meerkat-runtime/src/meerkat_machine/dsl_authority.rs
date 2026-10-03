@@ -233,6 +233,7 @@ pub(crate) fn new_registered_authority_with_optional_epoch(
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id,
             runtime_epoch_id,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )?;
     Ok(authority)

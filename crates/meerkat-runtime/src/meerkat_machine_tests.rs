@@ -9770,6 +9770,7 @@ fn revival_arms_preserve_identity_reset_placement_and_refuse_while_draining() {
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id: mm_dsl::SessionId("session-revive".to_string()),
             runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("epoch-2".to_string())),
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("same-session re-registration must revive a stopped machine");
@@ -9868,6 +9869,7 @@ fn revival_arms_preserve_identity_reset_placement_and_refuse_while_draining() {
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id: mm_dsl::SessionId("session-revive".to_string()),
             runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("epoch-2".to_string())),
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("the draining refusal is a typed verdict, not a guard rejection");
@@ -10349,6 +10351,7 @@ fn re_registration_is_idempotent_on_same_epoch_and_a_typed_verdict_on_a_differen
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id: session_id.clone(),
             runtime_epoch_id: Some(epoch.clone()),
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("same-session, same-epoch re-registration is the machine-owned no-op");
@@ -10363,6 +10366,7 @@ fn re_registration_is_idempotent_on_same_epoch_and_a_typed_verdict_on_a_differen
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id: session_id.clone(),
             runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("epoch-b".to_string())),
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("the conflict verdict is a machine-owned outcome, not a guard rejection");
@@ -10392,6 +10396,7 @@ fn re_registration_is_idempotent_on_same_epoch_and_a_typed_verdict_on_a_differen
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id,
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("epochless re-registration resolves to the same typed verdict");
@@ -10433,6 +10438,7 @@ fn new_binding_from_stopped_sets_the_new_registration_epoch() {
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id: mm_dsl::SessionId("new-tenant".to_string()),
             runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("epoch-new".to_string())),
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("a new session binding over Stopped must be admitted");
@@ -14510,7 +14516,22 @@ impl CoreExecutor for CountingApplyExecutor {
 async fn counting_executor_session(
     machine: &Arc<MeerkatMachine>,
 ) -> (SessionId, Arc<AtomicUsize>, Arc<Notify>) {
+    counting_executor_session_with_staged_holds(machine, &[]).await
+}
+
+/// A counting-executor session whose registration applies `staged` run-start
+/// holds, staged before the session exists (#1500).
+async fn counting_executor_session_with_staged_holds(
+    machine: &Arc<MeerkatMachine>,
+    staged: &[crate::RunStartHoldReason],
+) -> (SessionId, Arc<AtomicUsize>, Arc<Notify>) {
     let session_id = SessionId::new();
+    for reason in staged {
+        machine
+            .stage_registration_run_start_hold(&session_id, *reason)
+            .await
+            .expect("stage a registration hold");
+    }
     let applies = Arc::new(AtomicUsize::new(0));
     let applied = Arc::new(Notify::new());
     machine
@@ -14535,7 +14556,7 @@ async fn held_run_starts_park_the_loop_and_release_runs_the_input_once() {
     let (session_id, applies, applied) = counting_executor_session(&machine).await;
 
     let hold = machine
-        .hold_run_starts(&session_id)
+        .hold_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
         .await
         .expect("hold run starts");
     assert_eq!(hold.current_run, None, "an attached member has no run");
@@ -14560,18 +14581,181 @@ async fn held_run_starts_park_the_loop_and_release_runs_the_input_once() {
         .session_dsl_state(&session_id)
         .await
         .expect("machine state");
-    assert!(held.run_starts_held);
+    assert!(!held.run_start_holds.is_empty());
     assert_eq!(held.current_run_id, None);
 
     let ran = applied.notified();
     machine
-        .release_run_starts(&session_id)
+        .release_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
         .await
         .expect("release run starts");
     tokio::time::timeout(Duration::from_secs(30), ran)
         .await
         .expect("the queued input runs after the release");
     assert_eq!(applies.load(Ordering::SeqCst), 1, "it runs exactly once");
+}
+
+/// #1500: holds are per reason. With a mob Stop's hold and a host's hold both
+/// on the runtime, releasing the Stop's leaves it held; releasing the host's
+/// too runs the queued input exactly once.
+#[tokio::test]
+async fn run_starts_stay_held_until_every_reason_is_released() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let (session_id, applies, applied) = counting_executor_session(&machine).await;
+    for reason in [
+        crate::RunStartHoldReason::MobStop,
+        crate::RunStartHoldReason::ToolsNotPublished,
+    ] {
+        machine
+            .hold_run_starts(&session_id, reason)
+            .await
+            .expect("hold run starts");
+    }
+    let mut parks = machine.run_start_held_parks();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("held by two reasons"))
+        .await
+        .expect("admit while held");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+        .await
+        .expect("the runtime loop parks on the hold")
+        .expect("park signal");
+
+    machine
+        .release_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
+        .await
+        .expect("release the Stop's hold");
+    let state = machine
+        .session_dsl_state(&session_id)
+        .await
+        .expect("machine state");
+    assert_eq!(
+        state.run_start_holds,
+        std::collections::BTreeSet::from([dsl::RunStartHoldReason::ToolsNotPublished]),
+        "the host's hold still holds"
+    );
+    assert_eq!(
+        applies.load(Ordering::SeqCst),
+        0,
+        "no run starts while held"
+    );
+
+    // A reason that does not hold is a no-op release.
+    machine
+        .release_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
+        .await
+        .expect("release an absent reason");
+    assert!(
+        !machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("machine state")
+            .run_start_holds
+            .is_empty()
+    );
+
+    let ran = applied.notified();
+    machine
+        .release_run_starts(&session_id, crate::RunStartHoldReason::ToolsNotPublished)
+        .await
+        .expect("release the host's hold");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("the queued input runs once nothing holds it");
+    assert_eq!(applies.load(Ordering::SeqCst), 1, "it runs exactly once");
+}
+
+/// #1500: a hold staged before a session registers is applied by its
+/// registration, before its runtime loop can start a run.
+#[tokio::test]
+async fn a_staged_registration_hold_holds_the_session_from_registration() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let (session_id, applies, applied) = counting_executor_session_with_staged_holds(
+        &machine,
+        &[crate::RunStartHoldReason::ToolsNotPublished],
+    )
+    .await;
+    assert!(
+        !machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("machine state")
+            .run_start_holds
+            .is_empty(),
+        "the registration applied the staged hold"
+    );
+    let mut parks = machine.run_start_held_parks();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("held from registration"))
+        .await
+        .expect("admit");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+        .await
+        .expect("the runtime loop parks on the hold")
+        .expect("park signal");
+    assert_eq!(applies.load(Ordering::SeqCst), 0);
+
+    let ran = applied.notified();
+    machine
+        .release_run_starts(&session_id, crate::RunStartHoldReason::ToolsNotPublished)
+        .await
+        .expect("release");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("the queued input runs after the release");
+    assert_eq!(applies.load(Ordering::SeqCst), 1);
+}
+
+/// #1500: releasing a staged hold before the session registers cancels it:
+/// the registration applies no hold for that reason.
+#[tokio::test]
+async fn releasing_before_registration_cancels_the_staged_hold() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .stage_registration_run_start_hold(
+            &session_id,
+            crate::RunStartHoldReason::ToolsNotPublished,
+        )
+        .await
+        .expect("stage");
+    machine
+        .release_run_starts(&session_id, crate::RunStartHoldReason::ToolsNotPublished)
+        .await
+        .expect("a release before registration is not an error");
+    let applies = Arc::new(AtomicUsize::new(0));
+    let applied = Arc::new(Notify::new());
+    machine
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(CountingApplyExecutor {
+                applies: Arc::clone(&applies),
+                applied: Arc::clone(&applied),
+            }),
+        )
+        .await
+        .expect("register");
+    assert!(
+        machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("machine state")
+            .run_start_holds
+            .is_empty(),
+        "the released reason is not applied at registration"
+    );
+    let ran = applied.notified();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("runs at once"))
+        .await
+        .expect("admit");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("the input runs");
+    assert_eq!(applies.load(Ordering::SeqCst), 1);
 }
 
 /// #1500: without a hold nothing parks. A Held arm firing when run starts are
@@ -14595,9 +14779,12 @@ async fn unheld_run_starts_never_park_the_loop() {
     assert_eq!(*parks.borrow(), 0, "an unheld loop never parks");
 
     // A hold then release with nothing queued leaves later input unaffected.
-    machine.hold_run_starts(&session_id).await.expect("hold");
     machine
-        .release_run_starts(&session_id)
+        .hold_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
+        .await
+        .expect("hold");
+    machine
+        .release_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
         .await
         .expect("release");
     let ran = applied.notified();
@@ -14633,7 +14820,7 @@ async fn a_hold_landing_after_the_loop_woke_parks_it() {
         .expect("queue-authority hook armed");
 
     machine
-        .hold_run_starts(&session_id)
+        .hold_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
         .await
         .expect("hold while the loop is between wake and batch start");
     let mut parks = machine.run_start_held_parks();
@@ -14646,7 +14833,7 @@ async fn a_hold_landing_after_the_loop_woke_parks_it() {
 
     let ran = applied.notified();
     machine
-        .release_run_starts(&session_id)
+        .release_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
         .await
         .expect("release run starts");
     tokio::time::timeout(Duration::from_secs(30), ran)
@@ -34288,6 +34475,7 @@ fn registered_dsl_authority_for_session(session_id: &str) -> mm_dsl::MeerkatMach
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id: mm_dsl::SessionId(session_id.to_string()),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("register session");

@@ -9775,6 +9775,56 @@ impl std::fmt::Display for RunId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RunStartHoldReason {
+    #[default]
+    #[serde(rename = "MobStop")]
+    MobStop,
+    #[serde(rename = "ToolsNotPublished")]
+    ToolsNotPublished,
+}
+impl RunStartHoldReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MobStop => "MobStop",
+            Self::ToolsNotPublished => "ToolsNotPublished",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RunStartHoldReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MobStop" => Ok(Self::MobStop),
+            "ToolsNotPublished" => Ok(Self::ToolsNotPublished),
+            other => Err(format!("invalid RunStartHoldReason value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RunStartHoldReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RunStartHoldReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RuntimeApplyFailureCause {
     #[default]
     #[serde(rename = "Unknown")]
@@ -13655,7 +13705,7 @@ pub struct State {
     pub input_live_boundary_join_run: std::collections::BTreeMap<String, RunId>,
     pub input_live_boundary_join_phase: std::collections::BTreeMap<String, LiveBoundaryJoinPhase>,
     pub run_stop_requested: Option<RunId>,
-    pub run_starts_held: bool,
+    pub run_start_holds: std::collections::BTreeSet<RunStartHoldReason>,
     pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
     pub op_completion_seq: std::collections::BTreeMap<String, u64>,
@@ -14453,7 +14503,7 @@ impl std::fmt::Debug for State {
                 &self.input_live_boundary_join_phase,
             )
             .field("run_stop_requested", &self.run_stop_requested)
-            .field("run_starts_held", &self.run_starts_held)
+            .field("run_start_holds", &self.run_start_holds)
             .field("recovered_admitted_lanes", &self.recovered_admitted_lanes)
             .field("op_statuses", &self.op_statuses)
             .field("op_completion_seq", &self.op_completion_seq)
@@ -15515,6 +15565,7 @@ pub mod inputs {
     pub struct RegisterSession {
         pub session_id: SessionId,
         pub runtime_epoch_id: Option<RuntimeEpochId>,
+        pub initial_run_start_holds: std::collections::BTreeSet<RunStartHoldReason>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeDurableTailRecovery {
@@ -15681,9 +15732,13 @@ pub mod inputs {
         pub reason: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct HoldRunStarts {}
+    pub struct HoldRunStarts {
+        pub reason: RunStartHoldReason,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ReleaseRunStarts {}
+    pub struct ReleaseRunStarts {
+        pub reason: RunStartHoldReason,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CancelAfterBoundaryForRun {
         pub run_id: RunId,
@@ -22551,15 +22606,22 @@ pub enum TransitionId {
     HoldRunStartsAttached,
     HoldRunStartsRunning,
     HoldRunStartsRetired,
-    HoldRunStartsInertStopped,
+    HoldRunStartsStopped,
     HoldRunStartsInertDestroyed,
-    ReleaseRunStartsInitializing,
-    ReleaseRunStartsIdle,
-    ReleaseRunStartsAttached,
-    ReleaseRunStartsRunning,
-    ReleaseRunStartsRetired,
-    ReleaseRunStartsStopped,
-    ReleaseRunStartsDestroyed,
+    ReleaseRunStartsLastInitializing,
+    ReleaseRunStartsLastIdle,
+    ReleaseRunStartsLastAttached,
+    ReleaseRunStartsLastRunning,
+    ReleaseRunStartsLastRetired,
+    ReleaseRunStartsLastStopped,
+    ReleaseRunStartsLastDestroyed,
+    ReleaseRunStartsStillHeldInitializing,
+    ReleaseRunStartsStillHeldIdle,
+    ReleaseRunStartsStillHeldAttached,
+    ReleaseRunStartsStillHeldRunning,
+    ReleaseRunStartsStillHeldRetired,
+    ReleaseRunStartsStillHeldStopped,
+    ReleaseRunStartsStillHeldDestroyed,
     BoundaryAppliedPublish,
     PublishCommittedVisibleSetIdle,
     PublishCommittedVisibleSetAttached,
@@ -24927,7 +24989,7 @@ pub fn initial_state() -> State {
         input_live_boundary_join_run: Default::default(),
         input_live_boundary_join_phase: Default::default(),
         run_stop_requested: None,
-        run_starts_held: false,
+        run_start_holds: Default::default(),
         recovered_admitted_lanes: Default::default(),
         op_statuses: Default::default(),
         op_completion_seq: Default::default(),

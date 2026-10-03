@@ -1908,6 +1908,7 @@ impl EphemeralRuntimeDriver {
                 // Contract-test authority: no runtime session entry exists, so
                 // there is no entry epoch to register under.
                 runtime_epoch_id: None,
+                initial_run_start_holds: std::collections::BTreeSet::new(),
             },
             "ContractRegisterSession",
         )?;

@@ -94,10 +94,9 @@ impl BridgeRequestFailure {
 }
 
 /// The mob's member run-start posture (#1500), read from MobMachine's
-/// `member_run_starts_held`. A member that was
-/// not bound when the posture changed gets it on its next bind, and a
-/// restored actor sets it from the durable mob phase, so a supervisor
-/// restart cannot lose it.
+/// `member_run_starts_held`. A member that was not bound when the posture
+/// changed gets it on its next bind, and a restored mob publishes it from its
+/// recovered machine state, so a supervisor restart cannot lose it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemberRunStartPosture {
     Held,
@@ -1145,6 +1144,7 @@ impl MobSupervisorBridge {
                 // peer interaction for a participant name, not a runtime session
                 // entry, so it owns no entry runtime epoch.
                 runtime_epoch_id: None,
+                initial_run_start_holds: std::collections::BTreeSet::new(),
             },
             "mob_supervisor_bridge::register",
         )

@@ -2806,6 +2806,7 @@ mod tests {
                     session_id: mm_dsl::SessionId(session_id.to_string()),
                     // Re-admission restates the entry's registered epoch.
                     runtime_epoch_id: Some(mm_dsl::RuntimeEpochId::from_domain(&entry_epoch_id)),
+                    initial_run_start_holds: std::collections::BTreeSet::new(),
                 },
                 "CompletedStopRegressionReadmit",
             )

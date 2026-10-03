@@ -177,24 +177,33 @@ them.
   `TransitionId::DrainQueuedRunHeldRetired`,
   `TransitionId::HoldRunStartsAttached`, `TransitionId::HoldRunStartsIdle`,
   `TransitionId::HoldRunStartsInertDestroyed`,
-  `TransitionId::HoldRunStartsInertStopped`,
   `TransitionId::HoldRunStartsInitializing`,
   `TransitionId::HoldRunStartsRetired`, `TransitionId::HoldRunStartsRunning`,
+  `TransitionId::HoldRunStartsStopped`,
   `TransitionId::PrepareHeldAttached`, `TransitionId::PrepareHeldIdle`,
-  `TransitionId::ReleaseRunStartsAttached`,
-  `TransitionId::ReleaseRunStartsDestroyed`,
-  `TransitionId::ReleaseRunStartsIdle`,
-  `TransitionId::ReleaseRunStartsInitializing`,
-  `TransitionId::ReleaseRunStartsRetired`,
-  `TransitionId::ReleaseRunStartsRunning`,
-  `TransitionId::ReleaseRunStartsStopped`,
+  `TransitionId::ReleaseRunStartsLastAttached`,
+  `TransitionId::ReleaseRunStartsLastDestroyed`,
+  `TransitionId::ReleaseRunStartsLastIdle`,
+  `TransitionId::ReleaseRunStartsLastInitializing`,
+  `TransitionId::ReleaseRunStartsLastRetired`,
+  `TransitionId::ReleaseRunStartsLastRunning`,
+  `TransitionId::ReleaseRunStartsLastStopped`,
+  `TransitionId::ReleaseRunStartsStillHeldAttached`,
+  `TransitionId::ReleaseRunStartsStillHeldDestroyed`,
+  `TransitionId::ReleaseRunStartsStillHeldIdle`,
+  `TransitionId::ReleaseRunStartsStillHeldInitializing`,
+  `TransitionId::ReleaseRunStartsStillHeldRetired`,
+  `TransitionId::ReleaseRunStartsStillHeldRunning`,
+  `TransitionId::ReleaseRunStartsStillHeldStopped`,
   `TransitionId::StartConversationRunHeldAttached`,
   `TransitionId::StartConversationRunHeldIdle`,
   `TransitionId::StartConversationRunHeldInitializing`,
   `TransitionId::StartImmediateAppendHeldAttached`,
   `TransitionId::StartImmediateAppendHeldInitializing`. Added fields:
-  `BridgeCapabilities.run_start_hold`, `MeerkatMachineState.run_starts_held`,
-  `MobLifecycleResult.stop_report`, `State.run_starts_held`.
+  `BridgeCapabilities.run_start_hold`, `MeerkatMachineState.run_start_holds`,
+  `MobLifecycleResult.stop_report`, `State.run_start_holds`, and
+  `initial_run_start_holds` on the `RegisterSession` variant of
+  `MeerkatMachineInput` and `Input`.
 - `meerkat_mob_mcp::MobMcpState::mob_stop` returns the `MobStopReport`, and
   `mob_lifecycle_action` returns `MobLifecycleReports` (destroy and stop
   reports) instead of `Option<MobDestroyReport>` (#1500).
@@ -670,13 +679,29 @@ them.
   `NotHoldable` with the reason, or `NotBound` for a member the mob cannot
   reach right now: a placed member whose host carrier is dormant, or an
   unbound remote peer, which is held on its next bind).
-- `meerkat_runtime::MeerkatMachine::hold_run_starts` (returns
-  `RunStartsHold { current_run }`) and `release_run_starts`.
+- Run-start holds per reason (#1500): `meerkat_runtime::RunStartHoldReason`
+  (`MobStop`, `ToolsNotPublished`); a runtime starts no run while any reason
+  holds it. `meerkat_runtime::MeerkatMachine::hold_run_starts(&sid, reason)`
+  (returns `RunStartsHold { current_run }`), `release_run_starts(&sid, reason)`
+  and `stage_registration_run_start_hold(&sid, reason)`, a hold the session's
+  registration applies before its runtime loop can start a run. Releasing a
+  reason that does not hold, or releasing before registration, is a no-op
+  for that reason.
+- A host's holds on restored members (#1500):
+  `meerkat_mob::MobBuilder::hold_restored_member_run_starts(reason,
+  identities)` holds exactly the listed restored members whose runtime this
+  process hosts, and `meerkat_mob::MobHandle::release_member_run_starts(
+  &AgentIdentity, reason)` releases one (Ok for a member that does not hold
+  it, `MemberNotFound` for a non-member). The reason is a
+  `meerkat_mob::HostRunStartHoldReason` (`ToolsNotPublished`): a mob Stop's
+  hold is not one, and only Resume releases it.
 - Supervisor bridge: `BridgeCommand::HoldRunStarts` /
   `BridgeCommand::ReleaseRunStarts`, `BridgeReply::RunStartsHeld`, and the
   `BridgeCapabilities::run_start_hold` capability bit.
-- `MobProvisioner::stop_member_runtime` and `release_member_run_starts`, with
-  defaults that interrupt as before and report the member as not holdable.
+- `MobProvisioner::stop_member_runtime` and `release_member_run_starts`
+  (which takes the `RunStartHoldReason` it releases), with defaults that
+  interrupt as before and report the member as not holdable, and
+  `stage_member_registration_run_start_hold`.
 - One runtime delivery inbox per persistence bundle, with an in-process
   commit signal (#1497):
   - `meerkat::PersistenceBundle::runtime_delivery_inbox()` returns a clone of

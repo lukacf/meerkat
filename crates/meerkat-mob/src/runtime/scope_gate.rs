@@ -82,7 +82,9 @@ impl MobCommand {
             | Self::AttachForkedParticipant { .. }
             // Seating a branch as an ordinary member is a spawn AND a lease
             // acquisition; both halves already require SendCommand.
-            | Self::SpawnAttachedForkedParticipant { .. } => Some(ControlScope::SendCommand),
+            | Self::SpawnAttachedForkedParticipant { .. }
+            // Releasing a host's run-start hold lets the member start runs.
+            | Self::ReleaseMemberRunStarts { .. } => Some(ControlScope::SendCommand),
 
             #[cfg(feature = "openai-live")]
             Self::StartLiveBridgeOperation { .. }
@@ -369,6 +371,9 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::ProjectMemberStatus { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ReleaseMemberRunStarts { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             // Settling closes the waiter set; the actor's in-flight map prunes

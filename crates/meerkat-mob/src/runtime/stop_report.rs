@@ -105,3 +105,25 @@ pub enum NotHoldableReason {
     /// The provisioner serving the member does not implement the hold.
     ProvisionerLacksCapability,
 }
+
+/// A run-start hold a mob's host places on restored members and releases
+/// itself (#1500). A mob Stop's hold is not one of these: only Resume
+/// releases it.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HostRunStartHoldReason {
+    /// The member's tools are not published yet: it starts no run until
+    /// its host releases this hold.
+    ToolsNotPublished,
+}
+
+impl HostRunStartHoldReason {
+    pub(crate) fn runtime(self) -> meerkat_runtime::RunStartHoldReason {
+        match self {
+            Self::ToolsNotPublished => meerkat_runtime::RunStartHoldReason::ToolsNotPublished,
+        }
+    }
+}

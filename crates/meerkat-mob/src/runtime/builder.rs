@@ -546,6 +546,12 @@ pub struct MobBuilder {
     /// knob. `None` (the default) = local members' live verbs typed-reject
     /// `LiveTransportUnavailable` — honest degradation, zero cost.
     member_live_host: Option<Arc<dyn meerkat_runtime::member_live::MemberLiveHost>>,
+    /// Run-start holds restored members' registrations apply (#1500), by
+    /// identity; see [`MobBuilder::hold_restored_member_run_starts`].
+    restored_member_run_start_holds: BTreeMap<
+        AgentIdentity,
+        std::collections::BTreeSet<super::stop_report::HostRunStartHoldReason>,
+    >,
 }
 
 enum BuilderMode {
@@ -6778,6 +6784,7 @@ impl MobBuilder {
             realtime_session_factory: None,
             controlling_acceptor: None,
             member_live_host: None,
+            restored_member_run_start_holds: BTreeMap::new(),
         }
     }
 
@@ -6855,6 +6862,7 @@ impl MobBuilder {
             realtime_session_factory: None,
             controlling_acceptor: None,
             member_live_host: None,
+            restored_member_run_start_holds: BTreeMap::new(),
         }
     }
 
@@ -7033,6 +7041,25 @@ impl MobBuilder {
         self
     }
 
+    /// Hold the run starts of these restored members for `reason` (#1500):
+    /// each one's runtime registration applies the hold, so it starts no run
+    /// until [`MobHandle::release_member_run_starts`] releases `reason`. Only
+    /// members whose runtime this process hosts are held; a listed identity
+    /// that is not a restored local member is not held.
+    pub fn hold_restored_member_run_starts(
+        mut self,
+        reason: super::stop_report::HostRunStartHoldReason,
+        identities: impl IntoIterator<Item = AgentIdentity>,
+    ) -> Self {
+        for identity in identities {
+            self.restored_member_run_start_holds
+                .entry(identity)
+                .or_default()
+                .insert(reason);
+        }
+        self
+    }
+
     /// Create the mob: emit MobCreated event, start the actor, return handle.
     #[cfg(feature = "runtime-adapter")]
     pub async fn create(self) -> Result<MobHandle, MobError> {
@@ -7067,6 +7094,8 @@ impl MobBuilder {
                 realtime_session_factory,
                 controlling_acceptor,
                 member_live_host,
+                // A created mob has no restored members to hold.
+                restored_member_run_start_holds: _,
             } = builder;
             #[cfg(not(feature = "runtime-adapter"))]
             let runtime_adapter: RuntimeAdapterOption = None;
@@ -7302,6 +7331,7 @@ impl MobBuilder {
             realtime_session_factory,
             controlling_acceptor,
             member_live_host,
+            restored_member_run_start_holds,
         } = self;
         #[cfg(not(feature = "runtime-adapter"))]
         let runtime_adapter: RuntimeAdapterOption = None;
@@ -7772,6 +7802,23 @@ impl MobBuilder {
                 wiring.dsl_authority.state().topology_epoch,
             ));
 
+            // The host's run-start holds on restored members (#1500), staged
+            // before any member runtime can register: a running mob's members
+            // register in the reconcile just below.
+            for entry in roster.list() {
+                let Some(reasons) = restored_member_run_start_holds.get(&entry.agent_identity)
+                else {
+                    continue;
+                };
+                for reason in reasons {
+                    runtime_provisioner
+                        .stage_member_registration_run_start_hold(
+                            &entry.member_ref,
+                            reason.runtime(),
+                        )
+                        .await?;
+                }
+            }
             let mut per_spawn_external_tools_seed = super::fork_build::RetainedOverlays::default();
             let mut recovered_direct_member_adoption_pending = false;
             if resumed_state == MobState::Running
@@ -7903,6 +7950,20 @@ impl MobBuilder {
             supervisor_bridge.set_member_run_start_posture(
                 super::supervisor_bridge::MemberRunStartPosture::of(wiring.dsl_authority.state()),
             );
+            // A restored mob whose member run starts are held (a Stopped
+            // mob) holds its local members' runtimes from their registration
+            // on: the in-memory holds of the previous process are gone.
+            // Resume releases them, before or after they register.
+            if wiring.dsl_authority.state().member_run_starts_held {
+                for entry in roster.list() {
+                    runtime_provisioner
+                        .stage_member_registration_run_start_hold(
+                            &entry.member_ref,
+                            meerkat_runtime::RunStartHoldReason::MobStop,
+                        )
+                        .await?;
+                }
+            }
 
             let restore_diagnostics_snapshot =
                 preview_handle.restore_diagnostics.read().await.clone();

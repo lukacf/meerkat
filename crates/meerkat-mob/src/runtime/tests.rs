@@ -188,6 +188,7 @@ fn initialized_test_peer_projection_dsl(session_id: String) -> TestMeerkatMachin
         meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
             session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(session_id.clone()),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
         "test::register_session",
     )
@@ -18197,6 +18198,99 @@ fn external_descriptor_from_published_member(
         format!("inproc://{name}"),
     )
     .expect("published endpoint forms a consistent descriptor")
+}
+
+/// #1500: a host holds the run starts of exactly the restored members it
+/// lists (MobKit: the ones whose tools are not published yet). After a cold
+/// restart and Resume, a listed member's runtime is held from its
+/// registration and an unlisted one is not; releasing the listed member's
+/// hold through the handle lets it start runs. A non-member is
+/// MemberNotFound, and a member that does not hold the reason is an Ok no-op.
+#[tokio::test]
+async fn test_a_host_holds_exactly_the_restored_members_it_lists() {
+    let definition = with_unique_mob_id(sample_definition(), "host-holds-listed-restored");
+    let service = Arc::new(MockSessionService::new());
+    let _adapter = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let listed = AgentIdentity::from("tools-unpublished");
+    let unlisted = AgentIdentity::from("tools-published");
+    for identity in [&listed, &unlisted] {
+        let mut spec = SpawnMemberSpec::new("worker", identity.clone());
+        spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+        handle.spawn_spec(spec).await.expect("spawn member");
+    }
+    let session_of = |entry: Option<crate::roster::RosterEntry>| {
+        entry
+            .and_then(|entry| entry.bridge_session_id().cloned())
+            .expect("session-backed member")
+    };
+    let listed_session = session_of(handle.get_member(&listed).await.expect("read listed"));
+    let unlisted_session = session_of(handle.get_member(&unlisted).await.expect("read unlisted"));
+    handle.stop().await.expect("stop before restart");
+
+    let restarted = Arc::new(service.cold_restart_preserving_durable_state().await);
+    let adapter = restarted.enable_runtime_adapter();
+    crash_stop_and_release_routes(handle).await;
+    drop(service);
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata,
+    ))
+    .with_session_service(restarted.clone())
+    .notify_orchestrator_on_resume(false)
+    .hold_restored_member_run_starts(
+        crate::HostRunStartHoldReason::ToolsNotPublished,
+        [listed.clone()],
+    )
+    .resume()
+    .await
+    .expect("restore the stopped mob");
+    resumed.resume().await.expect("resume the restored mob");
+    assert_eq!(resumed.status().await.unwrap(), MobState::Running);
+
+    assert_eq!(
+        adapter.run_starts_held_for_test(&listed_session).await,
+        Some(true),
+        "the listed member is held from its registration"
+    );
+    assert_eq!(
+        adapter.run_starts_held_for_test(&unlisted_session).await,
+        Some(false),
+        "an unlisted member is not held"
+    );
+
+    resumed
+        .release_member_run_starts(&listed, crate::HostRunStartHoldReason::ToolsNotPublished)
+        .await
+        .expect("release the listed member");
+    assert_eq!(
+        adapter.run_starts_held_for_test(&listed_session).await,
+        Some(false),
+        "the released member starts runs again"
+    );
+    resumed
+        .release_member_run_starts(&unlisted, crate::HostRunStartHoldReason::ToolsNotPublished)
+        .await
+        .expect("releasing a member that does not hold the reason is a no-op");
+    assert!(
+        matches!(
+            resumed
+                .release_member_run_starts(
+                    &AgentIdentity::from("not-a-member"),
+                    crate::HostRunStartHoldReason::ToolsNotPublished,
+                )
+                .await,
+            Err(MobError::MemberNotFound(_))
+        ),
+        "a non-member is MemberNotFound"
+    );
 }
 
 async fn assert_stopped_restart_resume_publishes_preserved_member_peer_endpoint(cold: bool) {

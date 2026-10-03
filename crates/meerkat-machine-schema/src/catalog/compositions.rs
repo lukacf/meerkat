@@ -2290,6 +2290,7 @@ fn seam_runtime_session_registration_input() -> CompositionWitnessInput {
         vec![
             witness_field("session_id", Expr::String("sessionid_1".into())),
             witness_field("runtime_epoch_id", Expr::None),
+            witness_field("initial_run_start_holds", Expr::EmptySet),
         ],
     )
 }

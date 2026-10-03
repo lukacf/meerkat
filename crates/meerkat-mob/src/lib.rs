@@ -255,7 +255,8 @@ pub use runtime::remote_member_operator_tool_defs_for_test;
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::run_mobpack_callable;
 pub use runtime::stop_report::{
-    MemberRunStarts, MemberStopOutcome, MemberStopRun, MobStopReport, NotHoldableReason,
+    HostRunStartHoldReason, MemberRunStarts, MemberStopOutcome, MemberStopRun, MobStopReport,
+    NotHoldableReason,
 };
 pub use runtime::{AGENT_MOB_TOOL_NAMES, agent_mob_tool_names};
 pub use runtime::{

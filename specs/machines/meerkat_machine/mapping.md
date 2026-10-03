@@ -1196,31 +1196,52 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `HoldRunStartsRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `HoldRunStartsInertStopped`
+- `HoldRunStartsStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `HoldRunStartsInertDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ReleaseRunStartsInitializing`
+- `ReleaseRunStartsLastInitializing`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ReleaseRunStartsIdle`
+- `ReleaseRunStartsLastIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ReleaseRunStartsAttached`
+- `ReleaseRunStartsLastAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ReleaseRunStartsRunning`
+- `ReleaseRunStartsLastRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ReleaseRunStartsRetired`
+- `ReleaseRunStartsLastRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ReleaseRunStartsStopped`
+- `ReleaseRunStartsLastStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ReleaseRunStartsDestroyed`
+- `ReleaseRunStartsLastDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsStillHeldInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsStillHeldIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsStillHeldAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsStillHeldRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsStillHeldRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsStillHeldStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsStillHeldDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `BoundaryAppliedPublish`

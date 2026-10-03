@@ -1268,6 +1268,12 @@ pub(super) enum MobCommand {
         agent_identity: crate::ids::AgentIdentity,
         reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, crate::MobError>>,
     },
+    /// Release a host's run-start hold on a member (#1500).
+    ReleaseMemberRunStarts {
+        agent_identity: crate::ids::AgentIdentity,
+        reason: super::stop_report::HostRunStartHoldReason,
+        reply_tx: oneshot::Sender<Result<(), crate::MobError>>,
+    },
     /// An off-actor member-status observation returning to the actor, with
     /// every caller that joined it.
     ProjectMemberStatusObserved {
@@ -1861,6 +1867,7 @@ impl MobCommand {
             Self::StartupKickoffSnapshot { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ProjectMemberList { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ProjectMemberStatus { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ReleaseMemberRunStarts { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityIntent { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityConvergenceStatus { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdoptMemberIdentityDeclaration { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2064,6 +2071,7 @@ impl MobCommand {
             Self::StartupKickoffSnapshot { .. } => "StartupKickoffSnapshot",
             Self::ProjectMemberList { .. } => "ProjectMemberList",
             Self::ProjectMemberStatus { .. } => "ProjectMemberStatus",
+            Self::ReleaseMemberRunStarts { .. } => "ReleaseMemberRunStarts",
             Self::ProjectMemberStatusObserved { .. } => "ProjectMemberStatusObserved",
             Self::GetIdentityIntent { .. } => "GetIdentityIntent",
             Self::GetIdentityConvergenceStatus { .. } => "GetIdentityConvergenceStatus",

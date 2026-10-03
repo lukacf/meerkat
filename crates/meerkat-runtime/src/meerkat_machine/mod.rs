@@ -1986,6 +1986,38 @@ struct RuntimeExecutorAttachmentMaterializationClaim {
 /// to admit exact compare-and-remove teardown. Durable epoch identity alone is
 /// not exact because an epoch may survive an in-process entry rebuild; the
 /// private weak mutation-gate identity distinguishes those incarnations.
+/// What a run-start hold (#1500) found when it took effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunStartsHold {
+    /// The run current when the hold took effect: the only run that may still
+    /// execute, and the only one a stop may still cancel. `None` means the
+    /// member had no run.
+    pub current_run: Option<meerkat_core::lifecycle::RunId>,
+}
+
+/// Why a runtime's run starts are held (#1500). No new run starts while any
+/// reason holds a runtime; each holder releases only its own reason.
+#[non_exhaustive]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStartHoldReason {
+    /// A mob Stop holds its members until Resume.
+    MobStop,
+    /// A restored member waits until its host has published its tools.
+    ToolsNotPublished,
+}
+
+impl RunStartHoldReason {
+    pub(crate) fn dsl(self) -> dsl::RunStartHoldReason {
+        match self {
+            Self::MobStop => dsl::RunStartHoldReason::MobStop,
+            Self::ToolsNotPublished => dsl::RunStartHoldReason::ToolsNotPublished,
+        }
+    }
+}
+
 /// What a caller refused with
 /// [`RuntimeBindingsError::RegistrationOwned`](crate::RuntimeBindingsError::RegistrationOwned) observes once a session's
 /// actor-materialization claim is no longer in flight.
@@ -1997,15 +2029,6 @@ struct RuntimeExecutorAttachmentMaterializationClaim {
 /// it to clear could wait forever. That settlement is reported instead of
 /// awaited, and only an authority entitled to replace the session's actor may
 /// reclaim it.
-/// What a run-start hold (#1500) found when it took effect.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunStartsHold {
-    /// The run current when the hold took effect: the only run that may still
-    /// execute, and the only one a stop may still cancel. `None` means the
-    /// member had no run.
-    pub current_run: Option<meerkat_core::lifecycle::RunId>,
-}
-
 #[derive(Clone)]
 pub enum MaterializationClaimObservation {
     /// No claim blocks a new materialization: the claim is vacant, the
@@ -6271,7 +6294,7 @@ impl MeerkatMachine {
         self.session_dsl_state(session_id)
             .await
             .ok()
-            .map(|state| state.run_starts_held)
+            .map(|state| !state.run_start_holds.is_empty())
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -8988,6 +9011,12 @@ pub struct MeerkatMachineShared {
             crate::tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
+    /// Run-start holds a session's next registration applies (#1500),
+    /// before its runtime loop can start a run. A reason stays staged until
+    /// it is released, so every re-registration re-applies exactly the
+    /// reasons still outstanding.
+    registration_run_start_holds:
+        std::sync::Mutex<HashMap<SessionId, std::collections::BTreeSet<dsl::RunStartHoldReason>>>,
     /// Runtime-loop parks on held run starts (#1500), counted so tests can
     /// wait for the park as a positive event.
     #[cfg(any(test, feature = "test-support"))]
@@ -10551,6 +10580,7 @@ impl MeerkatMachine {
                 test_runtime_loop_before_terminal_commit: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
+                registration_run_start_holds: std::sync::Mutex::new(HashMap::new()),
                 #[cfg(any(test, feature = "test-support"))]
                 test_run_start_held_parks: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(any(test, feature = "test-support"))]
@@ -10656,6 +10686,7 @@ impl MeerkatMachine {
                 test_runtime_loop_before_terminal_commit: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
+                registration_run_start_holds: std::sync::Mutex::new(HashMap::new()),
                 #[cfg(any(test, feature = "test-support"))]
                 test_run_start_held_parks: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(any(test, feature = "test-support"))]
@@ -10761,6 +10792,7 @@ impl MeerkatMachine {
                 test_runtime_loop_before_terminal_commit: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
+                registration_run_start_holds: std::sync::Mutex::new(HashMap::new()),
                 #[cfg(any(test, feature = "test-support"))]
                 test_run_start_held_parks: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(any(test, feature = "test-support"))]

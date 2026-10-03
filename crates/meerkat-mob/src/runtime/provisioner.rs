@@ -1588,6 +1588,18 @@ pub trait MobProvisioner: Send + Sync {
         &self,
         _member_ref: &MemberRef,
         _expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+        _reason: meerkat_runtime::RunStartHoldReason,
+    ) -> Result<(), MobError> {
+        Ok(())
+    }
+    /// Stage a run-start hold the member's runtime registration applies
+    /// (#1500), so a restored member starts no run before `reason` is
+    /// released. Only a runtime this process hosts can be held this way; the
+    /// default holds nothing.
+    async fn stage_member_registration_run_start_hold(
+        &self,
+        _member_ref: &MemberRef,
+        _reason: meerkat_runtime::RunStartHoldReason,
     ) -> Result<(), MobError> {
         Ok(())
     }
@@ -4672,7 +4684,7 @@ impl SessionBackend {
             });
         }
         let hold = adapter
-            .hold_run_starts(&session_id)
+            .hold_run_starts(&session_id, meerkat_runtime::RunStartHoldReason::MobStop)
             .await
             .map_err(|error| {
                 MobError::Internal(format!(
@@ -12772,20 +12784,39 @@ impl MobProvisioner for SessionBackend {
         &self,
         member_ref: &MemberRef,
         _expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+        reason: meerkat_runtime::RunStartHoldReason,
     ) -> Result<(), MobError> {
-        let session_id = Self::require_session(member_ref, "resume")?;
+        let session_id = Self::require_session(member_ref, "release run starts")?;
         let Some(adapter) = &self.runtime_adapter else {
             return Ok(());
         };
-        if !adapter.contains_session(&session_id).await {
-            return Ok(());
-        }
+        // An unregistered runtime is released too: the release unstages the
+        // reason, so its registration applies no hold for it.
         adapter
-            .release_run_starts(&session_id)
+            .release_run_starts(&session_id, reason)
             .await
             .map_err(|error| {
                 MobError::Internal(format!(
                     "releasing run starts for '{session_id}' failed: {error}"
+                ))
+            })
+    }
+
+    async fn stage_member_registration_run_start_hold(
+        &self,
+        member_ref: &MemberRef,
+        reason: meerkat_runtime::RunStartHoldReason,
+    ) -> Result<(), MobError> {
+        let session_id = Self::require_session(member_ref, "stage run-start hold")?;
+        let Some(adapter) = &self.runtime_adapter else {
+            return Ok(());
+        };
+        adapter
+            .stage_registration_run_start_hold(&session_id, reason)
+            .await
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "staging a run-start hold for '{session_id}' failed: {error}"
                 ))
             })
     }
@@ -16412,6 +16443,7 @@ impl MobProvisioner for MultiBackendProvisioner {
         &self,
         member_ref: &MemberRef,
         expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+        reason: meerkat_runtime::RunStartHoldReason,
     ) -> Result<(), MobError> {
         match member_ref {
             MemberRef::BackendPeer {
@@ -16422,8 +16454,11 @@ impl MobProvisioner for MultiBackendProvisioner {
                 session_id,
                 ..
             } if expected_member.is_some() || session_id.is_none() => {
-                if self.supervisor_bridge.peer_run_start_hold(peer_id) == Some(false) {
-                    // Never held.
+                // A remote member is only ever held by a mob Stop: no other
+                // reason reaches it, so releasing one is a no-op.
+                if reason != meerkat_runtime::RunStartHoldReason::MobStop
+                    || self.supervisor_bridge.peer_run_start_hold(peer_id) == Some(false)
+                {
                     return Ok(());
                 }
                 let (peer, supervisor) = match self
@@ -16476,7 +16511,23 @@ impl MobProvisioner for MultiBackendProvisioner {
             }
             _ => {
                 self.session
-                    .release_member_run_starts(member_ref, expected_member)
+                    .release_member_run_starts(member_ref, expected_member, reason)
+                    .await
+            }
+        }
+    }
+
+    async fn stage_member_registration_run_start_hold(
+        &self,
+        member_ref: &MemberRef,
+        reason: meerkat_runtime::RunStartHoldReason,
+    ) -> Result<(), MobError> {
+        match member_ref {
+            // A remote member's runtime registers on its host, not here.
+            MemberRef::BackendPeer { session_id, .. } if session_id.is_none() => Ok(()),
+            _ => {
+                self.session
+                    .stage_member_registration_run_start_hold(member_ref, reason)
                     .await
             }
         }

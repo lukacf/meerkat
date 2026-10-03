@@ -37,7 +37,6 @@ them.
 
 ### Breaking
 
-  `TransitionId::CompleteSpawnStopped`,
 - `meerkat_mob::MobHandle::stop` returns `Result<MobStopReport, MobError>`
   instead of `Result<(), MobError>` (#1500).
 - Generated machine types gain the run-start hold (#1500). Machine DSL changes
@@ -69,6 +68,7 @@ them.
   `MobMachineEffectVariant::ReleaseMemberRunStarts`;
   `TransitionId::BeginPlacedCompletionLifecycleQuiesceFreshStop`,
   `TransitionId::BeginPlacedCompletionLifecycleQuiesceReplayStop`,
+  `TransitionId::CompleteSpawnStopped`,
   `TransitionId::DrainQueuedRunHeldRetired`,
   `TransitionId::HoldRunStartsAttached`, `TransitionId::HoldRunStartsIdle`,
   `TransitionId::HoldRunStartsInertDestroyed`,
@@ -745,9 +745,6 @@ them.
   - A REST test also pins that stopping an in-flight run
     (`POST /sessions/{id}/runs/{run_id}/stop`) reaches the interrupt without
     waiting for the run to end on its own.
-  - A spawn that completes into a Stopped mob leaves it Stopped and holds
-    its members, the new one included. Before, MobMachine's spawn completion
-    moved a Stopped mob back to Running. Only Resume leaves Stopped.
 - A mob Stop no longer lets input that was admitted to a member before the
   stop start a run while the mob is Stopped (#1500). The stop's cancel had no
   run to reach, the stop saw the member idle and completed, and the queued

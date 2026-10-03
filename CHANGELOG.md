@@ -1325,8 +1325,12 @@ them.
   one cue until the response ends: 1600 ms of output silence measured on the
   provider's own output audio frames (`OUTPUT_SILENCE_RELEASE_MS`, derived
   like the user-floor release), never a wall-clock timer. A deferred cue
-  holds nothing a close waits on. When the provider timeline shows no model
-  output starting at or after the end of the result's insertion, the cue no
+  holds nothing a close waits on. A deferred cue also waits while the user
+  holds the floor: the model's output is silent while the user speaks, so
+  output silence alone released the cue into the middle of the user's next
+  question, and the model then delegated that question (S99). When the
+  provider timeline shows no model output starting at or after the end of
+  the result's insertion, the cue no
   longer offers an "unless you have already reported it" exception, which the
   model took a greeting for (S97 v3 r4). The tail of a reply already under
   way when the result landed does not count as output since the result, even

@@ -2488,17 +2488,34 @@ impl SessionState {
             return;
         }
         self.output_silence_run_ms = self.output_silence_run_ms.saturating_add(frame_ms);
-        if self.output_silence_run_ms >= OUTPUT_SILENCE_RELEASE_MS
-            && !self.deferred_result_cues.is_empty()
+        self.release_deferred_result_cues_when_due();
+    }
+
+    /// Release deferred result cues once both the model's response has ended
+    /// ([`OUTPUT_SILENCE_RELEASE_MS`] of output silence) and the user does
+    /// not hold the floor ([`Self::user_holds_floor`], the state that holds
+    /// commentary). While the user speaks the model's output is silent, so
+    /// output silence alone released the cue into the middle of the user's
+    /// question, and the model then delegated that question (S99 pre-merge
+    /// r3 and r10: 2 of 3 such runs, against 0 of 5 where the cue landed
+    /// before the question). Called on each output frame and when the floor
+    /// ends; both are provider-clock transitions, never a timer.
+    fn release_deferred_result_cues_when_due(&mut self) {
+        if self.deferred_result_cues.is_empty()
+            || self.output_silence_run_ms < OUTPUT_SILENCE_RELEASE_MS
         {
-            tracing::info!(
-                silence_ms = self.output_silence_run_ms,
-                cues = self.deferred_result_cues.len(),
-                "public Live response ended; deferred result cues due"
-            );
-            self.due_result_cues
-                .extend(self.deferred_result_cues.drain(..));
+            return;
         }
+        if self.user_holds_floor() {
+            return;
+        }
+        tracing::info!(
+            silence_ms = self.output_silence_run_ms,
+            cues = self.deferred_result_cues.len(),
+            "public Live response ended and the user does not hold the floor; deferred result cues due"
+        );
+        self.due_result_cues
+            .extend(self.deferred_result_cues.drain(..));
     }
 
     fn observe_reflected_input_energy(&mut self, audio: &str, samples: u64) {
@@ -2517,6 +2534,7 @@ impl SessionState {
                 held = self.held_commentary.len(),
                 "public Live user floor ended by reflected-input silence; held commentary is released"
             );
+            self.release_deferred_result_cues_when_due();
         }
     }
 
@@ -5761,6 +5779,96 @@ mod tests {
         for _ in 0..frames {
             state.apply_frame(frame(input_audio(speech))).unwrap();
         }
+    }
+
+    /// S99 pre-merge r3: a cue deferred during the model's response; the
+    /// response ends and the user starts a question. The model's output is
+    /// silent while the user speaks, so output silence alone released the
+    /// cue mid-question and the model delegated the question. The cue now
+    /// waits until the user's floor ends, then goes out exactly once.
+    #[test]
+    fn a_deferred_cue_waits_for_the_users_floor_to_end() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_at(&pending_event_id(result), 2000.0)))
+            .unwrap();
+        assert_eq!(state.deferred_result_cues, ["dlg_cue"]);
+        // The response ends and the user begins a question right away.
+        model_output(&mut state, false, 2);
+        reflect_input(&mut state, true, 2);
+        state
+            .apply_frame(frame(input_delta_at(" which venue did I mention", 2600.0)))
+            .unwrap();
+        assert!(state.user_holds_floor());
+        // The model stays silent through the question: well past the output
+        // release, and still no cue.
+        for _ in 0..12 {
+            model_output(&mut state, false, 1);
+            reflect_input(&mut state, true, 1);
+        }
+        assert!(state.output_silence_run_ms >= OUTPUT_SILENCE_RELEASE_MS);
+        assert!(
+            state.due_result_cues.is_empty(),
+            "no cue while the user holds the floor"
+        );
+        assert_eq!(state.reserve_due_result_cue().unwrap(), None);
+        // The user stops: the floor ends at 1600 ms of reflected silence.
+        reflect_input(&mut state, false, 7);
+        assert!(state.due_result_cues.is_empty(), "1400 ms: still the floor");
+        reflect_input(&mut state, false, 1);
+        assert!(!state.user_holds_floor());
+        assert_eq!(
+            state.due_result_cues,
+            ["dlg_cue"],
+            "the floor's end releases the deferred cue"
+        );
+        drain(&mut state);
+        let (_, delegation_id, _) = state
+            .reserve_due_result_cue()
+            .unwrap()
+            .expect("one cue due");
+        assert_eq!(delegation_id, "dlg_cue");
+        model_output(&mut state, false, 20);
+        assert_eq!(state.reserve_due_result_cue().unwrap(), None, "exactly one");
+    }
+
+    /// The floor can also end on the model's own answer to the question.
+    /// The deferred cue then waits for that answer's end (output silence),
+    /// not for the floor alone.
+    #[test]
+    fn a_deferred_cue_after_an_answered_question_waits_for_the_answer_to_end() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_at(&pending_event_id(result), 2000.0)))
+            .unwrap();
+        model_output(&mut state, false, 2);
+        reflect_input(&mut state, true, 3);
+        state
+            .apply_frame(frame(input_delta_at(" which venue did I mention", 2600.0)))
+            .unwrap();
+        assert!(state.user_holds_floor());
+        // The model answers: the floor ends on its output.
+        state
+            .apply_frame(frame(output_delta_span(" Lisbon.", 3400.0, 3800.0)))
+            .unwrap();
+        model_output(&mut state, true, 2);
+        assert!(!state.user_holds_floor());
+        assert!(
+            state.due_result_cues.is_empty(),
+            "the answer is still being voiced"
+        );
+        model_output(&mut state, false, 7);
+        assert!(state.due_result_cues.is_empty(), "1400 ms after the answer");
+        model_output(&mut state, false, 1);
+        assert_eq!(state.due_result_cues, ["dlg_cue"]);
     }
 
     /// S103 r2: the user keeps talking past `session.delegation.created`,

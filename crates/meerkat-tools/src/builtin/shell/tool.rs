@@ -69,13 +69,27 @@ pub struct ShellTool {
     foreground_process_group_test_config: Option<ForegroundProcessGroupTestConfig>,
 }
 
+/// The failure bound on a foreground call's one-time setup (shell path
+/// resolution, working directory, placement and the custodied spawn) on top
+/// of the command's own timeout. The command's timeout starts when its
+/// process is spawned, so setup never consumes a model-chosen timeout; this
+/// bound only stops a setup that hangs.
+pub const SHELL_SETUP_FAILURE_BOUND: Duration = Duration::from_secs(30);
+
 impl ShellTool {
+    /// Resolve the shell path when the tool is built (a PATH lookup), so the
+    /// first call does not pay for it. A shell that cannot be found here is
+    /// resolved, and reported, on first use as before.
+    fn pre_resolved_shell_path(config: &ShellConfig) -> Option<PathBuf> {
+        config.resolve_shell_path_auto().ok()
+    }
+
     /// Create a new ShellTool with the given configuration
     pub fn new(config: ShellConfig) -> Self {
         let job_manager = Arc::new(super::job_manager::JobManager::new(config.clone()));
         Self {
+            resolved_shell_path: Arc::new(Mutex::new(Self::pre_resolved_shell_path(&config))),
             config,
-            resolved_shell_path: Arc::new(Mutex::new(None)),
             job_manager,
             foreground_containment_tasks: Arc::new(Mutex::new(Vec::new())),
             #[cfg(all(test, unix))]
@@ -89,8 +103,8 @@ impl ShellTool {
         job_manager: Arc<super::job_manager::JobManager>,
     ) -> Self {
         Self {
+            resolved_shell_path: Arc::new(Mutex::new(Self::pre_resolved_shell_path(&config))),
             config,
-            resolved_shell_path: Arc::new(Mutex::new(None)),
             job_manager,
             foreground_containment_tasks: Arc::new(Mutex::new(Vec::new())),
             #[cfg(all(test, unix))]
@@ -641,9 +655,12 @@ impl BuiltinTool for ShellTool {
         let resolved_context = if input.background {
             resolution_context.clone()
         } else {
+            // The command's timeout runs from its spawn (see
+            // `execute_command_for_call`); the dispatch deadline adds the
+            // setup failure bound so setup never eats a short timeout.
             resolution_context.with_deadline(meerkat_core::ToolDeadlineContributor::finite(
                 meerkat_core::ToolDeadlineOwner::ToolInternal,
-                Duration::from_secs(timeout_secs),
+                Duration::from_secs(timeout_secs).saturating_add(SHELL_SETUP_FAILURE_BOUND),
             ))?
         };
         let mode = if input.background {
@@ -876,14 +893,67 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            plan.deadlines().effective_timeout(),
-            Some(Duration::from_secs(7))
-        );
+        let declared = Duration::from_secs(7) + SHELL_SETUP_FAILURE_BOUND;
+        assert_eq!(plan.deadlines().effective_timeout(), Some(declared));
         assert!(plan.deadlines().contributors().iter().any(|contributor| {
             contributor.owner() == meerkat_core::ToolDeadlineOwner::ToolInternal
-                && contributor.timeout() == Some(Duration::from_secs(7))
+                && contributor.timeout() == Some(declared)
         }));
+    }
+
+    /// One-time setup never consumes a model-chosen timeout: the shell path
+    /// is resolved when the tool is built (here through the nu-to-bash
+    /// fallback), and a 1 s call's dispatch deadline is its timeout plus the
+    /// setup failure bound, while the command itself still gets 1 s from
+    /// its spawn.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_one_second_timeout_is_not_consumed_by_setup() {
+        let config = ShellConfig {
+            enabled: true,
+            shell: "nu".to_string(),
+            ..ShellConfig::default()
+        };
+        let tool = ShellTool::new(config);
+        assert!(
+            tool.resolved_shell_path.lock().await.is_some(),
+            "the shell path is resolved when the tool is built"
+        );
+        let args = serde_json::value::RawValue::from_string(
+            r#"{"command":"echo ok","timeout_secs":1}"#.to_string(),
+        )
+        .unwrap();
+        let plan = tool
+            .resolve_execution_plan(
+                meerkat_core::ToolCallView {
+                    id: "one-second",
+                    name: "shell",
+                    args: &args,
+                },
+                &meerkat_core::ToolExecutionResolutionContext::new(
+                    meerkat_core::ToolDeadlineChain::new(vec![
+                        meerkat_core::ToolDeadlineContributor::finite(
+                            meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                            Duration::from_secs(600),
+                        ),
+                    ])
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            plan.deadlines().effective_timeout(),
+            Some(Duration::from_secs(1) + SHELL_SETUP_FAILURE_BOUND)
+        );
+        let output = tool.execute_command("echo ok", None, 1).await.unwrap();
+        assert_eq!(output.exit_code, Some(0));
+        assert!(!output.timed_out);
+        // The command's own 1 s still binds it from its spawn.
+        let slow = tool.execute_command("sleep 3", None, 1).await.unwrap();
+        assert!(
+            slow.timed_out,
+            "the command is still killed at its own timeout"
+        );
     }
 
     #[cfg(unix)]

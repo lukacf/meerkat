@@ -1919,6 +1919,31 @@ fn s99_oracle_events(entries: &[(&str, f64, &str)]) -> Vec<Value> {
 
 /// An in-flight chain, then the answer after a quiet gap of at least the
 /// assistant-turn bound: the answer is kept, the in-flight chain is not.
+/// The vault phrase is recognized when the transcript glues a repeat, and
+/// a partial or reordered phrase is not.
+#[test]
+fn s99_recalls_a_glued_phrase_but_not_a_partial_one() {
+    let phrase = "maple otter badger willow amber";
+    assert!(s99_recalls_phrase(
+        "maple otter badger willow ambermaple otter badger willow amber",
+        phrase
+    ));
+    assert!(s99_recalls_phrase(
+        "Silver copperwillow willow silver.",
+        "silver copper willow willow silver"
+    ));
+    assert!(s99_recalls_phrase(
+        "Maple, otter, badger, willow, amber.",
+        phrase
+    ));
+    assert!(!s99_recalls_phrase("maple otter badger willow", phrase));
+    assert!(!s99_recalls_phrase(
+        "otter maple badger willow amber",
+        phrase
+    ));
+    assert!(!s99_recalls_phrase("I don't know yet.", phrase));
+}
+
 #[test]
 fn s99_answer_keeps_a_reply_after_the_in_flight_chain_goes_quiet() {
     let events = s99_oracle_events(&[
@@ -2801,19 +2826,22 @@ fn s99_honest_unknown(text: &str) -> bool {
     .any(|unknown| text.contains(unknown))
 }
 
+/// Whether `text` says the vault phrase: its words in order, compared
+/// letters only, ignoring case, spacing and punctuation. The provider's
+/// transcript can glue a repeated phrase ("...willow ambermaple otter...",
+/// soak 3e8eb29a S99 runs 4 and 5), so a word-window match missed answers
+/// that said it; the same comparison makes the "never claimed natively"
+/// checks catch glued claims too.
 fn s99_recalls_phrase(text: &str, phrase: &str) -> bool {
-    let words: Vec<_> = text
-        .split(|c: char| !c.is_ascii_alphabetic())
-        .filter(|word| !word.is_empty())
-        .collect();
-    let phrase: Vec<_> = phrase.split_whitespace().collect();
-    !phrase.is_empty()
-        && words.windows(phrase.len()).any(|window| {
-            window
-                .iter()
-                .zip(&phrase)
-                .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
-        })
+    let letters = |value: &str| -> String {
+        value
+            .chars()
+            .filter(char::is_ascii_alphabetic)
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let phrase = letters(phrase);
+    !phrase.is_empty() && letters(text).contains(&phrase)
 }
 
 /// S99 measures the gated late summary on every channel it opens. A reopen

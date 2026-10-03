@@ -7195,6 +7195,8 @@ pub enum PeerIngressInputClass {
     Ack,
     #[serde(rename = "PlainEvent")]
     PlainEvent,
+    #[serde(rename = "PeerLifecycleKickoff")]
+    PeerLifecycleKickoff,
 }
 impl PeerIngressInputClass {
     pub fn as_str(&self) -> &'static str {
@@ -7209,6 +7211,7 @@ impl PeerIngressInputClass {
             Self::SilentRequest => "SilentRequest",
             Self::Ack => "Ack",
             Self::PlainEvent => "PlainEvent",
+            Self::PeerLifecycleKickoff => "PeerLifecycleKickoff",
         }
     }
 }
@@ -7226,6 +7229,7 @@ impl std::convert::TryFrom<&str> for PeerIngressInputClass {
             "SilentRequest" => Ok(Self::SilentRequest),
             "Ack" => Ok(Self::Ack),
             "PlainEvent" => Ok(Self::PlainEvent),
+            "PeerLifecycleKickoff" => Ok(Self::PeerLifecycleKickoff),
             other => Err(format!("invalid PeerIngressInputClass value `{other}`")),
         }
     }
@@ -7263,6 +7267,18 @@ pub enum PeerIngressLifecycleClass {
     PeerRetired,
     #[serde(rename = "PeerUnwired")]
     PeerUnwired,
+    #[serde(rename = "KickoffPending")]
+    KickoffPending,
+    #[serde(rename = "KickoffStarting")]
+    KickoffStarting,
+    #[serde(rename = "KickoffStarted")]
+    KickoffStarted,
+    #[serde(rename = "KickoffCallbackPending")]
+    KickoffCallbackPending,
+    #[serde(rename = "KickoffFailed")]
+    KickoffFailed,
+    #[serde(rename = "KickoffCancelled")]
+    KickoffCancelled,
 }
 impl PeerIngressLifecycleClass {
     pub fn as_str(&self) -> &'static str {
@@ -7270,6 +7286,12 @@ impl PeerIngressLifecycleClass {
             Self::PeerAdded => "PeerAdded",
             Self::PeerRetired => "PeerRetired",
             Self::PeerUnwired => "PeerUnwired",
+            Self::KickoffPending => "KickoffPending",
+            Self::KickoffStarting => "KickoffStarting",
+            Self::KickoffStarted => "KickoffStarted",
+            Self::KickoffCallbackPending => "KickoffCallbackPending",
+            Self::KickoffFailed => "KickoffFailed",
+            Self::KickoffCancelled => "KickoffCancelled",
         }
     }
 }
@@ -7280,6 +7302,12 @@ impl std::convert::TryFrom<&str> for PeerIngressLifecycleClass {
             "PeerAdded" => Ok(Self::PeerAdded),
             "PeerRetired" => Ok(Self::PeerRetired),
             "PeerUnwired" => Ok(Self::PeerUnwired),
+            "KickoffPending" => Ok(Self::KickoffPending),
+            "KickoffStarting" => Ok(Self::KickoffStarting),
+            "KickoffStarted" => Ok(Self::KickoffStarted),
+            "KickoffCallbackPending" => Ok(Self::KickoffCallbackPending),
+            "KickoffFailed" => Ok(Self::KickoffFailed),
+            "KickoffCancelled" => Ok(Self::KickoffCancelled),
             other => Err(format!("invalid PeerIngressLifecycleClass value `{other}`")),
         }
     }
@@ -23060,6 +23088,8 @@ pub enum TransitionId {
     ClassifyExternalEnvelopeLifecycleUnwiredStopped,
     ClassifyExternalEnvelopeLifecycleUnwiredAttached,
     ClassifyExternalEnvelopeLifecycleUnwiredRunning,
+    ClassifyExternalEnvelopeLifecycleKickoffAttached,
+    ClassifyExternalEnvelopeLifecycleKickoffRunning,
     ClassifyExternalEnvelopeResponseAcceptedAttached,
     ClassifyExternalEnvelopeResponseAcceptedRunning,
     ClassifyExternalEnvelopeResponseCompletedAttached,

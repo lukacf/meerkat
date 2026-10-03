@@ -1368,7 +1368,10 @@ impl CoreCommsRuntime for MockCommsRuntime {
                     .behavior
                     .read()
                     .expect("poisoned behavior lock in mock runtime");
-                if behavior.peer_lifecycle_delay_ms > 0 {
+                // The delay models topology notices (`mob.peer_*`), as the
+                // request arm below does; kickoff status notices are not
+                // topology and stay undelayed.
+                if behavior.peer_lifecycle_delay_ms > 0 && !kind.is_kickoff() {
                     let in_flight = self
                         .peer_lifecycle_in_flight
                         .fetch_add(1, Ordering::Relaxed)
@@ -58042,8 +58045,7 @@ impl RealCommsSessionService {
                     meerkat_core::PeerInputClass::PeerLifecycleAdded
                         | meerkat_core::PeerInputClass::PeerLifecycleRetired
                         | meerkat_core::PeerInputClass::PeerLifecycleUnwired
-                        | meerkat_core::PeerInputClass::PeerLifecycleKickoffFailed
-                        | meerkat_core::PeerInputClass::PeerLifecycleKickoffCancelled
+                        | meerkat_core::PeerInputClass::PeerLifecycleKickoff
                 ) {
                     // Direct comms tests deliberately inspect other volatile
                     // interactions through the public inbox API. Retain that
@@ -81786,6 +81788,45 @@ fn kickoff_notice_intent_delivers_every_machine_emitted_phase() {
         seen.len(),
         all_intents.len(),
         "every machine-emitted kickoff phase must be forwarded with a distinct notice tag"
+    );
+}
+
+/// #1608: every kickoff notice leaves the sender as a one-way
+/// `PeerLifecycle` command of the matching typed kind, never as a peer
+/// request (a request opened an inbound request on each receiver that nobody
+/// answered). `mob.peer_added` keeps its existing request carrier.
+#[test]
+fn kickoff_notices_are_sent_as_typed_lifecycle_notices_not_requests() {
+    use crate::machines::mob_machine::KickoffIntent;
+
+    for intent in [
+        KickoffIntent::Pending,
+        KickoffIntent::Starting,
+        KickoffIntent::Started,
+        KickoffIntent::CallbackPending,
+        KickoffIntent::Failed,
+        KickoffIntent::Cancelled,
+    ] {
+        let tag = super::actor::MobActor::kickoff_notice_intent(intent);
+        let kind = super::actor::MobActor::peer_lifecycle_notice_kind(tag)
+            .unwrap_or_else(|| panic!("kickoff notice {tag} must be sent as a lifecycle notice"));
+        assert!(
+            kind.is_kickoff(),
+            "{tag} must map to a kickoff lifecycle kind"
+        );
+        assert_eq!(
+            kind.as_str(),
+            tag,
+            "the lifecycle kind must carry the notice tag"
+        );
+    }
+    assert_eq!(
+        super::actor::MobActor::peer_lifecycle_notice_kind("mob.peer_retired"),
+        Some(meerkat_core::comms::PeerLifecycleKind::PeerRetired)
+    );
+    assert_eq!(
+        super::actor::MobActor::peer_lifecycle_notice_kind("mob.peer_added"),
+        None
     );
 }
 

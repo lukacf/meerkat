@@ -602,8 +602,7 @@ pub fn spawn_comms_drain(
                         }
                     }
                     PeerInputClass::SilentRequest
-                    | PeerInputClass::PeerLifecycleKickoffFailed
-                    | PeerInputClass::PeerLifecycleKickoffCancelled
+                    | PeerInputClass::PeerLifecycleKickoff
                     | PeerInputClass::ActionableMessage
                     | PeerInputClass::ActionableRequest
                     | PeerInputClass::PlainEvent => {
@@ -9699,6 +9698,89 @@ mod tests {
                 "rejected {class:?} must use the typed abandonment path"
             );
         }
+    }
+
+    /// #1608: a member-kickoff lifecycle notice is admitted as visible runtime
+    /// work but never opens an inbound peer request: nobody can answer it, so
+    /// recording one would leave a request outstanding forever.
+    #[tokio::test]
+    async fn kickoff_lifecycle_notice_is_admitted_without_an_inbound_request() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+
+        let id = InteractionId(Uuid::new_v4());
+        let kind = meerkat_core::comms::PeerLifecycleKind::KickoffStarted;
+        let candidate = PeerInputCandidate {
+            interaction: InboxInteraction {
+                objective_id: None,
+                sender_taint: None,
+                id,
+                from_route: None,
+                from: "worker-1".to_string(),
+                content: InteractionContent::Request {
+                    intent: kind.as_str().to_string(),
+                    params: json!({ "peer": "worker-1" }),
+                    blocks: None,
+                },
+                rendered_text: String::new(),
+                handling_mode: HandlingMode::Queue,
+                render_metadata: None,
+            },
+            ingress: PeerIngressFact::peer(
+                id,
+                PeerInputClass::PeerLifecycleKickoff,
+                meerkat_core::PeerIngressKind::Request,
+                Some(meerkat_core::PeerIngressAuthDecision::Required),
+                PeerIngressIdentity::new(
+                    PeerId::new(),
+                    "worker-1",
+                    PeerIngressConvention::Lifecycle {
+                        kind,
+                        peer: "worker-1".to_string(),
+                    },
+                ),
+            ),
+            lifecycle_peer: Some("worker-1".to_string()),
+            response_terminality: None,
+        };
+
+        let peer_handle = Arc::new(CountingPeerInteractionHandle::default());
+        let peer_authority: Arc<dyn meerkat_core::handles::PeerInteractionHandle> =
+            peer_handle.clone();
+        let runtime = Arc::new(OneShotPeerRequestRuntime::with_complete_authority(
+            candidate,
+            peer_authority,
+        ));
+        let drain = spawn_authorized_test_comms_drain(
+            adapter.clone(),
+            session_id.clone(),
+            runtime.clone(),
+            Duration::from_millis(10),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(1), drain)
+            .await
+            .expect("drain should exit after one candidate")
+            .expect("drain task should not panic");
+
+        assert_eq!(
+            peer_handle.request_received_count(),
+            0,
+            "a kickoff notice must not record PeerRequestReceived"
+        );
+        assert!(runtime.abandonment_reasons().is_empty());
+        let snapshot = adapter
+            .meerkat_machine_spine_snapshot(&session_id)
+            .await
+            .expect("registered session snapshot");
+        assert_eq!(
+            snapshot.ledger.input_count, 1,
+            "the kickoff notice must still be admitted as visible runtime work"
+        );
     }
 
     #[tokio::test]

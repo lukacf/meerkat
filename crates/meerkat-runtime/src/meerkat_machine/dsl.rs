@@ -1180,6 +1180,7 @@ pub enum PeerIngressInputClass {
     SilentRequest,
     Ack,
     PlainEvent,
+    PeerLifecycleKickoff,
 }
 
 /// DSL-owned peer lifecycle classifier.
@@ -1189,6 +1190,12 @@ pub enum PeerIngressLifecycleClass {
     PeerAdded,
     PeerRetired,
     PeerUnwired,
+    KickoffPending,
+    KickoffStarting,
+    KickoffStarted,
+    KickoffCallbackPending,
+    KickoffFailed,
+    KickoffCancelled,
 }
 
 /// DSL-owned peer ingress auth classifier.

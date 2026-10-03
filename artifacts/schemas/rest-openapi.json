@@ -12928,7 +12928,7 @@
         "type": "string"
       },
       "PeerLifecycleKind": {
-        "description": "One-way peer lifecycle notification kind.\n\nThese notifications are control-plane topology updates, not correlated\npeer work requests. They intentionally do not create request/response\nlifecycles and must never require an LLM-authored reply.",
+        "description": "One-way peer lifecycle notification kind.\n\nThese notifications are control-plane updates (topology changes and\nmember-kickoff status), not correlated peer work requests. They\nintentionally do not create request/response lifecycles and must never\nrequire an LLM-authored reply. Topology kinds are consumed silently by the\nreceiver; kickoff kinds are projected to the receiving agent as visible\nlifecycle notices.",
         "oneOf": [
           {
             "enum": [
@@ -12941,6 +12941,36 @@
           {
             "const": "mob.dismiss",
             "description": "Supervisor-directed dismissal: a typed terminal lifecycle signal that\nretires a live executor. The dismissal authority is the supervisor /\nruntime drain-lifecycle owner, never a peer-authored message body — a\n\"DISMISS\" string in a peer message is ordinary content, not a control\nsignal.",
+            "type": "string"
+          },
+          {
+            "const": "mob.kickoff_pending",
+            "description": "A member's kickoff is queued behind its start gate.\n\nThe six kickoff kinds are visible member-status notices, not requests:\nthe receiver records nothing to answer and owes no reply.",
+            "type": "string"
+          },
+          {
+            "const": "mob.kickoff_starting",
+            "description": "A member's kickoff turn is being started.",
+            "type": "string"
+          },
+          {
+            "const": "mob.kickoff_started",
+            "description": "A member's kickoff turn started.",
+            "type": "string"
+          },
+          {
+            "const": "mob.kickoff_callback_pending",
+            "description": "A member's kickoff is waiting on its callback.",
+            "type": "string"
+          },
+          {
+            "const": "mob.kickoff_failed",
+            "description": "A member's kickoff failed.",
+            "type": "string"
+          },
+          {
+            "const": "mob.kickoff_cancelled",
+            "description": "A member's kickoff was cancelled.",
             "type": "string"
           }
         ]

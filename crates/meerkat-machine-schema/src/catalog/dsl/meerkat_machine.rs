@@ -650,6 +650,7 @@ pub enum PeerIngressInputClass {
     SilentRequest,
     Ack,
     PlainEvent,
+    PeerLifecycleKickoff,
 }
 
 /// DSL-owned peer lifecycle classifier.
@@ -659,6 +660,12 @@ pub enum PeerIngressLifecycleClass {
     PeerAdded,
     PeerRetired,
     PeerUnwired,
+    KickoffPending,
+    KickoffStarting,
+    KickoffStarted,
+    KickoffCallbackPending,
+    KickoffFailed,
+    KickoffCancelled,
 }
 
 /// DSL-owned peer ingress auth classifier.
@@ -19500,6 +19507,82 @@ macro_rules! meerkat_catalog_machine_dsl {
                 auth: PeerIngressAuthClass::Required,
                 from_peer_id: Some(from_peer_id),
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
+                request_id: None,
+                response_terminality: None
+            }
+        }
+        // Member-kickoff status notices (`mob.kickoff_*`) are one-way
+        // lifecycle notices the receiving agent sees, not requests: the class
+        // is actionable (routed to runtime admission like an actionable
+        // request, in the same phases) but emits no request id, so no inbound
+        // peer request lifecycle opens and no reply is owed (#1608).
+        transition ClassifyExternalEnvelopeLifecycleKickoffAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class,
+                lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_kickoff" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && (lifecycle_kind == PeerIngressLifecycleClass::KickoffPending
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffStarting
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffStarted
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffCallbackPending
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffFailed
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffCancelled)
+            }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
+            update {}
+            to Attached
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleKickoff,
+                actionable: true,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                from_peer_id: Some(from_peer_id),
+                lifecycle_kind: Some(lifecycle_kind),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
+                request_id: None,
+                response_terminality: None
+            }
+        }
+        // Member-kickoff status notices (`mob.kickoff_*`) are one-way
+        // lifecycle notices the receiving agent sees, not requests: the class
+        // is actionable (routed to runtime admission like an actionable
+        // request, in the same phases) but emits no request id, so no inbound
+        // peer request lifecycle opens and no reply is owed (#1608).
+        transition ClassifyExternalEnvelopeLifecycleKickoffRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class,
+                lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_kickoff" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && (lifecycle_kind == PeerIngressLifecycleClass::KickoffPending
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffStarting
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffStarted
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffCallbackPending
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffFailed
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffCancelled)
+            }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
+            update {}
+            to Running
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleKickoff,
+                actionable: true,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                from_peer_id: Some(from_peer_id),
+                lifecycle_kind: Some(lifecycle_kind),
                 lifecycle_peer: Some(lifecycle_peer_param.get("value")),
                 request_id: None,
                 response_terminality: None

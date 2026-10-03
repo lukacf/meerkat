@@ -2630,6 +2630,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyExternalEnvelopeLifecycleUnwiredRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyExternalEnvelopeLifecycleKickoffAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyExternalEnvelopeLifecycleKickoffRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeResponseAcceptedAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

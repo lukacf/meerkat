@@ -41,6 +41,35 @@ them.
   takes a `meerkat_session::LiveStalenessPosition` (`TurnBoundaryHeld` or
   `OutsideTurnBoundary`): whether the caller holds the session's
   turn-finalization boundary. See Fixed.
+- Member-kickoff status notices are typed one-way lifecycle notices (#1608).
+  `PeerLifecycleKind` (meerkat-core) gains `PeerLifecycleKind::KickoffPending`,
+  `PeerLifecycleKind::KickoffStarting`, `PeerLifecycleKind::KickoffStarted`,
+  `PeerLifecycleKind::KickoffCallbackPending`,
+  `PeerLifecycleKind::KickoffFailed` and `PeerLifecycleKind::KickoffCancelled`
+  (wire `mob.kickoff_*`, now valid `peer_lifecycle` kinds on REST, RPC and
+  MCP). `PeerInputClass` (meerkat-core) replaces the never-produced
+  `PeerInputClass::PeerLifecycleKickoffFailed` and
+  `PeerInputClass::PeerLifecycleKickoffCancelled` with one
+  `PeerInputClass::PeerLifecycleKickoff`, so the later variants
+  `PeerInputClass::SilentRequest`, `PeerInputClass::Ack` and
+  `PeerInputClass::PlainEvent` shift down one discriminant.
+  `CommsNoticeKind` gains `CommsNoticeKind::Lifecycle` (wire `lifecycle`) and
+  `PeerConversationProjection` gains `PeerConversationProjection::Lifecycle`.
+  The generated MeerkatMachine `PeerIngressLifecycleClass`
+  (meerkat-machine-schema, meerkat-machine-kernels, meerkat-runtime) gains
+  `PeerIngressLifecycleClass::KickoffPending`,
+  `PeerIngressLifecycleClass::KickoffStarting`,
+  `PeerIngressLifecycleClass::KickoffStarted`,
+  `PeerIngressLifecycleClass::KickoffCallbackPending`,
+  `PeerIngressLifecycleClass::KickoffFailed` and
+  `PeerIngressLifecycleClass::KickoffCancelled`; `PeerIngressInputClass`
+  gains `PeerIngressInputClass::PeerLifecycleKickoff`; the kernel
+  `TransitionId` gains
+  `TransitionId::ClassifyExternalEnvelopeLifecycleKickoffAttached` and
+  `TransitionId::ClassifyExternalEnvelopeLifecycleKickoffRunning`, appended.
+  Code matching any of these enums exhaustively must handle the new
+  variants.
+
 - MobMachine state records that member run starts are held (#1500):
   `MobMachineState` (meerkat-machine-schema) and the kernel `State`
   (meerkat-machine-kernels) gain the field `member_run_starts_held`, so code
@@ -1268,6 +1297,16 @@ them.
   input transcription: in Turbo S S103 a planted "Marigold" was transcribed
   as "meerkat". The voice layer is now "the low-latency voice layer for an
   executor agent", with the same meaning.
+- Mob member-kickoff status notices (`mob.kickoff_pending`, `_starting`,
+  `_started`, `_callback_pending`, `_failed`, `_cancelled`) no longer leave an
+  unanswered inbound peer request on every wired receiver (#1608). They were
+  sent as peer requests, so each one recorded a request nobody would answer
+  and told the receiving agent to call `send_response`. They are now one-way
+  `PeerLifecycle` notices: the receiver still sees each one (a `lifecycle`
+  comms notice naming the kind, waking it as before), no inbound request is
+  recorded, and the notice asks for no reply. A notice from an older sender
+  still arrives as a request. Topology notices (`mob.peer_*`) are unchanged.
+
 - GPT Live no longer announces "Finished voice request ... The result follows."
   for a result whose work is still waiting on another member's answer
   (Turbo S combined5 S102 R3: the voice answered that announcement with an

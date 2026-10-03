@@ -56186,18 +56186,13 @@ impl MobActor {
             ))
         })?;
 
-        let cmd = match intent {
-            "mob.peer_retired" => CommsCommand::PeerLifecycle {
+        let cmd = match Self::peer_lifecycle_notice_kind(intent) {
+            Some(kind) => CommsCommand::PeerLifecycle {
                 to: peer_route,
-                kind: PeerLifecycleKind::PeerRetired,
+                kind,
                 params,
             },
-            "mob.peer_unwired" => CommsCommand::PeerLifecycle {
-                to: peer_route,
-                kind: PeerLifecycleKind::PeerUnwired,
-                params,
-            },
-            _ => CommsCommand::PeerRequest {
+            None => CommsCommand::PeerRequest {
                 objective_id: None,
                 to: peer_route,
                 intent: intent.to_string(),
@@ -56209,6 +56204,26 @@ impl MobActor {
             },
         };
         Ok(cmd)
+    }
+
+    /// The one-way lifecycle kind a peer notice intent is sent as, or `None`
+    /// for intents still sent as peer requests.
+    ///
+    /// Kickoff status notices are lifecycle notices: sent as requests they
+    /// opened an inbound request on every receiver that nobody ever answered
+    /// (#1608).
+    pub(super) fn peer_lifecycle_notice_kind(intent: &str) -> Option<PeerLifecycleKind> {
+        match intent {
+            "mob.peer_retired" => Some(PeerLifecycleKind::PeerRetired),
+            "mob.peer_unwired" => Some(PeerLifecycleKind::PeerUnwired),
+            "mob.kickoff_pending" => Some(PeerLifecycleKind::KickoffPending),
+            "mob.kickoff_starting" => Some(PeerLifecycleKind::KickoffStarting),
+            "mob.kickoff_started" => Some(PeerLifecycleKind::KickoffStarted),
+            "mob.kickoff_callback_pending" => Some(PeerLifecycleKind::KickoffCallbackPending),
+            "mob.kickoff_failed" => Some(PeerLifecycleKind::KickoffFailed),
+            "mob.kickoff_cancelled" => Some(PeerLifecycleKind::KickoffCancelled),
+            _ => None,
+        }
     }
 
     async fn notify_kickoff_event(

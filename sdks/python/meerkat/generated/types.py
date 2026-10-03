@@ -7797,7 +7797,7 @@ class CommsCommandPeerMessage(TypedDict, total=False):
 
 class CommsCommandPeerLifecycle(TypedDict, total=False):
     kind: Required[Literal['peer_lifecycle']]
-    lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired'] | Literal['mob.dismiss']]
+    lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired'] | Literal['mob.dismiss'] | Literal['mob.kickoff_pending'] | Literal['mob.kickoff_starting'] | Literal['mob.kickoff_started'] | Literal['mob.kickoff_callback_pending'] | Literal['mob.kickoff_failed'] | Literal['mob.kickoff_cancelled']]
     params: Required[CommsPeerLifecycleParams]
     to: Required[PeerId]
 
@@ -8552,7 +8552,7 @@ class CommsSendParamsPeerMessage(TypedDict, total=False):
 
 class CommsSendParamsPeerLifecycle(TypedDict, total=False):
     kind: Required[Literal['peer_lifecycle']]
-    lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired'] | Literal['mob.dismiss']]
+    lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired'] | Literal['mob.dismiss'] | Literal['mob.kickoff_pending'] | Literal['mob.kickoff_starting'] | Literal['mob.kickoff_started'] | Literal['mob.kickoff_callback_pending'] | Literal['mob.kickoff_failed'] | Literal['mob.kickoff_cancelled']]
     params: Required[CommsPeerLifecycleParams]
     session_id: Required[str]
     to: Required[PeerId]

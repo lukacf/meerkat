@@ -938,14 +938,18 @@ Some peer lifecycle notices are informational and should not trigger an LLM turn
 
 These are injected as lifecycle context, not ordinary actionable requests.
 
-Kickoff anomalies are different:
+Kickoff status notices are different. A member's kickoff progress reaches its wired peers as visible lifecycle notices:
 
+- `mob.kickoff_pending`
+- `mob.kickoff_starting`
+- `mob.kickoff_started`
+- `mob.kickoff_callback_pending`
 - `mob.kickoff_failed`
 - `mob.kickoff_cancelled`
 
-These are visible lifecycle notices because they tell the parent or wired peers that a helper's initial autonomous turn failed before it could reliably report for itself.
+They are visible because they tell the parent or wired peers how a helper's initial autonomous turn is going, including a failure before the helper could reliably report for itself. They are still one-way notices, not requests: the receiving agent sees a `lifecycle` comms notice naming the kind, no inbound request is recorded, and no `send_response` reply is expected.
 
-Batched peer lifecycle updates are presentation-only: the underlying comms request stream remains one event per peer change.
+Batched peer lifecycle updates are presentation-only: the underlying comms stream remains one event per peer change.
 
 You can control whether these peer lifecycle updates are inlined by peer-count threshold using `max_inline_peer_notifications`:
 

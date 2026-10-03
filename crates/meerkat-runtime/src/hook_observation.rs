@@ -65,6 +65,9 @@ fn peer_ingress_observation(input: &Input) -> Option<HookPeerIngressCommitted> {
             meerkat_core::types::CommsNoticeKind::ResponseTerminal,
             Some(request_id.clone()),
         ),
+        Some(PeerConvention::Lifecycle { .. }) => {
+            (meerkat_core::types::CommsNoticeKind::Lifecycle, None)
+        }
         Some(PeerConvention::Message) | None => {
             (meerkat_core::types::CommsNoticeKind::Message, None)
         }

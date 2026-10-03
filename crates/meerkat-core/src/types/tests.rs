@@ -2408,6 +2408,52 @@ mod content_block_tests {
         assert!(conversational.indexable_content().is_indexable());
     }
 
+    /// A message whose text projection is empty or whitespace-only has nothing
+    /// to match: it is `Excluded(EmptyText)`, never `Indexable("")`. An empty
+    /// memory embedding is a zero vector, which cosine distance scores as a
+    /// perfect match for every query.
+    #[test]
+    fn indexable_content_excludes_empty_text() {
+        let tool_call_only = Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::ToolUse {
+                id: "tc_1".to_string(),
+                name: "test_tool".to_string(),
+                args: serde_json::value::RawValue::from_string("{}".to_string())
+                    .expect("valid args"),
+                meta: None,
+            }],
+            stop_reason: Some(StopReason::ToolUse),
+            identity: crate::types::TranscriptMessageIdentity::default(),
+            created_at: message_timestamp_now(),
+            assistant_message_id: None,
+        });
+        assert_eq!(
+            tool_call_only.indexable_content(),
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::EmptyText),
+        );
+        assert!(tool_call_only.as_indexable_text().is_empty());
+
+        let blank_user = Message::User(UserMessage::text("  \n\t "));
+        assert_eq!(
+            blank_user.indexable_content(),
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::EmptyText),
+        );
+
+        // `normalized` applies the same rule to a decision built directly.
+        assert_eq!(
+            MemoryIndexableContent::Indexable("   ".to_string()).normalized(),
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::EmptyText),
+        );
+        assert_eq!(
+            MemoryIndexableContent::Indexable("kept".to_string()).normalized(),
+            MemoryIndexableContent::Indexable("kept".to_string()),
+        );
+        assert_eq!(
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::ToolResults).normalized(),
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::ToolResults),
+        );
+    }
+
     #[test]
     fn injected_context_constructors_stamp_typed_role() {
         let text = UserMessage::injected_context("ambient");

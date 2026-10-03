@@ -118,12 +118,26 @@ this directory or the harness changes.
 
   Answers whose length shapes the client events (an appended reply is split
   into 500-byte fragments, and the fragment index is in the `event_id`) are
-  taken from the fixture itself. The summary is a fixed stub.
+  taken from the fixture itself.
+- **Summaries** follow each recorded open. The live pre-open summary wait is
+  bounded, so a live run seeds the summary only when it was ready in time;
+  otherwise the open seeds the recent turns verbatim and the summary follows
+  on the thinking lane after the first user turn. Which one happened is live
+  timing, so the replay reads it from the tape. The replay summarizer
+  returns the recorded summary text at once for an open recorded with a
+  seeded summary. For an open recorded with a late one, it holds the text
+  until that open's create request has been served, a typed tape state, so
+  the open goes ahead without it and the summary arrives late as recorded.
+  The recorded text also keeps the late append's fragment `event_id`s
+  equal.
 - **The driver** (`drive_replay`) reads the steps from the fixture, so a
   re-capture needs no new script:
   - each channel opens, and its markers are stepped in recorded order;
   - a disconnect followed by a recorded client mute is the host's close (the
-    provider did not end that channel); otherwise the provider closes it;
+    provider did not end that channel); otherwise the provider closes it. The
+    host closes once the tape reaches that mute, so narration and frames the
+    recording shows crossing the channel between the disconnect and the close
+    are replayed first;
   - each delegated job's worker turn is released once its channel carried
     the job's "Started voice request" narration, when its result was
     delivered on that channel. When it was not (the channel went down
@@ -148,7 +162,8 @@ this directory or the harness changes.
   - S104's opens must match the recorded seed shapes (item roles);
   - the scenario's own contract holds. S104: the merged job's reply reaches
     the reopened channel as runtime work carrying the result token. S106:
-    every open is seeded with the summary first.
+    every open carries the summary first, seeded where the recorded open
+    seeded it, otherwise as the late thinking append.
 
 A divergence fails with where the tape is parked (the marker or client event
 it waits for). `REPLAY_DUMP_REQUESTS=1` prints every scripted LLM request with

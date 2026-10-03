@@ -10,7 +10,8 @@
 //!   stream (`tests/integration/fixtures/gpt_live_replay/`), gated causally
 //!   on Meerkat's own client events and the test's steps, never on time;
 //! - every executor/worker LLM call is a [`ScriptedLlm`] keyed by purpose,
-//!   and the summary is a fixed [`ScriptedSummarizer`];
+//!   and each open's summary is a [`RecordedSummarizer`]: the recorded text,
+//!   seeded or late exactly as the recorded open had it;
 //! - there is no browser: the offer is a literal string, and the test steps
 //!   the recording's markers (`play_at:*`, `disconnect:*`) itself.
 //!
@@ -34,8 +35,9 @@ use meerkat::experimental_gpt_live::{
     ExperimentalGptLiveOpenAuthority, ExperimentalGptLiveWebrtcTransport,
     ExperimentalLiveOpenAuthorityProvider, ExperimentalLivePublicObservation,
     ExperimentalLivePublicObservationDeliveryError, ExperimentalLivePublicObservationPublisher,
-    GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID, GPT_LIVE_PUBLIC_MODEL, LIVE_RUNTIME_WORK_PREFIX,
-    PublicGptLiveOpenAuthorityConfig, PublicGptLivePlaybackPolicy, provider_recording,
+    GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID, GPT_LIVE_PUBLIC_MODEL, LIVE_LATE_SUMMARY_PREFIX,
+    LIVE_RUNTIME_WORK_PREFIX, PublicGptLiveOpenAuthorityConfig, PublicGptLivePlaybackPolicy,
+    provider_recording,
 };
 use meerkat::session_runtime::live_summary::{
     LiveContextBootstrapMode, LiveContextSummarizer, LiveContextSummaryError,
@@ -65,7 +67,7 @@ use tokio::io::BufReader;
 use tokio::sync::watch;
 use tokio::time::{Duration, timeout};
 
-use replay::{Cassette, ClientKey, Fixture, fixture_findings};
+use replay::{Cassette, ClientKey, Fixture, RecordedSummary, SummaryGate, fixture_findings};
 use support::evidence::{self, Journal};
 use support::{
     ExplicitScenarioBindingAuthority, FixedConfigSource, JsonlRpcClient, execution_identity,
@@ -280,17 +282,46 @@ impl LlmClient for ScriptedLlm {
 
 use futures::StreamExt as _;
 
-/// The bootstrap/reopen summary: fixed content, ready at once (the recorded
-/// runs had their summary before each open, so neither carried a late one).
-struct ScriptedSummarizer(String);
+/// Each open's summary as the recording had it. The live pre-open summary
+/// wait is bounded, so whether an open was seeded with its summary or got it
+/// late on the thinking lane is live timing. The replay follows the recorded
+/// open instead, keyed on the tape, never on time:
+/// - seeded: the recorded summary, ready at once, so this open seeds it;
+/// - late: the recorded summary, held until this open's create request has
+///   been served, so it cannot be ready within the pre-open bound and
+///   follows on the thinking lane as recorded;
+/// - absent (an open past the recording, or one that carried none): the
+///   scenario's fallback text, ready at once.
+///
+/// The recorded text also keeps the late append's fragment count (and so
+/// its `event_id`s) equal to the recording's.
+struct RecordedSummarizer {
+    gate: SummaryGate,
+    fallback: String,
+}
 
 #[async_trait::async_trait]
-impl LiveContextSummarizer for ScriptedSummarizer {
+impl LiveContextSummarizer for RecordedSummarizer {
     async fn summarize(
         &self,
         _snapshot: LiveContextSummarySnapshot<'_>,
     ) -> Result<String, LiveContextSummaryError> {
-        Ok(self.0.clone())
+        let open = self.gate.opens_created();
+        match self
+            .gate
+            .fixture()
+            .recorded_summary(open, LIVE_LATE_SUMMARY_PREFIX)
+        {
+            RecordedSummary::Seeded(summary) => Ok(summary),
+            RecordedSummary::Late(summary) => {
+                self.gate
+                    .created(open + 1)
+                    .await
+                    .map_err(LiveContextSummaryError::Producer)?;
+                Ok(summary)
+            }
+            RecordedSummary::Absent => Ok(self.fallback.clone()),
+        }
     }
 }
 
@@ -393,7 +424,9 @@ struct HostOptions<'a> {
     policy: LiveDelegationExecutionPolicy,
     executor_instructions: &'a str,
     seed_prompt: Option<&'a str>,
+    /// The summary of an open the recording carries none for.
     summary: &'a str,
+    summary_gate: SummaryGate,
 }
 
 async fn open_replay_host(
@@ -572,7 +605,10 @@ async fn open_replay_host(
     .with_webrtc_cleanup_state(webrtc)
     .with_context_summary_policy(
         LiveContextSummaryPolicy::new(
-            Arc::new(ScriptedSummarizer(options.summary.to_owned())),
+            Arc::new(RecordedSummarizer {
+                gate: options.summary_gate,
+                fallback: options.summary.to_owned(),
+            }),
             4 * 1024 * 1024,
             16 * 1024,
             Duration::from_secs(60),
@@ -800,6 +836,87 @@ fn replay_fixtures_are_scrubbed() {
     }
 }
 
+/// A recorded open's summary is read from the tape: seeded from the create
+/// request's developer item, late from the thinking append (all of its
+/// fragments) when the create request has none, absent otherwise.
+#[test]
+fn recorded_summary_follows_each_recorded_open() {
+    let line = |seq: u64, channel: u32, entry: provider_recording::Entry| {
+        serde_json::to_string(&provider_recording::Line {
+            seq,
+            channel_ordinal: channel,
+            elapsed_ms: 0,
+            entry,
+        })
+        .unwrap()
+    };
+    let create = |input: Value| provider_recording::Entry::CreateRequest {
+        body: json!({"session": {"input": input}}),
+    };
+    let created = || provider_recording::Entry::CreateResponse {
+        body: json!({"session": {"id": "s"}}),
+    };
+    let thinking = |id: &str, content: &str| provider_recording::Entry::ClientEvent {
+        event: json!({"type": "session.thinking.append", "event_id": id, "content": content}),
+    };
+    let seeded_item = json!([{"type": "message", "role": "developer", "content": [{
+        "type": "input_text",
+        "text": "Factual summary of the background agent's context at voice-channel open (context data, not a new user request):\nThe venue is Lisbon."
+    }]}]);
+    let recent_only = json!([{"type": "message", "role": "user", "content": [{
+        "type": "input_text", "text": "Typed while the voice call is down: the code is Kestrel."
+    }]}]);
+    let text = [
+        line(1, 1, create(seeded_item)),
+        line(2, 1, created()),
+        line(3, 2, create(recent_only.clone())),
+        line(4, 2, created()),
+        line(
+            5,
+            2,
+            thinking(
+                "meerkat-thinking-1-0",
+                &format!("{LIVE_LATE_SUMMARY_PREFIX}\nThe venue is Lis"),
+            ),
+        ),
+        line(
+            6,
+            2,
+            thinking("meerkat-thinking-1-1", "bon. The code is Kestrel."),
+        ),
+        line(
+            7,
+            2,
+            thinking(
+                "meerkat-thinking-2-0",
+                "Earlier in this call, replayed after the summary",
+            ),
+        ),
+        line(8, 3, create(recent_only)),
+        line(9, 3, created()),
+    ]
+    .join("\n");
+    let fixture = Fixture::parse(&text).unwrap();
+    assert_eq!(
+        fixture.recorded_summary(0, LIVE_LATE_SUMMARY_PREFIX),
+        RecordedSummary::Seeded("The venue is Lisbon.".to_owned())
+    );
+    assert_eq!(
+        fixture.recorded_summary(1, LIVE_LATE_SUMMARY_PREFIX),
+        RecordedSummary::Late("The venue is Lisbon. The code is Kestrel.".to_owned()),
+        "a late summary joins its fragments and leaves the causal replay out"
+    );
+    assert_eq!(
+        fixture.recorded_summary(2, LIVE_LATE_SUMMARY_PREFIX),
+        RecordedSummary::Absent
+    );
+    assert_eq!(
+        fixture.recorded_summary(3, LIVE_LATE_SUMMARY_PREFIX),
+        RecordedSummary::Absent,
+        "an open past the recording"
+    );
+}
+
 /// One delegated job of a recording, in creation order (the order the
 /// scripted worker sees `Purpose::DelegatedJob(n)`).
 #[derive(Debug, Clone)]
@@ -923,6 +1040,7 @@ async fn drive_replay(
         for step in tape.markers() {
             cassette.release(channel, &step).await?;
             if step.starts_with("disconnect") && tape.host_closes_after(&step) {
+                cassette.at_host_close(channel).await?;
                 host.host_close(&open).await?;
             }
         }
@@ -1089,6 +1207,7 @@ async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
         executor_instructions: S104_EXECUTOR_INSTRUCTIONS,
         seed_prompt: Some(S104_SEED_PROMPT),
         summary: "The team mascot is a heron named Bartleby.",
+        summary_gate: cassette.summary_gate(),
     })
     .await?;
     let result = drive_replay(
@@ -1191,6 +1310,7 @@ async fn s106_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
         executor_instructions: S106_EXECUTOR_INSTRUCTIONS,
         seed_prompt: Some(S106_SEED_PROMPT),
         summary: "The sponsor's name is Marlow. The project codename is Saffron. The launch venue is Lisbon. The budget code is Kestrel.",
+        summary_gate: cassette.summary_gate(),
     })
     .await?;
     let result = drive_replay(
@@ -1220,11 +1340,27 @@ async fn s106_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
     })?;
     finished?;
 
-    for body in cassette.create_bodies() {
-        assert_eq!(
-            body["session"]["input"][0]["role"], "developer",
-            "each S106 open is seeded with the summary first: {body}"
-        );
+    // Each open carries the summary first, as its recorded open did: seeded
+    // as the first startup item, or (not ready within the pre-open bound)
+    // absent from the seed and delivered as the thinking append the client
+    // event comparison below pins.
+    for (index, body) in cassette.create_bodies().iter().enumerate() {
+        let seeded = body["session"]["input"][0]["role"] == "developer";
+        match fixture.recorded_summary(index, LIVE_LATE_SUMMARY_PREFIX) {
+            RecordedSummary::Seeded(_) => assert!(
+                seeded,
+                "S106 open #{} is seeded with the summary first: {body}",
+                index + 1
+            ),
+            RecordedSummary::Late(_) => assert!(
+                !seeded,
+                "S106 open #{} was recorded with a late summary and must not seed one: {body}",
+                index + 1
+            ),
+            RecordedSummary::Absent => {
+                panic!("S106 open #{} carries no recorded summary", index + 1)
+            }
+        }
     }
     assert_recorded_client_events(&evidence, &fixture, &llm)?;
     Ok(())

@@ -204,6 +204,88 @@ impl Fixture {
     }
 }
 
+/// How one recorded open carried its context summary. The pre-open summary
+/// wait is bounded, so a live run seeds the summary only when it was ready
+/// within the bound; otherwise the open goes ahead without it and the summary
+/// follows on the quiet thinking lane. Which one happened is live timing; the
+/// replay reads it from the recording instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecordedSummary {
+    /// Seeded as the developer startup item of the create request.
+    Seeded(String),
+    /// Not in the create request: delivered as a thinking append after the
+    /// open, whose first fragment starts with the late-summary prefix.
+    Late(String),
+    /// The open carried no summary.
+    Absent,
+}
+
+/// The startup item of a seeded summary: `Factual summary of ...:` then the
+/// summary text on the next line.
+const SEEDED_SUMMARY_ITEM_START: &str = "Factual summary of ";
+
+impl Fixture {
+    /// How the open at `index` (0-based, creation order) carried its summary,
+    /// with the summary text as recorded. `late_prefix` is the product's
+    /// late-summary prefix (`LIVE_LATE_SUMMARY_PREFIX`).
+    pub fn recorded_summary(&self, index: usize, late_prefix: &str) -> RecordedSummary {
+        let Some(tape) = self.channels.get(index) else {
+            return RecordedSummary::Absent;
+        };
+        let seeded = tape.create_request["session"]["input"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| item["role"] == "developer")
+            .filter_map(|item| item["content"][0]["text"].as_str())
+            .find(|text| text.starts_with(SEEDED_SUMMARY_ITEM_START))
+            .and_then(|text| text.split_once('\n').map(|(_, summary)| summary.to_owned()));
+        if let Some(summary) = seeded {
+            return RecordedSummary::Seeded(summary);
+        }
+        // The late summary is one thinking append, split into fragments that
+        // share the append token: `meerkat-thinking-<token>-<fragment>`.
+        let thinking: Vec<(String, String)> = self
+            .lines
+            .iter()
+            .filter(|line| line.channel_ordinal == tape.ordinal)
+            .filter_map(|line| match &line.entry {
+                Entry::ClientEvent { event } if event["type"] == "session.thinking.append" => {
+                    Some((
+                        event["event_id"].as_str().unwrap_or_default().to_owned(),
+                        event["content"].as_str().unwrap_or_default().to_owned(),
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        let Some((first_id, _)) = thinking
+            .iter()
+            .find(|(_, content)| content.starts_with(late_prefix))
+        else {
+            return RecordedSummary::Absent;
+        };
+        let Some(token) = first_id
+            .rsplit_once('-')
+            .map(|(token, _)| format!("{token}-"))
+        else {
+            return RecordedSummary::Absent;
+        };
+        let joined: String = thinking
+            .iter()
+            .filter(|(id, _)| id.starts_with(&token))
+            .map(|(_, content)| content.as_str())
+            .collect();
+        match joined
+            .strip_prefix(late_prefix)
+            .map(|rest| rest.strip_prefix('\n').unwrap_or(rest))
+        {
+            Some(summary) => RecordedSummary::Late(summary.to_owned()),
+            None => RecordedSummary::Absent,
+        }
+    }
+}
+
 /// Where one channel's sideband replay currently waits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Parked {
@@ -378,6 +460,31 @@ impl Cassette {
         })
     }
 
+    /// Wait until channel `ordinal`'s tape is parked at the host's recorded
+    /// close (its `session.input_audio.mute`): every step the recording shows
+    /// before the host closed has been exchanged. A recorded run whose
+    /// narration or frames still crossed the channel between the peer's
+    /// disconnect and the host's close replays them before closing.
+    pub async fn at_host_close(&self, ordinal: u32) -> Result<(), String> {
+        let reached = timeout(
+            STEP_BOUND,
+            self.shared.wait_until(|state| {
+                matches!(
+                    state.parked.get(&ordinal),
+                    Some(Parked::Client(key)) if key.kind == "session.input_audio.mute"
+                ) || !state.divergences.is_empty()
+            }),
+        )
+        .await;
+        self.diverged()?;
+        reached.map_err(|_| {
+            format!(
+                "channel {ordinal} never reached the host's recorded close; the replay is parked at {:?}",
+                self.parked(ordinal)
+            )
+        })
+    }
+
     /// Wait until channel `ordinal`'s tape has ended (the provider closed).
     pub async fn ended(&self, ordinal: u32) -> Result<(), String> {
         let reached = timeout(
@@ -396,6 +503,13 @@ impl Cassette {
         })
     }
 
+    /// A handle the replay host's summarizer holds to follow the recording.
+    pub fn summary_gate(&self) -> SummaryGate {
+        SummaryGate {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
     /// Every create body Meerkat sent, in order.
     pub fn create_bodies(&self) -> Vec<Value> {
         self.shared.read(|state| state.create_bodies.clone())
@@ -407,6 +521,37 @@ impl Cassette {
             Some(divergence) => Err(divergence.clone()),
             None => Ok(()),
         })
+    }
+}
+
+/// The replay summarizer's view of the tape: which open a summary is for,
+/// and when that open's create request has been served.
+#[derive(Clone)]
+pub struct SummaryGate {
+    shared: Arc<Shared>,
+}
+
+impl SummaryGate {
+    pub fn fixture(&self) -> &Fixture {
+        &self.shared.fixture
+    }
+
+    /// Opens created so far: a summary generated now is for the open at this
+    /// index (the pre-open generation runs before its create request).
+    pub fn opens_created(&self) -> usize {
+        self.shared.read(|state| state.create_bodies.len())
+    }
+
+    /// Wait until `count` opens have sent their create request (a typed tape
+    /// state; the bound is a safety net for a broken replay).
+    pub async fn created(&self, count: usize) -> Result<(), String> {
+        timeout(
+            STEP_BOUND,
+            self.shared
+                .wait_until(|state| state.create_bodies.len() >= count),
+        )
+        .await
+        .map_err(|_| format!("open #{count} was never created"))
     }
 }
 

@@ -559,3 +559,216 @@ async fn shutdown_during_a_resume_rollback_completes_once_the_member_turn_ends()
         .expect("shutdown");
     assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
 }
+
+/// #1494: a handle whose actor side is played by the test. Its commands land
+/// on `commands` and its machine-state view is `state_tx`; the real mob only
+/// supplies the rest of the handle.
+async fn handle_with_scripted_actor(
+    pending: impl FnOnce(&mut crate::machines::mob_machine::MobMachineState),
+) -> (
+    MobHandle,
+    mpsc::Receiver<crate::runtime::scope_gate::RoutedMobCommand>,
+    tokio::sync::watch::Sender<crate::machines::mob_machine::MobMachineState>,
+    crate::machines::mob_machine::MobMachineState,
+) {
+    let (real, _service) = create_test_mob(sample_definition()).await;
+    let drained = real.machine_state_watch_rx.borrow().clone();
+    let mut blocked = drained.clone();
+    pending(&mut blocked);
+    let (state_tx, state_rx) = tokio::sync::watch::channel(blocked);
+    let (command_tx, commands) = mpsc::channel(8);
+    let mut handle = real.clone();
+    handle.command_tx = command_tx;
+    handle.machine_state_watch_rx = state_rx;
+    (handle, commands, state_tx, drained)
+}
+
+async fn refuse_next_stop(
+    commands: &mut mpsc::Receiver<crate::runtime::scope_gate::RoutedMobCommand>,
+    refusal: MobError,
+) {
+    let routed = tokio::time::timeout(STEP, commands.recv())
+        .await
+        .expect("the handle sends Stop")
+        .expect("command channel open");
+    let MobCommand::Stop { reply_tx } = routed.cmd else {
+        panic!("expected Stop, got {}", routed.cmd.kind());
+    };
+    let _ = reply_tx.send(Err(refusal));
+}
+
+/// #1494: a Stop the actor refuses because placed completion cleanup is still
+/// settling is re-issued exactly once, when that cleanup drains, and never
+/// on a retry cadence. The clock is paused: the old 25 ms resend loop would
+/// re-send during the idle barrier, and a timer-driven re-issue would make
+/// virtual time pass after the drain.
+#[tokio::test(start_paused = true)]
+async fn a_stop_refused_on_placed_completion_cleanup_reissues_once_when_it_drains() {
+    let (handle, mut commands, state_tx, drained) = handle_with_scripted_actor(|state| {
+        state
+            .pending_placed_completion_outcomes
+            .insert(crate::machines::mob_machine::PlacedCompletionObligation::default());
+    })
+    .await;
+    let stop = tokio::spawn(async move { handle.stop().await });
+    refuse_next_stop(
+        &mut commands,
+        MobError::PlacedCompletionCleanupPending {
+            pending: 1,
+            resolved: 0,
+        },
+    )
+    .await;
+
+    // Run until idle: on the paused clock this returns once the handle has
+    // taken the refusal and parked.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        commands.try_recv().is_err(),
+        "no Stop is re-sent while the placed completion cleanup is pending"
+    );
+    assert!(!stop.is_finished());
+
+    let drained_at = tokio::time::Instant::now();
+    state_tx.send_replace(drained);
+    let routed = tokio::time::timeout(STEP, commands.recv())
+        .await
+        .expect("Stop is re-issued when the cleanup drains")
+        .expect("command channel open");
+    assert_eq!(
+        tokio::time::Instant::now(),
+        drained_at,
+        "the drain re-issued the Stop, not a timer"
+    );
+    let MobCommand::Stop { reply_tx } = routed.cmd else {
+        panic!("expected Stop, got {}", routed.cmd.kind());
+    };
+    let _ = reply_tx.send(Ok(crate::MobStopReport::default()));
+    stop.await
+        .expect("stop task does not panic")
+        .expect("the re-issued Stop completes");
+    assert!(commands.try_recv().is_err(), "exactly one re-issue");
+}
+
+/// #1494: Shutdown refused on placed kickoff cleanup waits for those custody
+/// sets to drain, then re-issues once.
+#[tokio::test(start_paused = true)]
+async fn a_shutdown_refused_on_placed_kickoff_cleanup_reissues_once_when_it_drains() {
+    let (handle, mut commands, state_tx, drained) = handle_with_scripted_actor(|state| {
+        state
+            .resolved_placed_kickoff_outcomes
+            .insert(crate::machines::mob_machine::PlacedKickoffObligation::default());
+    })
+    .await;
+    let shutdown = tokio::spawn(async move { handle.shutdown().await });
+    let routed = tokio::time::timeout(STEP, commands.recv())
+        .await
+        .expect("the handle sends Shutdown")
+        .expect("command channel open");
+    let MobCommand::Shutdown { reply_tx, .. } = routed.cmd else {
+        panic!("expected Shutdown, got {}", routed.cmd.kind());
+    };
+    let _ = reply_tx.send(Err(MobError::PlacedKickoffCleanupPending {
+        pending: 0,
+        resolved: 1,
+    }));
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        commands.try_recv().is_err(),
+        "no Shutdown is re-sent while placed kickoff cleanup is pending"
+    );
+    let drained_at = tokio::time::Instant::now();
+    state_tx.send_replace(drained);
+    let routed = tokio::time::timeout(STEP, commands.recv())
+        .await
+        .expect("Shutdown is re-issued when the cleanup drains")
+        .expect("command channel open");
+    assert_eq!(tokio::time::Instant::now(), drained_at);
+    let MobCommand::Shutdown { reply_tx, .. } = routed.cmd else {
+        panic!("expected Shutdown, got {}", routed.cmd.kind());
+    };
+    let _ = reply_tx.send(Ok(()));
+    shutdown
+        .await
+        .expect("shutdown task does not panic")
+        .expect("the re-issued Shutdown completes");
+}
+
+/// #1494: a Stop refused because another lifecycle operation is settling is
+/// re-issued once at once (the state that lets it succeed may already be
+/// committed), and a repeated refusal is re-issued only when the machine
+/// commits a later transition, never on a timer.
+#[tokio::test(start_paused = true)]
+async fn a_stop_refused_on_a_pending_lifecycle_operation_reissues_on_the_next_commit() {
+    let (handle, mut commands, state_tx, drained) = handle_with_scripted_actor(|_| {}).await;
+    let stop = tokio::spawn(async move { handle.stop().await });
+    let pending = || MobError::LifecycleOperationPending {
+        intent: "member retirement".to_owned(),
+    };
+    refuse_next_stop(&mut commands, pending()).await;
+    // The first refusal is re-evaluated at once.
+    refuse_next_stop(&mut commands, pending()).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        commands.try_recv().is_err(),
+        "a repeated refusal is not re-sent before the machine commits again"
+    );
+    let committed_at = tokio::time::Instant::now();
+    state_tx.send_replace(drained);
+    let routed = tokio::time::timeout(STEP, commands.recv())
+        .await
+        .expect("Stop is re-issued on the next commit")
+        .expect("command channel open");
+    assert_eq!(tokio::time::Instant::now(), committed_at);
+    let MobCommand::Stop { reply_tx } = routed.cmd else {
+        panic!("expected Stop, got {}", routed.cmd.kind());
+    };
+    let _ = reply_tx.send(Ok(crate::MobStopReport::default()));
+    stop.await
+        .expect("stop task does not panic")
+        .expect("the re-issued Stop completes");
+}
+
+/// #1494: the hang guard, not a retry budget, bounds the wait. A cleanup that
+/// never drains returns the actor's refusal once the guard elapses, after
+/// exactly one Stop. The scripted actor refuses every Stop it receives, so a
+/// resend loop fails the count instead of hanging.
+#[tokio::test(start_paused = true)]
+async fn a_stop_whose_blocker_never_settles_returns_the_refusal_at_the_hang_guard() {
+    let (handle, mut commands, _state_tx, _drained) = handle_with_scripted_actor(|state| {
+        state
+            .pending_placed_completion_outcomes
+            .insert(crate::machines::mob_machine::PlacedCompletionObligation::default());
+    })
+    .await;
+    let stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let refuser_stops = Arc::clone(&stops);
+    let refuser = tokio::spawn(async move {
+        while let Some(routed) = commands.recv().await {
+            if let MobCommand::Stop { reply_tx } = routed.cmd {
+                refuser_stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = reply_tx.send(Err(MobError::PlacedCompletionCleanupPending {
+                    pending: 1,
+                    resolved: 0,
+                }));
+            }
+        }
+    });
+    let started = tokio::time::Instant::now();
+    let outcome = handle.stop().await;
+    assert!(
+        matches!(
+            outcome,
+            Err(MobError::PlacedCompletionCleanupPending { .. })
+        ),
+        "the refusal stands at the hang guard, got {outcome:?}"
+    );
+    assert!(started.elapsed() >= Duration::from_secs(600));
+    assert_eq!(
+        stops.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "no Stop is re-sent while the cleanup never drains"
+    );
+    refuser.abort();
+}

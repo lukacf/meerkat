@@ -12931,8 +12931,8 @@ impl MobHandle {
     /// starts are held; a member that cannot be held is reported, never
     /// hidden behind `Ok`.
     pub async fn stop(&self) -> Result<super::stop_report::MobStopReport, MobError> {
-        let deadline = Instant::now() + DEFAULT_KICKOFF_WAIT_TIMEOUT;
-        let mut retry_delay = Duration::from_millis(25);
+        let hang_guard = tokio::time::Instant::now() + DEFAULT_KICKOFF_WAIT_TIMEOUT;
+        let mut lifecycle_watch = None;
         loop {
             match self.execute_machine_command(MobMachineCommand::Stop).await {
                 Ok(MobMachineCommandResult::Stopped(report)) => return Ok(report),
@@ -12941,19 +12941,89 @@ impl MobHandle {
                         "unexpected command result variant".into(),
                     ));
                 }
-                Err(
-                    error @ (MobError::PlacedCompletionCleanupPending { .. }
-                    | MobError::PlacedKickoffCleanupPending { .. }
-                    | MobError::LifecycleOperationPending { .. }),
-                ) => {
-                    if Instant::now() >= deadline {
-                        return Err(error);
-                    }
-                    tokio::time::sleep(retry_delay).await;
-                    retry_delay = (retry_delay * 2).min(Duration::from_millis(250));
+                Err(error) => {
+                    self.await_lifecycle_blocker(error, hang_guard, &mut lifecycle_watch)
+                        .await?;
                 }
-                Err(error) => return Err(error),
             }
+        }
+    }
+
+    /// A Stop or Shutdown the actor refused because an operation it owns is
+    /// still settling waits for that operation's own completion, read from
+    /// the mob machine-state watch, then re-issues exactly once. There is no
+    /// retry cadence:
+    /// - placed completion or kickoff cleanup: the actor drains those custody
+    ///   sets as it applies the hosts' terminal outcomes, so this waits until
+    ///   the blocking sets are empty;
+    /// - another lifecycle operation: the first such refusal in a call is
+    ///   re-issued at once, because the state that lets it succeed (a member's
+    ///   new incarnation, a drained backlog) may already be committed; a
+    ///   repeat waits for the next committed machine transition after it.
+    ///
+    /// `hang_guard` is the failure bound, not a pacing timer: past it the
+    /// refusal is returned. Any other error is returned as is.
+    async fn await_lifecycle_blocker(
+        &self,
+        refusal: MobError,
+        hang_guard: tokio::time::Instant,
+        lifecycle_watch: &mut Option<tokio::sync::watch::Receiver<mob_dsl::MobMachineState>>,
+    ) -> Result<(), MobError> {
+        enum Blocker {
+            PlacedCompletionCleanup,
+            PlacedKickoffCleanup,
+        }
+        let blocker = match &refusal {
+            MobError::PlacedCompletionCleanupPending { .. } => Blocker::PlacedCompletionCleanup,
+            MobError::PlacedKickoffCleanupPending { .. } => Blocker::PlacedKickoffCleanup,
+            MobError::LifecycleOperationPending { .. } => {
+                return match lifecycle_watch {
+                    // First refusal: arm the receiver now, before the
+                    // immediate re-evaluation, so a commit that lands in
+                    // between still wakes the next wait.
+                    None => {
+                        let mut armed = self.machine_state_watch_rx.clone();
+                        armed.borrow_and_update();
+                        *lifecycle_watch = Some(armed);
+                        Ok(())
+                    }
+                    Some(armed) => {
+                        match tokio::time::timeout_at(hang_guard, armed.changed()).await {
+                            Ok(Ok(())) => Ok(()),
+                            Ok(Err(_)) | Err(_) => Err(refusal),
+                        }
+                    }
+                };
+            }
+            _ => return Err(refusal),
+        };
+        // The refusal was produced after the actor applied (and published)
+        // this attempt's own transitions, so only later commits count.
+        let mut state_rx = self.machine_state_watch_rx.clone();
+        state_rx.borrow_and_update();
+        let progress = async move {
+            match blocker {
+                Blocker::PlacedCompletionCleanup => state_rx
+                    .wait_for(|state| {
+                        state.pending_placed_completion_outcomes.is_empty()
+                            && state.resolved_placed_completion_outcomes.is_empty()
+                    })
+                    .await
+                    .map(|_| ()),
+                Blocker::PlacedKickoffCleanup => state_rx
+                    .wait_for(|state| {
+                        state.pending_placed_kickoff_outcomes.is_empty()
+                            && state.resolved_placed_kickoff_outcomes.is_empty()
+                    })
+                    .await
+                    .map(|_| ()),
+            }
+        };
+        match tokio::time::timeout_at(hang_guard, progress).await {
+            Ok(Ok(())) => Ok(()),
+            // The actor is gone (its state watch closed) or the hang guard
+            // elapsed: the refusal stands.
+            Ok(Err(_)) | Err(_) => Err(refusal),
         }
     }
 
@@ -13230,10 +13300,12 @@ impl MobHandle {
     }
 
     async fn shutdown_until(&self, caller_deadline: Option<Instant>) -> Result<(), MobError> {
-        let default_deadline = Instant::now() + DEFAULT_KICKOFF_WAIT_TIMEOUT;
-        let deadline =
-            caller_deadline.map_or(default_deadline, |caller| caller.min(default_deadline));
-        let mut retry_delay = Duration::from_millis(25);
+        let now = tokio::time::Instant::now();
+        let default_guard = now + DEFAULT_KICKOFF_WAIT_TIMEOUT;
+        let hang_guard = caller_deadline.map_or(default_guard, |caller| {
+            default_guard.min(now + caller.saturating_duration_since(Instant::now()))
+        });
+        let mut lifecycle_watch = None;
         loop {
             match self
                 .execute_machine_command(MobMachineCommand::Shutdown {
@@ -13247,18 +13319,10 @@ impl MobHandle {
                         "unexpected command result variant".into(),
                     ));
                 }
-                Err(
-                    error @ (MobError::PlacedCompletionCleanupPending { .. }
-                    | MobError::PlacedKickoffCleanupPending { .. }
-                    | MobError::LifecycleOperationPending { .. }),
-                ) => {
-                    if Instant::now() >= deadline {
-                        return Err(error);
-                    }
-                    tokio::time::sleep(retry_delay).await;
-                    retry_delay = (retry_delay * 2).min(Duration::from_millis(250));
+                Err(error) => {
+                    self.await_lifecycle_blocker(error, hang_guard, &mut lifecycle_watch)
+                        .await?;
                 }
-                Err(error) => return Err(error),
             }
         }
     }

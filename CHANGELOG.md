@@ -773,6 +773,14 @@ them.
   - A spawn that completes into a Stopped mob leaves it Stopped and holds
     its members, the new one included. Before, MobMachine's spawn completion
     moved a Stopped mob back to Running. Only Resume leaves Stopped.
+- The rkat full-tools spawn fits its 2 MiB production worker-stack budget
+  again (`tools_full_with_explicit_auth_binding_can_spawn_within_production_stack_budget`
+  overflowed after #1436). The agent's LLM retry loop builds its
+  failure-recovery step (machine verdict, model fallback, retry wait) in its
+  own boxed frame, and its fallback-origin resume check runs out of line.
+  Before, both recovery paths sat inline in one poll frame. The deepest
+  debug path now fits in about 1.5 MiB.
+
 - The runtime store test `contended_unregister_finalization_does_not_starve_runtime_worker`
   no longer fails on a loaded host. Its two 1 s wall-clock waits are replaced
   by typed handoffs. The heartbeat now fires on a test-only signal sent when

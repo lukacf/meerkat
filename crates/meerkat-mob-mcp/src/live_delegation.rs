@@ -103,8 +103,8 @@ const AWAITING_PEER_HISTORY_PAGE: usize = 200;
 
 use schedule::{
     LIVE_DELEGATION_CHANNEL_WORKER_CAP, VoiceWorkGraph, VoiceWorkItem, WorkItemDisposition,
-    fork_work_instructions, narration_text, narration_title, post_close_merge_text,
-    task_after_failed_blockers, task_with_waited_results,
+    delegation_title_transcript, fork_work_instructions, narration_text, narration_title,
+    post_close_merge_text, task_after_failed_blockers, task_with_waited_results,
 };
 
 const LIVE_DELEGATION_RESULT_BYTES: usize = 16 * 1024;
@@ -3552,7 +3552,11 @@ impl ExperimentalLiveDelegationCoordinator {
         represented_user_rows: Vec<meerkat_core::RepresentedLiveUserRow>,
         executor_input: LiveDelegationExecutorInput,
     ) {
-        let title = narration_title(&executor_input.request_transcript);
+        let title = narration_title(delegation_title_transcript(
+            &final_transcript,
+            &represented_user_rows,
+            &executor_input.request_transcript,
+        ));
         let workgraph = self.voice_workgraph(&mob_handle);
         let work = match workgraph.as_ref() {
             Some(workgraph) => match workgraph

@@ -88,6 +88,40 @@ pub(super) fn narration_title(transcript: &str) -> String {
     truncate_chars(transcript, NARRATION_TITLE_CHARS)
 }
 
+/// The user words a delegation's narrations quote: the user's last turn
+/// before the delegation, not the whole executor window.
+///
+/// The executor window holds every user transcript since the previous
+/// delegation, so it also holds turns the model already answered natively.
+/// Quoted back to the model as `Started voice request: "..."`, those turns
+/// read as part of a request the executor owns: S106 r2 labelled the
+/// lighthouse request with "the venue for the launch is Lisbon", and "which
+/// venue did I mention" was then delegated. The last turn is the open user
+/// turn the delegation terminated (`final_transcript`, no represented rows)
+/// or, for a delegation that arrived after the model spoke, the last user
+/// row it re-presents. A speaker change ends a user turn, so turns before
+/// the last one are separated from it by model speech.
+///
+/// Only the label narrows. The provider marks no difference between a
+/// model backchannel ("mm-hm") and a substantive answer (transcript deltas
+/// carry only text and a timeline span), so a request the user split
+/// around a backchannel still reaches the executor whole, with the
+/// assistant's own words as labelled context.
+pub(super) fn delegation_title_transcript<'a>(
+    final_transcript: &'a str,
+    represented_user_rows: &'a [meerkat_core::RepresentedLiveUserRow],
+    request_transcript: &'a str,
+) -> &'a str {
+    let last_turn = represented_user_rows
+        .last()
+        .map_or(final_transcript, |row| row.text.as_str());
+    if last_turn.trim().is_empty() {
+        request_transcript
+    } else {
+        last_turn
+    }
+}
+
 /// Constant narration templates. The only variable parts are item titles
 /// and counts supplied by the scheduler.
 pub(super) fn narration_text(
@@ -609,6 +643,95 @@ mod tests {
         assert_eq!(
             narration_text(LiveDelegationNarrationKind::Failed, title, 0, &[], false),
             "Voice request \"book the \"late\" flight\" could not be completed."
+        );
+    }
+
+    fn row(text: &str) -> meerkat_core::RepresentedLiveUserRow {
+        meerkat_core::RepresentedLiveUserRow {
+            item_id: format!("item:{text}"),
+            text: text.to_string(),
+        }
+    }
+
+    /// S106 r2: the lighthouse request terminated an open user turn; the
+    /// window also held the codename and venue turns the model had already
+    /// answered ("Okay.", "Got it."). The label quotes only the request.
+    #[test]
+    fn an_open_turn_delegation_is_labelled_by_that_turn_alone() {
+        let request = "Quick note for today: the project codename is Saffron. Just say 'Okay'. \
+             And the venue for the launch is Lisbon , got it Ask the executor to write a note \
+             about lighthouses";
+        let title = delegation_title_transcript(
+            "it Ask the executor to write a note about lighthouses",
+            &[],
+            request,
+        );
+        assert_eq!(
+            title,
+            "it Ask the executor to write a note about lighthouses"
+        );
+        assert!(!title.contains("Lisbon"));
+    }
+
+    /// S106 r2 channel 2: a delegation that arrived after the model spoke
+    /// re-presents the rows finished since the previous delegation, including
+    /// the budget-code question the model answered ("Kestrel."). The label
+    /// quotes the last row: the request itself.
+    #[test]
+    fn a_detached_delegation_is_labelled_by_its_last_represented_row() {
+        let rows = [
+            row("I typed a budget code while the call was down. What was it"),
+            row("Have the executor add one closing sentence about foghorns"),
+        ];
+        let title = delegation_title_transcript(
+            "I typed a budget code while the call was down. What was it Have the executor add one closing sentence about foghorns",
+            &rows,
+            "I typed a budget code while the call was down. What was it Have the executor add one closing sentence about foghorns",
+        );
+        assert_eq!(
+            title,
+            "Have the executor add one closing sentence about foghorns"
+        );
+    }
+
+    /// A request split around a model backchannel: the label quotes the part
+    /// after it, and the executor still receives the whole request, because
+    /// nothing on the wire tells a backchannel from an answer.
+    #[test]
+    fn a_backchannel_split_narrows_only_the_label() {
+        let request = "Ask the executor to compare the two vendors and tell me which is cheaper";
+        let rows = [
+            row("Ask the executor to compare the two vendors"),
+            row("and tell me which is cheaper"),
+        ];
+        let title = delegation_title_transcript(
+            "Ask the executor to compare the two vendors and tell me which is cheaper",
+            &rows,
+            request,
+        );
+        assert_eq!(title, "and tell me which is cheaper");
+        let task =
+            super::super::delegation_request_text(&super::super::LiveDelegationExecutorInput {
+                request_transcript: request.to_string(),
+                assistant_context: "Mm-hm.".to_string(),
+            });
+        assert!(
+            task.contains(request),
+            "the executor gets the whole request"
+        );
+    }
+
+    /// No words in the last turn (a delegation decided before any transcript
+    /// landed): the label falls back to the executor request.
+    #[test]
+    fn an_empty_last_turn_falls_back_to_the_request() {
+        assert_eq!(
+            delegation_title_transcript("  ", &[], "book a table"),
+            "book a table"
+        );
+        assert_eq!(
+            delegation_title_transcript("joined", &[row(" ")], "book a table"),
+            "book a table"
         );
     }
 

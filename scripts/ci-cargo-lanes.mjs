@@ -100,6 +100,10 @@ export const FEATURE_UNIT_SUITES = [
   { package: "meerkat-mob-mcp", id: "openai-live", features: ["experimental-gpt-live-gate0-harness"] },
   { package: "meerkat-rpc", id: "openai-live", features: ["experimental-gpt-live"] },
   { package: "xtask", id: "machine-authority", features: ["machine-authority"] },
+  // The generated-kernel tests (runtime.rs) are behind `test-oracle`: their
+  // hand-built MeerkatMachine inputs broke silently when RegisterSession
+  // gained initial_run_start_holds, because no lane enabled the feature.
+  { package: "meerkat-machine-kernels", id: "test-oracle", features: ["test-oracle"] },
 ];
 
 // Integration-test suites. Every unit lane runs `--lib --bins`, so a crate's
@@ -138,6 +142,9 @@ export const INTEGRATION_SUITES = [
     triggers: [...MACHINE_AUTHORITY_PACKAGES, "meerkat-runtime", "meerkat-mob", "meerkat-machine-codegen"],
   },
   { package: "xtask", features: ["machine-authority"], triggers: ["xtask"], paths: [".github/workflows/"] },
+  // kernel_typed_round_trip drives the generated kernels with hand-built
+  // inputs, so any machine DSL change can break it; it needs `test-oracle`.
+  { package: "meerkat-machine-kernels", features: ["test-oracle"], triggers: MACHINE_AUTHORITY_PACKAGES },
   // Deterministic replays of recorded Turbo S gpt-live-1 provider streams
   // (tests/integration/fixtures/gpt_live_replay): the S104/S106 voice
   // contracts without a provider or a key. `tests` names the one target, so

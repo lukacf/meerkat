@@ -1125,11 +1125,12 @@ them.
 ### Fixed
 
 - A GPT Live open whose summary is still being prepared tells the model that
-  the newest conversation turns it carries are known and only the earlier
-  history is pending. The startup notice used to say just that a summary "is
-  being prepared and is not yet available", and gpt-live-1 answered "I don't
-  know that yet" about a fact in those very turns (Turbo S S99's positive
-  control).
+  the newest turns of the earlier text conversation it carries are known and
+  only the older part of that conversation is summarized and still pending.
+  The startup notice used to say just that a summary "is being prepared and is
+  not yet available", and gpt-live-1 answered "I don't know that yet" about a
+  fact in those very turns, including when asked about "our text chat" (Turbo
+  S S99's positive control).
 
 - GPT Live: the narration and other spoken context that follow a client
   delegation no longer arrive about 8 s late. Spoken context waits while the

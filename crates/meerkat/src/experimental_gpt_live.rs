@@ -12616,7 +12616,7 @@ mod tests {
                 "{instructions}"
             );
             assert!(
-                instructions.contains("A summary of the earlier history is being prepared"),
+                instructions.contains("Only the older part of the text conversation is summarized"),
                 "{instructions}"
             );
         }

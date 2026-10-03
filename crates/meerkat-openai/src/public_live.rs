@@ -615,7 +615,7 @@ const LIVE_STARTUP_INPUT_BYTES_PER_TOKEN: usize = 3;
 
 /// Startup notice of a summary-pending seed that carries the newest turns
 /// verbatim ([`PublicLiveOpenConfig::with_pending_context_after_recent`]).
-const LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE: &str = "Voice-channel context availability (factual state, not a new user request):\nThe most recent conversation turns are in the session input: you know them, so answer questions about them directly. Only the earlier history is still pending: its summary is being prepared and is not yet available.";
+const LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE: &str = "Voice-channel context availability (factual state, not a new user request):\nThe most recent turns of the earlier text conversation are in the session input. They are part of that text conversation and you know them: answer questions about them directly, without lookup, tool, or delegate. Only the older part of the text conversation is summarized, and that summary is being prepared and is not yet available.";
 
 /// What the startup input budget dropped to fit the provider limits. Recent
 /// turns are dropped oldest first; the summary is never dropped.
@@ -892,7 +892,9 @@ impl PublicLiveContextSeed {
             // pending summary is not read as "no history at all". Saying only
             // that history "is not yet available" made gpt-live-1 answer
             // "I don't know that yet" about a fact in those very turns (S99
-            // positive control, BuildBuddy 045430ec).
+            // positive control, BuildBuddy 045430ec). The turns are named as
+            // part of the earlier text conversation, so a question about "our
+            // text chat" is not filed under the pending summary (1139a4ff).
             Self::HistoricalContextPending { .. } => Some(
                 LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE.to_string(),
             ),
@@ -4083,7 +4085,7 @@ mod tests {
             encoded["instructions"]
                 .as_str()
                 .unwrap()
-                .contains("its summary is being prepared and is not yet available")
+                .contains("Only the older part of the text conversation is summarized")
         );
         // No recent turns: the original pending notice and no input.
         let empty = PublicLiveOpenConfig::new("v=0", "marin")
@@ -4116,8 +4118,11 @@ mod tests {
             format!("Catalog behavior.\n\n{LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE}")
         );
         let notice = LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE;
-        assert!(notice.contains("you know them, so answer questions about them directly"));
-        assert!(notice.contains("Only the earlier history is still pending"));
+        assert!(notice.contains(
+            "The most recent turns of the earlier text conversation are in the session input"
+        ));
+        assert!(notice.contains("you know them: answer questions about them directly"));
+        assert!(notice.contains("Only the older part of the text conversation is summarized"));
         assert_eq!(
             encoded["input"][0]["content"][0]["text"],
             "today I parked on level nine"

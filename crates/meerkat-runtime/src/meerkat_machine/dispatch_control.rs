@@ -650,6 +650,7 @@ impl MeerkatMachine {
                             accepted_input_id,
                         )
                     };
+                    #[cfg(not(target_arch = "wasm32"))]
                     drop(credential_custody);
                     crate::hook_observation::dispatch_runtime_input_outcome(
                         &post_commit_hooks,

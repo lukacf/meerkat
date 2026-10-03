@@ -17,11 +17,9 @@ use std::{
 use super::status::AuthStatusPhase;
 #[cfg(not(target_arch = "wasm32"))]
 use super::token_store::{
-    CredentialMutationError, CredentialMutationOutcome, ProviderAuthPersistence,
+    CredentialMutationError, CredentialMutationOutcome, ProviderAuthPersistence, TokenStore,
 };
-use super::token_store::{
-    PersistedAuthMode, PersistedTokens, TokenKey, TokenStore, TokenStoreError,
-};
+use super::token_store::{PersistedAuthMode, PersistedTokens, TokenKey, TokenStoreError};
 use crate::connection::{AuthBindingRef, AuthCredentialIdentity};
 use crate::generated::auth_lease_durable_lifecycle_marker as durable_marker;
 use crate::handles::{

@@ -25,6 +25,7 @@ pub struct NativeControllerGrantMutation<'a> {
 }
 
 impl NativeControllerGrantMutation<'_> {
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn references_credential(
         &self,
         key: Option<&meerkat_core::handles::LeaseKey>,

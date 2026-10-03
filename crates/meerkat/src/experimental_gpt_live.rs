@@ -12307,6 +12307,11 @@ mod tests {
             /// the late tail opens its own user turn, the model speaks again,
             /// then the delegation arrives with no user turn open.
             pub(super) split_before_delegation: bool,
+            /// The result lands at the generation frontier (gap 0) of a
+            /// response the model is still voicing (S97 r3): its speak cue
+            /// must wait for the response to end, 1600 ms of output silence on
+            /// the provider's output audio frames.
+            pub(super) frontier_result: bool,
             pub(super) create_body: Option<Value>,
             pub(super) create_authorization: Option<String>,
             pub(super) attach_authorization: Option<String>,
@@ -12317,6 +12322,19 @@ mod tests {
         fn input_delta(text: &str) -> Value {
             input_delta_span(text, 0.0, 1.0)
         }
+
+        /// One 200 ms provider output audio frame (4800 PCM16 samples): a
+        /// +/-16384 square tone for speech, digital zero for silence.
+        fn output_audio_frame(speech: bool) -> Value {
+            let delta = if speech {
+                "AEAAwABA".repeat(1600)
+            } else {
+                "A".repeat(12800)
+            };
+            json!({"type":"session.output_audio.delta","delta":delta})
+        }
+
+        pub(super) const READOUT_TRANSCRIPT: &str = " Table booked for two.";
 
         fn input_delta_span(text: &str, start_ms: f64, end_ms: f64) -> Value {
             json!({"type":"session.input_transcript.delta","event_id":"i","delta":text,"start_ms":start_ms,"end_ms":end_ms})
@@ -12470,14 +12488,50 @@ mod tests {
             let release = recv_json(&mut socket, &capture).await;
             assert_eq!(release["type"], "session.commentary.append");
             assert_eq!(release["delegation_id"], DELEGATION_ID);
-            // The result lands after the model's last output word, so it is
-            // followed by one speak cue bound to its delegation.
-            let release_at_ms = if late_tail { 1500.0 } else { 2.0 };
-            send_json(&mut socket, json!({"type":"session.commentary.appended","event_id":"a2","start_ms":release_at_ms,"end_ms":release_at_ms})).await;
-            let cue = recv_json(&mut socket, &capture).await;
-            assert_eq!(cue["type"], "session.instructions.append");
-            assert_eq!(cue["delegation_id"], DELEGATION_ID);
-            send_json(&mut socket, json!({"type":"session.instructions.appended","event_id":"a3","start_ms":release_at_ms,"end_ms":release_at_ms,"client_event_id":cue["event_id"]})).await;
+            let frontier = capture.lock().expect("capture lock").frontier_result;
+            if frontier {
+                // The model is still voicing its response when the result lands
+                // at that response's generation frontier: the output so far
+                // ends at 2.0 ms, where the result is inserted (gap 0).
+                for _ in 0..2 {
+                    send_json(&mut socket, output_audio_frame(true)).await;
+                }
+                send_json(&mut socket, json!({"type":"session.commentary.appended","event_id":"a2","start_ms":2.0,"end_ms":2.0})).await;
+                // 1400 ms of output silence: the response may still continue.
+                for _ in 0..7 {
+                    send_json(&mut socket, output_audio_frame(false)).await;
+                }
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(300), socket.recv())
+                        .await
+                        .is_err(),
+                    "no speak cue inside the response"
+                );
+                // 1600 ms of output silence: the response has ended.
+                send_json(&mut socket, output_audio_frame(false)).await;
+                let cue = recv_json(&mut socket, &capture).await;
+                assert_eq!(cue["type"], "session.instructions.append");
+                assert_eq!(cue["delegation_id"], DELEGATION_ID);
+                send_json(&mut socket, json!({"type":"session.instructions.appended","event_id":"a3","start_ms":1602.0,"end_ms":1602.0,"client_event_id":cue["event_id"]})).await;
+                // The model reads the result out.
+                send_json(
+                    &mut socket,
+                    output_delta_span(READOUT_TRANSCRIPT, 1700.0, 2600.0),
+                )
+                .await;
+            } else {
+                // The result lands after a gap following the model's last output
+                // word, into silence, so it is followed at once by one speak cue
+                // bound to its delegation. (A result at the end of the output so
+                // far, gap 0, is the generation frontier of a response still
+                // being voiced; its cue waits for the response to end.)
+                let release_at_ms = if late_tail { 1900.0 } else { 400.0 };
+                send_json(&mut socket, json!({"type":"session.commentary.appended","event_id":"a2","start_ms":release_at_ms,"end_ms":release_at_ms})).await;
+                let cue = recv_json(&mut socket, &capture).await;
+                assert_eq!(cue["type"], "session.instructions.append");
+                assert_eq!(cue["delegation_id"], DELEGATION_ID);
+                send_json(&mut socket, json!({"type":"session.instructions.appended","event_id":"a3","start_ms":release_at_ms,"end_ms":release_at_ms,"client_event_id":cue["event_id"]})).await;
+            }
             let mute = recv_json(&mut socket, &capture).await;
             assert_eq!(mute["type"], "session.input_audio.mute");
             let close = recv_json(&mut socket, &capture).await;
@@ -12487,14 +12541,16 @@ mod tests {
         }
 
         pub(super) async fn local_server() -> (String, SharedCapture, tokio::task::JoinHandle<()>) {
-            local_server_with(false).await
+            local_server_with(false, false).await
         }
 
         pub(super) async fn local_server_with(
             late_tail: bool,
+            frontier_result: bool,
         ) -> (String, SharedCapture, tokio::task::JoinHandle<()>) {
             local_server_capturing(Capture {
                 late_tail,
+                frontier_result,
                 ..Capture::default()
             })
             .await
@@ -12634,6 +12690,16 @@ mod tests {
     #[tokio::test]
     async fn public_broker_lowers_a_late_utterance_tail_as_a_new_user_turn() {
         run_public_broker_seed_end_to_end(PublicSeedCase::Canonical, true).await;
+    }
+
+    /// S97 r3 end to end: the result lands at the generation frontier (gap 0)
+    /// of a response the model is still voicing. Its speak cue is not sent
+    /// inside the response; it goes out once the provider's output audio
+    /// frames show 1600 ms of silence, and the model then reads the result.
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[tokio::test]
+    async fn public_broker_defers_a_frontier_result_cue_until_the_response_ends_end_to_end() {
+        run_public_broker_seed_end_to_end_with(PublicSeedCase::Canonical, false, true).await;
     }
 
     #[cfg(feature = "test-realtime-fixtures")]
@@ -12886,7 +12952,7 @@ mod tests {
     #[cfg(feature = "test-realtime-fixtures")]
     #[tokio::test]
     async fn public_broker_seeds_recent_turns_into_a_late_open_without_moving_its_cursor() {
-        let (base_url, capture, server) = public_wire::local_server_with(false).await;
+        let (base_url, capture, server) = public_wire::local_server_with(false, false).await;
         let realm = meerkat_core::RealmId::parse("voice").expect("realm");
         let target = public_fixture_target(&realm);
         let identity = target.identity().clone();
@@ -13001,8 +13067,17 @@ mod tests {
 
     #[cfg(feature = "test-realtime-fixtures")]
     async fn run_public_broker_seed_end_to_end(seed_case: PublicSeedCase, late_tail: bool) {
+        run_public_broker_seed_end_to_end_with(seed_case, late_tail, false).await;
+    }
+
+    async fn run_public_broker_seed_end_to_end_with(
+        seed_case: PublicSeedCase,
+        late_tail: bool,
+        frontier_result: bool,
+    ) {
         let summarized = seed_case != PublicSeedCase::Canonical;
-        let (base_url, capture, server) = public_wire::local_server_with(late_tail).await;
+        let (base_url, capture, server) =
+            public_wire::local_server_with(late_tail, frontier_result).await;
         let realm = meerkat_core::RealmId::parse("voice").expect("realm");
         let target = public_fixture_target(&realm);
         let identity = target.identity().clone();
@@ -13374,6 +13449,25 @@ mod tests {
             LiveSidebandObservationKind::AppendAcknowledged { attempt: acked }
                 if *acked == attempt
         ));
+        if frontier_result {
+            // The deferred speak cue went out once the response ended and the
+            // model read the result out; close only after the readout.
+            loop {
+                if let LiveSidebandObservationKind::AssistantTranscriptFragment { text, .. } =
+                    next().await.kind()
+                    && text.contains(public_wire::READOUT_TRANSCRIPT)
+                {
+                    break;
+                }
+            }
+            assert!(
+                matches!(
+                    next().await.kind(),
+                    LiveSidebandObservationKind::TurnSnapshotDelta { .. }
+                ),
+                "the readout delta's turn snapshot"
+            );
+        }
 
         sideband.close().await.expect("close requested");
         if late_tail {
@@ -13394,14 +13488,29 @@ mod tests {
                 } if transcript == public_wire::USER_TRANSCRIPT_TAIL
             ));
         } else {
-            assert!(matches!(
-                next().await.kind(),
-                LiveSidebandObservationKind::TurnFinished {
-                    role: LiveSidebandTurnRole::Assistant,
-                    transcript,
-                    ..
-                } if transcript == public_wire::ASSISTANT_TRANSCRIPT
-            ));
+            // A frontier result is read out in the same assistant turn.
+            let expected = if frontier_result {
+                format!(
+                    "{}{}",
+                    public_wire::ASSISTANT_TRANSCRIPT,
+                    public_wire::READOUT_TRANSCRIPT
+                )
+            } else {
+                public_wire::ASSISTANT_TRANSCRIPT.to_string()
+            };
+            let observed = next().await;
+            assert!(
+                matches!(
+                    observed.kind(),
+                    LiveSidebandObservationKind::TurnFinished {
+                        role: LiveSidebandTurnRole::Assistant,
+                        transcript,
+                        ..
+                    } if *transcript == expected
+                ),
+                "expected the assistant turn {expected:?}, got {:?}",
+                observed.kind()
+            );
         }
         assert!(next_semantic_observation(sideband.as_ref()).await.is_none());
 

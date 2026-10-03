@@ -71,15 +71,19 @@ FORBIDDEN = [
 # reflected uplink, `session.output_audio.delta` model speech). Replay needs
 # their decoded length (timing and latency are derived from it), never the
 # voice: scrub replaces each with `<silence-bytes:N>` (N decoded bytes), which
-# the replay server expands to N zero bytes. A reflected input frame
-# (`session.input_audio.append`) carrying speech energy keeps one bit of it:
-# `<speech-bytes:N>`, which the replay server expands to N bytes of a fixed
-# tone. The broker ends the user's floor on reflected-input silence, so the
-# speech/silence bit (never the voice) is part of what a replay must
-# reproduce. Check rejects any other value.
+# the replay server expands to N zero bytes. A frame carrying speech energy
+# keeps one bit of it: `<speech-bytes:N>`, which the replay server expands to
+# N bytes of a fixed tone. The broker ends the user's floor on reflected-input
+# silence (`session.input_audio.append`) and ends the model's response on
+# model-output silence (`session.output_audio.delta`, where a deferred result
+# cue is released), so the speech/silence bit of both streams (never the
+# voice) is part of what a replay must reproduce. Check rejects any other
+# value.
 AUDIO_FIELDS = ("audio", "delta")
 # meerkat_openai::public_live::USER_FLOOR_SPEECH_DBFS: the same floor.
 SPEECH_DBFS = -50.0
+# The audio frames whose speech/silence bit replay reproduces.
+SPEECH_BIT_FRAMES = ("session.input_audio.append", "session.output_audio.delta")
 
 ENV_SECRETS = ("OPENAI_API_KEY", "RKAT_OPENAI_API_KEY", "BUILDBUDDY_API_KEY")
 
@@ -150,8 +154,7 @@ def zero_fill_audio(line: Any) -> Any:
     frame = line.get("entry", {}).get("raw") if isinstance(line, dict) else None
     field = audio_field(frame)
     if field:
-        reflected_input = frame.get("type") == "session.input_audio.append"
-        frame[field] = placeholder(frame[field], reflected_input)
+        frame[field] = placeholder(frame[field], frame.get("type") in SPEECH_BIT_FRAMES)
     return line
 
 
@@ -167,8 +170,8 @@ def audio_findings(raw: str) -> list[str]:
     match = PLACEHOLDER.fullmatch(frame[field])
     if not match:
         return ["voice-audio"]
-    if match.group(1) == "speech" and frame.get("type") != "session.input_audio.append":
-        return ["speech-bit-outside-reflected-input"]
+    if match.group(1) == "speech" and frame.get("type") not in SPEECH_BIT_FRAMES:
+        return ["speech-bit-outside-audio-stream"]
     return []
 
 

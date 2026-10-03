@@ -4423,6 +4423,8 @@ pub enum LiveContextRowDisposition {
     ReplayRuntimeWork,
     #[serde(rename = "ReassertAssistantOutput")]
     ReassertAssistantOutput,
+    #[serde(rename = "ReplayTextChat")]
+    ReplayTextChat,
 }
 impl LiveContextRowDisposition {
     pub fn as_str(&self) -> &'static str {
@@ -4434,6 +4436,7 @@ impl LiveContextRowDisposition {
             Self::ReassertCausalTail => "ReassertCausalTail",
             Self::ReplayRuntimeWork => "ReplayRuntimeWork",
             Self::ReassertAssistantOutput => "ReassertAssistantOutput",
+            Self::ReplayTextChat => "ReplayTextChat",
         }
     }
 }
@@ -4448,6 +4451,7 @@ impl std::convert::TryFrom<&str> for LiveContextRowDisposition {
             "ReassertCausalTail" => Ok(Self::ReassertCausalTail),
             "ReplayRuntimeWork" => Ok(Self::ReplayRuntimeWork),
             "ReassertAssistantOutput" => Ok(Self::ReassertAssistantOutput),
+            "ReplayTextChat" => Ok(Self::ReplayTextChat),
             other => Err(format!("invalid LiveContextRowDisposition value `{other}`")),
         }
     }
@@ -4483,12 +4487,15 @@ pub enum LiveContextRowSource {
     Conversation,
     #[serde(rename = "RuntimeWork")]
     RuntimeWork,
+    #[serde(rename = "TextChat")]
+    TextChat,
 }
 impl LiveContextRowSource {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Conversation => "Conversation",
             Self::RuntimeWork => "RuntimeWork",
+            Self::TextChat => "TextChat",
         }
     }
 }
@@ -4498,6 +4505,7 @@ impl std::convert::TryFrom<&str> for LiveContextRowSource {
         match value {
             "Conversation" => Ok(Self::Conversation),
             "RuntimeWork" => Ok(Self::RuntimeWork),
+            "TextChat" => Ok(Self::TextChat),
             other => Err(format!("invalid LiveContextRowSource value `{other}`")),
         }
     }

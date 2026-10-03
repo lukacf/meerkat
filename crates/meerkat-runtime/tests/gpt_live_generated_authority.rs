@@ -1299,7 +1299,53 @@ fn later_heard_user_speech_supersedes_a_held_typed_row() {
     );
 }
 
-/// Replayed heard speech waits for the provider turn boundary: a burst of
+/// S99 with the text chat (#1623): a host-typed row queues as the quiet
+/// ReplayTextChat and is still a typed row, so later heard user speech
+/// supersedes it through the same generated edge.
+#[test]
+fn later_heard_user_speech_supersedes_a_held_text_chat_row() {
+    let mut authority = acknowledged_summary_with_heard_sources();
+    enqueue_sourced_mirror_row(
+        &mut authority,
+        "typed",
+        4,
+        mm::LiveContextRowSource::TextChat,
+    );
+    assert_eq!(
+        authority.state().live_context_queued_disposition_by_append["typed"],
+        mm::LiveContextRowDisposition::ReplayTextChat
+    );
+    enqueue_observed_row(
+        &mut authority,
+        "spoken",
+        5,
+        mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+        Some("heard-user"),
+    );
+    assert!(authorize_superseded_flag(&mut authority, "typed", 4));
+}
+
+/// A text-chat row with only the assistant's own speech after it is not
+/// superseded: it is authorized as ordinary quiet text-chat context.
+#[test]
+fn later_assistant_output_does_not_supersede_a_text_chat_row() {
+    let mut authority = acknowledged_summary_with_heard_sources();
+    enqueue_sourced_mirror_row(
+        &mut authority,
+        "typed",
+        4,
+        mm::LiveContextRowSource::TextChat,
+    );
+    enqueue_observed_row(
+        &mut authority,
+        "assistant",
+        5,
+        mm::LiveContextRowDisposition::AssistantObservation,
+        Some("heard-assistant"),
+    );
+    assert!(!authorize_superseded_flag(&mut authority, "typed", 4));
+}
+
 /// replays while the model talks made it react to each (S99). Only replayed
 /// runtime work output is admitted mid-turn.
 #[test]
@@ -2359,6 +2405,41 @@ fn quiet_history_waits_for_the_conversation_without_a_bootstrap() {
     let effects = authorize_row(&mut authority, "merged-result-reply", 0)
         .expect("the first turn finished; the quiet row is admitted");
     assert!(authorized(&effects, "merged-result-reply"));
+}
+
+/// A text-chat row is quiet: it neither starts the conversation nor is
+/// appended into silence, and like a voiced typed row it waits for the turn
+/// boundary (never mid-utterance), then is admitted.
+#[test]
+fn text_chat_row_waits_for_the_conversation_and_the_turn_boundary() {
+    let mut authority = opened_authority();
+    bind_experimental(&mut authority, 0);
+    enqueue_sourced_mirror_row(
+        &mut authority,
+        "typed",
+        1,
+        mm::LiveContextRowSource::TextChat,
+    );
+    assert_eq!(conversation_start(&authority), None);
+    let effects = authorize_row(&mut authority, "typed", 0).expect("typed deferral");
+    assert!(deferred(&effects, "typed"));
+    start_user_turn(&mut authority, "first-user-turn");
+    let effects =
+        authorize_row(&mut authority, "typed", 0).expect("typed deferral during the user's turn");
+    assert!(deferred(&effects, "typed"));
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::CompleteLiveInteraction {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            provider_turn_ref: "first-user-turn".to_string(),
+        },
+    )
+    .expect("the user's first turn finishes");
+    let effects = authorize_row(&mut authority, "typed", 0).expect("admitted after the turn");
+    assert!(authorized(&effects, "typed"));
 }
 
 /// Replayed runtime work output is admitted during the user phase of a

@@ -4026,14 +4026,19 @@ pub fn superseded_typed_row_context<'a>(
 pub enum LiveContextAppendKind {
     Ordinary,
     CausalReassertion,
-    /// A typed row the provider never received, held behind the late summary
-    /// while the user said something newer aloud: delivered quietly, never
-    /// described as heard or answered.
+    /// A typed row the provider never received (voiced or text chat), held
+    /// behind the late summary while the user said something newer aloud:
+    /// delivered quietly, never described as heard or answered.
     SupersededTypedRow,
     /// Runtime work output the model has never seen (a job result merged
     /// while the call was down): delivered quietly as background context,
     /// never described as heard or answered.
     RuntimeWorkReplay,
+    /// A row of a host-typed turn (the text chat: the typed input or its
+    /// reply), which the user typed and read in the chat: delivered quietly
+    /// as text-chat context, never voiced (#1614). A text-chat row the user's
+    /// newer speech superseded arrives as [`Self::SupersededTypedRow`].
+    TextChatReplay,
     HistoryBootstrap,
 }
 
@@ -4331,7 +4336,7 @@ impl LiveContextQueuedRow {
             == crate::meerkat_machine::dsl::LiveContextPayloadAvailability::Materializable;
         // Heard user speech replays as ReassertCausalTail, the assistant's own
         // speech as ReassertAssistantOutput, runtime work output as
-        // ReplayRuntimeWork.
+        // ReplayRuntimeWork, text-chat rows as ReplayTextChat.
         let user_authored = row.author() == crate::meerkat_machine::dsl::LiveContextRowAuthor::User;
         let reasserted_speech = *disposition == LiveContextRowDisposition::ReassertCausalTail
             && materializable
@@ -4351,12 +4356,16 @@ impl LiveContextQueuedRow {
                     || reasserted_speech
                     || (reasserted_output && !user_authored)
             }
-            // Runtime work output is replayed quietly instead of voiced.
+            // Runtime work output and text-chat rows are replayed quietly
+            // instead of voiced.
             LiveContextRowDisposition::MirrorParentText => {
                 *disposition == LiveContextRowDisposition::MirrorParentText
                     || (*disposition == LiveContextRowDisposition::ReplayRuntimeWork
                         && row.source()
                             == crate::meerkat_machine::dsl::LiveContextRowSource::RuntimeWork)
+                    || (*disposition == LiveContextRowDisposition::ReplayTextChat
+                        && row.source()
+                            == crate::meerkat_machine::dsl::LiveContextRowSource::TextChat)
             }
             _ => disposition == &expected_disposition,
         };
@@ -4398,7 +4407,8 @@ impl LiveContextQueuedRow {
             LiveContextRowDisposition::MirrorParentText => self.row.provider_context(),
             LiveContextRowDisposition::ReassertCausalTail
             | LiveContextRowDisposition::ReassertAssistantOutput
-            | LiveContextRowDisposition::ReplayRuntimeWork => self.row.causal_context(),
+            | LiveContextRowDisposition::ReplayRuntimeWork
+            | LiveContextRowDisposition::ReplayTextChat => self.row.causal_context(),
             LiveContextRowDisposition::AlreadyPresentInLiveChannel
             | LiveContextRowDisposition::AssistantObservation
             | LiveContextRowDisposition::ExcludedFromLiveContext => None,
@@ -4428,6 +4438,13 @@ impl LiveContextQueuedRow {
     #[must_use]
     pub fn is_runtime_work_replay(&self) -> bool {
         self.disposition == LiveContextRowDisposition::ReplayRuntimeWork
+    }
+
+    /// A quiet replay of a text-chat row (a host-typed turn's input or
+    /// reply), which the user typed and read in the chat (#1614).
+    #[must_use]
+    pub fn is_text_chat_replay(&self) -> bool {
+        self.disposition == LiveContextRowDisposition::ReplayTextChat
     }
 }
 
@@ -4631,16 +4648,21 @@ impl LiveContextAppendAuthority {
         )
         .map(|authority| {
             authority.map(|mut authority| {
-                // The generated edge reports a voiced typed row whose channel
-                // already heard newer user speech; it travels quietly with its
-                // own framing, distinct from replayed heard speech.
+                // The generated edge reports a typed row (voiced, or a quiet
+                // text-chat row) whose channel already heard newer user
+                // speech; it travels quietly with its own superseded framing,
+                // distinct from replayed heard speech and from current
+                // text-chat context (S99: framed as current text chat, the
+                // stale typed value outranked the later spoken correction).
                 authority.kind = if authority.kind == LiveContextAppendKind::SupersededTypedRow {
                     debug_assert_eq!(
                         queued.row().disposition(),
                         meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::MirrorParentText,
-                        "only a voiced parent text row can be superseded"
+                        "only a parent text row can be superseded"
                     );
                     LiveContextAppendKind::SupersededTypedRow
+                } else if queued.is_text_chat_replay() {
+                    LiveContextAppendKind::TextChatReplay
                 } else if queued.is_runtime_work_replay() {
                     LiveContextAppendKind::RuntimeWorkReplay
                 } else if queued.is_causal_reassertion() {

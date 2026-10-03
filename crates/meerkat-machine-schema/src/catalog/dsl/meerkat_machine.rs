@@ -1627,6 +1627,13 @@ pub enum LiveContextRowDisposition {
     /// speech. Kept apart from heard user speech because only the user's
     /// newer speech supersedes a typed row held behind the summary.
     ReassertAssistantOutput,
+    /// Runtime-minted quiet replay of a text-chat row (see
+    /// `LiveContextRowSource::TextChat`): the user typed it and read the reply
+    /// in the chat, so it is never voiced. Like runtime work output it waits
+    /// for the conversation; like a voiced typed row it waits for the turn
+    /// boundary and is superseded by the user's newer heard speech
+    /// (`AuthorizeLiveContextAppendSuperseded`).
+    ReplayTextChat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -1641,13 +1648,17 @@ pub enum LiveContextPayloadAvailability {
 /// spoken, or a peer message); a `RuntimeWork` row is the assistant's reply
 /// to runtime-authored injected execution context, such as a voice job's
 /// result merged into the source member after its channel closed. Runtime
-/// work output is history the model has not seen, never speech to voice.
+/// work output is history the model has not seen, never speech to voice. A
+/// `TextChat` row belongs to a host-typed turn (the text chat): the user typed
+/// it and read the reply there, so it is quiet context, never voiced, and
+/// still a typed row that the user's newer speech supersedes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]
 pub enum LiveContextRowSource {
     #[default]
     Conversation,
     RuntimeWork,
+    TextChat,
 }
 
 /// Who authored a committed row queued for a live channel: the user's own
@@ -1709,8 +1720,8 @@ pub enum LiveContextDeliveryReadiness {
 /// `SpokenCanonicalRow` is a queued canonical row the channel will voice
 /// (`MirrorParentText` with a materializable payload from a conversational
 /// turn): that row produces speech on its own, so holding the summary for the
-/// user would deadlock it. Runtime work output is replayed quietly and does
-/// not start the conversation.
+/// user would deadlock it. Runtime work output and text-chat rows are replayed
+/// quietly and do not start the conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum LiveConversationStartCause {
     #[default]
@@ -7776,9 +7787,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 append_id: String,
                 previous_cursor: u64,
                 next_cursor: u64,
-                // The row would be voiced (MirrorParentText) but the channel
-                // already heard newer speech while the row waited behind the
-                // late summary: it goes out as a quiet replay instead.
+                // A typed row (voiced MirrorParentText, or a quiet text-chat
+                // ReplayTextChat row) whose channel already heard newer user
+                // speech while the row waited behind the late summary: it goes
+                // out as a quiet replay framed as superseded.
                 superseded_by_heard_speech: bool,
             },
             LiveContextAppendDeferred {
@@ -30379,6 +30391,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 disposition != LiveContextRowDisposition::ReassertCausalTail
                 && disposition != LiveContextRowDisposition::ReplayRuntimeWork
                 && disposition != LiveContextRowDisposition::ReassertAssistantOutput
+                && disposition != LiveContextRowDisposition::ReplayTextChat
             }
             guard "ordinary_mirror_has_materializable_payload" {
                 disposition != LiveContextRowDisposition::MirrorParentText
@@ -30447,7 +30460,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                     // is read aloud unprompted; it is replayed on the quiet
                     // lane instead, once the conversation has started.
                     { LiveContextRowDisposition::ReplayRuntimeWork }
-                    else { disposition } } });
+                    else { if disposition == LiveContextRowDisposition::MirrorParentText
+                        && payload_availability == LiveContextPayloadAvailability::Materializable
+                        && row_source == LiveContextRowSource::TextChat
+                    // A text-chat row (a host-typed turn's input or reply) was
+                    // typed and read in the chat. Voiced, it is read aloud and
+                    // stale results are replayed with it (#1614); it rides the
+                    // quiet lane instead, still supersedable as a typed row.
+                    { LiveContextRowDisposition::ReplayTextChat }
+                    else { disposition } } } });
                 self.live_context_queued_append_by_cursor.insert(canonical_cursor, append_id);
                 // A row this channel will voice (the Ordinary append of a
                 // materializable parent text row of a conversational turn)
@@ -30572,13 +30593,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReplayRuntimeWork)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertAssistantOutput))
+                    == Some(LiveContextRowDisposition::ReassertAssistantOutput)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat))
             }
             // A voiced row that the channel's later live speech already
             // superseded is authorized by AuthorizeLiveContextAppendSuperseded.
             guard "not_superseded_by_heard_speech" {
-                !(self.live_context_queued_disposition_by_append.get_copied(append_id)
+                !((self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::MirrorParentText)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat))
                 && exists(later in self.live_context_queued_cursor_by_append.keys(),
                     self.live_context_queued_session_by_append.get_cloned(later)
                         == self.live_channel_session_by_channel.get_cloned(channel_id)
@@ -30624,8 +30649,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             // aloud over the user's first question 4/5), so replayed runtime
             // work output waits for the conversation to start.
             guard "quiet_history_waits_for_the_conversation" {
-                self.live_context_queued_disposition_by_append.get_copied(append_id)
+                (self.live_context_queued_disposition_by_append.get_copied(append_id)
                     != Some(LiveContextRowDisposition::ReplayRuntimeWork)
+                && self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    != Some(LiveContextRowDisposition::ReplayTextChat))
                 || self.live_conversation_started_channels.contains_key(channel_id)
             }
             guard "channel_has_no_recovery_obligation" {
@@ -30695,7 +30722,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReassertCausalTail)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertAssistantOutput))
+                    == Some(LiveContextRowDisposition::ReassertAssistantOutput)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat))
             }
             // A typed row held behind the late summary acknowledgement while
             // the user said something newer aloud (a later queued
@@ -30713,9 +30742,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             // Causal-tail rows only ever enter above the channel's seed or
             // context cursor (guard canonical_cursor_is_future), so a retired
             // incarnation's rows at or below it cannot count as later.
+            // A text-chat row (ReplayTextChat) is such a typed row too: its
+            // quiet text-chat framing would otherwise present the stale typed
+            // value as current over the newer speech (S99, #1623: 3/10).
             guard "superseded_by_heard_speech" {
-                self.live_context_queued_disposition_by_append.get_copied(append_id)
+                (self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::MirrorParentText)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat))
                 && exists(later in self.live_context_queued_cursor_by_append.keys(),
                     self.live_context_queued_session_by_append.get_cloned(later)
                         == self.live_channel_session_by_channel.get_cloned(channel_id)
@@ -30731,6 +30765,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "safe_provider_turn_boundary" {
                 !self.live_provider_turn_by_channel.contains_key(channel_id)
+            }
+            // A text-chat row is quiet history and waits for the conversation
+            // (AuthorizeLiveContextAppendDeferredByConversation).
+            guard "quiet_history_waits_for_the_conversation" {
+                self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    != Some(LiveContextRowDisposition::ReplayTextChat)
+                || self.live_conversation_started_channels.contains_key(channel_id)
             }
             guard "channel_has_no_recovery_obligation" {
                 !self.live_context_recovery_replacement_by_channel.contains_key(channel_id)
@@ -30815,6 +30856,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                     == Some(LiveContextRowDisposition::ReassertCausalTail)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReassertAssistantOutput)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat)
                     // Complement of the runtime-work exemption in guard
                     // `safe_provider_turn_boundary`: on a channel seeded at
                     // open (no context preparation) it waits for the user's
@@ -30841,8 +30884,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // Replayed runtime work output queued before the conversation
-        // started waits for it (guard `quiet_history_waits_for_the_conversation`);
+        // Replayed runtime work output and text-chat rows queued before the
+        // conversation started wait for it (guard `quiet_history_waits_for_the_conversation`);
         // the conversation start requests a drain.
         transition AuthorizeLiveContextAppendDeferredByConversation {
             per_phase [Idle, Attached, Running]
@@ -30864,8 +30907,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_append_by_cursor.get_cloned(next_cursor) == Some(append_id)
                 && self.live_context_queued_digest_by_append.contains_key(append_id)
                 && self.live_context_queued_commit_token_by_append.contains_key(append_id)
-                && self.live_context_queued_disposition_by_append.get_copied(append_id)
+                && (self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReplayRuntimeWork)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat))
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
             guard "conversation_not_started" {
@@ -30908,7 +30953,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReplayRuntimeWork)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertAssistantOutput))
+                    == Some(LiveContextRowDisposition::ReassertAssistantOutput)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat))
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
             guard "close_revoked_delivery" { self.live_revoked_execution_channels.contains(channel_id) }
@@ -30946,7 +30993,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReplayRuntimeWork)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertAssistantOutput))
+                    == Some(LiveContextRowDisposition::ReassertAssistantOutput)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat))
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
             guard "recovery_owns_replacement" {

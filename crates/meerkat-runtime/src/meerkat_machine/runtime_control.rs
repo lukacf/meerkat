@@ -1293,11 +1293,27 @@ mod live_context_mirror_tests {
         UserSpeech,
     }
 
+    /// How the typed row behind the late summary was submitted.
+    #[derive(Clone, Copy)]
+    enum TypedRowStamp {
+        /// No turn-input stamp (the voiced typed row).
+        Unstamped,
+        /// A host-typed turn (the text chat, `TranscriptTurnInput::TypedText`).
+        TextChat,
+    }
+
     /// Drive one typed row (canonical row 2) behind a late summary that is
     /// still being delivered, followed by one row the channel heard live
     /// (row 3), and return the append kinds in delivery order.
     async fn typed_row_append_kinds_after(
         heard: HeardAfterTyped,
+    ) -> Vec<(crate::live_execution::LiveContextAppendKind, String)> {
+        typed_row_append_kinds_after_stamped(heard, TypedRowStamp::Unstamped).await
+    }
+
+    async fn typed_row_append_kinds_after_stamped(
+        heard: HeardAfterTyped,
+        stamp: TypedRowStamp,
     ) -> Vec<(crate::live_execution::LiveContextAppendKind, String)> {
         let (machine, session_id, channel_id) = prepared_experimental_live_machine().await;
         stage_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
@@ -1340,9 +1356,11 @@ mod live_context_mirror_tests {
         session.push(meerkat_core::Message::User(
             meerkat_core::UserMessage::text("old source"),
         ));
-        session.push(meerkat_core::Message::User(
-            meerkat_core::UserMessage::text("typed request while history is pending"),
-        ));
+        let mut typed = meerkat_core::UserMessage::text("typed request while history is pending");
+        if matches!(stamp, TypedRowStamp::TextChat) {
+            typed.identity.turn_input = Some(meerkat_core::types::TranscriptTurnInput::TypedText);
+        }
+        session.push(meerkat_core::Message::User(typed));
         let observation = machine
             .record_live_context_observation(&lease, lease.new_observation_id())
             .await
@@ -1446,6 +1464,57 @@ mod live_context_mirror_tests {
                 .contains("typed request while history is pending"),
             "the typed request is delivered, not dropped: {:?}",
             appends[1].1
+        );
+    }
+
+    /// S99's shape with the text chat (#1623): a typed correction held
+    /// behind the late summary while the user said something newer aloud is
+    /// still a superseded typed row. Framed as current text chat, the stale
+    /// typed value outranked the later spoken correction (S99 "current",
+    /// 3/10); the generated superseded edge keys on the queued text-chat
+    /// disposition, so it keeps the superseded framing on the quiet lane.
+    #[tokio::test]
+    async fn superseded_text_chat_row_keeps_superseded_framing() {
+        let appends = typed_row_append_kinds_after_stamped(
+            HeardAfterTyped::UserSpeech,
+            TypedRowStamp::TextChat,
+        )
+        .await;
+        assert_eq!(
+            appends.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(),
+            [
+                crate::live_execution::LiveContextAppendKind::HistoryBootstrap,
+                crate::live_execution::LiveContextAppendKind::SupersededTypedRow,
+                crate::live_execution::LiveContextAppendKind::CausalReassertion,
+            ]
+        );
+        assert!(
+            appends[1]
+                .1
+                .contains("typed request while history is pending"),
+            "the typed row is delivered, not dropped: {:?}",
+            appends[1].1
+        );
+    }
+
+    /// The same text-chat row with only the assistant's own speech after it
+    /// is not superseded: it keeps the quiet text-chat framing.
+    #[tokio::test]
+    async fn unsuperseded_text_chat_row_keeps_text_chat_framing() {
+        assert_eq!(
+            typed_row_append_kinds_after_stamped(
+                HeardAfterTyped::AssistantOnly,
+                TypedRowStamp::TextChat,
+            )
+            .await
+            .into_iter()
+            .map(|(kind, _)| kind)
+            .collect::<Vec<_>>(),
+            [
+                crate::live_execution::LiveContextAppendKind::HistoryBootstrap,
+                crate::live_execution::LiveContextAppendKind::TextChatReplay,
+                crate::live_execution::LiveContextAppendKind::CausalReassertion,
+            ]
         );
     }
 
@@ -2294,6 +2363,109 @@ mod live_context_mirror_tests {
         session.push(meerkat_core::Message::BlockAssistant(reply));
         meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
             .expect("seal the merge turn")
+    }
+
+    /// A host-typed turn (`TranscriptTurnInput::TypedText` on its user row and
+    /// reply): the text chat.
+    fn typed_turn_commit(
+        session_id: &SessionId,
+        typed: &str,
+        reply_text: &str,
+    ) -> meerkat_core::lifecycle::core_executor::BoundSessionCommit {
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        let mut user = meerkat_core::UserMessage::text(typed);
+        user.identity.turn_input = Some(meerkat_core::types::TranscriptTurnInput::TypedText);
+        session.push(meerkat_core::Message::User(user));
+        let mut reply = meerkat_core::types::BlockAssistantMessage::snapshot(vec![
+            meerkat_core::AssistantBlock::Text {
+                text: reply_text.into(),
+                meta: None,
+            },
+        ]);
+        reply.identity.turn_input = Some(meerkat_core::types::TranscriptTurnInput::TypedText);
+        session.push(meerkat_core::Message::BlockAssistant(reply));
+        meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+            .expect("seal the typed turn")
+    }
+
+    /// #1614 (S105 R3): a typed correction committed mid-call reaches the
+    /// channel as quiet text-chat context, both its user row and its reply,
+    /// never as an ordinary (voiced) append: voiced, the model read it aloud
+    /// and replayed stale results with it.
+    #[tokio::test]
+    async fn a_typed_turn_mid_call_is_quiet_text_chat_context() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let host = Arc::new(RecordingMirrorHost::default());
+        machine.set_live_context_mirror_host(host.clone());
+        let key = (session_id.clone(), channel_id.clone());
+        // The conversation has started: the user's first turn finished.
+        let (provider_binding, turn) = first_user_turn(&machine, &session_id, &channel_id).await;
+        machine
+            .observe_live_provider_turn_started(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding.clone(),
+                meerkat_live::LiveSidebandObservationKind::TurnStarted {
+                    turn: turn.clone(),
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ))
+            .await
+            .expect("the user's first turn starts");
+        machine
+            .observe_live_provider_turn_finished(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding,
+                meerkat_live::LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: "pick a number and double it".into(),
+                },
+            ))
+            .await
+            .expect("the user's first turn finishes");
+        let finished = machine
+            .shared
+            .live_context_drain_tasks
+            .lock()
+            .expect("drain tasks")
+            .get(&key)
+            .cloned();
+        if let Some(finished) = finished {
+            finished
+                .wait()
+                .await
+                .expect("the turn-finish drain completes");
+        }
+        machine
+            .enqueue_committed_parent_session_boundary(
+                &session_id,
+                &typed_turn_commit(
+                    &session_id,
+                    "Correction: the numbers are 21 and 42.",
+                    "The numbers are 21 and 42.",
+                ),
+                "store-commit",
+            )
+            .await
+            .expect("enqueue the typed turn");
+        machine
+            .drain_live_context_outbox_for_channel(&session_id, &channel_id)
+            .await
+            .expect("drain the typed turn");
+        let appends = host.appends.lock().expect("appends");
+        assert_eq!(appends.len(), 2, "{appends:?}");
+        assert!(
+            appends[0]
+                .1
+                .contains("Correction: the numbers are 21 and 42.")
+        );
+        assert!(appends[1].1.contains("The numbers are 21 and 42."));
+        assert_eq!(
+            host.append_kinds.lock().expect("kinds").as_slice(),
+            &[
+                crate::live_execution::LiveContextAppendKind::TextChatReplay,
+                crate::live_execution::LiveContextAppendKind::TextChatReplay,
+            ],
+            "quiet text chat, never an Ordinary (voiced) append"
+        );
     }
 
     /// On a channel seeded at open, runtime work output committed after the

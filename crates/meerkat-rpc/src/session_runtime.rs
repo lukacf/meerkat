@@ -2683,13 +2683,29 @@ impl SessionRuntime {
         overrides: Option<&crate::handlers::turn::TurnOverrides>,
         provider_hint: Option<&str>,
     ) -> meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-        meerkat_runtime::runtime_stamped_prompt_turn_metadata(Self::turn_metadata_from_overrides(
-            skill_references,
-            turn_tool_overlay,
-            additional_instructions,
-            overrides,
-            provider_hint,
+        meerkat_runtime::runtime_stamped_prompt_turn_metadata(Self::typed_text_turn(
+            Self::turn_metadata_from_overrides(
+                skill_references,
+                turn_tool_overlay,
+                additional_instructions,
+                overrides,
+                provider_hint,
+            ),
         ))
+    }
+
+    /// Stamp a host-submitted prompt turn's authorship as typed text
+    /// (`TranscriptTurnInput::TypedText`) on its transcript identity, so every
+    /// row the turn commits (the user row and its reply) carries it: a live
+    /// channel's mirror reads it from the row and takes the text chat as
+    /// quiet context instead of speech to voice (#1614).
+    fn typed_text_turn(
+        metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+        let mut metadata = metadata.unwrap_or_default();
+        metadata.transcript_identity.turn_input =
+            Some(meerkat_core::types::TranscriptTurnInput::TypedText);
+        Some(metadata)
     }
 
     pub(crate) fn turn_overrides_from_metadata(
@@ -7416,13 +7432,13 @@ impl SessionRuntime {
             }
         }
 
-        let turn_metadata = Self::turn_metadata_from_overrides(
+        let turn_metadata = Self::typed_text_turn(Self::turn_metadata_from_overrides(
             skill_references,
             turn_tool_overlay,
             additional_instructions,
             overrides.as_ref(),
             Some(effective_identity.provider.as_str()),
-        );
+        ));
 
         // Injected context lowers through the prompt input's typed slot so
         // the runtime batch places the InjectedContext-role appends
@@ -12655,6 +12671,31 @@ mod tests {
         assert_eq!(
             metadata.execution_kind,
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+        );
+    }
+
+    /// #1614: a host-submitted prompt turn (turn/start, a session's initial
+    /// prompt) is stamped as typed text, with or without other overrides, so
+    /// a live channel's mirror takes its rows as quiet text-chat context.
+    #[test]
+    fn host_prompt_turns_are_stamped_as_typed_text() {
+        let typed = Some(meerkat_core::types::TranscriptTurnInput::TypedText);
+        let bare = SessionRuntime::runtime_stamped_prompt_turn_metadata_from_overrides(
+            None, None, None, None, None,
+        );
+        assert_eq!(bare.transcript_identity.turn_input, typed);
+        let with_overrides = SessionRuntime::runtime_stamped_prompt_turn_metadata_from_overrides(
+            None,
+            None,
+            Some(vec!["runtime note".to_string()]),
+            None,
+            None,
+        );
+        assert_eq!(with_overrides.transcript_identity.turn_input, typed);
+        assert_eq!(
+            SessionRuntime::typed_text_turn(None)
+                .and_then(|metadata| metadata.transcript_identity.turn_input),
+            typed
         );
     }
 

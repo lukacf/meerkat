@@ -1223,6 +1223,23 @@ them.
   same transaction unable to reach the service (`Destroyed`). The boundary now
   retains the service and releases before it. No current caller hit this; they
   keep the service alive for the whole transaction.
+- A GPT Live delegation's "Started voice request" and "Finished voice
+  request" narrations now quote only the user's last turn before the
+  delegation, not every user word since the previous delegation (Turbo S S106
+  r2). The label carried turns the model had already answered natively, so
+  "the venue for the launch is Lisbon" read as part of the lighthouse request
+  handed to the executor, and "which venue did I mention earlier" was then
+  delegated instead of answered. The executor request itself is unchanged:
+  the provider marks no difference between a model backchannel and a
+  substantive answer, so a request the user split around a backchannel must
+  still reach the executor whole, with the assistant's own words as
+  labelled context.
+- The GPT Live voice instructions now give call endings an owner: when the
+  user says goodbye or asks to end or close the call, the voice layer says a
+  brief goodbye itself and the app ends the call (Turbo S S106 r4). The voice
+  model cannot end a call, and the instructions route work it cannot do to
+  the executor, so "Close the call" was delegated.
+
 - `MobHandle::force_cancel_member` and `MobHandle::cancel_all_work` no longer
   fail with `Internal("... Runtime not ready: attached")` on a member whose
   runtime is attached but has no run. Both now cancel the member's current

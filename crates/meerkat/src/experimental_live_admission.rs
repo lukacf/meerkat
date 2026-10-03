@@ -27,6 +27,7 @@ pub(crate) const GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS: &str = concat!(
     "The client executor does the work you cannot do yourself: hand it requests that need tools, files, current information, or extended reasoning. ",
     "Everything said in this conversation, on this call or in the text chat before or during it and its summary, is something you already know: answer questions about it yourself. ",
     "Treat returned executor context as authoritative, present it naturally, and never expose the internal split. ",
+    "Ending the call is not executor work: when the user says goodbye or asks to end or close the call, say a brief goodbye yourself; the app ends the call. ",
     "This call continues an existing conversation with this user: do not greet or introduce yourself, wait for the user to speak. ",
     "Let the user finish. A pause in the middle of a sentence, a list, or a train of thought, or after a filler such as \"um\", \"uh\" or \"so\", is not the end of their turn: stay completely silent through it. ",
     "While the user is still talking, do not backchannel (no \"mm-hm\", \"okay\" or \"got it\"), do not repeat details back, and do not act yet; respond once, when they have clearly finished. ",
@@ -1525,6 +1526,29 @@ mod tests {
             ExperimentalLiveGate0QualificationVersion::parse("not valid")
                 .expect_err("unsafe qualification"),
             ExperimentalLiveAdmissionError::InvalidGate0QualificationVersion
+        );
+    }
+    /// S106 r4 e10: "Thanks. That's all for today. Close the call" was
+    /// delegated. Ending the call is an action the voice model cannot take
+    /// itself, and the instructions route such work to the executor, so
+    /// call endings need an explicit owner: the voice layer says goodbye and
+    /// the app ends the call.
+    #[test]
+    fn voice_session_instructions_keep_call_endings_out_of_the_executor() {
+        let instructions = GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS;
+        let clause = "Ending the call is not executor work: when the user says goodbye or asks to end or close the call, say a brief goodbye yourself; the app ends the call. ";
+        assert_eq!(
+            instructions.matches(clause).count(),
+            1,
+            "the call-ending clause appears exactly once"
+        );
+        let routing = instructions
+            .find("The client executor does the work you cannot do yourself")
+            .expect("executor routing sentence");
+        let ending = instructions.find(clause).expect("call-ending clause");
+        assert!(
+            ending > routing,
+            "the call-ending exception follows the routing rule it narrows"
         );
     }
 }

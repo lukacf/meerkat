@@ -2005,13 +2005,48 @@ const canonicalHookLaunchRefusedEvent: Extract<
 void [canonicalHookFailedEvent, canonicalHookLaunchRefusedEvent];
 
 
-// Future native tags remain raw adapter causes, not fabricated known variants.
-const futureHookFailedReason: NonNullable<import("../src/index.js").HookFailedEvent["reason"]> = {
-  reason_code: "future_guard_busy", retry_after_ms: 23,
-  details: { owner: "future-native-owner", token: null },
+// Future native tags use an explicit SDK wrapper and retain the exact wire cause.
+const futureHookFailedReason: import("../src/index.js").HookFailureReason = {
+  reason_code: "unknown", rawReasonCode: "future_guard_busy",
+  raw: { reason_code: "future_guard_busy", retry_after_ms: 23,
+    details: { owner: "future-native-owner", token: null } },
 };
-const futureHookConfinementCause: NonNullable<import("../src/index.js").HookFailedEvent["reason"]> = {
-  reason_code: "confinement_refused", refusal: "future_backend_busy",
-  detail: { generation: 9, resource: null },
+const futureHookConfinementCause: import("../src/index.js").UnknownHookFailureReason = {
+  reason_code: "unknown", rawReasonCode: "confinement_refused",
+  raw: { reason_code: "confinement_refused", refusal: "future_backend_busy",
+    detail: { generation: 9, resource: null } },
 };
-void [futureHookFailedReason, futureHookConfinementCause];
+const publicConfinementCause: import("../src/index.js").ConfinementRefusal = "preparation_failed";
+// @ts-expect-error The generated known confinement causes remain a closed union.
+const inventedConfinementCause: import("../src/index.js").ConfinementRefusal = "future_backend_busy";
+void [futureHookFailedReason, futureHookConfinementCause, publicConfinementCause, inventedConfinementCause];
+
+
+// Known generated variants retain ordinary discriminant narrowing.
+function narrowHookFailureReason(reason: NonNullable<import("../src/index.js").HookFailedEvent["reason"]>): string {
+  switch (reason.reason_code) {
+    case "timeout": {
+      const timeoutMs: number = reason.timeout_ms;
+      return `${timeoutMs}`;
+    }
+    case "execution_failed":
+    case "config_invalid": {
+      const message: string = reason.message;
+      return message;
+    }
+    case "observe_only_violation": return "observe-only";
+    case "confinement_refused": {
+      const refusal: import("../src/generated/event_types.js").ConfinementRefusal = reason.refusal;
+      return refusal;
+    }
+    case "unknown": {
+      const raw: Readonly<Record<string, unknown>> = reason.raw;
+      return typeof raw.reason_code === "string" ? raw.reason_code : "unknown";
+    }
+    default: {
+      const exhausted: never = reason;
+      return exhausted;
+    }
+  }
+}
+void narrowHookFailureReason;

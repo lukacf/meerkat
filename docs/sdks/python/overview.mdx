@@ -344,10 +344,11 @@ Known event types without a handwritten parser class arrive as `UnknownEvent`
 with their wire payload preserved in `event.data`. This includes server-tool
 content, model-fallback, rewrite-receipt, and boundary-append events; they are
 in the generated inventory. `RunStarted.input` preserves the typed content or
-pending-tool-results input. `HookFailed.reason` retains a generated known
-cause or an unchanged raw dictionary for a future cause; preserve unknown
-objects and check their fields before use. Unknown causes display
-`"unknown hook failure"` in `error`. A present reason takes priority over a
+pending-tool-results input. `HookFailed.reason` retains a known native cause
+or an `UnknownHookFailureReason` wrapper with `reason_code="unknown"`,
+`raw_reason_code` and the exact original dictionary in `raw`. Check raw fields
+before use. Unknown causes display `"unknown hook failure"` in `error`.
+A present reason takes priority over a
 legacy error, and malformed known causes keep their raw payload in a
 malformed event. `hook_launch_refused` uses the same recognized raw-event
 path. See the [event compatibility

@@ -6257,22 +6257,23 @@ it("native refusal terminal kinds remain valid settlement companions", () => {
 
 
 it("hook failed preserves unknown future reason codes", () => {
-  const reason = {
-    reason_code: "future_guard_busy",
-    retry_after_ms: 23,
-    details: { owner: "future-native-owner", token: null, stages: ["prepared"] },
-  };
-  const raw = {
-    type: "hook_failed", hook_id: "  hook-future  ", point: "post_tool_execution",
-    reason, error: "permission denied by legacy string",
-  };
-  const event = parseEvent(raw);
-  assert.equal(event.type, "hook_failed");
-  assert.equal(event.hookId, raw.hook_id);
-  assert.equal(event.point, raw.point);
-  assert.deepEqual(event.reason, reason);
-  assert.equal(event.error, "unknown hook failure");
-  assert.equal(parseEvent({ type: "text_delta", delta: "continued after future reason" }).delta, "continued after future reason");
+  for (const code of ["future_guard_busy", "unknown"]) {
+    const reason = {
+      reason_code: code, retry_after_ms: 23,
+      details: { owner: "future-native-owner", token: null, stages: ["prepared"] },
+    };
+    const raw = {
+      type: "hook_failed", hook_id: "  hook-future  ", point: "post_tool_execution",
+      reason, error: "permission denied by legacy string",
+    };
+    const event = parseEvent(raw);
+    assert.equal(event.type, "hook_failed");
+    assert.equal(event.hookId, raw.hook_id);
+    assert.equal(event.point, raw.point);
+    assert.deepEqual(event.reason, { reason_code: "unknown", rawReasonCode: code, raw: reason });
+    assert.equal(event.error, "unknown hook failure");
+    assert.equal(parseEvent({ type: "text_delta", delta: "continued after future reason" }).delta, "continued after future reason");
+  }
 });
 
 it("hook failed preserves unknown future confinement causes", () => {
@@ -6287,7 +6288,7 @@ it("hook failed preserves unknown future confinement causes", () => {
     };
     const event = parseEvent(raw);
     assert.equal(event.type, "hook_failed");
-    assert.deepEqual(event.reason, reason);
+    assert.deepEqual(event.reason, { reason_code: "unknown", rawReasonCode: "confinement_refused", raw: reason });
     assert.equal(event.error, "unknown hook failure");
     assert.equal(parseEvent({ type: "text_delta", delta: "continued after future cause" }).delta, "continued after future cause");
   }
@@ -6324,4 +6325,19 @@ it("hook denied preserves payload presence including explicit null", () => {
   assert.equal(present.type, "hook_denied");
   assert.equal(Object.hasOwn(present, "payload"), true);
   assert.equal(present.payload, null);
+});
+
+
+it("hook failed displays every remaining known reason exactly", () => {
+  for (const [reason, display] of [
+    [{ reason_code: "timeout", timeout_ms: 23 }, "hook timed out after 23ms"],
+    [{ reason_code: "execution_failed", message: "process exited" }, "process exited"],
+    [{ reason_code: "config_invalid", message: "invalid config" }, "invalid config"],
+    [{ reason_code: "observe_only_violation" }, "background hooks are observe-only"],
+  ]) {
+    const event = parseEvent({ type: "hook_failed", hook_id: "hook-1", point: "post_tool_execution", reason });
+    assert.equal(event.type, "hook_failed");
+    assert.deepEqual(event.reason, reason);
+    assert.equal(event.error, display);
+  }
 });

@@ -428,9 +428,10 @@ them.
   TypeScript settlement decoding also recognizes the distinct native
   `confinement_refused` and `hook_denied` terminal kinds. `hook_launch_refused`
   stays on the recognized raw-event path with its exact cause and call ID.
-  SDK migration: `reason` also retains raw future cause objects, with the neutral
-  display `"unknown hook failure"`. Check fields defensively; TypeScript
-  reason-code narrowing alone does not guarantee variant fields.
+  SDK migration: future reason codes and confinement refusal strings use an
+  explicit `UnknownHookFailureReason` wrapper with the exact original cause in
+  `raw` and neutral display `"unknown hook failure"`. Known native causes stay
+  unchanged and TypeScript reason-code narrowing preserves their typed fields.
 
 - An asset recovery dispatched from main (`release-workflow-dispatch --mode
   assets`) can publish its release archives. It runs main's workflow against

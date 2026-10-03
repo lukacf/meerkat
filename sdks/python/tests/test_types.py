@@ -8563,8 +8563,9 @@ def test_hook_failed_legacy_string_wire_remains_compatible():
 
 
 @pytest.mark.parametrize("reason", [
-    {"reason_code": "future_guard_busy", "retry_after_ms": 23,
-     "details": {"owner": "future-native-owner", "token": None, "stages": ["prepared"]}},
+    *[{"reason_code": code, "retry_after_ms": 23,
+       "details": {"owner": "future-native-owner", "token": None, "stages": ["prepared"]}}
+      for code in ["future_guard_busy", "unknown"]],
     *[{"reason_code": "confinement_refused", "refusal": refusal,
        "detail": {"generation": 9, "resource": None}}
       for refusal in ["future_backend_busy", "constructor", "__proto__"]],
@@ -8580,7 +8581,9 @@ def test_hook_failed_preserves_unknown_future_causes(reason):
     assert isinstance(event, HookFailed)
     assert event.hook_id == raw["hook_id"]
     assert event.point == raw["point"]
-    assert event.reason == reason
+    assert event.reason == {
+        "reason_code": "unknown", "raw_reason_code": reason["reason_code"], "raw": reason,
+    }
     assert event.error == "unknown hook failure"
     control = parse_event({"type": "text_delta", "delta": "continued after future cause"})
     assert isinstance(control, TextDelta)
@@ -8609,3 +8612,31 @@ def test_hook_failed_display_mapping_matches_generated_confinement_causes():
     from meerkat.generated.event_types import ConfinementRefusal
 
     assert set(_CONFINEMENT_REFUSAL_MESSAGES) == set(get_args(ConfinementRefusal))
+
+
+@pytest.mark.parametrize(("reason", "display"), [
+    ({"reason_code": "timeout", "timeout_ms": 23}, "hook timed out after 23ms"),
+    ({"reason_code": "execution_failed", "message": "process exited"}, "process exited"),
+    ({"reason_code": "config_invalid", "message": "invalid config"}, "invalid config"),
+    ({"reason_code": "observe_only_violation"}, "background hooks are observe-only"),
+])
+def test_hook_failed_displays_every_remaining_known_reason_exactly(reason, display):
+    from meerkat.events import HookFailed
+
+    event = parse_event({"type": "hook_failed", "hook_id": "hook-1", "point": "post_tool_execution", "reason": reason})
+    assert isinstance(event, HookFailed)
+    assert event.reason == reason
+    assert event.error == display
+
+
+
+def test_hook_failed_public_reason_exports_keep_generated_known_causes_and_unknown_wrapper():
+    import meerkat
+    from meerkat import ConfinementRefusal, HookFailureReason, UnknownHookFailureReason
+    from meerkat.events import HookFailed
+    from meerkat.generated.event_types import ConfinementRefusal as NativeConfinementRefusal
+
+    assert ConfinementRefusal is NativeConfinementRefusal
+    assert UnknownHookFailureReason in get_args(HookFailureReason)
+    assert UnknownHookFailureReason in get_args(get_type_hints(HookFailed)["reason"])
+    assert {"HookFailureReason", "UnknownHookFailureReason", "ConfinementRefusal"} <= set(meerkat.__all__)

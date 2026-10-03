@@ -29,13 +29,14 @@ Example::
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypedDict, cast
 from uuid import UUID
 
 from .errors import MeerkatError
 from .generated.event_inventory import KNOWN_AGENT_EVENT_TYPES
 from .generated.event_types import (
-    HookFailureReason,
+    ConfinementRefusal,
+    HookFailureReason as NativeHookFailureReason,
     LiveChannelId,
     LiveContextObservationId,
     ObjectiveId,
@@ -497,6 +498,17 @@ class HookCompleted(Event):
     duration_ms: int = 0
 
 
+class UnknownHookFailureReason(TypedDict):
+    """SDK wrapper retaining an unrecognized native cause's exact wire object."""
+
+    reason_code: Literal["unknown"]
+    raw_reason_code: str
+    raw: dict[str, Any]
+
+
+HookFailureReason: TypeAlias = NativeHookFailureReason | UnknownHookFailureReason
+
+
 @dataclass(frozen=True, slots=True)
 class HookFailed(Event):
     """A hook invocation failed; error is the display projection of reason."""
@@ -504,7 +516,7 @@ class HookFailed(Event):
     hook_id: HookId = ""
     point: str = ""
     error: str = ""
-    reason: HookFailureReason | dict[str, Any] | None = None
+    reason: HookFailureReason | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1174,7 +1186,7 @@ _CONFINEMENT_REFUSAL_MESSAGES = {
 }
 
 
-def _parse_hook_failure_reason(raw: Any) -> HookFailureReason | dict[str, Any]:
+def _parse_hook_failure_reason(raw: Any) -> HookFailureReason:
     if not isinstance(raw, dict):
         raise ValueError("hook reason must be object")
     code = _require_str(raw, "reason_code")
@@ -1185,12 +1197,15 @@ def _parse_hook_failure_reason(raw: Any) -> HookFailureReason | dict[str, Any]:
     elif code == "observe_only_violation":
         pass
     elif code == "confinement_refused":
-        _require_str(raw, "refusal")
-    # Future native tags are raw causes, not malformed known variants.
-    return raw
+        refusal = _require_str(raw, "refusal")
+        if refusal not in _CONFINEMENT_REFUSAL_MESSAGES:
+            return {"reason_code": "unknown", "raw_reason_code": code, "raw": raw}
+    else:
+        return {"reason_code": "unknown", "raw_reason_code": code, "raw": raw}
+    return cast(NativeHookFailureReason, raw)
 
 
-def _hook_failure_message(reason: HookFailureReason | dict[str, Any]) -> str:
+def _hook_failure_message(reason: HookFailureReason) -> str:
     code = reason["reason_code"]
     if code == "timeout":
         return f"hook timed out after {reason['timeout_ms']}ms"
@@ -1199,7 +1214,7 @@ def _hook_failure_message(reason: HookFailureReason | dict[str, Any]) -> str:
     if code == "observe_only_violation":
         return "background hooks are observe-only"
     if code == "confinement_refused":
-        return _CONFINEMENT_REFUSAL_MESSAGES.get(reason["refusal"], "unknown hook failure")
+        return _CONFINEMENT_REFUSAL_MESSAGES[reason["refusal"]]
     return "unknown hook failure"
 
 

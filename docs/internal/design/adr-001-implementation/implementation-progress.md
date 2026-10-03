@@ -52,14 +52,26 @@ existing TypeScript suite passed 499 tests and Python type/parser file passed
 476 tests; root verified the five source/test files match the executed bytes.
 These are SDK and CI routing repairs, with no Rust source change.
 
+The lead then reproduced a public TypeScript narrowing regression: the raw
+future-cause union overlapped known reason codes. Tests first reproduced the
+failure. The adapter now uses an explicit `reason_code: "unknown"` wrapper,
+retaining the exact native reason and its original code. Known native variants
+keep ordinary discriminant narrowing. Both SDKs export the reason and
+confinement types publicly. Exact display controls cover all known variants.
+The existing TypeScript build, public typecheck and 500 tests passed; the
+existing Python type/parser file passed 482 tests. Root verified all seven
+source/test files against those executed bytes. Generated wire and Rust
+runtime files are unchanged.
+
 The parallel Console candidate is committed at `42df889d` with current main,
 local-feedback documentation and a browser fixture compatibility fix. Existing
 JS/component/build checks and four mock browser scenarios passed. Production
 JS/assets remain those tested at `4d4559504`. Native hook/confinement cards have
 unit/component qualification; the browser scenarios exercise permission/audit
 feedback and access state. PR 520 still has its previous remote head, so its old
-green checks do not qualify this candidate. Its normal push is queued behind
-the native Rust gate.
+green checks do not qualify this candidate. Its normal push now owns the local
+Rust lane. GCP accepted ownership of the native candidate's normal hook-running
+push in an isolated checkout after receiving the final SDK successor bundle.
 
 Root owns overhead measurement on meerkat-dev after the GCP lead prepares the
 exact published candidate's optimized binary and passes both existing cost
@@ -67,9 +79,11 @@ correctness selectors. The lead marked the tentative 22:30-23:00 UTC window
 NOT_MEASURED when publication missed its 21:45 cutoff. A standard Git bundle
 let the lead prepare the exact frozen d1 candidate while normal gates ran:
 the optimized build passed in 8m41s and both existing correctness selectors
-passed. Publication review requires a successor; its exact optimized binary
-must be rebuilt/reconciled with the published SHA before the lead schedules
-explicit quiet clearance. No accepted overhead result or green native
+passed. The fca successor build also passed in 7m53s; its binary was identical
+and both correctness selectors passed again (0.04s and 11.45s). These are
+preparation runs. The final SDK successor still needs exact source
+reconciliation with the published SHA before the lead schedules explicit
+quiet clearance. No accepted overhead result or green native
 implementation PR CI exists yet. Publication-only repairs continue; additional
 runtime integration remains held.
 

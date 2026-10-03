@@ -1652,6 +1652,22 @@ pub trait ExperimentalGptLiveControlPlane: Send + Sync {
         text: String,
     ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError>;
 
+    /// [`Self::release_delegation_context`] for a result whose delegated
+    /// work asked other members (`peers`, display labels) whose answers have
+    /// not arrived. Compositions without a pending-answer notice release it
+    /// as an ordinary result.
+    async fn release_delegation_context_awaiting_peer_replies(
+        &self,
+        authority: LiveDelegationResultDeliveryAuthority,
+        delegation: LiveSidebandDelegationRef,
+        text: String,
+        peers: Vec<String>,
+    ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError> {
+        let _ = peers;
+        self.release_delegation_context(authority, delegation, text)
+            .await
+    }
+
     /// Client-context capability only. Templated executor-state narration for
     /// one exact delegation, released under generated narration authority. It
     /// is spoken by the provider like a delegation result but carries none.
@@ -2584,6 +2600,19 @@ trait ExperimentalGptLiveBrokerSession: Send + Sync {
         self.append_delegation_context(delegation, text).await
     }
 
+    /// An executor result whose delegated work asked other members that
+    /// have not answered yet (`peers`, display labels). Sessions without a
+    /// pending-answer notice append it as an ordinary result.
+    async fn append_delegation_result_awaiting_peer_replies(
+        &self,
+        delegation: &GptLiveDelegationRef,
+        text: String,
+        peers: Vec<String>,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        let _ = peers;
+        self.append_delegation_result(delegation, text).await
+    }
+
     async fn next_observation(
         &self,
     ) -> Result<Option<GptLiveBrokerObservation>, GptLiveBrokerError>;
@@ -2683,6 +2712,18 @@ impl ExperimentalGptLiveBrokerSession for PublicLiveBrokerSession {
         text: String,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
         PublicLiveBrokerSession::append_delegation_result(self, delegation, text).await
+    }
+
+    async fn append_delegation_result_awaiting_peer_replies(
+        &self,
+        delegation: &GptLiveDelegationRef,
+        text: String,
+        peers: Vec<String>,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        PublicLiveBrokerSession::append_delegation_result_awaiting_peer_replies(
+            self, delegation, text, peers,
+        )
+        .await
     }
 
     async fn next_observation(
@@ -6114,6 +6155,26 @@ impl ExperimentalGptLiveWebrtcTransport {
         delegation: LiveSidebandDelegationRef,
         text: impl Into<String>,
     ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError> {
+        self.release_delegation_context_awaiting_peer_replies(
+            authority,
+            delegation,
+            text,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// [`Self::release_delegation_context`] for a result whose delegated
+    /// work asked other members (`peers`, display labels) that have not
+    /// answered: the broker tells the provider their answers are pending
+    /// ahead of the result.
+    pub async fn release_delegation_context_awaiting_peer_replies(
+        &self,
+        authority: LiveDelegationResultDeliveryAuthority,
+        delegation: LiveSidebandDelegationRef,
+        text: impl Into<String>,
+        peers: Vec<String>,
+    ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError> {
         let text = require_context_text(text)?;
         let binding = self
             .active_binding(authority.session_id())
@@ -6126,7 +6187,8 @@ impl ExperimentalGptLiveWebrtcTransport {
             .into_sideband_release_authority(binding, &delegation, &text)
             .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
         let command = LiveSidebandCommand::release_delegation_context(sideband, delegation, text)
-            .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
+            .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?
+            .awaiting_peer_replies(peers);
         self.dispatch_delegation_result(authority, command).await
     }
 
@@ -6985,6 +7047,19 @@ impl ExperimentalGptLiveControlPlane for ExperimentalGptLiveWebrtcTransport {
     ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError> {
         ExperimentalGptLiveWebrtcTransport::release_delegation_context(
             self, authority, delegation, text,
+        )
+        .await
+    }
+
+    async fn release_delegation_context_awaiting_peer_replies(
+        &self,
+        authority: LiveDelegationResultDeliveryAuthority,
+        delegation: LiveSidebandDelegationRef,
+        text: String,
+        peers: Vec<String>,
+    ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError> {
+        ExperimentalGptLiveWebrtcTransport::release_delegation_context_awaiting_peer_replies(
+            self, authority, delegation, text, peers,
         )
         .await
     }
@@ -8479,6 +8554,7 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
                 attempt,
                 delegation,
                 text,
+                awaiting_peer_replies,
                 ..
             } => {
                 let provider_delegation = self
@@ -8495,10 +8571,19 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
                     .await
                     .appends
                     .reserve(SidebandAppendLane::Delegation, attempt)?;
-                let result = self
-                    .session
-                    .append_delegation_result(&provider_delegation, text)
-                    .await;
+                let result = if awaiting_peer_replies.is_empty() {
+                    self.session
+                        .append_delegation_result(&provider_delegation, text)
+                        .await
+                } else {
+                    self.session
+                        .append_delegation_result_awaiting_peer_replies(
+                            &provider_delegation,
+                            text,
+                            awaiting_peer_replies,
+                        )
+                        .await
+                };
                 #[cfg(feature = "test-realtime-fixtures")]
                 if let Ok(token) = &result {
                     record_released_result_append(

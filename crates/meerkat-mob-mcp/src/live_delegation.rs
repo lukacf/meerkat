@@ -94,7 +94,12 @@ pub(crate) fn delegation_request_text(input: &LiveDelegationExecutorInput) -> St
         "{LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE}\n\n{request}\n\n{LIVE_DELEGATION_ASSISTANT_CONTEXT_HEADING}\n{context}"
     )
 }
+mod peer_replies;
 mod schedule;
+
+/// Rows per page when reading a worker session's history for pending peer
+/// requests at result release.
+const AWAITING_PEER_HISTORY_PAGE: usize = 200;
 
 use schedule::{
     LIVE_DELEGATION_CHANNEL_WORKER_CAP, VoiceWorkGraph, VoiceWorkItem, WorkItemDisposition,
@@ -1093,6 +1098,9 @@ struct RetainedDelegationResult {
     unconfirmed_continuations: usize,
     reconciliation: Option<LiveHandoffReconciliationReceipt>,
     result_text: Option<String>,
+    /// The session the worker's completed turn ran in (see
+    /// [`RealizedDelegationTerminal::worker_session`]).
+    worker_session: Option<SessionId>,
     release_authority: Option<LiveDelegationResultReleaseAuthority>,
     delivery_authority: Option<LiveDelegationResultDeliveryAuthority>,
     terminal_ineligible: bool,
@@ -5079,6 +5087,7 @@ impl ExperimentalLiveDelegationCoordinator {
         {
             let mut result = retained.result.lock().await;
             result.result_text = terminal.result_text.clone();
+            result.worker_session = terminal.worker_session.clone();
             result.terminal_ineligible |= terminal.terminal_ineligible;
         }
         let blocker_titles = terminal
@@ -5436,22 +5445,86 @@ impl ExperimentalLiveDelegationCoordinator {
     async fn release_exact_delegation_result_projection(
         control: &dyn ExperimentalGptLiveControlPlane,
         projection: ExactDelegationResultProjection<LiveDelegationResultDeliveryAuthority>,
+        awaiting_peer_replies: Vec<String>,
     ) -> (
         Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError>,
         ExactDelegationResultProjectionEvidence,
     ) {
         projection
             .dispatch(|authority, delegation, result_text| {
-                control.release_delegation_context(authority, delegation, result_text)
+                control.release_delegation_context_awaiting_peer_replies(
+                    authority,
+                    delegation,
+                    result_text,
+                    awaiting_peer_replies,
+                )
             })
             .await
+    }
+
+    /// Members the worker's turn (`interaction`) asked over comms whose
+    /// answers are not committed yet (see
+    /// [`peer_replies::awaiting_peer_replies`]), read from the worker
+    /// session's whole committed history. A read failure leaves the
+    /// result an ordinary one: it is still delivered, only without the
+    /// pending-answer notice.
+    async fn awaiting_peer_replies(
+        &self,
+        session_id: &SessionId,
+        interaction: &str,
+    ) -> Vec<String> {
+        use meerkat_core::service::{SessionHistoryQuery, SessionServiceHistoryExt};
+        let service = self.mobs.session_service();
+        let mut messages = Vec::new();
+        loop {
+            let page = match service
+                .read_history(
+                    session_id,
+                    SessionHistoryQuery {
+                        offset: messages.len(),
+                        limit: Some(AWAITING_PEER_HISTORY_PAGE),
+                    },
+                )
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(
+                        %session_id,
+                        %error,
+                        "live delegation result released without reading pending peer requests"
+                    );
+                    return Vec::new();
+                }
+            };
+            let read = page.messages.len();
+            messages.extend(page.messages);
+            if !page.has_more || read == 0 {
+                break;
+            }
+        }
+        let awaiting = peer_replies::awaiting_peer_replies(&messages, interaction);
+        tracing::info!(
+            %session_id,
+            rows = messages.len(),
+            members = awaiting.len(),
+            "live delegation result release read the worker's pending peer requests"
+        );
+        awaiting
     }
 
     async fn try_release_retained_result(
         &self,
         retained: &Arc<RetainedDelegation>,
     ) -> Result<ResultReleaseOutcome, String> {
-        let (reservation, reconciliation, result_text, existing_release, existing_delivery) = {
+        let (
+            reservation,
+            reconciliation,
+            result_text,
+            worker_session,
+            existing_release,
+            existing_delivery,
+        ) = {
             let mut result = retained.result.lock().await;
             let (Some(reconciliation), Some(result_text)) =
                 (result.reconciliation.clone(), result.result_text.clone())
@@ -5472,6 +5545,7 @@ impl ExperimentalLiveDelegationCoordinator {
                 reservation,
                 reconciliation,
                 result_text,
+                result.worker_session.clone(),
                 result.release_authority.clone(),
                 result.delivery_authority.clone(),
             )
@@ -5555,6 +5629,19 @@ impl ExperimentalLiveDelegationCoordinator {
             false,
         )
         .await;
+        // Read at release, after the worker's terminal committed: a peer
+        // request its turn sent whose answer has not been committed yet.
+        let awaiting_peer_replies = match &worker_session {
+            Some(session_id) => {
+                let interaction = retained
+                    .operation
+                    .domain_correlation()
+                    .interaction_id()
+                    .to_string();
+                self.awaiting_peer_replies(session_id, &interaction).await
+            }
+            None => Vec::new(),
+        };
         retained.result.lock().await.dispatch_crossed = true;
         let (dispatch, projection_evidence) = Self::release_exact_delegation_result_projection(
             retained.control.as_ref(),
@@ -5563,6 +5650,7 @@ impl ExperimentalLiveDelegationCoordinator {
                 retained.delegation.clone(),
                 result_text,
             ),
+            awaiting_peer_replies,
         )
         .await;
         let resolution = match dispatch {
@@ -6059,6 +6147,9 @@ struct RealizedDelegationTerminal {
     /// The provider channel unbound before the terminal could be recorded
     /// under its binding; the worker was reconciled as revoked instead.
     channel_closed: bool,
+    /// The session the worker's completed turn ran in, read again at result
+    /// release for peer requests still awaiting an answer.
+    worker_session: Option<SessionId>,
 }
 
 /// Retry a binding-fenced step while the worker's channel is still bound.
@@ -6233,6 +6324,10 @@ async fn realize_terminal(
         DelegationTurnTerminal::Failed(_) => None,
         _ => None,
     };
+    let worker_session = match terminalized.terminal() {
+        DelegationTurnTerminal::Completed(turn) => Some(turn.result().session_id().clone()),
+        _ => None,
+    };
     let (terminal_kind, blockers, explicit_block) =
         classify_worker_terminal(retained, mob_terminal, mob_result_text.as_deref()).await;
     if runtime
@@ -6289,6 +6384,7 @@ async fn realize_terminal(
                 blockers,
                 explicit_block,
                 channel_closed: false,
+                worker_session,
             };
         }
     }
@@ -6367,6 +6463,7 @@ async fn realize_terminal_after_channel_close(
         blockers,
         explicit_block,
         channel_closed: true,
+        worker_session: None,
     }
 }
 

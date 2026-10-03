@@ -757,6 +757,8 @@ enum LiveSidebandCommandKind {
         delegation: LiveSidebandDelegationRef,
         disposition: LiveResultDisposition,
         text: String,
+        /// See [`LiveSidebandCommand::awaiting_peer_replies`].
+        awaiting_peer_replies: Vec<String>,
     },
     NarrateDelegation {
         binding: ProviderWebrtcBinding,
@@ -805,6 +807,9 @@ pub enum LiveSidebandProviderCommand {
         delegation: LiveSidebandDelegationRef,
         disposition: LiveResultDisposition,
         text: String,
+        /// Members the delegated work asked and whose answers have not
+        /// arrived (see [`LiveSidebandCommand::awaiting_peer_replies`]).
+        awaiting_peer_replies: Vec<String>,
     },
     /// Templated executor-state narration for one exact delegation. It is
     /// lowered like a delegation-scoped commentary append and never carries
@@ -933,8 +938,27 @@ impl LiveSidebandCommand {
                 delegation,
                 disposition,
                 text,
+                awaiting_peer_replies: Vec::new(),
             },
         })
+    }
+
+    /// Mark a result release with the members its delegated work asked and
+    /// whose answers have not arrived: outbound peer requests the worker's
+    /// session sent with no terminal response committed. The result then
+    /// reports only that they were asked, so the provider is told their
+    /// answers are still pending ahead of it. Display labels only, never
+    /// authority; a non-release command is returned unchanged.
+    #[must_use]
+    pub fn awaiting_peer_replies(mut self, peers: Vec<String>) -> Self {
+        if let LiveSidebandCommandKind::ReleaseDelegation {
+            awaiting_peer_replies,
+            ..
+        } = &mut self.kind
+        {
+            *awaiting_peer_replies = peers;
+        }
+        self
     }
 
     /// Templated executor-state narration for one exact delegation. Consumes
@@ -1043,12 +1067,14 @@ impl LiveSidebandCommand {
                 delegation,
                 disposition,
                 text,
+                awaiting_peer_replies,
             } => LiveSidebandProviderCommand::ReleaseDelegationContext {
                 binding,
                 attempt,
                 delegation,
                 disposition,
                 text,
+                awaiting_peer_replies,
             },
             LiveSidebandCommandKind::NarrateDelegation {
                 binding,
@@ -1580,6 +1606,37 @@ mod tests {
         );
     }
 
+    /// A release marked with the members its work asked and whose answers
+    /// have not arrived carries exactly those labels to the provider
+    /// adapter; any other command ignores the mark.
+    #[test]
+    fn result_release_carries_the_members_still_owing_a_reply() {
+        let authority = LiveSidebandReleaseAuthority::from_test_machine(
+            binding(),
+            23,
+            LiveResultDisposition::DeferredContext,
+        );
+        let delegation = LiveSidebandDelegationRef::__from_provider_observation(
+            "delegation:2".to_string(),
+            "provider-delegation-secret".to_string(),
+        )
+        .expect("opaque provider delegation");
+        let command = LiveSidebandCommand::release_delegation_context(
+            authority,
+            delegation,
+            "I asked analyst-pemberton what time it is.",
+        )
+        .expect("one result-context delivery")
+        .awaiting_peer_replies(vec!["analyst-pemberton".to_string()]);
+        assert!(matches!(
+            command.__into_provider_command(),
+            LiveSidebandProviderCommand::ReleaseDelegationContext {
+                awaiting_peer_replies,
+                ..
+            } if awaiting_peer_replies == ["analyst-pemberton"]
+        ));
+    }
+
     #[test]
     fn result_release_is_context_only_without_canonical_cursor_and_consumes_once() {
         let authority = LiveSidebandReleaseAuthority::from_test_machine(
@@ -1605,8 +1662,9 @@ mod tests {
             LiveSidebandProviderCommand::ReleaseDelegationContext {
                 disposition: LiveResultDisposition::DeferredContext,
                 text,
+                awaiting_peer_replies,
                 ..
-            } if text == "executor result for model context only"
+            } if text == "executor result for model context only" && awaiting_peer_replies.is_empty()
         ));
         assert_eq!(
             LiveSidebandCommand::release_delegation_context(

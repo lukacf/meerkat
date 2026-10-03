@@ -2979,8 +2979,12 @@ async fn s99_wait_for_assistant_quiet(
 async fn wait_for_assistant_quiet(
     peer: &mut BrowserPeer,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Follows the assistant's output to its end: every assistant output
+    // event restarts the quiet window, and the wait ends after 3 s without
+    // one. There is no ceiling while output keeps arriving: a legitimate
+    // long readout (S99's spelled-out pwd, about 28 s in check run 6a779d8e
+    // R2) is not a fault. The scenario's overall deadline still bounds it.
     const QUIET_FOR: Duration = Duration::from_secs(3);
-    let deadline = Instant::now() + Duration::from_secs(30);
     let mut last_len = peer.events().await?.len();
     let mut quiet_since = Instant::now();
     loop {
@@ -2993,9 +2997,6 @@ async fn wait_for_assistant_quiet(
         }
         if quiet_since.elapsed() >= QUIET_FOR {
             return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err("assistant did not stop speaking before the next question".into());
         }
         sleep(Duration::from_millis(100)).await;
     }

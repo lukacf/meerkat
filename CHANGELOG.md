@@ -2027,6 +2027,10 @@ them.
     barge-in that lands just after the assistant went quiet still gets its
     talk-over-start check; S106 counts the reopen's append lanes from the old
     channel's close; S97 keeps its scratch workspace alive for the whole run.
+  - Waiting for the assistant to finish follows its output to the end: each
+    assistant output event restarts the 3 s quiet window, with no ceiling
+    while output keeps arriving, so a long legitimate readout is not a
+    failure. The scenario's overall deadline still bounds the wait.
   - A failed scenario (an error or a panic) closes its live channel through
     the exact close before teardown, so the provider's `session.closed`
     drains the sideband and the provider stream records every frame sent

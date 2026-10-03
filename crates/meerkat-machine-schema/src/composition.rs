@@ -492,6 +492,13 @@ pub struct FeedbackFieldBinding {
 pub enum FeedbackFieldSource {
     /// Value must come from the outstanding obligation record.
     ObligationField(FieldId),
+    /// Value is one member of a set-valued field of the outstanding obligation
+    /// record. The feedback names a single member (for example one drained
+    /// flow id of a `Set<String>` obligation field) and discharges only that
+    /// member: the obligation stays open while any member-bearing field of the
+    /// protocol is non-empty. The obligation field's type must be `Set<T>`
+    /// where `T` is the feedback input field's type.
+    ObligationMember(FieldId),
     /// Value is supplied by the realizing owner at feedback time.
     /// Free-form string key into owner context — not a kernel identity.
     OwnerContext(String),
@@ -2183,6 +2190,35 @@ impl CompositionSchema {
                                         obligation_field: field.as_str().to_owned(),
                                         source_ty: source_field.ty.clone(),
                                         target_ty: target_field.ty.clone(),
+                                    },
+                                );
+                            }
+                        }
+                        FeedbackFieldSource::ObligationMember(field) => {
+                            if !protocol.obligation_fields.contains(field) {
+                                return Err(
+                                    CompositionSchemaError::UnknownHandoffBindingObligationField {
+                                        protocol: protocol.name.as_str().to_owned(),
+                                        field: field.as_str().to_owned(),
+                                    },
+                                );
+                            }
+                            // The obligation field must be a set whose element
+                            // type is exactly the feedback input field's type.
+                            let source_field = effect_variant_schema
+                                .field_named(field.as_str())
+                                .map_err(CompositionSchemaError::MachineSchema)?;
+                            let expected = TypeRef::Set(Box::new(target_field.ty.clone()));
+                            if source_field.ty != expected {
+                                return Err(
+                                    CompositionSchemaError::HandoffFeedbackBindingTypeMismatch {
+                                        protocol: protocol.name.as_str().to_owned(),
+                                        machine: feedback.machine_instance.as_str().to_owned(),
+                                        input: feedback.input_variant.as_str().to_owned(),
+                                        input_field: binding.input_field.as_str().to_owned(),
+                                        obligation_field: field.as_str().to_owned(),
+                                        source_ty: source_field.ty.clone(),
+                                        target_ty: expected,
                                     },
                                 );
                             }

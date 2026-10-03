@@ -765,7 +765,7 @@ impl SessionRuntimeLlmReconfigureHostBlueprint {
         let config_runtime = self.config_runtime();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
-                service,
+                service: Arc::downgrade(&service),
                 staged_sessions: Arc::new(StagedSessionRegistry::new()),
                 factory: self.factory,
                 auth_lease: runtime_adapter.generated_auth_lease_handle(),
@@ -787,7 +787,12 @@ impl SessionRuntimeLlmReconfigureHostBlueprint {
 pub struct SessionRuntimeLlmReconfigureHost {
     /// Live session service. Both persistent and ephemeral embedded runtimes
     /// implement the same reconfigure transaction contract.
-    pub service: Arc<dyn SessionRuntimeLlmReconfigureService>,
+    ///
+    /// Held weakly: the service owns the runtime machine this host is
+    /// installed on, so a strong reference here would keep both alive forever.
+    /// A host whose service is gone answers every call with a typed
+    /// [`RuntimeDriverError::Destroyed`].
+    pub service: std::sync::Weak<dyn SessionRuntimeLlmReconfigureService>,
     /// Staged session registry; consulted when the live session is
     /// missing but a staged identity is available.
     pub staged_sessions: Arc<StagedSessionRegistry>,
@@ -810,6 +815,12 @@ pub struct SessionRuntimeLlmReconfigureHost {
 }
 
 impl SessionRuntimeLlmReconfigureHost {
+    /// The live session service, or a typed `Destroyed` once the service (and
+    /// with it the surface that owns this runtime) has been dropped.
+    fn service(&self) -> Result<Arc<dyn SessionRuntimeLlmReconfigureService>, RuntimeDriverError> {
+        self.service.upgrade().ok_or(RuntimeDriverError::Destroyed)
+    }
+
     async fn capability_surface_for_identity(
         &self,
         identity: &SessionLlmIdentity,
@@ -888,7 +899,7 @@ impl SessionRuntimeLlmReconfigureHost {
         identity: &SessionLlmIdentity,
     ) -> Result<Arc<dyn AgentLlmClient>, RuntimeDriverError> {
         let preferred_realm = preferred_hot_swap_realm(
-            self.service.as_ref(),
+            self.service()?.as_ref(),
             session_id,
             self.inheritance_head_realm(),
         )
@@ -1007,7 +1018,7 @@ impl SessionRuntimeLlmReconfigureHost {
         // web-search body that `--no-web-search` suppressed. Read it from the
         // live session metadata; fail closed to `Inherit` only when the metadata
         // is genuinely unavailable.
-        let web_search = match self.service.live_web_search_override(session_id).await {
+        let web_search = match self.service()?.live_web_search_override(session_id).await {
             Ok(web_search) => web_search,
             Err(_) => meerkat_core::ToolCategoryOverride::Inherit,
         };
@@ -1047,7 +1058,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
         RuntimeDriverError,
     > {
-        self.service
+        self.service()?
             .acquire_runtime_turn_finalization_guard(session_id)
             .await
             .map_err(session_error_to_runtime_driver)
@@ -1060,11 +1071,11 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         // A stopped or errored turn leaves the live actor trailing durable
         // authority until the next turn resyncs it. This reconfiguration runs
         // before that turn, so it performs the turn-entry resync itself.
-        self.service
+        self.service()?
             .synchronize_live_session_from_durable_authority(session_id)
             .await
             .map_err(session_error_to_runtime_driver)?;
-        let current_identity = match self.service.live_llm_identity(session_id).await {
+        let current_identity = match self.service()?.live_llm_identity(session_id).await {
             Ok(identity) => identity,
             Err(err) => {
                 if let Some(hydrated) = self.hydrate_staged_session_llm_state(session_id).await? {
@@ -1074,7 +1085,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
             }
         };
         let current_visibility_state =
-            match self.service.live_tool_visibility_state(session_id).await {
+            match self.service()?.live_tool_visibility_state(session_id).await {
                 Ok(state) => state.unwrap_or_default(),
                 Err(err) => {
                     if let Some(hydrated) =
@@ -1086,7 +1097,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
                 }
             };
         let base_tool_names = self
-            .service
+            .service()?
             .live_tool_scope_snapshot(session_id)
             .await
             .map_err(|err| live_session_read_error_to_runtime_driver(session_id, err))?
@@ -1154,7 +1165,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         capability_surface: Option<&SessionLlmCapabilitySurface>,
     ) -> Result<(), RuntimeDriverError> {
         if self
-            .service
+            .service()?
             .live_session_has_instruction_activations(session_id)
             .await
             .map_err(|err| live_session_read_error_to_runtime_driver(session_id, err))?
@@ -1176,7 +1187,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         let request_policy = self
             .build_request_policy_for_llm_identity(session_id, identity)
             .await?;
-        self.service
+        self.service()?
             .apply_live_llm_identity_under_runtime_turn_boundary(
                 session_id,
                 adapter,
@@ -1192,7 +1203,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         session_id: &SessionId,
         visibility_state: Option<SessionToolVisibilityState>,
     ) -> Result<(), RuntimeDriverError> {
-        self.service
+        self.service()?
             .apply_live_tool_visibility_state_under_runtime_turn_boundary(
                 session_id,
                 visibility_state,
@@ -1202,14 +1213,14 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
     }
 
     async fn persist_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
-        self.service
+        self.service()?
             .persist_live_under_runtime_turn_boundary(session_id)
             .await
             .map_err(session_error_to_runtime_driver)
     }
 
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
-        self.service
+        self.service()?
             .discard_live_under_runtime_turn_boundary(session_id)
             .await
             .map_err(session_error_to_runtime_driver)
@@ -1220,7 +1231,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         session_id: &SessionId,
         record: meerkat_core::session::model_routing_control::SessionModelRoutingControlRecord,
     ) -> Result<(), RuntimeDriverError> {
-        Arc::clone(&self.service)
+        self.service()?
             .commit_model_routing_control_record_durable_first(session_id, record)
             .await
             .map_err(session_error_to_runtime_driver)
@@ -1233,7 +1244,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         meerkat_core::session::model_routing_control::SessionModelRoutingControlHistory,
         RuntimeDriverError,
     > {
-        self.service
+        self.service()?
             .live_model_routing_control_history(session_id)
             .await
             .map_err(session_error_to_runtime_driver)
@@ -1418,6 +1429,72 @@ mod tests {
                 .await
                 .expect("fall back to runtime head");
         assert_eq!(selected, Some(runtime_head));
+    }
+
+    /// The host holds its service weakly (the service owns the machine the
+    /// host is installed on). Once the service is gone, every host entry point
+    /// answers with a typed `Destroyed`; none panics.
+    #[tokio::test]
+    async fn a_host_whose_service_was_dropped_answers_destroyed_on_every_call() {
+        let service: Arc<dyn SessionRuntimeLlmReconfigureService> =
+            Arc::new(RealmOnlyService { realm_id: None });
+        let weak = Arc::downgrade(&service);
+        drop(service);
+        let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+        let host = SessionRuntimeLlmReconfigureHost {
+            service: weak,
+            staged_sessions: Arc::new(StagedSessionRegistry::new()),
+            factory: AgentFactory::minimal(),
+            auth_lease: machine.generated_auth_lease_handle(),
+            default_llm_client: Arc::new(std::sync::RwLock::new(None)),
+            agent_llm_client_decorator: Arc::new(std::sync::RwLock::new(None)),
+            config_runtime: Arc::new(std::sync::RwLock::new(None)),
+            realm_inheritance: Arc::new(std::sync::RwLock::new(None)),
+        };
+        let session_id = SessionId::new();
+        let destroyed = |error: RuntimeDriverError| matches!(error, RuntimeDriverError::Destroyed);
+        assert!(
+            host.acquire_turn_finalization_boundary(&session_id)
+                .await
+                .err()
+                .is_some_and(destroyed)
+        );
+        assert!(
+            host.hydrate_session_llm_state(&session_id)
+                .await
+                .err()
+                .is_some_and(destroyed)
+        );
+        assert!(
+            host.apply_live_session_llm_identity(&session_id, &anthropic_identity(), None)
+                .await
+                .err()
+                .is_some_and(destroyed)
+        );
+        assert!(
+            host.apply_live_session_tool_visibility_state(&session_id, None)
+                .await
+                .err()
+                .is_some_and(destroyed)
+        );
+        assert!(
+            host.persist_live_session(&session_id)
+                .await
+                .err()
+                .is_some_and(destroyed)
+        );
+        assert!(
+            host.discard_live_session(&session_id)
+                .await
+                .err()
+                .is_some_and(destroyed)
+        );
+        assert!(
+            host.load_live_session_model_routing_control_history(&session_id)
+                .await
+                .err()
+                .is_some_and(destroyed)
+        );
     }
 
     #[tokio::test]

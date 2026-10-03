@@ -166,13 +166,23 @@ impl OAuthTokenResult {
 }
 
 /// OAuth flow errors.
-#[derive(Debug, Error)]
+///
+/// `Display` and `Debug` never render a token endpoint's response body: an
+/// authorization server may echo the grant (a refresh token, a code) or other
+/// secrets in it, and these errors flow into tool errors, agent-visible
+/// connection notices and logs. Only the status and the RFC 6749 `error`
+/// code (when it is a well-formed code) are shown; the raw body stays in the
+/// field for host code that deliberately reads it.
+#[derive(Error)]
 pub enum OAuthError {
     #[error("user denied authorization")]
     UserDenied,
     #[error("callback parse error: {0}")]
     CallbackParse(String),
-    #[error("token endpoint error: status={status} body={body}")]
+    #[error(
+        "token endpoint error: status={status}{code}",
+        code = token_endpoint_error_code_display(body)
+    )]
     TokenEndpoint { status: u16, body: String },
     #[error("token expires_in is out of range: {expires_in_secs}")]
     TokenExpiryOutOfRange { expires_in_secs: u64 },
@@ -192,6 +202,53 @@ pub enum OAuthError {
     AccessDenied,
     #[error("device flow expired")]
     ExpiredToken,
+}
+
+impl std::fmt::Debug for OAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TokenEndpoint { status, body } => f
+                .debug_struct("TokenEndpoint")
+                .field("status", status)
+                .field("error", &well_formed_token_endpoint_error_code(body))
+                .field("body", &format_args!("<redacted {} bytes>", body.len()))
+                .finish(),
+            Self::UserDenied => f.write_str("UserDenied"),
+            Self::CallbackParse(detail) => f.debug_tuple("CallbackParse").field(detail).finish(),
+            Self::TokenExpiryOutOfRange { expires_in_secs } => f
+                .debug_struct("TokenExpiryOutOfRange")
+                .field("expires_in_secs", expires_in_secs)
+                .finish(),
+            Self::Network(detail) => f.debug_tuple("Network").field(detail).finish(),
+            Self::Timeout => f.write_str("Timeout"),
+            Self::InvalidConfig(detail) => f.debug_tuple("InvalidConfig").field(detail).finish(),
+            Self::StateMismatch => f.write_str("StateMismatch"),
+            Self::AuthorizationPending => f.write_str("AuthorizationPending"),
+            Self::SlowDown => f.write_str("SlowDown"),
+            Self::AccessDenied => f.write_str("AccessDenied"),
+            Self::ExpiredToken => f.write_str("ExpiredToken"),
+        }
+    }
+}
+
+/// The RFC 6749 §5.2 `error` code of a token endpoint response body, only
+/// when it is a well-formed code (short, lowercase ASCII letters, digits,
+/// `_`, `-`, `.`). Anything else is not rendered, so a server cannot smuggle
+/// a secret into an error message through the code field either.
+fn well_formed_token_endpoint_error_code(body: &str) -> Option<String> {
+    oauth_token_endpoint_error_code(body).filter(|code| {
+        !code.is_empty()
+            && code.len() <= 64
+            && code.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-.".contains(&byte)
+            })
+    })
+}
+
+fn token_endpoint_error_code_display(body: &str) -> String {
+    well_formed_token_endpoint_error_code(body)
+        .map(|code| format!(" error={code}"))
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Deserialize)]
@@ -374,5 +431,44 @@ mod tests {
             err,
             OAuthError::TokenExpiryOutOfRange { expires_in_secs: 1 }
         ));
+    }
+}
+
+#[cfg(test)]
+mod token_endpoint_redaction_tests {
+    use super::OAuthError;
+
+    const CANARY: &str = "token-endpoint-body-canary";
+
+    #[test]
+    fn display_and_debug_show_status_and_code_never_the_body() {
+        let error = OAuthError::TokenEndpoint {
+            status: 400,
+            body: format!(
+                r#"{{"error":"invalid_request","error_description":"{CANARY}","refresh_token":"{CANARY}"}}"#
+            ),
+        };
+        let display = error.to_string();
+        assert_eq!(
+            display,
+            "token endpoint error: status=400 error=invalid_request"
+        );
+        let debug = format!("{error:?}");
+        assert!(!debug.contains(CANARY), "{debug}");
+        assert!(debug.contains("invalid_request"), "{debug}");
+    }
+
+    #[test]
+    fn a_malformed_or_absent_error_code_is_not_rendered() {
+        for body in [
+            format!(r#"{{"error":"bad code {CANARY}"}}"#),
+            format!(r#"{{"error":"{}"}}"#, "a".repeat(65)),
+            CANARY.to_string(),
+            String::new(),
+        ] {
+            let error = OAuthError::TokenEndpoint { status: 502, body };
+            assert_eq!(error.to_string(), "token endpoint error: status=502");
+            assert!(!format!("{error:?}").contains(CANARY));
+        }
     }
 }

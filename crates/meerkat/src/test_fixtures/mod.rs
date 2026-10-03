@@ -4,4 +4,10 @@
 //! battery, `crates/meerkat-mob/tests` (which cannot depend on the integration
 //! crate — cycle), and the integration member-live rows.
 
+#[cfg(feature = "test-realtime-fixtures")]
 pub mod realtime;
+
+/// OAuth-protected MCP server for MCP OAuth canaries
+/// (`test-mcp-oauth-fixtures`).
+#[cfg(feature = "test-mcp-oauth-fixtures")]
+pub mod mcp_oauth;

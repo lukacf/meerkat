@@ -2817,6 +2817,10 @@ impl MethodRouter {
                 routed_arm(|| handlers::auth::handle_auth_login_complete(id, params, &self.runtime))
                     .await
             }
+            "auth/login/cancel" => {
+                routed_arm(|| handlers::auth::handle_auth_login_cancel(id, params, &self.runtime))
+                    .await
+            }
             "auth/login/device_start" => {
                 routed_arm(|| {
                     handlers::auth::handle_auth_login_device_start(id, params, &self.runtime)

@@ -31,6 +31,11 @@ on:
         required: false
         default: ""
         type: string
+      assets_run_id:
+        description: "Asset recovery: publish the release archives of this earlier release.yml run on main instead of rebuilding them (requires publish_release_assets_only)"
+        required: false
+        default: ""
+        type: string
       publish_release_assets_only:
         description: "Recovery lane: build surface binaries and publish GitHub release assets only"
         required: false
@@ -688,7 +693,7 @@ jobs:
             --changelog .semver-recovery-policy/CHANGELOG.md
 
   build_binaries:
-    name: Build and package surface binaries with GitHub-hosted runners
+    name: Build and package surface binaries with GitHub-hosted runners (${{ matrix.surface.bin }}, ${{ matrix.platform.target }})
     needs: [require_ci_green, release_validate_gate]
     # Linux/macOS fallback lane only. Under the owner BuildBuddy split those
     # four targets come from build_binaries_buildbuddy, and Windows is always
@@ -703,18 +708,30 @@ jobs:
         needs.release_validate_gate.result == 'skipped')) &&
       (startsWith(github.ref, 'refs/tags/v') ||
        (github.event_name == 'workflow_dispatch' &&
-        github.event.inputs.publish_release_assets_only == 'true'))
-    runs-on: ${{ matrix.runs-on }}
+        github.event.inputs.publish_release_assets_only == 'true')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.assets_run_id == '')
+    runs-on: ${{ matrix.platform.runs-on }}
     # Linux GNU binaries must keep the same glibc floor as the BuildBuddy lane
     # (buildpack-deps:bullseye = glibc 2.31, see tools/bazel/platforms/BUILD.bazel);
     # building directly on the hosted runner (Ubuntu 24.04, glibc 2.39) would
     # silently reintroduce the v0.8.21 Bullseye loader failure whenever this
     # fallback lane is active. Non-Linux matrix entries get no container.
-    container: ${{ contains(matrix.target, 'unknown-linux-gnu') && 'docker.io/library/buildpack-deps:bullseye' || '' }}
+    container: ${{ contains(matrix.platform.target, 'unknown-linux-gnu') && 'docker.io/library/buildpack-deps:bullseye' || '' }}
+    # One job per (target, surface binary). Each job builds exactly one
+    # package, so every binary keeps the feature set its own package
+    # resolves: one `cargo build -p` for all four would unify features
+    # across them and change what each binary links (measured on 0.8.50:
+    # rkat-mcp would gain the facade's live/mcp features, native keyring and
+    # OAuth; rkat-rest live, axum ws and keyring; rkat and rkat-rpc the rmcp
+    # streamable-HTTP server). The four used to build in sequence in one job,
+    # each rebuilding the graph above meerkat-core (whose features differ per
+    # package), so a target took the sum of four builds (3+ h on Linux at two
+    # jobs); now it takes the slowest single package. The cache key is shared
+    # per target so the four jobs warm each other where features match.
     strategy:
       fail-fast: false
       matrix:
-        include:
+        platform:
           - runs-on: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive_ext: tar.gz
@@ -724,9 +741,21 @@ jobs:
           - runs-on: macos-15
             target: aarch64-apple-darwin
             archive_ext: tar.gz
-          - runs-on: macos-15-large
+          # x86_64 macOS builds natively on the free standard Intel label. It
+          # used to build on macos-15-large, a billed larger runner (257 min
+          # per release on v0.8.50, sequential).
+          - runs-on: macos-15-intel
             target: x86_64-apple-darwin
             archive_ext: tar.gz
+        surface:
+          - package: rkat
+            bin: rkat
+          - package: meerkat-rpc
+            bin: rkat-rpc
+          - package: meerkat-rest
+            bin: rkat-rest
+          - package: meerkat-mcp-server
+            bin: rkat-mcp
 
     steps:
       - name: Checkout
@@ -749,12 +778,12 @@ jobs:
       - uses: ./.github/actions/setup-rust-ci
 
       - name: Add release target
-        run: rustup target add ${{ matrix.target }}
+        run: rustup target add ${{ matrix.platform.target }}
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          key: release-${{ matrix.platform.target }}
 
       # The workspace is trusted for Git in the step after Checkout (see
       # there). audiopus-sys falls back to building bundled Opus and requires
@@ -836,30 +865,26 @@ jobs:
             cargo_cmd=(cargo --config 'profile.release.package.meerkat-machine-schema.opt-level=1')
           fi
 
-          # Package names (for cargo build -p) — binary names differ via [[bin]]
-          PACKAGES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
-          for pkg in "${PACKAGES[@]}"; do
-            "${cargo_cmd[@]}" build --locked -p "$pkg" --release --target "${{ matrix.target }}"
-          done
+          # This job's one package (binary names differ via [[bin]], see the
+          # matrix). Building it alone keeps its own feature resolution.
+          "${cargo_cmd[@]}" build --locked -p "${{ matrix.surface.package }}" --release --target "${{ matrix.platform.target }}"
 
       - name: Ad-hoc codesign macOS binaries
         if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
-          for bin in rkat rkat-rpc rkat-rest rkat-mcp; do
-            codesign --force --sign - "target/${{ matrix.target }}/release/${bin}"
-          done
+          codesign --force --sign - "target/${{ matrix.platform.target }}/release/${{ matrix.surface.bin }}"
 
       - name: Package artifacts
         shell: bash
         env:
-          TARGET: ${{ matrix.target }}
+          TARGET: ${{ matrix.platform.target }}
           VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
-          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+          ARCHIVE_EXT: ${{ matrix.platform.archive_ext }}
         run: |
           set -euo pipefail
-          BINARIES=("rkat" "rkat-rpc" "rkat-rest" "rkat-mcp")
+          BINARIES=("${{ matrix.surface.bin }}")
           mkdir -p dist
           VERSION="${VERSION#v}"
           VERSION="${VERSION//\//-}"
@@ -885,6 +910,40 @@ jobs:
             echo "packaged=${bin} -> dist/${artifact_name}"
           done
 
+      # An asset recovery runs this workflow from main against the tag, so
+      # its attestations name main's commit, not the tag. Each archive
+      # therefore carries a stamp of the tree it was built from, written only
+      # after checking that the checkout is the tag's commit, and attested
+      # with it (see scripts/verify-release-asset-provenance --stamps).
+      - name: Stamp archives with the checked-out release commit
+        id: source_commit
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tree="$(git rev-parse HEAD)"
+          if ! tag_commit="$(git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}^{commit}")"; then
+            git fetch --no-tags --depth=1 origin "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+            tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          fi
+          if [[ "${tree}" != "${tag_commit}" ]]; then
+            echo "checked-out tree ${tree} is not the ${RELEASE_TAG} commit ${tag_commit}" >&2
+            exit 1
+          fi
+          echo "source_commit=${tree}" >> "${GITHUB_OUTPUT}"
+          stamped=0
+          for archive in dist/*.tar.gz dist/*.zip; do
+            [[ -f "${archive}" ]] || continue
+            printf '%s\n' "${tree}" > "${archive}.source-commit"
+            stamped=$((stamped + 1))
+          done
+          if [[ "${stamped}" -eq 0 ]]; then
+            echo "no release archives under dist/ to stamp" >&2
+            exit 1
+          fi
+          echo "stamped ${stamped} archive(s) with ${RELEASE_TAG} ${tree}"
+
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v4
         with:
@@ -893,7 +952,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: meerkat-${{ matrix.target }}-${{ matrix.runs-on }}
+          name: meerkat-${{ matrix.platform.target }}-${{ matrix.platform.runs-on }}-${{ matrix.surface.bin }}
           path: dist/*
           if-no-files-found: error
 
@@ -909,7 +968,8 @@ jobs:
         needs.release_validate_gate.result == 'skipped')) &&
       (startsWith(github.ref, 'refs/tags/v') ||
        (github.event_name == 'workflow_dispatch' &&
-        github.event.inputs.publish_release_assets_only == 'true'))
+        github.event.inputs.publish_release_assets_only == 'true')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.assets_run_id == '')
     # Windows binaries are cross-compiled from Linux with cargo-xwin (clang-cl,
     # lld-link, the Windows SDK). The native windows-latest build ran 190 to
     # 275 minutes on every release from v0.8.11 to v0.8.39 and lost its runner
@@ -961,6 +1021,40 @@ jobs:
         uses: ./.release-tooling/.github/actions/build-windows-cross
         with:
           version: ${{ steps.version.outputs.version }}
+
+      # An asset recovery runs this workflow from main against the tag, so
+      # its attestations name main's commit, not the tag. Each archive
+      # therefore carries a stamp of the tree it was built from, written only
+      # after checking that the checkout is the tag's commit, and attested
+      # with it (see scripts/verify-release-asset-provenance --stamps).
+      - name: Stamp archives with the checked-out release commit
+        id: source_commit
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tree="$(git rev-parse HEAD)"
+          if ! tag_commit="$(git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}^{commit}")"; then
+            git fetch --no-tags --depth=1 origin "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+            tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          fi
+          if [[ "${tree}" != "${tag_commit}" ]]; then
+            echo "checked-out tree ${tree} is not the ${RELEASE_TAG} commit ${tag_commit}" >&2
+            exit 1
+          fi
+          echo "source_commit=${tree}" >> "${GITHUB_OUTPUT}"
+          stamped=0
+          for archive in dist/*.tar.gz dist/*.zip; do
+            [[ -f "${archive}" ]] || continue
+            printf '%s\n' "${tree}" > "${archive}.source-commit"
+            stamped=$((stamped + 1))
+          done
+          if [[ "${stamped}" -eq 0 ]]; then
+            echo "no release archives under dist/ to stamp" >&2
+            exit 1
+          fi
+          echo "stamped ${stamped} archive(s) with ${RELEASE_TAG} ${tree}"
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v4
@@ -1031,7 +1125,8 @@ jobs:
          github.event.inputs.release_backend == 'buildbuddy') ||
         (github.event_name != 'workflow_dispatch' &&
          (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
-          vars.MEERKAT_RELEASE_BUILDBUDDY == '1'))))
+          vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.assets_run_id == '')
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     env:
       BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
@@ -1174,6 +1269,40 @@ jobs:
             fi
             echo "packaged=${bin} -> dist/${artifact_name}"
           done
+
+      # An asset recovery runs this workflow from main against the tag, so
+      # its attestations name main's commit, not the tag. Each archive
+      # therefore carries a stamp of the tree it was built from, written only
+      # after checking that the checkout is the tag's commit, and attested
+      # with it (see scripts/verify-release-asset-provenance --stamps).
+      - name: Stamp archives with the checked-out release commit
+        id: source_commit
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tree="$(git rev-parse HEAD)"
+          if ! tag_commit="$(git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}^{commit}")"; then
+            git fetch --no-tags --depth=1 origin "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+            tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          fi
+          if [[ "${tree}" != "${tag_commit}" ]]; then
+            echo "checked-out tree ${tree} is not the ${RELEASE_TAG} commit ${tag_commit}" >&2
+            exit 1
+          fi
+          echo "source_commit=${tree}" >> "${GITHUB_OUTPUT}"
+          stamped=0
+          for archive in dist/*.tar.gz dist/*.zip; do
+            [[ -f "${archive}" ]] || continue
+            printf '%s\n' "${tree}" > "${archive}.source-commit"
+            stamped=$((stamped + 1))
+          done
+          if [[ "${stamped}" -eq 0 ]]; then
+            echo "no release archives under dist/ to stamp" >&2
+            exit 1
+          fi
+          echo "stamped ${stamped} archive(s) with ${RELEASE_TAG} ${tree}"
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v4
@@ -1384,8 +1513,21 @@ jobs:
     steps:
       - name: Check selected release binary backend
         shell: bash
+        env:
+          ASSETS_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.assets_run_id || '' }}
         run: |
           set -euo pipefail
+          # Asset recovery from an earlier run: nothing is built here; the
+          # publisher verifies that run's archives and that its own build
+          # gate passed (see publish_github_release).
+          if [[ -n "${ASSETS_RUN_ID}" ]]; then
+            for result in "${{ needs.build_binaries.result }}" "${{ needs.build_binaries_buildbuddy.result }}" \
+                          "${{ needs.build_binaries_windows_cross.result }}" "${{ needs.verify_windows_binaries.result }}"; do
+              [[ "${result}" == "skipped" ]] || { echo "assets_run_id set, but a build job ran (${result})" >&2; exit 1; }
+            done
+            echo "Publishing the archives of release run ${ASSETS_RUN_ID}; no build in this run."
+            exit 0
+          fi
           bb_selected="${{ github.actor == 'lukacf' && ((github.event_name == 'workflow_dispatch' && github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1'))) }}"
           github_result="${{ needs.build_binaries.result }}"
           buildbuddy_result="${{ needs.build_binaries_buildbuddy.result }}"
@@ -1448,9 +1590,22 @@ jobs:
           fetch-depth: 0
 
       - name: Download all artifacts
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.assets_run_id == '' }}
         uses: actions/download-artifact@v4
         with:
           path: release-artifacts
+
+      # Asset recovery from an earlier run (assets_run_id): its archives,
+      # stamps and attestations; verify-release-asset-provenance --source-run
+      # binds them to that run before anything is published.
+      - name: Download the archives of the earlier release run
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.assets_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          pattern: meerkat-*
+          run-id: ${{ github.event.inputs.assets_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Prepare and verify complete release asset set
         env:
@@ -1466,11 +1621,74 @@ jobs:
             --output-dir prepared-release-artifacts \
             --release-tag "${RELEASE_TAG}"
 
+      # The build jobs refuse to package a binary that does not embed the
+      # release version; check it again on the exact bytes being published,
+      # which for assets_run_id were built by an earlier run.
+      - name: Require the release version in every published binary
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          version="${version//\//-}"
+          checked=0
+          for archive in prepared-release-artifacts/*.tar.gz prepared-release-artifacts/*.zip; do
+            [[ -f "${archive}" ]] || continue
+            unpacked="$(mktemp -d)"
+            case "${archive}" in
+              *.tar.gz) tar -xzf "${archive}" -C "${unpacked}" ;;
+              *.zip) unzip -q "${archive}" -d "${unpacked}" ;;
+            esac
+            binaries=0
+            while IFS= read -r -d '' binary; do
+              binaries=$((binaries + 1))
+              grep -aqF -- "${version}" "${binary}" || {
+                echo "$(basename "${archive}"): $(basename "${binary}") does not embed release version ${version}" >&2
+                exit 1
+              }
+            done < <(find "${unpacked}" -type f -print0)
+            [[ "${binaries}" -gt 0 ]] || { echo "$(basename "${archive}") is empty" >&2; exit 1; }
+            rm -rf "${unpacked}"
+            checked=$((checked + 1))
+          done
+          [[ "${checked}" -gt 0 ]] || { echo "no release archives to check" >&2; exit 1; }
+          echo "Every binary in ${checked} archives embeds ${version}"
+
+      # Tag push, or a dispatch on the tag ref: every archive is attested
+      # from exactly the tag commit. An asset recovery dispatched from main
+      # runs main's workflow against the tag, so its attestations name the
+      # run's commit: then each archive must be attested by release.yml at
+      # that commit on refs/heads/main, and carry an attested stamp proving
+      # its build job checked out the tag commit. With assets_run_id the
+      # archives come from that earlier run: --source-run binds them to its
+      # commit, requires its build gate to have passed, and accepts an
+      # unstamped run only if nothing outside .github/ and CHANGELOG.md
+      # changed between the tag and that commit.
       - name: Verify exact-tag release build provenance
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
-        run: scripts/verify-release-asset-provenance prepared-release-artifacts "${RELEASE_TAG}"
+          RECOVERY_FROM_MAIN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release_assets_only == 'true' && github.ref == 'refs/heads/main' }}
+          ASSETS_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.assets_run_id || '' }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${ASSETS_RUN_ID}" && "${RECOVERY_FROM_MAIN}" != "true" ]]; then
+            echo "assets_run_id requires publish_release_assets_only dispatched on main" >&2
+            exit 1
+          fi
+          if [[ -n "${ASSETS_RUN_ID}" ]]; then
+            scripts/verify-release-asset-provenance \
+              --source-run "${ASSETS_RUN_ID}" \
+              --stamps release-artifacts \
+              prepared-release-artifacts "${RELEASE_TAG}"
+          elif [[ "${RECOVERY_FROM_MAIN}" == "true" ]]; then
+            scripts/verify-release-asset-provenance \
+              --recovery-source "${GITHUB_SHA}" \
+              --stamps release-artifacts \
+              prepared-release-artifacts "${RELEASE_TAG}"
+          else
+            scripts/verify-release-asset-provenance prepared-release-artifacts "${RELEASE_TAG}"
+          fi
 
       - name: Publish release archives
         uses: softprops/action-gh-release@v2

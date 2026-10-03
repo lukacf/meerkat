@@ -327,6 +327,10 @@ printf '%s\n' \
   'echo "Error: Invariant NotGoalNotDelivered is violated."' \
   'echo "Error: Invariant NotGoalMaterialConflict is violated."' \
   'echo "Error: Invariant NotGoalMissing is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReleasedRuns is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRunFinishesThenRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRetiredDrainRefused is violated."' \
   'echo "Error: Action property AuditNeverUnregisters is violated."' \
   'echo "Error: Action property AuditNeverUnregistersWithPreparation is violated."' \
   'echo "Error: Invariant AuditNeverCancelsRecovery is violated."' \

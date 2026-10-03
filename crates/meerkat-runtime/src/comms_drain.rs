@@ -32,18 +32,18 @@ use meerkat_contracts::wire::supervisor_bridge::{
     BRIDGE_TURN_OUTCOME_ACK_MAX, BridgeAck, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
     BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryRejectionCause,
     BridgeDeliveryResponse, BridgeDestroyResponse, BridgeDirectMemberFence, BridgeEventCursor,
-    BridgeHardCancelPayload, BridgeLiveControlledResponse, BridgeLiveOpenedResponse,
+    BridgeHardCancelPayload, BridgeHeldRun, BridgeLiveControlledResponse, BridgeLiveOpenedResponse,
     BridgeMemberEventsPage, BridgeMemberHistoryPage, BridgeMemberIncarnation,
     BridgeMemberRuntimeState, BridgeMobPeerOverlayHandoff, BridgeObservationResponse,
     BridgeOutboundTaintTarget, BridgeOutcomeTracking, BridgePeerConnectivity, BridgePeerIdentity,
     BridgePeerSpec, BridgeProtocolVersion, BridgeRejectionCause, BridgeReply, BridgeRetireOutcome,
-    BridgeRetireResponse, BridgeSupervisorPayload, BridgeSupervisorRotationObservation,
-    BridgeSupervisorRotationOperationReceipt, BridgeSupervisorRotationPendingPhase,
-    BridgeSupervisorRotationRejectionCause, BridgeSupervisorRotationRejectionReceipt,
-    BridgeSupervisorRotationState, BridgeSupervisorRotationTargetReceipt,
-    BridgeTrackedInputCancelPayload, BridgeTrackedInputCancelResponse, SUPERVISOR_BRIDGE_INTENT,
-    SupervisorRotationOperationId, WireEventRow, canonicalize_bridge_address,
-    decode_bridge_command,
+    BridgeRetireResponse, BridgeRunStartHoldResponse, BridgeSupervisorPayload,
+    BridgeSupervisorRotationObservation, BridgeSupervisorRotationOperationReceipt,
+    BridgeSupervisorRotationPendingPhase, BridgeSupervisorRotationRejectionCause,
+    BridgeSupervisorRotationRejectionReceipt, BridgeSupervisorRotationState,
+    BridgeSupervisorRotationTargetReceipt, BridgeTrackedInputCancelPayload,
+    BridgeTrackedInputCancelResponse, SUPERVISOR_BRIDGE_INTENT, SupervisorRotationOperationId,
+    WireEventRow, canonicalize_bridge_address, decode_bridge_command,
 };
 #[cfg(test)]
 use meerkat_contracts::wire::supervisor_bridge::{
@@ -1333,6 +1333,8 @@ fn bridge_capabilities(
         // Rotation observation is a V4 command; this member holds it until
         // the operation is terminal when asked.
         rotation_observe_hold: origin_protocol.supports_multi_host(),
+        // Mob Stop holds this member's run starts until Resume (#1500).
+        run_start_hold: origin_protocol.supports_multi_host(),
         retire_member: true,
         destroy_member: true,
         wire_member: true,
@@ -5034,6 +5036,144 @@ async fn try_handle_supervisor_bridge_command(
                 }
             }
             true
+            })
+            .await
+        }
+        BridgeCommand::HoldRunStarts(payload) => {
+            crate::stack_relief::box_in_own_frame(|| async move {
+                let sup_payload = BridgeSupervisorPayload {
+                    supervisor: payload.supervisor.clone(),
+                    epoch: payload.epoch,
+                    protocol_version: payload.protocol_version,
+                };
+                if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                    adapter,
+                    session_id,
+                    comms_runtime,
+                    sender,
+                    &sup_payload,
+                    "hold run starts failed",
+                )
+                .await
+                {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                if let Err((cause, reason)) = require_optional_registered_member_incarnation(
+                    adapter,
+                    session_id,
+                    payload.expected_member.as_ref(),
+                    "hold run starts",
+                ) {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                let held = match adapter.hold_run_starts(session_id).await {
+                    Ok(held) => held,
+                    Err(error) => {
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            format!("hold run starts failed: {error}"),
+                            None,
+                        )
+                        .await;
+                        return true;
+                    }
+                };
+                let run = match held.current_run {
+                    None => BridgeHeldRun::NoRun,
+                    Some(run_id) if !payload.cancel_current_run => {
+                        BridgeHeldRun::LeftRunning { run_id }
+                    }
+                    Some(run_id) => match adapter
+                        .cancel_after_boundary_run_if_current(session_id, &run_id)
+                        .await
+                    {
+                        Ok(true) => BridgeHeldRun::CancelledAtBoundary { run_id },
+                        Ok(false)
+                        | Err(
+                            crate::traits::RuntimeDriverError::StaleAuthority { .. }
+                            | crate::traits::RuntimeDriverError::NotReady { .. },
+                        ) => BridgeHeldRun::RunEndedBeforeCancel { run_id },
+                        Err(error) => {
+                            send_bridge_failure(
+                                comms_runtime,
+                                candidate,
+                                BridgeRejectionCause::Internal,
+                                format!("cancelling the held member's run failed: {error}"),
+                                None,
+                            )
+                            .await;
+                            return true;
+                        }
+                    },
+                };
+                send_bridge_response(
+                    comms_runtime,
+                    candidate,
+                    meerkat_core::interaction::ResponseStatus::Completed,
+                    BridgeReply::RunStartsHeld(BridgeRunStartHoldResponse { run }),
+                    None,
+                )
+                .await;
+                true
+            })
+            .await
+        }
+        BridgeCommand::ReleaseRunStarts(payload) => {
+            crate::stack_relief::box_in_own_frame(|| async move {
+                let sup_payload = BridgeSupervisorPayload {
+                    supervisor: payload.supervisor.clone(),
+                    epoch: payload.epoch,
+                    protocol_version: payload.protocol_version,
+                };
+                if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                    adapter,
+                    session_id,
+                    comms_runtime,
+                    sender,
+                    &sup_payload,
+                    "release run starts failed",
+                )
+                .await
+                {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                if let Err((cause, reason)) = require_optional_registered_member_incarnation(
+                    adapter,
+                    session_id,
+                    payload.expected_member.as_ref(),
+                    "release run starts",
+                ) {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                match adapter.release_run_starts(session_id).await {
+                    Ok(()) => {
+                        send_bridge_response(
+                            comms_runtime,
+                            candidate,
+                            meerkat_core::interaction::ResponseStatus::Completed,
+                            BridgeReply::Ack(BridgeAck { ok: true }),
+                            None,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            format!("release run starts failed: {error}"),
+                            None,
+                        )
+                        .await;
+                    }
+                }
+                true
             })
             .await
         }

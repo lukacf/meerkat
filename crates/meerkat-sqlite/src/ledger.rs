@@ -346,6 +346,37 @@ impl SchemaDomain {
         }
     }
 
+    /// Verify the catalog of a file whose ledger row stamps `version`. For the
+    /// current version a mismatch is the typed
+    /// [`SqliteStoreError::CurrentSchemaMismatch`] naming the differing
+    /// objects (falling back to the fingerprint detail when no object-level
+    /// difference explains it); predecessors are verified as usual.
+    fn verify_stamped_version(
+        &self,
+        conn: &Connection,
+        version: i64,
+    ) -> Result<(), SqliteStoreError> {
+        if version != self.supported_version() {
+            return self.verify_predecessor(conn, version);
+        }
+        verify_current_schema_fingerprint(conn, self).map_err(|detail| {
+            match current_catalog_diff(conn, self) {
+                Ok(diff) if !diff.is_empty() => SqliteStoreError::CurrentSchemaMismatch {
+                    domain: self.name.to_string(),
+                    version,
+                    missing_objects: diff.missing,
+                    unexpected_objects: diff.unexpected,
+                    changed_objects: diff.changed,
+                },
+                _ => SqliteStoreError::SchemaFingerprintMismatch {
+                    domain: self.name.to_string(),
+                    version,
+                    detail,
+                },
+            }
+        })
+    }
+
     fn verify_predecessor(&self, conn: &Connection, version: i64) -> Result<(), SqliteStoreError> {
         if version == self.supported_version() {
             return verify_current_schema_fingerprint(conn, self).map_err(|detail| {
@@ -496,7 +527,7 @@ pub fn preflight_schema_eligibility(
         Some(found) if !domain.accepts_existing_version(found) => {
             return Err(unsupported_predecessor(domain, found));
         }
-        Some(found) => domain.verify_predecessor(conn, found)?,
+        Some(found) => domain.verify_stamped_version(conn, found)?,
         None => {
             let objects = find_owned_objects(conn, domain)?;
             if !objects.is_empty() {
@@ -529,7 +560,7 @@ pub fn apply_domain_migrations(
         let read = conn.transaction()?;
         let is_current = domain_version(&read, domain.name)? == Some(supported);
         if is_current {
-            domain.verify_predecessor(&read, supported)?;
+            domain.verify_stamped_version(&read, supported)?;
         }
         read.rollback()?;
         if is_current {
@@ -560,7 +591,7 @@ pub fn apply_domain_migrations(
         if !domain.accepts_existing_version(found) {
             return Err(unsupported_predecessor(domain, found));
         }
-        domain.verify_predecessor(&tx, found)?;
+        domain.verify_stamped_version(&tx, found)?;
     } else {
         let objects = find_owned_objects(&tx, domain)?;
         if !objects.is_empty() {
@@ -721,7 +752,7 @@ pub fn bridge_unledgered_domain(
         if !domain.accepts_existing_version(found) {
             return Err(unsupported_predecessor(domain, found));
         }
-        domain.verify_predecessor(&tx, found)?;
+        domain.verify_stamped_version(&tx, found)?;
         if found == target_version && prepare.is_none() {
             return Ok(MaintenanceBridgeReport {
                 from_version: found,
@@ -1172,6 +1203,100 @@ fn current_catalog_cache_key(domain: &SchemaDomain) -> String {
         ));
     }
     key
+}
+
+/// Object-level difference between a file's domain-owned catalog and the
+/// domain's current schema, each object named `kind:name`.
+#[derive(Debug, Default)]
+struct CurrentCatalogDiff {
+    missing: Vec<String>,
+    unexpected: Vec<String>,
+    changed: Vec<String>,
+}
+
+impl CurrentCatalogDiff {
+    fn is_empty(&self) -> bool {
+        self.missing.is_empty() && self.unexpected.is_empty() && self.changed.is_empty()
+    }
+}
+
+/// Diagnose a current-version fingerprint mismatch. Runs only on the refusal
+/// path: the expected side is the domain's own initializer in a private
+/// in-memory database, compared entry by entry with the file's owned and
+/// retired objects (normalized CREATE SQL, as in the fingerprint).
+fn current_catalog_diff(
+    actual: &Connection,
+    domain: &SchemaDomain,
+) -> Result<CurrentCatalogDiff, String> {
+    let mut oracle =
+        Connection::open_in_memory().map_err(|error| format!("open current oracle: {error}"))?;
+    let tx = oracle
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| format!("begin current oracle: {error}"))?;
+    (domain.initialize_current)(&tx).map_err(|error| format!("build current oracle: {error}"))?;
+    tx.commit()
+        .map_err(|error| format!("commit current oracle: {error}"))?;
+    let expected = domain_catalog_entries(&oracle, domain)?;
+    let found = domain_catalog_entries(actual, domain)?;
+    let mut diff = CurrentCatalogDiff::default();
+    for (object, entry) in &expected {
+        match found.get(object) {
+            None => diff.missing.push(object.clone()),
+            Some(found_entry) if found_entry != entry => diff.changed.push(object.clone()),
+            Some(_) => {}
+        }
+    }
+    for object in found.keys() {
+        if !expected.contains_key(object) {
+            diff.unexpected.push(object.clone());
+        }
+    }
+    Ok(diff)
+}
+
+/// `kind:name` -> normalized definition for every object in `conn` whose name
+/// the domain owns now or owned in a supported predecessor.
+fn domain_catalog_entries(
+    conn: &Connection,
+    domain: &SchemaDomain,
+) -> Result<BTreeMap<String, String>, String> {
+    let names = all_domain_objects(domain)
+        .into_iter()
+        .map(|object| object.name)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut statement = conn
+        .prepare(
+            "SELECT type, name, tbl_name, sql
+             FROM main.sqlite_schema
+             WHERE name NOT LIKE 'sqlite_%'
+             ORDER BY type, name",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut entries = BTreeMap::new();
+    for row in rows {
+        let (kind, name, table_name, sql) = row.map_err(|error| error.to_string())?;
+        if names.contains(name.as_str()) {
+            entries.insert(
+                format!("{kind}:{name}"),
+                format!(
+                    "{table_name}\u{1f}{}",
+                    sql.map(|sql| normalize_schema_sql(&sql))
+                        .unwrap_or_default()
+                ),
+            );
+        }
+    }
+    Ok(entries)
 }
 
 fn build_current_catalog_fingerprint(domain: &SchemaDomain) -> Result<String, String> {
@@ -2164,14 +2289,51 @@ mod tests {
         conn.execute_batch("ALTER TABLE t1 ADD COLUMN candidate_partial TEXT")
             .expect("partial candidate mutation");
         let err = apply_domain_migrations(&mut conn, &DOMAIN_V2).expect_err("refuse current shape");
-        assert!(matches!(
-            err,
-            SqliteStoreError::SchemaFingerprintMismatch { version: 2, .. }
-        ));
+        match err {
+            SqliteStoreError::CurrentSchemaMismatch {
+                version: 2,
+                missing_objects,
+                unexpected_objects,
+                changed_objects,
+                ..
+            } => {
+                assert!(missing_objects.is_empty(), "{missing_objects:?}");
+                assert!(unexpected_objects.is_empty(), "{unexpected_objects:?}");
+                assert_eq!(changed_objects, vec!["table:t1".to_string()]);
+            }
+            other => panic!("expected a typed current-schema mismatch, got {other:?}"),
+        }
         assert_eq!(
             domain_version(&conn, DOMAIN_V2.name).expect("ledger"),
             Some(2)
         );
+    }
+
+    #[test]
+    fn current_row_without_its_owned_objects_names_them() {
+        // A file stamped with this domain's current version by a build that
+        // reused the number for a different schema: the owned table is absent.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        apply_domain_migrations(&mut conn, &DOMAIN_V2).expect("current");
+        conn.execute_batch("DROP TABLE t1; CREATE TABLE unrelated_candidate (x INTEGER)")
+            .expect("foreign-shaped current");
+        let err = apply_domain_migrations(&mut conn, &DOMAIN_V2).expect_err("refuse current row");
+        match err {
+            SqliteStoreError::CurrentSchemaMismatch {
+                version: 2,
+                missing_objects,
+                unexpected_objects,
+                changed_objects,
+                ..
+            } => {
+                assert_eq!(missing_objects, vec!["table:t1".to_string()]);
+                // Foreign co-tenant objects are not this domain's business.
+                assert!(unexpected_objects.is_empty(), "{unexpected_objects:?}");
+                assert!(changed_objects.is_empty(), "{changed_objects:?}");
+            }
+            other => panic!("expected a typed current-schema mismatch, got {other:?}"),
+        }
     }
 
     #[test]

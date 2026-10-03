@@ -342,8 +342,10 @@ list.
 
 ### GitHub Workflows
 
-**CI** (`.github/workflows/ci.yml`) runs on pushes to `main`, PRs, and
-manual dispatch (a branch head runs once, via its PR). It is Cargo-only on
+**CI** (`.github/workflows/ci.yml`) runs on pushes to `main` and to
+`release/**` integration branches, PRs, and manual dispatch (any other branch
+head runs once, via its PR; a release-branch push runs the same push-only
+lanes as `main`, without the attestation). It is Cargo-only on
 GitHub-hosted runners and sized to a 25-minute lane execution budget:
 - `changes` classifies the diff with `scripts/ci-cargo-lanes.mjs` (fail
   closed: every Rust-relevant change yields lanes; unmapped Rust paths, a
@@ -391,8 +393,9 @@ GitHub-hosted runners and sized to a 25-minute lane execution budget:
   pull requests a 1500-second lane execution budget (classification plus
   each lane's own run time, runner queue excluded) and a 2700-second
   push-to-terminal runaway ceiling (each lane timed from the start of the
-  run attempt it ran in); runner queue wait of 300 s or more on the critical
-  path is a `CI runner queue wait` warning with a typed verdict, never a
+  run attempt it ran in, runner queue on its path excluded); runner queue
+  wait of 300 s or more on the critical path is a `CI runner queue wait`
+  warning with a typed verdict, never a
   failure (the account's 40 concurrent hosted jobs are shared by every PR,
   main push and nightly); the lane table is reported on every non-cancelled
   run, failed runs included; a failure to measure only warns on `main`;

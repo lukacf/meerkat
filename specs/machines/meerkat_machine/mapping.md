@@ -1181,6 +1181,48 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AbortCancelAfterBoundaryDispatchDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `HoldRunStartsInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldRunStartsIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldRunStartsAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldRunStartsRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldRunStartsRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldRunStartsInertStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldRunStartsInertDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BoundaryAppliedPublish`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
@@ -2657,10 +2699,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PrepareIdleRetainingUnsettledCompletion`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `PrepareHeldIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrepareAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `PrepareAttachedRetainingUnsettledCompletion`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareHeldAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `DrainQueuedRunRetired`
@@ -2669,13 +2717,25 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DrainQueuedRunRetiredRetainingUnsettledCompletion`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `DrainQueuedRunHeldRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartConversationRunIdleWithBinding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartConversationRunHeldIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `StartConversationRunInitializing`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
+- `StartConversationRunHeldInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartConversationRunAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartConversationRunHeldAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `StartConversationRunRunning`
@@ -2684,7 +2744,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `StartImmediateAppendInitializing`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
+- `StartImmediateAppendHeldInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartImmediateAppendAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartImmediateAppendHeldAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `StartImmediateAppendRunning`
@@ -7607,6 +7673,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `BoundaryCancelAlreadyPending`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RunStartsHeld`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RunStartsReleased`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RunStartHeld`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `WakeInterrupt`

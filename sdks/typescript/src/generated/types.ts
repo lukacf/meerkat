@@ -412,6 +412,12 @@ export interface WorkItemsResult {
 
 export type ConfigSetParams = Record<string, unknown>;
 
+export interface WireMcpAuthTarget {
+  oauth_account?: string | null;
+  server_name: string;
+  server_url: string;
+}
+
 export type InstructionActivationDisposition = unknown;
 
 export type InstructionActivationExpectation = unknown;
@@ -517,6 +523,85 @@ export interface WireDeviceCompleteResultReady {
 }
 
 export type WireDeviceCompleteResult = WireDeviceCompleteResultPending | WireDeviceCompleteResultSlowDown | WireDeviceCompleteResultAccessDenied | WireDeviceCompleteResultExpired | WireDeviceCompleteResultReady;
+
+export interface AuthStatusParamsBindingIdParams {
+  binding_id: string;
+  profile_id?: string | null;
+  realm_id: string;
+}
+
+export interface AuthStatusParamsMcpLoginTarget {
+  mcp: WireMcpAuthTarget;
+}
+
+export type AuthStatusParams = AuthStatusParamsBindingIdParams | AuthStatusParamsMcpLoginTarget;
+
+export interface LoginCompleteParamsProviderLoginTarget {
+  code: string;
+  redirect_uri: string;
+  state: string;
+  binding_id: string;
+  profile_id?: string | null;
+  provider: "anthropic" | "openai" | "google" | "copilot";
+  realm_id: string;
+}
+
+export interface LoginCompleteParamsMcpLoginTarget {
+  code: string;
+  redirect_uri: string;
+  state: string;
+  mcp: WireMcpAuthTarget;
+}
+
+export type LoginCompleteParams = LoginCompleteParamsProviderLoginTarget | LoginCompleteParamsMcpLoginTarget;
+
+export interface LoginStartParamsProviderLoginTarget {
+  redirect_uri: string;
+  binding_id: string;
+  profile_id?: string | null;
+  provider: "anthropic" | "openai" | "google" | "copilot";
+  realm_id: string;
+}
+
+export interface LoginStartParamsMcpLoginTarget {
+  redirect_uri: string;
+  mcp: WireMcpAuthTarget;
+}
+
+export type LoginStartParams = LoginStartParamsProviderLoginTarget | LoginStartParamsMcpLoginTarget;
+
+export interface WireAuthStatusResultAuthStatusDetail {
+  account_id?: string | null;
+  auth_binding: WireAuthBindingRef;
+  auth_method: string;
+  binding_id: string;
+  expires_at?: string | null;
+  has_refresh_token: boolean;
+  last_refresh_at?: string | null;
+  profile_id: string;
+  provider: string;
+  realm_id: string;
+  state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "released" | "absent" | "missing_credential";
+}
+
+export interface WireAuthStatusResultMcpAuthStatus {
+  account_id?: string | null;
+  expires_at?: string | null;
+  mcp: WireMcpAuthTarget;
+  phase: "authorized" | "reauth_required" | "authorization_required";
+}
+
+export type WireAuthStatusResult = WireAuthStatusResultAuthStatusDetail | WireAuthStatusResultMcpAuthStatus;
+
+export interface LoginCancelParams {
+  mcp: WireMcpAuthTarget;
+  state: string;
+}
+
+export interface WireLoginCancelled {
+  cancelled: boolean;
+  mcp: WireMcpAuthTarget;
+}
 
 export interface ActivateInstructionParams {
   activation: Record<string, unknown>;
@@ -844,24 +929,6 @@ export interface ListSessionsParams {
 
 export interface ListSessionsResult {
   sessions: Record<string, unknown>[];
-}
-
-export interface LoginCompleteParams {
-  binding_id: string;
-  code: string;
-  profile_id?: string | null;
-  provider: "anthropic" | "openai" | "google" | "copilot";
-  realm_id: string;
-  redirect_uri: string;
-  state: string;
-}
-
-export interface LoginStartParams {
-  binding_id: string;
-  profile_id?: string | null;
-  provider: "anthropic" | "openai" | "google" | "copilot";
-  realm_id: string;
-  redirect_uri: string;
 }
 
 export interface ProvisionApiKeyParams {
@@ -1399,6 +1466,7 @@ export interface MobLifecycleResult {
   destroy_report?: unknown;
   mob_id: string;
   ok: boolean;
+  stop_report?: unknown;
 }
 
 export interface MobSpawnParams {
@@ -2850,6 +2918,7 @@ export interface BridgeCapabilities {
   resolvable_providers?: Provider[];
   retire_member?: boolean;
   rotation_observe_hold?: boolean;
+  run_start_hold?: boolean;
   supported_protocol_versions?: BridgeProtocolVersion[];
   tracked_input_cancel?: boolean;
   unwire_member?: boolean;
@@ -4243,6 +4312,23 @@ export interface BridgeCommandStopMemberRun {
   supervisor: BridgePeerSpec;
 }
 
+export interface BridgeCommandHoldRunStarts {
+  cancel_current_run?: boolean;
+  command: "hold_run_starts";
+  epoch: number;
+  expected_member?: BridgeMemberIncarnation | null;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandReleaseRunStarts {
+  command: "release_run_starts";
+  epoch: number;
+  expected_member?: BridgeMemberIncarnation | null;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
 export interface BridgeCommandRetireMember {
   command: "retire_member";
   epoch: number;
@@ -4493,7 +4579,7 @@ export interface BridgeCommandRevokeForkedParticipant {
   supervisor: BridgePeerSpec;
 }
 
-export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant;
+export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandHoldRunStarts | BridgeCommandReleaseRunStarts | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant;
 
 export interface BridgeDeliveryOutcomeAccepted {
   outcome: "accepted";
@@ -4747,6 +4833,11 @@ export interface BridgeReplyMemberRunStopped {
   result: "member_run_stopped";
 }
 
+export interface BridgeReplyRunStartsHeld {
+  result: "run_starts_held";
+  run: { run: "no_run" } | Record<string, unknown>;
+}
+
 export interface BridgeReplyRetire {
   outcome: Record<string, unknown>;
   result: "retire";
@@ -4888,7 +4979,7 @@ export interface BridgeReplyForkedParticipantRevoked {
   result: "forked_participant_revoked";
 }
 
-export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked;
+export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRunStartsHeld | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked;
 
 export interface ContentBlockText {
   text: string;
@@ -6002,24 +6093,52 @@ export interface WireAuthProfileCleared {
   realm_id: string;
 }
 
-export interface WireLoginStart {
-  authorize_url: string;
-  provider: "anthropic" | "openai" | "google" | "copilot";
-  redirect_uri: string;
-  state: string;
+export interface WireMcpAuthStatus {
+  account_id?: string | null;
+  expires_at?: string | null;
+  mcp: WireMcpAuthTarget;
+  phase: "authorized" | "reauth_required" | "authorization_required";
 }
 
-export interface WireLoginReady {
-  auth_binding: WireAuthBindingRef;
-  binding_id: string;
+export interface WireLoginStartProviderLoginStart {
+  authorize_url: string;
+  redirect_uri: string;
+  state: string;
+  provider: "anthropic" | "openai" | "google" | "copilot";
+}
+
+export interface WireLoginStartMcpLoginStart {
+  authorize_url: string;
+  redirect_uri: string;
+  state: string;
+  disposition: "started" | "joined";
+  mcp: WireMcpAuthTarget;
+}
+
+export type WireLoginStart = WireLoginStartProviderLoginStart | WireLoginStartMcpLoginStart;
+
+export interface WireLoginReadyProviderLoginReady {
   expires_at?: string | null;
   has_refresh_token: boolean;
+  scopes: string[];
+  state?: string | null;
+  auth_binding: WireAuthBindingRef;
+  binding_id: string;
   profile_id: string;
   provider: "anthropic" | "openai" | "google" | "copilot";
   realm_id: string;
+}
+
+export interface WireLoginReadyMcpLoginReady {
+  expires_at?: string | null;
+  has_refresh_token: boolean;
   scopes: string[];
   state?: string | null;
+  account_id?: string | null;
+  mcp: WireMcpAuthTarget;
 }
+
+export type WireLoginReady = WireLoginReadyProviderLoginReady | WireLoginReadyMcpLoginReady;
 
 export interface WireDeviceStart {
   device_code: string;

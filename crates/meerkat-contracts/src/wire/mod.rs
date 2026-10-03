@@ -59,12 +59,16 @@ pub use config::{
     WireLiveHotSwapSkipReason, WireLiveRefreshFailure, WireLiveSwapFailure,
 };
 pub use connection::{
-    BindingIdParams, CreateProfileParams, DeviceCompleteParams, DeviceStartParams,
-    LoginCompleteParams, LoginStartParams, ProvisionApiKeyParams, RealmIdParams,
-    WireAuthBindingRef, WireAuthError, WireAuthProfile, WireAuthProfileCleared,
-    WireAuthProfileCreated, WireAuthProfileDetail, WireAuthProfilesList, WireAuthStatus,
-    WireAuthStatusDetail, WireBackendProfile, WireBindingIdentity, WireDeviceCompleteResult,
-    WireDeviceStart, WireLoginReady, WireLoginStart, WireOAuthProvider, WireProviderBinding,
+    AuthStatusParams, BindingIdParams, CreateProfileParams, DeviceCompleteParams,
+    DeviceStartParams, LoginCancelParams, LoginCompleteParams, LoginStartParams,
+    ProvisionApiKeyParams, RealmIdParams, WireAuthBindingRef, WireAuthError, WireAuthProfile,
+    WireAuthProfileCleared, WireAuthProfileCreated, WireAuthProfileDetail, WireAuthProfilesList,
+    WireAuthStatus, WireAuthStatusDetail, WireAuthStatusResult, WireBackendProfile,
+    WireBindingIdentity, WireDeviceCompleteResult, WireDeviceStart, WireLoginCancelled,
+    WireLoginReady, WireLoginReadyTarget, WireLoginStart, WireLoginStartTarget, WireLoginTarget,
+    WireMcpAuthPhase, WireMcpAuthStatus, WireMcpAuthTarget, WireMcpLoginDisposition,
+    WireMcpLoginReady, WireMcpLoginStart, WireMcpLoginTarget, WireOAuthProvider,
+    WireProviderBinding, WireProviderLoginReady, WireProviderLoginStart, WireProviderLoginTarget,
     WireProvisionApiKeyResult, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
 };
 pub use rpc_surface::{
@@ -259,10 +263,11 @@ pub use session::{
     RevisionSelector, RewriteSessionTranscriptParams, SessionStreamCloseParams,
     SessionStreamCloseResult, SessionStreamOpenParams, SessionStreamOpenResult,
     TranscriptRewriteMessage, UpdateSystemPromptParams, WireAssistantBlock, WireContentBlock,
-    WireContentInput, WireInterruptOutcome, WirePromptInput, WireProviderMeta, WireSessionHistory,
-    WireSessionInfo, WireSessionMessage, WireSessionSummary, WireSessionTranscriptRevision,
-    WireSessionTranscriptRevisionEntry, WireSessionTranscriptRevisionList, WireStopReason,
-    WireSystemMessageIdentity, WireToolResult, WireToolResultContent, WireTranscriptSource,
+    WireContentInput, WireImageData, WireInterruptOutcome, WirePromptInput, WireProviderMeta,
+    WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
+    WireSessionTranscriptRevision, WireSessionTranscriptRevisionEntry,
+    WireSessionTranscriptRevisionList, WireStopReason, WireSystemMessageIdentity, WireToolResult,
+    WireToolResultContent, WireTranscriptSource, WireVideoData,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
 pub use spec_digest::{SpecDigestError, portable_member_spec_digest};

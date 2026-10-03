@@ -18,7 +18,7 @@ pub use meerkat_contracts::wire::supervisor_bridge::{
     BridgeForkedParticipantAttachment, BridgeForkedParticipantCreatedResponse,
     BridgeForkedParticipantOwnerRoute, BridgeForkedParticipantRef, BridgeForkedParticipantReuse,
     BridgeForkedParticipantRevocationOutcome, BridgeForkedParticipantRevokedResponse,
-    BridgeForkedParticipantScope, BridgeHardCancelPayload, BridgeHostBindPayload,
+    BridgeForkedParticipantScope, BridgeHardCancelPayload, BridgeHeldRun, BridgeHostBindPayload,
     BridgeHostBindResponse, BridgeHostBindingDescriptorIssuedResponse, BridgeHostBootstrapProof,
     BridgeHostCapabilityRequirements, BridgeHostMemberRecord, BridgeHostRebindPayload,
     BridgeHostReboundResponse, BridgeHostRevokePayload, BridgeHostRevokedResponse,
@@ -35,6 +35,7 @@ pub use meerkat_contracts::wire::supervisor_bridge::{
     BridgePollEventsPayload, BridgeProtocolVersion, BridgeReadHistoryPayload, BridgeRejectionCause,
     BridgeRejectionReply, BridgeReleasePayload, BridgeReply, BridgeRetireOutcome,
     BridgeRetirePayload, BridgeRetireResponse, BridgeRevokeForkedParticipantPayload,
+    BridgeRunStartHoldPayload, BridgeRunStartHoldResponse, BridgeRunStartReleasePayload,
     BridgeStopMemberRunPayload, BridgeSupervisorDelivery, BridgeSupervisorPayload,
     BridgeSupervisorRotationObservation, BridgeSupervisorRotationObserve,
     BridgeSupervisorRotationOperationReceipt, BridgeSupervisorRotationPendingPhase,
@@ -289,6 +290,7 @@ impl_from_bridge_reply!(
     MemberRunStopped,
     "member_run_stopped"
 );
+impl_from_bridge_reply!(BridgeRunStartHoldResponse, RunStartsHeld, "run_starts_held");
 impl_from_bridge_reply!(BridgeRetireResponse, Retire, "retire");
 impl_from_bridge_reply!(BridgeDestroyResponse, Destroy, "destroy");
 impl_from_bridge_reply!(BridgeHostBindResponse, BindHost, "bind_host");
@@ -398,6 +400,7 @@ enum ExpectedBridgeReply {
     Delivery,
     TrackedInputCancelled,
     MemberRunStopped,
+    RunStartsHeld,
     Retire,
     Destroy,
     BindHost,
@@ -430,6 +433,7 @@ impl ExpectedBridgeReply {
             Self::Delivery => "delivery",
             Self::TrackedInputCancelled => "tracked_input_cancelled",
             Self::MemberRunStopped => "member_run_stopped",
+            Self::RunStartsHeld => "run_starts_held",
             Self::Retire => "retire",
             Self::Destroy => "destroy",
             Self::BindHost => "bind_host",
@@ -461,6 +465,7 @@ fn expected_reply_kind(command: &BridgeCommand) -> ExpectedBridgeReply {
         BridgeCommand::AuthorizeSupervisor(_)
         | BridgeCommand::RevokeSupervisor(_)
         | BridgeCommand::InterruptMember(_)
+        | BridgeCommand::ReleaseRunStarts(_)
         | BridgeCommand::HardCancelMember(_)
         | BridgeCommand::WireMember(_)
         | BridgeCommand::UnwireMember(_)
@@ -473,6 +478,7 @@ fn expected_reply_kind(command: &BridgeCommand) -> ExpectedBridgeReply {
         | BridgeCommand::DeclareMemberOutboundTaint(_) => ExpectedBridgeReply::Ack,
         BridgeCommand::DeliverMemberInput(_) => ExpectedBridgeReply::Delivery,
         BridgeCommand::CancelTrackedMemberInput(_) => ExpectedBridgeReply::TrackedInputCancelled,
+        BridgeCommand::HoldRunStarts(_) => ExpectedBridgeReply::RunStartsHeld,
         BridgeCommand::StopMemberRun(_) => ExpectedBridgeReply::MemberRunStopped,
         BridgeCommand::ObserveMember(_) => ExpectedBridgeReply::Observation,
         BridgeCommand::RetireMember(_) => ExpectedBridgeReply::Retire,
@@ -516,6 +522,7 @@ fn reply_kind(reply: &BridgeReply) -> ExpectedBridgeReply {
         BridgeReply::Delivery(_) => ExpectedBridgeReply::Delivery,
         BridgeReply::TrackedInputCancelled(_) => ExpectedBridgeReply::TrackedInputCancelled,
         BridgeReply::MemberRunStopped(_) => ExpectedBridgeReply::MemberRunStopped,
+        BridgeReply::RunStartsHeld(_) => ExpectedBridgeReply::RunStartsHeld,
         BridgeReply::Retire(_) => ExpectedBridgeReply::Retire,
         BridgeReply::Destroy(_) => ExpectedBridgeReply::Destroy,
         BridgeReply::BindHost(_) => ExpectedBridgeReply::BindHost,

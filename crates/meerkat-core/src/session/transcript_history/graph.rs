@@ -981,7 +981,15 @@ impl TranscriptGraphPrefixAccumulator {
         anchor: &TranscriptRevisionAnchor,
         edges: impl IntoIterator<Item = &'a TranscriptRevisionEdge>,
     ) -> Result<Self, serde_json::Error> {
-        let mut prefix = Self::from_anchor(anchor)?;
+        Self::extend_all(Self::from_anchor(anchor)?, edges)
+    }
+
+    /// Extend `base` (an anchor or retired-prefix accumulator) over `edges`.
+    pub(super) fn extend_all<'a>(
+        base: Self,
+        edges: impl IntoIterator<Item = &'a TranscriptRevisionEdge>,
+    ) -> Result<Self, serde_json::Error> {
+        let mut prefix = base;
         for edge in edges {
             prefix = prefix.extend(edge)?;
         }
@@ -1180,8 +1188,21 @@ impl PersistentTranscriptEdges {
         anchor: &TranscriptRevisionAnchor,
         edges: Vec<TranscriptRevisionEdge>,
     ) -> Result<Self, serde_json::Error> {
+        Self::from_vec_after(
+            TranscriptGraphPrefixAccumulator::from_anchor(anchor)?,
+            edges,
+        )
+    }
+
+    /// Chain `edges` onto an arbitrary rolling base: the anchor accumulator
+    /// for a whole graph, or a retired prefix's accumulator for a
+    /// re-anchored one. Node prefixes stay the absolute rolling identity.
+    fn from_vec_after(
+        base: TranscriptGraphPrefixAccumulator,
+        edges: Vec<TranscriptRevisionEdge>,
+    ) -> Result<Self, serde_json::Error> {
         let mut persistent = Self::empty();
-        let mut graph_prefix = TranscriptGraphPrefixAccumulator::from_anchor(anchor)?;
+        let mut graph_prefix = base;
         for edge in edges {
             graph_prefix = graph_prefix.extend(&edge)?;
             persistent.push(edge, graph_prefix.clone());
@@ -1292,6 +1313,162 @@ impl PersistentTranscriptEdges {
     }
 }
 
+/// Audit authority of the rewrite occurrences a re-anchored graph no longer
+/// retains bodies for.
+///
+/// Every retired commit stays, in generation order, together with the exact
+/// rewrite-prefix and graph-prefix accumulators after the last of them. The
+/// retained edges chain from `graph_prefix`, so the graph's rolling identity
+/// is byte-identical to the un-retired graph's: a physical head that binds a
+/// generation at or after the retirement point still verifies.
+///
+/// What is gone is the bodies: the original anchor and the parent advances
+/// and patches of the retired edges. Materializing a retired revision is a
+/// typed refusal ([`TranscriptEditError::TranscriptRevisionRetired`]), never
+/// a wrong anchor. `graph_prefix` itself is carried authority: its digest
+/// covers the dropped edge bytes, so it can be matched against a store's
+/// physical head but not recomputed from what remains.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct RetiredTranscriptPrefix {
+    commits: Vec<TranscriptRewriteCommit>,
+    rewrite_prefix: TranscriptRewritePrefixAccumulator,
+    graph_prefix: TranscriptGraphPrefixAccumulator,
+}
+
+impl RetiredTranscriptPrefix {
+    /// The retired commits, generation `1..=len` in order.
+    #[must_use]
+    pub fn commits(&self) -> &[TranscriptRewriteCommit] {
+        &self.commits
+    }
+
+    /// Rewrite-prefix accumulator after the last retired commit.
+    #[must_use]
+    pub fn rewrite_prefix(&self) -> &TranscriptRewritePrefixAccumulator {
+        &self.rewrite_prefix
+    }
+
+    /// Graph-prefix accumulator after the last retired occurrence.
+    #[must_use]
+    pub fn graph_prefix(&self) -> &TranscriptGraphPrefixAccumulator {
+        &self.graph_prefix
+    }
+
+    /// Whether `revision` labels the parent or child of a retired commit.
+    #[must_use]
+    pub fn labels_revision(&self, revision: &str) -> bool {
+        self.commits
+            .iter()
+            .any(|commit| commit.parent_revision == revision || commit.revision == revision)
+    }
+}
+
+/// The persisted base of a re-anchored graph: its retired prefix and the
+/// anchor the retained edges chain from.
+///
+/// A head-canonical store writes this once per retirement, deletes the edge
+/// rows below the cut, and replays the retained edges from it
+/// ([`ValidatedTranscriptHistory::from_store_replayed_retired_graph`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct RetiredTranscriptGraphBase {
+    retired: RetiredTranscriptPrefix,
+    anchor: TranscriptRevisionAnchor,
+}
+
+impl RetiredTranscriptGraphBase {
+    #[must_use]
+    pub fn retired(&self) -> &RetiredTranscriptPrefix {
+        &self.retired
+    }
+
+    #[must_use]
+    pub fn anchor(&self) -> &TranscriptRevisionAnchor {
+        &self.anchor
+    }
+
+    /// Number of retired occurrences (the first retained generation minus one).
+    #[must_use]
+    pub fn retired_count(&self) -> usize {
+        self.retired.commits.len()
+    }
+}
+
+/// [`TranscriptHistoryState::commits`]: retired commits, then retained ones.
+#[derive(Debug, Clone)]
+pub struct TranscriptRewriteCommits<'a> {
+    retired: std::slice::Iter<'a, TranscriptRewriteCommit>,
+    retained: std::slice::Iter<'a, Arc<TranscriptRevisionEdge>>,
+}
+
+impl<'a> Iterator for TranscriptRewriteCommits<'a> {
+    type Item = &'a TranscriptRewriteCommit;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.retired
+            .next()
+            .or_else(|| self.retained.next().map(|edge| edge.commit()))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.retired.len() + self.retained.len();
+        (len, Some(len))
+    }
+}
+
+impl DoubleEndedIterator for TranscriptRewriteCommits<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.retained
+            .next_back()
+            .map(|edge| edge.commit())
+            .or_else(|| self.retired.next_back())
+    }
+}
+
+impl ExactSizeIterator for TranscriptRewriteCommits<'_> {}
+
+/// How many recent rewrite occurrences a transcript graph keeps bodies for.
+///
+/// Older occurrences are retired by
+/// [`TranscriptHistoryState::retire_occurrences_beyond`]: their commits and
+/// prefix digests stay as audit authority, their bodies go. The default keeps
+/// [`TranscriptHistoryRetention::DEFAULT_RETAINED_REWRITES`] occurrences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptHistoryRetention {
+    retained_rewrites: std::num::NonZeroUsize,
+}
+
+impl TranscriptHistoryRetention {
+    /// Default number of retained rewrite occurrences.
+    pub const DEFAULT_RETAINED_REWRITES: usize = 4;
+
+    #[must_use]
+    pub const fn new(retained_rewrites: std::num::NonZeroUsize) -> Self {
+        Self { retained_rewrites }
+    }
+
+    /// `None` for zero: at least the newest occurrence is always retained.
+    #[must_use]
+    pub fn from_count(retained_rewrites: usize) -> Option<Self> {
+        std::num::NonZeroUsize::new(retained_rewrites).map(Self::new)
+    }
+
+    #[must_use]
+    pub const fn retained_rewrites(self) -> usize {
+        self.retained_rewrites.get()
+    }
+}
+
+impl Default for TranscriptHistoryRetention {
+    fn default() -> Self {
+        Self::from_count(Self::DEFAULT_RETAINED_REWRITES)
+            .unwrap_or(Self::new(std::num::NonZeroUsize::MIN))
+    }
+}
+
 /// Typed session-local transcript revision authority.
 ///
 /// The anchor and ordered occurrence edges are the ONE in-memory and durable
@@ -1301,6 +1478,9 @@ impl PersistentTranscriptEdges {
 #[derive(Debug, Clone)]
 pub struct TranscriptHistoryState {
     format: &'static str,
+    /// Occurrences retired before `anchor`, or `None` for a whole graph
+    /// whose anchor is the pre-rewrite transcript.
+    retired: Option<Arc<RetiredTranscriptPrefix>>,
     anchor: Arc<TranscriptRevisionAnchor>,
     edges: PersistentTranscriptEdges,
     rewrite_prefix: TranscriptRewritePrefixAccumulator,
@@ -1331,6 +1511,8 @@ pub struct TranscriptHistoryState {
 #[schemars(rename = "TranscriptHistoryState")]
 struct SchemaTranscriptHistoryState {
     format: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retired: Option<RetiredTranscriptPrefix>,
     anchor: TranscriptRevisionAnchor,
     edges: Vec<TranscriptRevisionEdge>,
     rewrite_prefix: TranscriptRewritePrefixAccumulator,
@@ -1364,8 +1546,14 @@ impl Serialize for TranscriptHistoryState {
     {
         use serde::ser::SerializeStruct as _;
 
-        let mut wire = serializer.serialize_struct("TranscriptHistoryState", 6)?;
+        let field_count = if self.retired.is_some() { 7 } else { 6 };
+        let mut wire = serializer.serialize_struct("TranscriptHistoryState", field_count)?;
         wire.serialize_field("format", self.format)?;
+        // Absent for a whole graph, so an un-retired graph keeps its exact
+        // pre-retention bytes.
+        if let Some(retired) = self.retired.as_deref() {
+            wire.serialize_field("retired", retired)?;
+        }
         wire.serialize_field("anchor", self.anchor.as_ref())?;
         wire.serialize_field("edges", self.edges.ordered())?;
         wire.serialize_field("rewrite_prefix", &self.rewrite_prefix)?;
@@ -1384,6 +1572,8 @@ impl<'de> Deserialize<'de> for TranscriptHistoryState {
         #[serde(rename_all = "snake_case", deny_unknown_fields)]
         struct CurrentWire {
             format: String,
+            #[serde(default)]
+            retired: Option<RetiredTranscriptPrefix>,
             anchor: TranscriptRevisionAnchor,
             edges: Vec<TranscriptRevisionEdge>,
             rewrite_prefix: TranscriptRewritePrefixAccumulator,
@@ -1404,10 +1594,16 @@ impl<'de> Deserialize<'de> for TranscriptHistoryState {
                 wire.digest_format
             )));
         }
-        let persistent_edges = PersistentTranscriptEdges::from_vec(&wire.anchor, wire.edges)
+        let base = match wire.retired.as_ref() {
+            Some(retired) => retired.graph_prefix.clone(),
+            None => TranscriptGraphPrefixAccumulator::from_anchor(&wire.anchor)
+                .map_err(serde::de::Error::custom)?,
+        };
+        let persistent_edges = PersistentTranscriptEdges::from_vec_after(base, wire.edges)
             .map_err(serde::de::Error::custom)?;
         let state = TranscriptHistoryState {
             format: TRANSCRIPT_HISTORY_FORMAT_CURRENT,
+            retired: wire.retired.map(Arc::new),
             anchor: Arc::new(wire.anchor),
             edges: persistent_edges,
             rewrite_prefix: wire.rewrite_prefix,
@@ -1764,7 +1960,73 @@ impl TranscriptHistoryState {
             .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
         let state = Self {
             format: TRANSCRIPT_HISTORY_FORMAT_CURRENT,
+            retired: None,
             anchor: Arc::new(anchor),
+            edges: persistent_edges,
+            rewrite_prefix,
+            graph_prefix,
+            digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
+        };
+        validate_transcript_history_state(&state)?;
+        Ok(state)
+    }
+
+    /// Rebuild a re-anchored graph from a head-canonical store's persisted
+    /// base and the retained edge rows after it.
+    ///
+    /// The retired-graph counterpart of
+    /// [`Self::from_store_replayed_compact_graph`]: the first edge must
+    /// advance from the base anchor at generation `retired + 1`, and the
+    /// rebuilt rewrite and graph prefixes must equal the physical head's.
+    pub(in crate::session) fn from_store_replayed_retired_graph(
+        base: RetiredTranscriptGraphBase,
+        edges: Vec<TranscriptRevisionEdge>,
+        expected_rewrite_prefix: &TranscriptRewritePrefixAccumulator,
+        expected_graph_prefix: &TranscriptGraphPrefixAccumulator,
+    ) -> Result<Self, TranscriptEditError> {
+        let malformed =
+            |reason: &str| TranscriptEditError::HistoryStateMalformed(reason.to_string());
+        let first = edges
+            .first()
+            .ok_or_else(|| malformed("store-replayed retired graph carries no retained edge"))?;
+        if first.base_revision() != base.anchor.revision()
+            || first.messages_before_base() != base.anchor.messages.len()
+            || u64::try_from(base.retired_count())
+                .ok()
+                .and_then(|count| count.checked_add(1))
+                != Some(first.rewrite_generation())
+        {
+            return Err(malformed(
+                "store-replayed retired graph base does not match its first retained edge",
+            ));
+        }
+        let rewrite_prefix = edges
+            .last()
+            .map(TranscriptRevisionEdge::rewrite_prefix)
+            .cloned()
+            .ok_or_else(|| {
+                malformed("store-replayed retired graph lost its final rewrite prefix")
+            })?;
+        if &rewrite_prefix != expected_rewrite_prefix {
+            return Err(malformed(
+                "store-replayed retired graph rewrite prefix differs from the physical head",
+            ));
+        }
+        let graph_prefix =
+            TranscriptGraphPrefixAccumulator::extend_all(base.retired.graph_prefix.clone(), &edges)
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        if &graph_prefix != expected_graph_prefix {
+            return Err(malformed(
+                "store-replayed retired graph prefix differs from the physical head",
+            ));
+        }
+        let persistent_edges =
+            PersistentTranscriptEdges::from_vec_after(base.retired.graph_prefix.clone(), edges)
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        let state = Self {
+            format: TRANSCRIPT_HISTORY_FORMAT_CURRENT,
+            retired: Some(Arc::new(base.retired)),
+            anchor: Arc::new(base.anchor),
             edges: persistent_edges,
             rewrite_prefix,
             graph_prefix,
@@ -1883,6 +2145,7 @@ impl TranscriptHistoryState {
             .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
         let state = Self {
             format: TRANSCRIPT_HISTORY_FORMAT_CURRENT,
+            retired: None,
             anchor: Arc::new(anchor),
             edges: persistent_edges,
             rewrite_prefix,
@@ -1961,6 +2224,7 @@ impl TranscriptHistoryState {
             .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
         Ok(Self {
             format: TRANSCRIPT_HISTORY_FORMAT_CURRENT,
+            retired: None,
             anchor: Arc::new(anchor),
             edges: persistent_edges,
             rewrite_prefix,
@@ -2039,22 +2303,211 @@ impl TranscriptHistoryState {
             .unwrap_or_else(|| self.anchor.revision())
     }
 
-    pub fn commits(&self) -> impl ExactSizeIterator<Item = &TranscriptRewriteCommit> {
-        self.edges.ordered().iter().map(|edge| edge.commit())
+    /// Every rewrite commit in generation order: retired commits first, then
+    /// the commits of the retained edges.
+    pub fn commits(&self) -> TranscriptRewriteCommits<'_> {
+        TranscriptRewriteCommits {
+            retired: self.retired_commits().iter(),
+            retained: self.edges.ordered().iter(),
+        }
     }
 
     #[must_use]
     pub fn commit_count(&self) -> usize {
-        self.edges.len()
+        self.retired_count() + self.edges.len()
     }
 
     #[must_use]
     pub fn commit(&self, index: usize) -> Option<&TranscriptRewriteCommit> {
-        self.edges.get(index).map(TranscriptRevisionEdge::commit)
+        let retired = self.retired_commits();
+        match index.checked_sub(retired.len()) {
+            None => retired.get(index),
+            Some(retained) => self.edges.get(retained).map(TranscriptRevisionEdge::commit),
+        }
     }
 
+    /// The edge of the rewrite occurrence at absolute `index`, or `None`
+    /// when that occurrence is retired or outside the graph.
     pub(crate) fn edge(&self, index: usize) -> Option<&TranscriptRevisionEdge> {
-        self.edges.get(index)
+        self.edges.get(index.checked_sub(self.retired_count())?)
+    }
+
+    /// Occurrences retired before the anchor (zero for a whole graph).
+    #[must_use]
+    pub fn retired_count(&self) -> usize {
+        self.retired_commits().len()
+    }
+
+    fn retired_commits(&self) -> &[TranscriptRewriteCommit] {
+        self.retired
+            .as_deref()
+            .map_or(&[], RetiredTranscriptPrefix::commits)
+    }
+
+    /// The retired prefix of a re-anchored graph.
+    #[must_use]
+    pub fn retired_prefix(&self) -> Option<&RetiredTranscriptPrefix> {
+        self.retired.as_deref()
+    }
+
+    /// The persisted base of a re-anchored graph (retired prefix + anchor).
+    #[must_use]
+    pub fn retired_base(&self) -> Option<RetiredTranscriptGraphBase> {
+        self.retired
+            .as_deref()
+            .map(|retired| RetiredTranscriptGraphBase {
+                retired: retired.clone(),
+                anchor: self.anchor.as_ref().clone(),
+            })
+    }
+
+    /// The oldest revision whose body this graph still retains: the anchor.
+    #[must_use]
+    pub fn oldest_retained_revision(&self) -> &str {
+        self.anchor.revision()
+    }
+
+    /// Whether `revision` labels a retired occurrence and no retained one.
+    #[must_use]
+    pub fn is_retired_revision(&self, revision: &str) -> bool {
+        self.retired
+            .as_deref()
+            .is_some_and(|retired| retired.labels_revision(revision))
+            && !self.contains_revision(revision)
+    }
+
+    /// The typed refusal for a read that targets a retired revision.
+    #[must_use]
+    pub fn retired_revision_refusal(&self, revision: &str) -> TranscriptEditError {
+        TranscriptEditError::TranscriptRevisionRetired {
+            revision: revision.to_string(),
+            oldest_retained_revision: self.oldest_retained_revision().to_string(),
+            retired_rewrites: self.retired_count() as u64,
+        }
+    }
+
+    fn retired_occurrence_refusal(&self, index: usize) -> TranscriptEditError {
+        let revision = self
+            .commit(index)
+            .map_or_else(String::new, |commit| commit.revision.clone());
+        self.retired_revision_refusal(&revision)
+    }
+
+    /// The audited endpoint the occurrence at absolute `index` advances
+    /// from: the anchor for the first retained occurrence, otherwise the
+    /// preceding occurrence's result. `None` when the occurrence is retired
+    /// (its base is gone) or outside the graph.
+    pub(crate) fn occurrence_base_endpoint(
+        &self,
+        index: usize,
+    ) -> Option<(usize, &SessionMessageRowPrefixAccumulator)> {
+        let relative = index.checked_sub(self.retired_count())?;
+        if relative >= self.edges.len() {
+            return None;
+        }
+        if relative == 0 {
+            return Some((self.anchor.messages.len(), self.anchor.row_prefix()));
+        }
+        self.edges.get(relative - 1).map(|edge| {
+            let witness = edge.result_witness();
+            (witness.message_count(), witness.row_prefix())
+        })
+    }
+
+    /// Rolling accumulator the retained edges chain from.
+    fn graph_base(&self) -> Result<TranscriptGraphPrefixAccumulator, serde_json::Error> {
+        match self.retired.as_deref() {
+            Some(retired) => Ok(retired.graph_prefix.clone()),
+            None => TranscriptGraphPrefixAccumulator::from_anchor(&self.anchor),
+        }
+    }
+
+    /// Retire every occurrence beyond the newest `retention` ones.
+    ///
+    /// The one typed re-anchoring transition. The new anchor is the exact
+    /// materialized child of the last retired occurrence (its digest is
+    /// re-proved against that occurrence's revision); the retired prefix
+    /// keeps every commit plus the rewrite- and graph-prefix accumulators
+    /// after it, so the rolling graph identity is unchanged. Returns the
+    /// number of occurrences retired by this call (zero when the graph is
+    /// already within `retention`).
+    ///
+    /// The anchor carries that child's exact row-lineage token (a splice
+    /// lineage, not a flat hash of its rows), so the retained edges keep
+    /// chaining from the same physical endpoint.
+    pub(in crate::session) fn retire_occurrences_beyond(
+        &mut self,
+        retention: TranscriptHistoryRetention,
+    ) -> Result<usize, TranscriptEditError> {
+        let keep = retention.retained_rewrites();
+        if self.edges.len() <= keep {
+            return Ok(0);
+        }
+        self.retire_occurrences_through(self.commit_count() - keep)
+    }
+
+    /// Retire every occurrence up to absolute generation `retired_count`.
+    ///
+    /// The count-addressed form of [`Self::retire_occurrences_beyond`], for a
+    /// store that retires its persisted rows to the count the live graph
+    /// reached. At least one occurrence always stays retained; a target at or
+    /// below the current retired count is a no-op (zero).
+    pub(in crate::session) fn retire_occurrences_through(
+        &mut self,
+        retired_count: usize,
+    ) -> Result<usize, TranscriptEditError> {
+        let malformed = |error: serde_json::Error| {
+            TranscriptEditError::HistoryStateMalformed(error.to_string())
+        };
+        if retired_count <= self.retired_count() {
+            return Ok(0);
+        }
+        if retired_count >= self.commit_count() {
+            return Err(TranscriptEditError::HistoryStateMalformed(format!(
+                "cannot retire through generation {retired_count} of a {}-occurrence graph: the newest occurrence is always retained",
+                self.commit_count()
+            )));
+        }
+        let retire = retired_count - self.retired_count();
+        let child = self.materialize_occurrence(self.retired_count() + retire - 1, false)?;
+        let ordered = self.edges.ordered();
+        let last_retired = ordered[retire - 1].as_ref();
+        let anchor = TranscriptRevisionAnchor {
+            revision: child.revision,
+            messages: child.messages,
+            row_prefix: last_retired.result_witness().row_prefix().clone(),
+            created_at: last_retired.revision_created_at,
+        };
+        let graph_prefix = self.edges.graph_prefix_at(retire).cloned().ok_or_else(|| {
+            TranscriptEditError::HistoryStateMalformed(
+                "retirement point has no rolling graph prefix".to_string(),
+            )
+        })?;
+        let mut commits = self.retired_commits().to_vec();
+        commits.extend(ordered[..retire].iter().map(|edge| edge.commit.clone()));
+        let retired = RetiredTranscriptPrefix {
+            commits,
+            rewrite_prefix: last_retired.rewrite_prefix.clone(),
+            graph_prefix: graph_prefix.clone(),
+        };
+        let kept = ordered[retire..]
+            .iter()
+            .map(|edge| edge.as_ref().clone())
+            .collect();
+        let edges =
+            PersistentTranscriptEdges::from_vec_after(graph_prefix, kept).map_err(malformed)?;
+        let next = Self {
+            format: TRANSCRIPT_HISTORY_FORMAT_CURRENT,
+            retired: Some(Arc::new(retired)),
+            anchor: Arc::new(anchor),
+            edges,
+            rewrite_prefix: self.rewrite_prefix.clone(),
+            graph_prefix: self.graph_prefix.clone(),
+            digest_format: self.digest_format,
+        };
+        validate_transcript_history_state(&next)?;
+        *self = next;
+        Ok(retire)
     }
 
     #[must_use]
@@ -2081,8 +2534,48 @@ impl TranscriptHistoryState {
         self.edges.ordered()
     }
 
+    /// Retained edges from absolute occurrence `start`; `None` when `start`
+    /// is retired or past the end.
     pub(super) fn edge_suffix(&self, start: usize) -> Option<Vec<Arc<TranscriptRevisionEdge>>> {
-        self.edges.suffix(start)
+        self.edges.suffix(start.checked_sub(self.retired_count())?)
+    }
+
+    /// Rewrite-prefix accumulator after the first `count` occurrences, or
+    /// `None` past the end. Inside the retired prefix it is recomputed from
+    /// the retained commits.
+    pub(crate) fn rewrite_prefix_at(
+        &self,
+        count: usize,
+    ) -> Option<std::borrow::Cow<'_, TranscriptRewritePrefixAccumulator>> {
+        if count == 0 {
+            return Some(std::borrow::Cow::Owned(
+                TranscriptRewritePrefixAccumulator::empty(),
+            ));
+        }
+        match self.retired.as_deref() {
+            Some(retired) if count == retired.commits.len() => {
+                Some(std::borrow::Cow::Borrowed(&retired.rewrite_prefix))
+            }
+            // Inside the retired prefix the per-edge accumulators are gone,
+            // but the commits remain: recompute from them.
+            Some(retired) if count < retired.commits.len() => {
+                TranscriptRewritePrefixAccumulator::from_commits(&retired.commits[..count])
+                    .ok()
+                    .map(std::borrow::Cow::Owned)
+            }
+            _ => self
+                .edge(count - 1)
+                .map(|edge| std::borrow::Cow::Borrowed(edge.rewrite_prefix())),
+        }
+    }
+
+    /// Typed refusal when an occurrence count lies before the retirement
+    /// point (a suffix or prefix there needs retired bodies).
+    pub(crate) fn refuse_if_retired_count(&self, count: usize) -> Result<(), TranscriptEditError> {
+        if count < self.retired_count() {
+            return Err(self.retired_occurrence_refusal(count));
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -2103,6 +2596,11 @@ impl TranscriptHistoryState {
             return false;
         }
         if prefix_count == 0 {
+            // A re-anchored graph no longer holds the pre-rewrite anchor a
+            // zero-occurrence prefix names, so the relation is unprovable.
+            if self.retired.is_some() {
+                return false;
+            }
             let expected_graph_prefix =
                 TranscriptGraphPrefixAccumulator::from_anchor(prefix.anchor()).ok();
             return self.anchor() == prefix.anchor()
@@ -2210,7 +2708,16 @@ impl TranscriptHistoryState {
         &self,
         occurrence_count: usize,
     ) -> Option<&TranscriptGraphPrefixAccumulator> {
-        self.edges.graph_prefix_at(occurrence_count)
+        match self.retired.as_deref() {
+            None => self.edges.graph_prefix_at(occurrence_count),
+            // Before the retirement point the rolling identity is gone; at
+            // it, the retired prefix carries it.
+            Some(retired) => match occurrence_count.checked_sub(retired.commits.len()) {
+                None => None,
+                Some(0) => Some(&retired.graph_prefix),
+                Some(retained) => self.edges.graph_prefix_at(retained),
+            },
+        }
     }
 
     pub fn final_endpoint_witness(&self) -> Option<&TranscriptEndpointWitness> {
@@ -2254,8 +2761,7 @@ impl TranscriptHistoryState {
 
     #[must_use]
     pub fn parent_transition(&self, index: usize) -> Option<TranscriptRewriteParentTransition> {
-        self.edges
-            .get(index)
+        self.edge(index)
             .map(|edge| edge.parent_advance.transition())
     }
 
@@ -2298,17 +2804,25 @@ impl TranscriptHistoryState {
     pub(crate) fn prune_mechanical_revision_bodies(&mut self) {}
 
     pub(super) fn proved_prefix(&self, edge_count: usize) -> Result<Self, TranscriptEditError> {
-        if edge_count == 0 || edge_count > self.edges.len() {
+        if edge_count == 0 || edge_count > self.commit_count() {
             return Err(TranscriptEditError::HistoryStateMalformed(format!(
                 "compact graph prefix {edge_count} is outside 1..={}",
-                self.edges.len()
+                self.commit_count()
             )));
         }
-        let edges = self.edges.prefix(edge_count).ok_or_else(|| {
-            TranscriptEditError::HistoryStateMalformed(
-                "compact graph prefix could not address its persistent tail".to_string(),
-            )
-        })?;
+        // A prefix ending at or before the retirement point would need the
+        // retired bodies (a zero-edge re-anchored graph is not a graph).
+        if edge_count <= self.retired_count() {
+            return Err(self.retired_occurrence_refusal(edge_count - 1));
+        }
+        let edges = self
+            .edges
+            .prefix(edge_count - self.retired_count())
+            .ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(
+                    "compact graph prefix could not address its persistent tail".to_string(),
+                )
+            })?;
         let rewrite_prefix = edges
             .last()
             .map(TranscriptRevisionEdge::rewrite_prefix)
@@ -2318,13 +2832,15 @@ impl TranscriptHistoryState {
                     "compact graph prefix lost its final edge".to_string(),
                 )
             })?;
-        let graph_prefix = TranscriptGraphPrefixAccumulator::from_graph(
-            self.anchor.as_ref(),
+        let graph_prefix = TranscriptGraphPrefixAccumulator::extend_all(
+            self.graph_base()
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?,
             edges.ordered().iter().map(AsRef::as_ref),
         )
         .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
         Ok(Self {
             format: TRANSCRIPT_HISTORY_FORMAT_CURRENT,
+            retired: self.retired.clone(),
             anchor: Arc::clone(&self.anchor),
             edges,
             rewrite_prefix,
@@ -2344,7 +2860,7 @@ impl TranscriptHistoryState {
             .iter()
             .rposition(|edge| edge.revision() == revision)
         {
-            return self.materialize_occurrence(index, false);
+            return self.materialize_occurrence(self.retired_count() + index, false);
         }
         if let Some(index) = self
             .edges
@@ -2352,7 +2868,7 @@ impl TranscriptHistoryState {
             .iter()
             .rposition(|edge| edge.parent_revision() == revision)
         {
-            return self.materialize_occurrence(index, true);
+            return self.materialize_occurrence(self.retired_count() + index, true);
         }
         if self.anchor.revision == revision {
             TRANSCRIPT_HISTORY_FULL_BODY_MATERIALIZATIONS
@@ -2363,6 +2879,9 @@ impl TranscriptHistoryState {
                 messages: self.anchor.messages.clone(),
                 created_at: self.anchor.created_at,
             });
+        }
+        if self.is_retired_revision(revision) {
+            return Err(self.retired_revision_refusal(revision));
         }
         Err(TranscriptEditError::HistoryStateMalformed(format!(
             "missing transcript revision {revision}"
@@ -2389,11 +2908,14 @@ impl TranscriptHistoryState {
         edge_index: usize,
         parent: bool,
     ) -> Result<TranscriptRevisionBody, TranscriptEditError> {
-        if edge_index >= self.edges.len() {
+        if edge_index >= self.commit_count() {
             return Err(TranscriptEditError::HistoryStateMalformed(format!(
                 "rewrite occurrence index {edge_index} is outside the compact graph"
             )));
         }
+        let Some(edge_index) = edge_index.checked_sub(self.retired_count()) else {
+            return Err(self.retired_occurrence_refusal(edge_index));
+        };
         TRANSCRIPT_HISTORY_FULL_BODY_MATERIALIZATIONS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut messages = self.anchor.messages.clone();
@@ -3346,6 +3868,83 @@ mod tests {
             .expect("chain is non-empty")
     }
 
+    #[test]
+    fn retirement_preserves_per_count_graph_identity_and_addresses_only_retained_edges() {
+        let whole = rebuild(&rewrite_chain(7));
+        let mut anchored = whole.clone();
+        let retired = anchored
+            .retire_occurrences_beyond(TranscriptHistoryRetention::from_count(3).unwrap())
+            .expect("retire");
+        assert_eq!(retired, 4);
+        assert_eq!(anchored.retired_count(), 4);
+        assert_eq!(anchored.commit_count(), 7);
+        for count in 0..=7 {
+            let expected = if count < 4 {
+                None
+            } else {
+                whole.graph_prefix_at(count)
+            };
+            assert_eq!(anchored.graph_prefix_at(count), expected, "count {count}");
+        }
+        for index in 0..7 {
+            assert_eq!(
+                anchored.commit(index),
+                whole.commit(index),
+                "commit {index}"
+            );
+            if index < 4 {
+                assert!(anchored.edge(index).is_none(), "retired edge {index}");
+                assert!(anchored.occurrence_base_endpoint(index).is_none());
+            } else {
+                assert_eq!(anchored.edge(index), whole.edge(index), "edge {index}");
+                assert_eq!(
+                    anchored.occurrence_base_endpoint(index),
+                    whole.occurrence_base_endpoint(index),
+                    "base endpoint {index}"
+                );
+            }
+        }
+        assert_eq!(
+            anchored.rewrite_prefix_at(4).as_deref(),
+            whole.rewrite_prefix_at(4).as_deref()
+        );
+        // Inside the retired prefix the accumulator is recomputed from the
+        // retained commits.
+        assert_eq!(
+            anchored.rewrite_prefix_at(3).as_deref(),
+            whole.rewrite_prefix_at(3).as_deref()
+        );
+
+        // Re-retiring an already re-anchored graph extends the retired prefix.
+        let mut twice = anchored.clone();
+        assert_eq!(
+            twice
+                .retire_occurrences_beyond(TranscriptHistoryRetention::from_count(1).unwrap())
+                .expect("retire again"),
+            2
+        );
+        assert_eq!(twice.retired_count(), 6);
+        assert_eq!(twice.graph_prefix(), whole.graph_prefix());
+        assert_eq!(twice.graph_prefix_at(6), whole.graph_prefix_at(6));
+
+        // A proved suffix that would start inside the retired prefix is refused.
+        let sealed = ValidatedTranscriptHistory::seal_owned(anchored).expect("seal");
+        let before_window = whole.rewrite_prefix_at(2).unwrap().into_owned();
+        assert!(matches!(
+            sealed.prove_commit_suffix_after(&before_window),
+            Err(TranscriptEditError::TranscriptRevisionRetired { .. })
+        ));
+        let at_window = whole.rewrite_prefix_at(5).unwrap().into_owned();
+        assert_eq!(
+            sealed
+                .prove_commit_suffix_after(&at_window)
+                .expect("suffix after the window")
+                .edges()
+                .len(),
+            2
+        );
+    }
+
     fn sealed(records: &[TranscriptRewriteRecord]) -> ValidatedTranscriptHistory {
         ValidatedTranscriptHistory::seal_owned(rebuild(records)).expect("rebuilt chain seals")
     }
@@ -3374,6 +3973,7 @@ mod tests {
         };
         TranscriptHistoryState {
             format: TRANSCRIPT_HISTORY_FORMAT_CURRENT,
+            retired: None,
             graph_prefix: TranscriptGraphPrefixAccumulator::from_anchor(&anchor)
                 .expect("anchor graph prefix"),
             anchor: Arc::new(anchor),

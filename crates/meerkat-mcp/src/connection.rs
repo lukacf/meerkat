@@ -181,6 +181,14 @@ impl StdioChildCustody {
     }
 }
 
+/// Credential source for OAuth-protected MCP servers.
+///
+/// `interactive_login` is only reached in [`McpAuthMode::Interactive`]. A
+/// resolver without a host browser channel returns
+/// [`McpOAuthError::HumanAuthorizationRequired`], which the connection
+/// reports as the typed [`McpError::AuthorizationRequired`] host status. A
+/// host that owns an unobservable browser context drives
+/// `McpOAuthAuthority::login_start`/`login_complete` itself.
 #[async_trait]
 pub trait McpAuthResolver: Send + Sync {
     async fn stored_bearer_token(
@@ -197,19 +205,32 @@ pub trait McpAuthResolver: Send + Sync {
 
 #[async_trait]
 impl McpAuthResolver for meerkat_auth_core::McpOAuthAuthority {
+    /// Unselected targets (no `oauth_account`) keep their stored-only
+    /// semantics, so servers that need no OAuth connect as before.
     async fn stored_bearer_token(
         &self,
         target: &McpServerIdentity,
     ) -> Result<Option<String>, McpOAuthError> {
+        if target.expected_account().is_none() {
+            return self.stored_only().stored_bearer_token(target).await;
+        }
         self.stored_bearer_token(target).await
     }
 
+    /// The native authority has no browser: human authorization is a host
+    /// obligation, reported as typed status instead of opening anything.
+    /// Interactive login needs a selected account.
     async fn interactive_login(
         &self,
         target: &McpServerIdentity,
-        www_authenticate: Option<&str>,
+        _www_authenticate: Option<&str>,
     ) -> Result<String, McpOAuthError> {
-        self.interactive_login(target, www_authenticate).await
+        if target.expected_account().is_none() {
+            return Err(McpOAuthError::AccountSelectionRequired);
+        }
+        Err(McpOAuthError::HumanAuthorizationRequired {
+            server_name: target.server_name().to_owned(),
+        })
     }
 }
 
@@ -380,7 +401,7 @@ impl McpConnection {
             let token = resolver
                 .interactive_login(&target, None)
                 .await
-                .map_err(mcp_auth_error_to_connection_failed)?;
+                .map_err(|error| mcp_interactive_error(&target, error))?;
             return Self::connect_streamable_http_once(
                 config,
                 headers,
@@ -420,7 +441,7 @@ impl McpConnection {
                     (Some(_), McpAuthMode::Interactive) => resolver
                         .interactive_login(&target, challenge.as_deref())
                         .await
-                        .map_err(mcp_auth_error_to_connection_failed)?,
+                        .map_err(|error| mcp_interactive_error(&target, error))?,
                     (None, McpAuthMode::Stored) => {
                         return Err(McpError::ConnectionFailed {
                             reason: McpOAuthError::MissingStoredToken {
@@ -432,7 +453,7 @@ impl McpConnection {
                     (None, McpAuthMode::Interactive) => resolver
                         .interactive_login(&target, challenge.as_deref())
                         .await
-                        .map_err(mcp_auth_error_to_connection_failed)?,
+                        .map_err(|error| mcp_interactive_error(&target, error))?,
                 };
                 // The first attempt consumed its service. A retry selects a
                 // fresh owner for the same config before touching transport.
@@ -698,6 +719,15 @@ impl StreamableConnectError {
 
 fn auth_failure_suggests_oauth(error: &StreamableConnectError) -> bool {
     error.auth.challenge().is_some() || error.auth.status().is_some()
+}
+
+fn mcp_interactive_error(target: &McpServerIdentity, error: McpOAuthError) -> McpError {
+    match error {
+        McpOAuthError::HumanAuthorizationRequired { .. } => McpError::AuthorizationRequired {
+            target: Box::new(target.clone()),
+        },
+        other => mcp_auth_error_to_connection_failed(other),
+    }
 }
 
 fn mcp_auth_error_to_connection_failed(error: McpOAuthError) -> McpError {
@@ -1014,12 +1044,12 @@ pub mod tests {
         conn.close().await.expect("Failed to close connection");
     }
 
-    struct HttpMcpTestState {
+    pub(crate) struct HttpMcpTestState {
         accepted_token: &'static str,
         seen_authorizations: Mutex<Vec<Option<String>>>,
     }
 
-    async fn spawn_http_mcp_server(
+    pub(crate) async fn spawn_http_mcp_server(
         accepted_token: &'static str,
     ) -> (String, Arc<HttpMcpTestState>) {
         let state = Arc::new(HttpMcpTestState {
@@ -1107,17 +1137,18 @@ pub mod tests {
         (StatusCode::OK, Json(response)).into_response()
     }
 
-    struct FakeMcpAuthResolver {
+    pub(crate) struct FakeMcpAuthResolver {
         stored_token: Option<String>,
         stored_reauth_required: bool,
         interactive_token: String,
         interactive_delay: Option<Duration>,
         interactive_calls: AtomicUsize,
         challenges: Mutex<Vec<Option<String>>>,
+        human_authorization_required: bool,
     }
 
     impl FakeMcpAuthResolver {
-        fn new(stored_token: Option<&str>, interactive_token: &str) -> Self {
+        pub(crate) fn new(stored_token: Option<&str>, interactive_token: &str) -> Self {
             Self {
                 stored_token: stored_token.map(ToOwned::to_owned),
                 stored_reauth_required: false,
@@ -1125,6 +1156,7 @@ pub mod tests {
                 interactive_delay: None,
                 interactive_calls: AtomicUsize::new(0),
                 challenges: Mutex::new(Vec::new()),
+                human_authorization_required: false,
             }
         }
 
@@ -1135,6 +1167,11 @@ pub mod tests {
 
         fn with_stored_reauth_required(mut self) -> Self {
             self.stored_reauth_required = true;
+            self
+        }
+
+        pub(crate) fn with_human_authorization_required(mut self) -> Self {
+            self.human_authorization_required = true;
             self
         }
     }
@@ -1166,8 +1203,50 @@ pub mod tests {
                 .lock()
                 .unwrap()
                 .push(www_authenticate.map(ToOwned::to_owned));
+            if self.human_authorization_required {
+                return Err(McpOAuthError::HumanAuthorizationRequired {
+                    server_name: _target.server_name().to_owned(),
+                });
+            }
             Ok(self.interactive_token.clone())
         }
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_human_authorization_is_typed_with_target_and_carries_no_secret() {
+        let (url, state) = spawn_http_mcp_server("interactive-token").await;
+        let config = McpServerConfig::streamable_http("glean", url, HashMap::new());
+        let resolver =
+            Arc::new(FakeMcpAuthResolver::new(None, "unused").with_human_authorization_required());
+
+        let error = match McpConnection::connect_and_enumerate_with_mcp_auth(
+            &config,
+            McpAuthMode::Interactive,
+            Some(resolver.clone()),
+        )
+        .await
+        {
+            Ok(_) => panic!("unauthorized server must not connect"),
+            Err(error) => error,
+        };
+        let McpError::AuthorizationRequired { target } = &error else {
+            panic!("expected typed authorization-required, got {error:?}");
+        };
+        assert_eq!(**target, McpServerIdentity::from_config(&config).unwrap());
+        let rendered = format!("{error} {error:?}");
+        for secret in ["authorize", "state=", "code=", "resource_metadata"] {
+            assert!(!rendered.contains(secret), "{secret:?} leaked: {rendered}");
+        }
+        assert_eq!(resolver.interactive_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            state
+                .seen_authorizations
+                .lock()
+                .unwrap()
+                .iter()
+                .all(Option::is_none),
+            "no credential may be sent without completed host authorization"
+        );
     }
 
     #[tokio::test]

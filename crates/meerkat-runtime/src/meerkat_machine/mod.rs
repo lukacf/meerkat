@@ -1997,6 +1997,15 @@ struct RuntimeExecutorAttachmentMaterializationClaim {
 /// it to clear could wait forever. That settlement is reported instead of
 /// awaited, and only an authority entitled to replace the session's actor may
 /// reclaim it.
+/// What a run-start hold (#1500) found when it took effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunStartsHold {
+    /// The run current when the hold took effect: the only run that may still
+    /// execute, and the only one a stop may still cancel. `None` means the
+    /// member had no run.
+    pub current_run: Option<meerkat_core::lifecycle::RunId>,
+}
+
 #[derive(Clone)]
 pub enum MaterializationClaimObservation {
     /// No claim blocks a new materialization: the claim is vacant, the
@@ -6247,6 +6256,30 @@ impl MeerkatMachine {
         }
     }
 
+    /// Runtime-loop parks on held run starts (#1500). Test support: wait for
+    /// the park as a positive event instead of a quiet period.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn run_start_held_parks(&self) -> crate::tokio::sync::watch::Receiver<u64> {
+        self.test_run_start_held_parks.subscribe()
+    }
+
+    /// Whether `session_id`'s run starts are held (#1500). Test support.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn run_starts_held_for_test(&self, session_id: &SessionId) -> Option<bool> {
+        self.session_dsl_state(session_id)
+            .await
+            .ok()
+            .map(|state| state.run_starts_held)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn note_run_start_held_park(&self) {
+        self.test_run_start_held_parks
+            .send_modify(|parks| *parks = parks.wrapping_add(1));
+    }
+
     /// Deterministically pause the runtime loop after its ready-effect drain
     /// and before queue authority is acquired. Exposed only by test builds so
     /// cross-crate integration tests can admit a complete same-boundary batch.
@@ -8882,6 +8915,10 @@ pub struct MeerkatMachineShared {
             crate::tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
+    /// Runtime-loop parks on held run starts (#1500), counted so tests can
+    /// wait for the park as a positive event.
+    #[cfg(any(test, feature = "test-support"))]
+    test_run_start_held_parks: crate::tokio::sync::watch::Sender<u64>,
     /// One-shot deterministic gate after the runtime loop's first ready-effect
     /// drain but before it acquires queue authority. Tests publish an executor
     /// effect in this exact gap and prove the consumed wake is retained.
@@ -10299,10 +10336,20 @@ impl MeerkatMachine {
         }
     }
 
+    /// Whether both handles are the same live runtime owner: clones share
+    /// every machine-owned session fact, live session map and control plane.
+    /// A separately constructed machine is a different owner even over the
+    /// same runtime store.
+    #[must_use]
+    pub fn is_same_runtime_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
     /// Whether this adapter shares the same runtime persistence authority as
     /// another adapter. Runtime-backed composition surfaces use this to reject
     /// mismatched adapters before visible terminal events can outrun the store
-    /// that owns their durable commit.
+    /// that owns their durable commit. Two distinct owners can share a store;
+    /// use [`Self::is_same_runtime_owner`] to decide ownership.
     #[must_use]
     pub fn shares_runtime_persistence_with(&self, other: &Self) -> bool {
         match (&self.store, &other.store) {
@@ -10420,6 +10467,8 @@ impl MeerkatMachine {
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
+                test_run_start_held_parks: crate::tokio::sync::watch::Sender::new(0),
+                #[cfg(any(test, feature = "test-support"))]
                 test_reload_required_discard_after_successor_publication: StdMutex::new(None),
                 #[cfg(test)]
                 test_control_command_after_logical_lookup: StdMutex::new(None),
@@ -10522,6 +10571,8 @@ impl MeerkatMachine {
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
+                test_run_start_held_parks: crate::tokio::sync::watch::Sender::new(0),
+                #[cfg(any(test, feature = "test-support"))]
                 test_reload_required_discard_after_successor_publication: StdMutex::new(None),
                 #[cfg(test)]
                 test_control_command_after_logical_lookup: StdMutex::new(None),
@@ -10623,6 +10674,8 @@ impl MeerkatMachine {
                 test_runtime_loop_before_terminal_commit: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
+                test_run_start_held_parks: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(any(test, feature = "test-support"))]
                 test_reload_required_discard_after_successor_publication: StdMutex::new(None),
                 #[cfg(test)]

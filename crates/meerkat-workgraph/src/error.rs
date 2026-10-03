@@ -56,6 +56,30 @@ pub enum WorkGraphError {
     /// the public backend label is `sqlite`.
     #[error("work graph backing store '{backend}' is unavailable: {reason}")]
     BackingStoreUnavailable { backend: String, reason: String },
+    /// `WorkGraphLifecycleMachine` refused a create whose admission identity
+    /// is half present: an admission key without a request digest, or the
+    /// reverse. Nothing was created. The flags say which half was supplied.
+    #[error(
+        "work item admission identity is half present (admission key present: {admission_key_present}, request digest present: {request_digest_present}); both or neither are required"
+    )]
+    UnpairedAdmissionIdentity {
+        admission_key_present: bool,
+        request_digest_present: bool,
+    },
+    /// The backing store is stamped with the current workgraph schema
+    /// version, but its workgraph catalog is not that schema (for example a
+    /// file written by an unreleased build that reused the version number for
+    /// different tables). Objects are named `kind:name`. The store is refused,
+    /// never treated as current; recreate or restore the file.
+    #[error(
+        "work graph store is stamped schema version {version} but is not that schema: missing {missing_objects:?}, unexpected {unexpected_objects:?}, changed {changed_objects:?}"
+    )]
+    SchemaMismatch {
+        version: i64,
+        missing_objects: Vec<String>,
+        unexpected_objects: Vec<String>,
+        changed_objects: Vec<String>,
+    },
 }
 
 impl WorkGraphError {

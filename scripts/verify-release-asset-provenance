@@ -3,16 +3,98 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-Usage: verify-release-asset-provenance <artifact-dir> <release-tag> [signer-workflow]
+Usage: verify-release-asset-provenance [--recovery-source <sha> | --source-run <run-id>] [--stamps <dir>] <artifact-dir> <release-tag> [signer-workflow]
 
 Verify every release archive in artifact-dir against GitHub's signed build
-provenance. The certificate-bound source repository digest must equal the
-commit named by release-tag. signer-workflow defaults to the release workflow.
+provenance. signer-workflow defaults to the release workflow.
+
+Default (tag push, or a dispatch on the tag ref): the certificate-bound
+source repository digest must equal the commit named by release-tag.
+
+--recovery-source <sha> --stamps <dir>: an asset recovery dispatched from
+main runs main's workflow at <sha> and checks out the tag, so the
+attestations name <sha> (the run's commit), not the tag. Then every archive
+must be attested by the release workflow with source digest <sha> and source
+ref refs/heads/main, and must have exactly one <archive>.source-commit stamp
+under <dir>, itself attested the same way, whose content is the tag's commit
+(written by the build job after it checked that its checkout is the tag).
+
+--source-run <run-id> --stamps <dir>: publish the archives of an earlier
+asset recovery run without rebuilding. The run must be this repository's
+release.yml, dispatched on main, at a commit in main's history, and its
+Release binary build gate job must have succeeded; its head_sha becomes the
+recovery source above. A run built before archives were stamped
+has no stamps: then the tag must be an ancestor of that head_sha and every
+path changed between them must be under .github/ or CHANGELOG.md, so the
+compiled sources are the tag's whichever of the two trees the run checked out.
 EOF
   exit 2
 }
 
+recovery_source=""
+source_run=""
+stamps_dir=""
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --recovery-source)
+      recovery_source="${2:?--recovery-source requires a commit}"
+      shift 2
+      ;;
+    --source-run)
+      source_run="${2:?--source-run requires a run id}"
+      shift 2
+      ;;
+    --stamps)
+      stamps_dir="${2:?--stamps requires a directory}"
+      shift 2
+      ;;
+    --*)
+      usage
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
 [[ "$#" -ge 2 && "$#" -le 3 ]] || usage
+if [[ -n "${source_run}" ]]; then
+  [[ -z "${recovery_source}" ]] || { echo "--source-run and --recovery-source are exclusive" >&2; exit 2; }
+  [[ "${source_run}" =~ ^[0-9]+$ ]] || { echo "--source-run must be a run id: ${source_run}" >&2; exit 2; }
+  repository_for_run="${GITHUB_REPOSITORY:-lukacf/meerkat}"
+  run_meta="$(gh api "repos/${repository_for_run}/actions/runs/${source_run}" \
+    --jq '[.path, .event, .head_branch, .head_sha, .repository.full_name] | @tsv')"
+  IFS=$'\t' read -r run_path run_event run_branch run_sha run_repo <<<"${run_meta}"
+  if [[ "${run_path}" != ".github/workflows/release.yml" || "${run_event}" != "workflow_dispatch" \
+        || "${run_branch}" != "main" || "${run_repo}" != "${repository_for_run}" ]]; then
+    echo "run ${source_run} is not a release.yml workflow_dispatch on main in ${repository_for_run} (path=${run_path} event=${run_event} branch=${run_branch} repo=${run_repo})" >&2
+    exit 1
+  fi
+  git merge-base --is-ancestor "${run_sha}" HEAD || {
+    echo "run ${source_run} commit ${run_sha} is not in the checked-out main history" >&2
+    exit 1
+  }
+  # That run's own build gate covers what this run skips: every lane built,
+  # each binary embedded the version, Windows binaries ran on Windows.
+  build_gate="$(gh api "repos/${repository_for_run}/actions/runs/${source_run}/jobs?per_page=100" --paginate \
+    --jq '.jobs[] | select(.name == "Release binary build gate") | .conclusion')"
+  if [[ "${build_gate}" != "success" ]]; then
+    echo "run ${source_run}: Release binary build gate did not succeed (${build_gate:-absent})" >&2
+    exit 1
+  fi
+  recovery_source="${run_sha}"
+  echo "source run ${source_run}: release.yml on main at ${run_sha}, build gate passed"
+fi
+if [[ -n "${recovery_source}" || -n "${stamps_dir}" ]]; then
+  [[ "${recovery_source}" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "--recovery-source must be a full commit sha: ${recovery_source}" >&2
+    exit 2
+  }
+  [[ -d "${stamps_dir}" ]] || {
+    echo "--stamps directory does not exist: ${stamps_dir}" >&2
+    exit 2
+  }
+fi
 
 artifact_dir="$1"
 release_tag="$2"
@@ -48,13 +130,69 @@ if [[ "${#archives[@]}" -eq 0 ]]; then
   exit 1
 fi
 
-for archive in "${archives[@]}"; do
-  gh attestation verify "${archive}" \
+if [[ -z "${recovery_source}" ]]; then
+  for archive in "${archives[@]}"; do
+    gh attestation verify "${archive}" \
+      --repo "${repository}" \
+      --source-digest "${release_sha}" \
+      --signer-workflow "${signer_workflow}" \
+      >/dev/null
+    echo "verified release provenance: $(basename "${archive}") <- ${release_sha}"
+  done
+  echo "Verified ${#archives[@]} release archive attestations for ${release_tag} at ${release_sha}"
+  exit 0
+fi
+
+verify_recovery_attestation() {
+  gh attestation verify "$1" \
     --repo "${repository}" \
-    --source-digest "${release_sha}" \
+    --source-digest "${recovery_source}" \
+    --source-ref refs/heads/main \
     --signer-workflow "${signer_workflow}" \
     >/dev/null
-  echo "verified release provenance: $(basename "${archive}") <- ${release_sha}"
-done
+}
 
-echo "Verified ${#archives[@]} release archive attestations for ${release_tag} at ${release_sha}"
+stamp_count="$(find "${stamps_dir}" -type f -name '*.source-commit' | wc -l | tr -d ' ')"
+if [[ "${stamp_count}" -eq 0 && -n "${source_run}" ]]; then
+  # A run from before archives were stamped: prove the compiled sources do
+  # not depend on which of the tag and the run's commit it checked out.
+  git merge-base --is-ancestor "${release_sha}" "${recovery_source}" || {
+    echo "${release_tag} (${release_sha}) is not an ancestor of the run commit ${recovery_source}" >&2
+    exit 1
+  }
+  changed="$(git diff --name-only "${release_sha}" "${recovery_source}")"
+  outside="$(grep -vE '^(\.github/|CHANGELOG\.md$)' <<<"${changed}" || true)"
+  if [[ -n "${outside}" ]]; then
+    echo "run ${source_run} has no source stamps and its commit changes build inputs since ${release_tag}:" >&2
+    echo "${outside}" >&2
+    exit 1
+  fi
+  for archive in "${archives[@]}"; do
+    verify_recovery_attestation "${archive}"
+    echo "verified recovery provenance: $(basename "${archive}") <- release.yml@${recovery_source} (refs/heads/main), sources identical to ${release_tag}"
+  done
+  echo "Verified ${#archives[@]} archive attestations of run ${source_run} for ${release_tag}: built by release.yml at ${recovery_source}; ${release_tag}..${recovery_source} changes only:"
+  echo "${changed:-<nothing>}" | sed 's/^/  /'
+  exit 0
+fi
+
+for archive in "${archives[@]}"; do
+  name="$(basename "${archive}")"
+  verify_recovery_attestation "${archive}"
+  stamps=()
+  while IFS= read -r -d '' stamp; do
+    stamps+=("${stamp}")
+  done < <(find "${stamps_dir}" -type f -name "${name}.source-commit" -print0)
+  if [[ "${#stamps[@]}" -ne 1 ]]; then
+    echo "${name}: expected exactly one ${name}.source-commit stamp under ${stamps_dir}, found ${#stamps[@]}" >&2
+    exit 1
+  fi
+  verify_recovery_attestation "${stamps[0]}"
+  stamped="$(tr -d '[:space:]' < "${stamps[0]}")"
+  if [[ "${stamped}" != "${release_sha}" ]]; then
+    echo "${name}: built from ${stamped}, expected the ${release_tag} commit ${release_sha}" >&2
+    exit 1
+  fi
+  echo "verified recovery provenance: ${name} <- release.yml@${recovery_source} (refs/heads/main), source tree ${release_sha}"
+done
+echo "Verified ${#archives[@]} recovery archive attestations for ${release_tag}: built by release.yml at ${recovery_source} from the ${release_sha} tree"

@@ -360,38 +360,24 @@ fn exact_committed_rewrite_receipt(
     {
         return Ok(None);
     }
-    let suffix = history
-        .prove_commit_suffix_starting_with(first)
+    // Receipt-only proof: it needs no edge bodies, so it also covers
+    // occurrences the graph has retired.
+    let receipt = history
+        .audit_receipt_starting_with(first)
         .map_err(
             |error| RuntimeStoreError::SessionPersistenceAuthorityConflict {
                 runtime_id: expected_runtime.store_authority().session_id().to_string(),
-                detail: format!("committed WholeBlob rewrite-repair suffix is invalid: {error}"),
+                detail: format!("failed to prepare committed WholeBlob rewrite repair: {error}"),
             },
         )?;
-    let selected = suffix.commits();
-    if selected.len() != commits.len()
-        || !selected
-            .zip(commits)
-            .all(|(selected, supplied)| selected == supplied)
-    {
+    if receipt.commits() != commits {
         return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
             runtime_id: expected_runtime.store_authority().session_id().to_string(),
             detail: "committed WholeBlob rewrite-repair commits differ from the exact sealed tail"
                 .to_string(),
         });
     }
-    TranscriptRewriteAuditReceiptBatch::new(
-        suffix.start_prefix().clone(),
-        commits.to_vec(),
-        suffix.end_prefix().clone(),
-    )
-    .map(Some)
-    .map_err(
-        |error| RuntimeStoreError::SessionPersistenceAuthorityConflict {
-            runtime_id: expected_runtime.store_authority().session_id().to_string(),
-            detail: format!("failed to prepare committed WholeBlob rewrite repair: {error}"),
-        },
-    )
+    Ok(Some(receipt))
 }
 
 /// Store-facing exact CAS inputs for a prepared WholeBlob rewrite.

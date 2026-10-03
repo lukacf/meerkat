@@ -2887,8 +2887,7 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let job_store = persistence.job_store();
-        let runtime_delivery_inbox =
-            meerkat_runtime::RuntimeDeliveryInbox::new(persistence.runtime_store());
+        let runtime_delivery_inbox = persistence.runtime_delivery_inbox();
         let schedule_service = ScheduleService::new(persistence.schedule_store());
         let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();
@@ -2926,7 +2925,7 @@ impl SessionRuntime {
         let reconfigure_auth_lease = runtime_adapter.generated_auth_lease_handle();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
-                service: service.clone(),
+                service: Arc::<PersistentSessionService<FactoryAgentBuilder>>::downgrade(&service),
                 staged_sessions: Arc::clone(&staged_sessions),
                 factory: factory_clone.clone(),
                 auth_lease: reconfigure_auth_lease,
@@ -3035,8 +3034,7 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let job_store = persistence.job_store();
-        let runtime_delivery_inbox =
-            meerkat_runtime::RuntimeDeliveryInbox::new(persistence.runtime_store());
+        let runtime_delivery_inbox = persistence.runtime_delivery_inbox();
         let schedule_service = ScheduleService::new(persistence.schedule_store());
         let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();
@@ -3075,7 +3073,7 @@ impl SessionRuntime {
         let reconfigure_auth_lease = runtime_adapter.generated_auth_lease_handle();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
-                service: service.clone(),
+                service: Arc::<PersistentSessionService<FactoryAgentBuilder>>::downgrade(&service),
                 staged_sessions: Arc::clone(&staged_sessions),
                 factory: factory_clone.clone(),
                 auth_lease: reconfigure_auth_lease,
@@ -4245,6 +4243,20 @@ impl SessionRuntime {
 
     pub fn provider_auth_runtime_authority(&self) -> meerkat_runtime::ProviderAuthRuntimeAuthority {
         self.runtime_adapter.provider_auth_runtime_authority()
+    }
+
+    /// The runtime's default MCP credential source (see
+    /// [`meerkat::default_mcp_auth_resolver`]).
+    #[cfg(feature = "mcp")]
+    pub fn default_mcp_auth_resolver(&self) -> Option<Arc<dyn meerkat::McpAuthResolver>> {
+        let persistence = match self.provider_auth_persistence() {
+            Ok(persistence) => persistence,
+            Err(error) => {
+                tracing::warn!(error = %error, "provider-auth persistence unavailable for MCP OAuth");
+                None
+            }
+        };
+        meerkat::default_mcp_auth_resolver(persistence, self.provider_auth_runtime_authority())
     }
 
     /// Override the shared default LLM client used by this runtime.
@@ -5754,7 +5766,7 @@ impl SessionRuntime {
 
     fn llm_reconfigure_host(&self) -> SessionRuntimeLlmReconfigureHost {
         SessionRuntimeLlmReconfigureHost {
-            service: self.service.clone(),
+            service: Arc::<PersistentSessionService<FactoryAgentBuilder>>::downgrade(&self.service),
             staged_sessions: Arc::clone(&self.staged_sessions),
             factory: self.factory.clone(),
             auth_lease: self.runtime_adapter.generated_auth_lease_handle(),
@@ -11532,7 +11544,14 @@ impl SessionRuntime {
             meerkat_core::RuntimeBuildMode::StandaloneEphemeral => {
                 meerkat::mcp::standalone_router()
             }
-        };
+        }
+        // Live `mcp/add` servers use the same interactive MCP auth as
+        // factory-built sessions: stored credentials, or the typed
+        // human-authorization status. Never a browser.
+        .with_mcp_auth(
+            meerkat::McpAuthMode::Interactive,
+            self.default_mcp_auth_resolver(),
+        );
         let adapter = Arc::new(McpRouterAdapter::new(router));
         let adapter_dispatcher: Arc<dyn AgentToolDispatcher> = adapter.clone();
         let combined = match build_config.external_tools.clone() {
@@ -11632,7 +11651,7 @@ impl SessionRuntime {
             action.operation == ToolConfigChangeOperation::Remove
                 && action.phase == McpLifecyclePhase::Draining
         }) {
-            Self::spawn_mcp_drain_task_if_needed(adapter.clone(), drain_task_running, lifecycle_tx);
+            adapter.spawn_removal_drain(drain_task_running, lifecycle_tx);
         }
 
         queued_actions.extend(result.delta.lifecycle_actions);
@@ -11665,47 +11684,6 @@ impl SessionRuntime {
             *turn_prompt = ContentInput::Blocks(blocks);
         }
         Ok(())
-    }
-
-    #[cfg(feature = "mcp")]
-    fn spawn_mcp_drain_task_if_needed(
-        adapter: Arc<McpRouterAdapter>,
-        task_running: Arc<AtomicBool>,
-        lifecycle_tx: mpsc::UnboundedSender<McpLifecycleAction>,
-    ) {
-        if task_running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                let delta = match adapter.progress_removals().await {
-                    Ok(delta) => delta,
-                    Err(err) => {
-                        tracing::warn!("background MCP drain apply failed: {err}");
-                        break;
-                    }
-                };
-
-                for action in delta.lifecycle_actions {
-                    let _ = lifecycle_tx.send(action);
-                }
-
-                match adapter.has_removing_servers().await {
-                    Ok(true) => continue,
-                    Ok(false) => break,
-                    Err(err) => {
-                        tracing::warn!("background MCP drain state check failed: {err}");
-                        break;
-                    }
-                }
-            }
-            task_running.store(false, Ordering::Release);
-        });
     }
 
     #[cfg(feature = "mcp")]
@@ -14320,6 +14298,87 @@ mod tests {
 
     fn temp_factory(temp: &tempfile::TempDir) -> AgentFactory {
         AgentFactory::new(temp.path().join("sessions"))
+    }
+
+    /// An MCP endpoint that always demands OAuth.
+    #[cfg(feature = "mcp")]
+    async fn spawn_oauth_required_mcp_endpoint() -> String {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    [(
+                        "www-authenticate",
+                        r#"Bearer resource_metadata="/.well-known/oauth-protected-resource/mcp""#,
+                    )],
+                )
+                    .into_response()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        url
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn live_mcp_servers_get_interactive_auth_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = temp_factory(&temp).with_provider_auth_persistence(
+            meerkat_providers::auth_store::ProviderAuthPersistence::new(
+                Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+                Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+            ),
+        );
+        let runtime = make_runtime(factory, 2);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        assert!(runtime.default_mcp_auth_resolver().is_some());
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create session");
+        let mut config = McpServerConfig::streamable_http(
+            "guarded",
+            spawn_oauth_required_mcp_endpoint().await,
+            std::collections::HashMap::new(),
+        );
+        if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut config.transport {
+            http.oauth_account = Some("subject-7".to_owned());
+        }
+        let target = meerkat::McpServerIdentity::from_config(&config).unwrap();
+        runtime
+            .mcp_stage_add(&session_id, config)
+            .await
+            .expect("stage guarded server");
+        let adapter = runtime
+            .mcp_adapter_for_session(&session_id)
+            .await
+            .expect("session has a live MCP adapter");
+        adapter.apply_staged().await.expect("apply staged add");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            adapter.poll_lifecycle_actions().await.unwrap();
+            let awaiting = adapter.servers_awaiting_authorization().await;
+            if !awaiting.is_empty() {
+                assert_eq!(
+                    awaiting,
+                    vec![target],
+                    "the default resolver reports the typed human-authorization status"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "OAuth-protected live server never reported awaiting authorization"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     fn make_runtime(factory: AgentFactory, max_sessions: usize) -> Arc<SessionRuntime> {
@@ -25854,7 +25913,6 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[tokio::test]
-    #[ignore = "flaky under load (8/30): Remove event missing at the remove boundary, #1461"]
     async fn start_turn_applies_staged_mcp_remove_and_reload_at_turn_boundary() {
         let server_config = mcp_server_config("test-server");
         let temp = tempfile::tempdir().unwrap();
@@ -25889,6 +25947,17 @@ mod tests {
                 && payload.target == "test-server"
                 && payload.status_text() == "pending"
         }));
+        // The add connects in the background. A remove staged while it is
+        // still pending is deferred to a later boundary, so wait until the
+        // server is connected and installed.
+        let adapter = runtime
+            .mcp_adapter_for_session(&session_id)
+            .await
+            .expect("mcp adapter");
+        adapter
+            .wait_until_ready(Duration::from_secs(10))
+            .await
+            .expect("the add connects");
 
         runtime
             .mcp_stage_remove(&session_id, "test-server".to_string())
@@ -25908,11 +25977,14 @@ mod tests {
             .await
             .expect("turn remove should apply staged remove");
         let remove_events = collect_tool_config_events(&mut event_rx).await;
-        assert!(remove_events.iter().any(|payload| {
-            payload.operation == ToolConfigChangeOperation::Remove
-                && payload.target == "test-server"
-                && matches!(payload.status_text().as_str(), "applied" | "draining")
-        }));
+        assert!(
+            remove_events.iter().any(|payload| {
+                payload.operation == ToolConfigChangeOperation::Remove
+                    && payload.target == "test-server"
+                    && matches!(payload.status_text().as_str(), "applied" | "draining")
+            }),
+            "remove boundary events: {remove_events:?}"
+        );
     }
 
     #[cfg(feature = "mcp")]
@@ -25992,20 +26064,12 @@ mod tests {
                 && payload.status_text() == "draining"
         }));
 
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if !adapter
-                    .has_removing_servers()
-                    .await
-                    .expect("check removing state")
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("timed out waiting for forced removal to finalize");
+        assert!(
+            adapter
+                .wait_removals_finalized(Duration::from_secs(10))
+                .await,
+            "the drain must finalize the timed-out removal"
+        );
 
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
@@ -26020,17 +26084,7 @@ mod tests {
             )
             .await
             .expect("follow-up boundary");
-        let second_turn_events = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let events = collect_tool_config_events(&mut event_rx).await;
-                if !events.is_empty() {
-                    break events;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap_or_default();
+        let second_turn_events = collect_tool_config_events(&mut event_rx).await;
         assert!(
             second_turn_events.iter().any(|payload| {
                 payload.operation == ToolConfigChangeOperation::Remove
@@ -26043,7 +26097,6 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[tokio::test]
-    #[ignore = "flaky under load (11/30): depends on the 100 ms MCP drain poll, #1461"]
     async fn staged_ops_remain_boundary_gated_while_background_drain_runs() {
         let server1_config = mcp_server_config("server-draining");
         let server2_config = mcp_server_config("server-staged");
@@ -26077,6 +26130,12 @@ mod tests {
             .mcp_adapter_for_session(&session_id)
             .await
             .expect("mcp adapter");
+        // The add connects in the background; the server must be installed
+        // before its in-flight count is set and its remove is staged.
+        adapter
+            .wait_until_ready(Duration::from_secs(10))
+            .await
+            .expect("the add connects");
         adapter
             .set_removal_timeout_for_testing(Duration::from_secs(3))
             .await
@@ -26119,7 +26178,12 @@ mod tests {
             .await
             .expect("stage second add");
 
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        // What the background drain does on every wake: progressing
+        // removals must not apply the staged add outside a boundary.
+        adapter
+            .progress_removals()
+            .await
+            .expect("progress removals");
         assert!(
             adapter.tools().is_empty(),
             "background drain must not apply newly staged add outside boundary"
@@ -26152,9 +26216,15 @@ mod tests {
             "expected Add+pending for server-staged at boundary, got: {next_turn_events:?}"
         );
 
-        // Turn 4: after the background connection resolves, drain_pending
-        // picks it up and the server becomes visible.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Turn 4: once the background connection delivers its result,
+        // drain_pending at the boundary picks it up and the server becomes
+        // visible.
+        assert!(
+            adapter
+                .wait_connect_results_delivered(Duration::from_secs(10))
+                .await,
+            "the staged add must deliver its connect result"
+        );
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
             .start_turn(
@@ -26189,7 +26259,6 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[tokio::test]
-    #[ignore = "fails under load (3/3 on 2 cores): fixed sleep on the 100 ms MCP drain poll, #1461"]
     async fn queued_lifecycle_actions_survive_boundary_apply_failure() {
         let server_config = mcp_server_config("lossless-server");
 
@@ -26222,8 +26291,18 @@ mod tests {
             .mcp_adapter_for_session(&session_id)
             .await
             .expect("mcp adapter");
+        // The add connects in the background; the server must be installed
+        // before its in-flight count is set and its remove is staged.
         adapter
-            .set_removal_timeout_for_testing(Duration::from_millis(20))
+            .wait_until_ready(Duration::from_secs(10))
+            .await
+            .expect("the add connects");
+        // A removal timeout far past the test (a hang guard only): the
+        // removal must still be draining after the remove boundary, so the
+        // background drain, not that boundary, finalizes it. A 20 ms timeout
+        // raced the boundary's own removal pass and finalized there under load.
+        adapter
+            .set_removal_timeout_for_testing(Duration::from_secs(60))
             .await
             .expect("set timeout");
         adapter
@@ -26235,7 +26314,7 @@ mod tests {
             .mcp_stage_remove(&session_id, "lossless-server".to_string())
             .await
             .expect("stage remove");
-        let (event_tx, _event_rx) = mpsc::channel(64);
+        let (event_tx, mut event_rx) = mpsc::channel(64);
         runtime
             .start_turn(
                 &session_id,
@@ -26248,11 +26327,28 @@ mod tests {
             )
             .await
             .expect("remove boundary");
+        let remove_turn_events = collect_tool_config_events(&mut event_rx).await;
+        assert!(
+            remove_turn_events.iter().any(|payload| {
+                payload.operation == ToolConfigChangeOperation::Remove
+                    && payload.target == "lossless-server"
+                    && payload.status_text() == "draining"
+            }),
+            "the remove boundary starts draining, got: {remove_turn_events:?}"
+        );
 
-        // Wait for the background drain task to process the forced removal.
-        // Drain task polls every 100ms, timeout is 20ms, so after 500ms
-        // the forced removal should be queued in lifecycle_rx.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // The in-flight call finishes: the background drain wakes on it,
+        // finalizes the removal and queues its action for the next boundary.
+        adapter
+            .set_inflight_calls_for_testing("lossless-server", 0)
+            .await
+            .expect("finish inflight call");
+        assert!(
+            adapter
+                .wait_removals_finalized(Duration::from_secs(10))
+                .await,
+            "the drain must finalize the drained removal"
+        );
 
         runtime
             .mcp_stage_add(

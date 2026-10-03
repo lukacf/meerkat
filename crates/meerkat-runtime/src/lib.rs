@@ -68,6 +68,7 @@ pub mod input;
 pub mod input_ledger;
 pub mod input_scope;
 pub mod input_state;
+pub mod instruction_activation_admission;
 pub mod interrupt_public_result;
 pub mod live_context_mirror;
 pub mod live_execution;
@@ -533,8 +534,8 @@ pub use completion::{
     CompletionCleanupObservation, CompletionHandle, CompletionOutcome, CompletionWaitError,
 };
 pub use delivery_inbox::{
-    RuntimeDeliveryError, RuntimeDeliveryId, RuntimeDeliveryInbox, RuntimeDeliveryKind,
-    RuntimeDeliveryReceipt, RuntimeDeliveryRecord, RuntimeDeliverySubmission,
+    RuntimeDeliveryAcknowledgement, RuntimeDeliveryError, RuntimeDeliveryId, RuntimeDeliveryInbox,
+    RuntimeDeliveryKind, RuntimeDeliveryReceipt, RuntimeDeliveryRecord, RuntimeDeliverySubmission,
 };
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
 pub use exact_operation::{
@@ -578,7 +579,7 @@ pub use meerkat_machine::{
     PendingExecutorAttachmentAbortCompletion, PendingRuntimeExecutorAttachment,
     PreparedArchivedResumeCommitLease, PreparedAttachedSessionActorRecovery,
     PreparedRuntimeExecutorAttachmentRetirement, PreparedSessionMaterialization,
-    ReloadRequiredRegistrationDisposition, ReloadRequiredRegistrationSettlement,
+    ReloadRequiredRegistrationDisposition, ReloadRequiredRegistrationSettlement, RunStartsHold,
     RuntimeBindingsError, RuntimeCleanupTaskSpawner, RuntimeDetachedUnregister,
     RuntimeExecutorAttachmentRetirementCompletion, RuntimeExecutorAttachmentWitness,
     RuntimeLifecycleFacts, RuntimeLoopQueueAdmissionPlan, RuntimeOwnerlessRegistrationAdmission,
@@ -1063,6 +1064,10 @@ pub mod machine_schema_exports {
             .attach_to(crate::auth_machine::dsl::AuthMachineState::schema())
     }
 }
+pub use instruction_activation_admission::{
+    InstructionActivationRuntimeRefusal, instruction_activation_admission_for_session_error,
+    instruction_activation_runtime_admission,
+};
 pub use interrupt_public_result::{
     UserInterruptObservation, UserInterruptPublicResult, resolve_user_interrupt_public_result,
 };

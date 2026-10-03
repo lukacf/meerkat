@@ -714,13 +714,23 @@ pub async fn handle_public_tools_call(
         "meerkat_mob_lifecycle" => {
             let input: MobLifecycleParams = parse_args(arguments)?;
             let mob_id = parse_mob_id(&input.mob_id)?;
-            let destroy_report = state
+            let reports = state
                 .mob_lifecycle_action(&mob_id, input.action)
                 .await
-                .map_err(|err| McpToolError::from_mob_destroy(&err))?
+                .map_err(|err| McpToolError::from_mob_destroy(&err))?;
+            let destroy_report = reports
+                .destroy_report
                 .map(|report| {
                     serde_json::to_value(&report).map_err(|err| {
                         McpToolError::internal(format!("destroy report serialize: {err}"))
+                    })
+                })
+                .transpose()?;
+            let stop_report = reports
+                .stop_report
+                .map(|report| {
+                    serde_json::to_value(&report).map_err(|err| {
+                        McpToolError::internal(format!("stop report serialize: {err}"))
                     })
                 })
                 .transpose()?;
@@ -729,6 +739,7 @@ pub async fn handle_public_tools_call(
                 action: input.action,
                 ok: true,
                 destroy_report,
+                stop_report,
             }))
         }
         "meerkat_mob_spawn" => {

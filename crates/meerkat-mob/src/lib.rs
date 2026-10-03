@@ -230,6 +230,8 @@ pub use run::{
 pub use runtime::DeliveryInputSettleTestRelease;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::FactoryChainSpawnBasePromptSource;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub use runtime::MemberInstructionActivationError;
 pub use runtime::RestoreIncompatible;
 pub use runtime::bridge::{MobBoundMemberRuntimeBridge, MobMemberRuntimeBridge};
 pub use runtime::bridge_protocol::{
@@ -252,6 +254,9 @@ pub use runtime::mob_scoped_workgraph_service;
 pub use runtime::remote_member_operator_tool_defs_for_test;
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::run_mobpack_callable;
+pub use runtime::stop_report::{
+    MemberRunStarts, MemberStopOutcome, MemberStopRun, MobStopReport, NotHoldableReason,
+};
 pub use runtime::{
     AdaptiveDriverCapability, AdaptiveLayerAdmission, AdaptiveLayerAdmissionRequest,
     AdaptiveLayerAttempt, AdaptiveLayerDisposition, AdaptiveLayerPhaseView,

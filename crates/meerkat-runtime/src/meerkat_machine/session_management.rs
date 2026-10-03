@@ -10989,6 +10989,95 @@ Ok::<(), RuntimeDriverError>(())
             })
     }
 
+    /// Hold run starts for `session_id` (#1500): until
+    /// [`Self::release_run_starts`], no transition establishes a new run, so
+    /// admitted input stays queued. The current run, if any, is unaffected and
+    /// reported, so the caller can cancel exactly that run. Idempotent, and a
+    /// no-op on a stopped or destroyed runtime.
+    pub async fn hold_run_starts(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<super::RunStartsHold, RuntimeDriverError> {
+        let _gate = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::HoldRunStarts {},
+                "HoldRunStarts",
+            )
+            .await
+            .map_err(RuntimeDriverError::Internal)?;
+        let current_run = effects
+            .as_slice()
+            .iter()
+            .find_map(|effect| match effect {
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::RunStartsHeld {
+                    current_run,
+                } => Some(current_run.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(
+                    "HoldRunStarts committed without RunStartsHeld".to_string(),
+                )
+            })?;
+        let current_run = current_run
+            .map(|run_id| {
+                uuid::Uuid::parse_str(&run_id.0)
+                    .map(meerkat_core::lifecycle::RunId::from_uuid)
+                    .map_err(|error| {
+                        RuntimeDriverError::Internal(format!(
+                            "RunStartsHeld carried a malformed run id {run_id:?}: {error}"
+                        ))
+                    })
+            })
+            .transpose()?;
+        Ok(super::RunStartsHold { current_run })
+    }
+
+    /// Release a hold taken by [`Self::hold_run_starts`]. A runtime loop that
+    /// parked on the hold is woken when input is queued.
+    pub async fn release_run_starts(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        let gate = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ReleaseRunStarts {},
+                "ReleaseRunStarts",
+            )
+            .await
+            .map_err(RuntimeDriverError::Internal)?;
+        let queued = effects.as_slice().iter().any(|effect| {
+            matches!(
+                effect,
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::RunStartsReleased {
+                    queued: true
+                }
+            )
+        });
+        let wake_tx = if queued {
+            self.sessions
+                .read()
+                .await
+                .get(session_id)
+                .and_then(RuntimeSessionEntry::wake_sender)
+        } else {
+            None
+        };
+        drop(gate);
+        if let Some(wake_tx) = wake_tx {
+            let _ = wake_tx.try_send(());
+        }
+        Ok(())
+    }
+
     /// Request cancellation at the next safe boundary for the currently-running turn.
     pub async fn cancel_after_boundary(
         &self,

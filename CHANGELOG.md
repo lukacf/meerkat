@@ -46,11 +46,86 @@ them.
   and `LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY` are removed. The deferred
   close settlement no longer retries on a timer (see Fixed);
   `LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND` remains as its single hang guard.
+  `TransitionId::CompleteSpawnStopped`,
+- `meerkat_mob::MobHandle::stop` returns `Result<MobStopReport, MobError>`
+  instead of `Result<(), MobError>` (#1500).
+- Generated machine types gain the run-start hold (#1500). Machine DSL changes
+  add variants to the generated MeerkatMachine, MobMachine and kernel enums,
+  shifting the discriminants and order of: `EffectKind::*`, `InputKind::*`,
+  `MeerkatMachineEffect::*`, `MeerkatMachineEffectVariant::*`,
+  `MeerkatMachineInput::*`, `MeerkatMachineInputVariant::*`,
+  `MobMachineEffect::*`, `MobMachineEffectVariant::*`, `TransitionId::*`.
+  Added variants: `Effect::HoldMemberRunStarts`,
+  `Effect::ReleaseMemberRunStarts`, `Effect::RunStartHeld`,
+  `Effect::RunStartsHeld`, `Effect::RunStartsReleased`;
+  `EffectKind::HoldMemberRunStarts`, `EffectKind::ReleaseMemberRunStarts`,
+  `EffectKind::RunStartHeld`, `EffectKind::RunStartsHeld`,
+  `EffectKind::RunStartsReleased`; `Input::HoldRunStarts`,
+  `Input::ReleaseRunStarts`; `InputKind::HoldRunStarts`,
+  `InputKind::ReleaseRunStarts`; `MeerkatMachineEffect::RunStartHeld`,
+  `MeerkatMachineEffect::RunStartsHeld`,
+  `MeerkatMachineEffect::RunStartsReleased`;
+  `MeerkatMachineEffectVariant::RunStartHeld`,
+  `MeerkatMachineEffectVariant::RunStartsHeld`,
+  `MeerkatMachineEffectVariant::RunStartsReleased`;
+  `MeerkatMachineInput::HoldRunStarts`,
+  `MeerkatMachineInput::ReleaseRunStarts`;
+  `MeerkatMachineInputVariant::HoldRunStarts`,
+  `MeerkatMachineInputVariant::ReleaseRunStarts`;
+  `MobMachineEffect::HoldMemberRunStarts`,
+  `MobMachineEffect::ReleaseMemberRunStarts`;
+  `MobMachineEffectVariant::HoldMemberRunStarts`,
+  `MobMachineEffectVariant::ReleaseMemberRunStarts`;
+  `TransitionId::BeginPlacedCompletionLifecycleQuiesceFreshStop`,
+  `TransitionId::BeginPlacedCompletionLifecycleQuiesceReplayStop`,
+  `TransitionId::DrainQueuedRunHeldRetired`,
+  `TransitionId::HoldRunStartsAttached`, `TransitionId::HoldRunStartsIdle`,
+  `TransitionId::HoldRunStartsInertDestroyed`,
+  `TransitionId::HoldRunStartsInertStopped`,
+  `TransitionId::HoldRunStartsInitializing`,
+  `TransitionId::HoldRunStartsRetired`, `TransitionId::HoldRunStartsRunning`,
+  `TransitionId::PrepareHeldAttached`, `TransitionId::PrepareHeldIdle`,
+  `TransitionId::ReleaseRunStartsAttached`,
+  `TransitionId::ReleaseRunStartsDestroyed`,
+  `TransitionId::ReleaseRunStartsIdle`,
+  `TransitionId::ReleaseRunStartsInitializing`,
+  `TransitionId::ReleaseRunStartsRetired`,
+  `TransitionId::ReleaseRunStartsRunning`,
+  `TransitionId::ReleaseRunStartsStopped`,
+  `TransitionId::StartConversationRunHeldAttached`,
+  `TransitionId::StartConversationRunHeldIdle`,
+  `TransitionId::StartConversationRunHeldInitializing`,
+  `TransitionId::StartImmediateAppendHeldAttached`,
+  `TransitionId::StartImmediateAppendHeldInitializing`. Added fields:
+  `BridgeCapabilities.run_start_hold`, `MeerkatMachineState.run_starts_held`,
+  `MobLifecycleResult.stop_report`, `State.run_starts_held`.
+- `meerkat_mob_mcp::MobMcpState::mob_stop` returns the `MobStopReport`, and
+  `mob_lifecycle_action` returns `MobLifecycleReports` (destroy and stop
+  reports) instead of `Option<MobDestroyReport>` (#1500).
+- `meerkat_sqlite::SqliteStoreError` and `meerkat_store::StoreError` gain
+  `UnsupportedDatabaseFile { path, detail }`, the typed refusal for a
+  database path SQLite cannot safely address by one name (#1551, see Fixed).
+  Exhaustive matches must handle it.
 - `meerkat_mob_mcp::detached_delivery::OwnerRevivalDeferral::LifecycleOperationPending`
   gains `member: meerkat_mob::AgentIdentity`, the member whose
   explicit-resume work defers the revival, so the wait can observe that
   operation's own completion.
 
+- `meerkat_machine_codegen::CompositionTlaError` gains the variants
+  `InvalidSuppliedMachine`, `DuplicateSuppliedMachine`,
+  `ShadowsCanonicalMachine`, `CanonicalNamedTypeMismatch`,
+  `DivergentNamedTypeBinding` and `InvalidCompositionForCatalog`, so
+  exhaustive matches need arms. `render_machine_semantic_model` now returns
+  `CanonicalNamedTypeMismatch` for a machine that keeps a canonical id but
+  drops or rebinds a canonical named type, where it used to panic.
+- `meerkat_machine_schema::MachineSchema` gains the public field
+  `input_field_domains: Vec<InputFieldDomain>`, and
+  `meerkat_machine_schema::catalog::dsl::MachineSchemaMetadata` gains
+  `input_field_domains` and `state_bound_input_fields`. Struct literals must
+  set them; an empty `Vec` keeps today's behaviour.
+  `meerkat_machine_schema::MachineSchemaError` gains the variant
+  `InvalidInputFieldDomain { variant, field, reason }`, so exhaustive matches
+  need an arm.
 - `meerkat_runtime::EphemeralRuntimeDriver` is no longer `UnwindSafe` or
   `RefUnwindSafe`: it now holds the runtime admission signal added with the
   typed admission wait (#1431). Callers that relied on these auto traits (for
@@ -63,6 +138,33 @@ them.
   `None` and `false` keep today's behaviour. On the wire both are omitted when
   unset, so payloads to and from members that predate them are unchanged. The
   supervisor bridge protocol version stays V6.
+- `meerkat::session_runtime::llm_reconfigure::SessionRuntimeLlmReconfigureHost::service`
+  changes from `Arc<dyn SessionRuntimeLlmReconfigureService>` to
+  `std::sync::Weak<dyn SessionRuntimeLlmReconfigureService>`; construct it
+  with `Arc::downgrade`. The service now owns the runtime machine the host is
+  installed on, so a strong back-reference would leak both. A host whose
+  service was dropped answers every call with `RuntimeDriverError::Destroyed`.
+  `meerkat_session::PersistentSessionService` adds
+  `with_canonical_runtime_adapter` and `canonical_runtime_adapter`; the
+  runtime-backed surface composition binds the machine it returns. Behaviour:
+  a mob on a persistent service built by that composition runs on the
+  surface's machine (with its LLM reconfigure host) instead of a private
+  second machine, so per-turn LLM overrides and host `stop_run` work without
+  `MobBuilder::with_runtime_adapter` (#1435). A directly constructed service
+  owns a machine of its own, created on first use; the global pointer-keyed
+  cache is gone.
+- Behaviour-only (not measured by the gate): a mob Stop or Shutdown no longer
+  answers `MobError::AutonomousStopInterruptsPending` while its members'
+  exact interrupts are in flight. It waits for them off the actor loop and
+  completes once they settle, so `MobHandle::stop`/`shutdown` no longer retry
+  that variant on a timer. A stop whose interrupts do not all settle within
+  the lifecycle budget reports a typed `LifecycleOperationProgressStalled`.
+  The placed-cleanup barriers (`PlacedKickoffCleanupPending`,
+  `PlacedCompletionCleanupPending`) are unchanged (#1413).
+- `meerkat_mcp::McpRouter::set_inflight_calls_for_testing` (feature
+  `test-support`) now returns `Result<(), McpError>`. It fails when the
+  server is not installed or the surface owner rejects the call transition,
+  instead of silently leaving the shell's count and the owner's apart.
 - Behaviour-only (not measured by the gate): rkat-rpc callback routing is
   owned per connection (#1451). Over TCP, a session's callback tools route
   only to the connection that created it, and `tools/register` changes only
@@ -75,6 +177,38 @@ them.
     Binding mob callback tools to the creating connection is tracked in #1459.
   - Stdio and embedded servers that pre-create the channel with
     `SessionRuntime::init_callback_channel` are unchanged.
+- Keyed WorkGraph admission (#1496, see Added) adds the create identity to the
+  generated `WorkGraphLifecycleMachine` vocabulary. Struct literals and
+  exhaustive matches must handle the new members:
+  - `meerkat_machine_schema` `WorkGraphLifecycleInput::CreateOpen` and
+    `WorkGraphLifecycleInput::CreateBlocked` gain
+    `admission_key: Option<WorkAdmissionKeyRef>` and
+    `admission_request_digest: Option<WorkAdmissionDigestRef>` (`None` for an
+    unkeyed create); the matching `meerkat_machine_kernels` `CreateOpen` and
+    `CreateBlocked` input structs gain the same fields.
+  - `WorkGraphLifecycleEffect::Created` changes from a unit variant to
+    `Created { admission_key, admission_request_digest }`; the
+    `meerkat_machine_kernels` `Created` effect struct gains `admission_key` and
+    `admission_request_digest`.
+  - `WorkGraphLifecycleEffect` and `WorkGraphLifecycleEffectVariant` gain the
+    variant `UnpairedAdmissionIdentityRejected`; in `meerkat_machine_kernels`
+    the work-graph lifecycle `Effect` and `EffectKind` gain it too, and
+    `TransitionId` gains `CreateOpenRejectedUnpairedAdmission` and
+    `CreateBlockedRejectedUnpairedAdmission` (appended, so existing
+    discriminants are unchanged).
+  - `meerkat_workgraph::WorkGraphError` gains the variants
+    `UnpairedAdmissionIdentity { admission_key_present, request_digest_present }`
+    and `SchemaMismatch { version, missing_objects, unexpected_objects,
+    changed_objects }`; the generated `WorkGraphErrorKind` gains
+    `UnpairedAdmissionIdentity` (classified `invalid_arguments`) and
+    `SchemaMismatch` (classified `store_error`), both appended.
+- `meerkat_sqlite::SqliteStoreError` gains `CurrentSchemaMismatch { domain,
+  version, missing_objects, unexpected_objects, changed_objects }`. A file
+  whose ledger row stamps a domain's CURRENT version but whose owned catalog is
+  not that schema is now reported with it, naming the missing, unexpected and
+  changed objects, instead of `SchemaFingerprintMismatch` (which remains for
+  released predecessors and post-migration self-checks). Exhaustive matches
+  must handle the new variant.
 - Typed tool choice (see Added). Struct literals and exhaustive matches must
   handle the new members:
   - `meerkat_llm_core::LlmRequest` gains `tool_choice: ToolChoice` (serde
@@ -158,6 +292,173 @@ them.
   transcript is ahead of the store. It completes when a runtime turn's
   boundary commit is acknowledged, a full persist lands, or the live actor is
   synchronized from or discarded for durable authority.
+- `meerkat_core::TranscriptEditError` gains the variant
+  `TranscriptRevisionRetired { revision, oldest_retained_revision,
+  retired_rewrites }`, the typed refusal for a revision older than the
+  transcript-history retention window (see Fixed). Exhaustive matches must
+  handle it.
+- `meerkat_core::CompactionConfig` and
+  `meerkat_core::config::CompactionRuntimeConfig` gain the public field
+  `history_retained_rewrites: usize` (default 4). Struct literals must set it
+  or use `..Default::default()`.
+- `meerkat_core::TranscriptHistoryState::commits` returns the named iterator
+  `TranscriptRewriteCommits` (`ExactSizeIterator + DoubleEndedIterator`)
+  instead of an opaque `impl ExactSizeIterator`.
+- Behaviour-only (not measured by the gate): a session's transcript graph is
+  re-anchored after each compaction. On a re-anchored
+  `TranscriptHistoryState`, `anchor()` is the oldest retained rewrite child,
+  not the pre-rewrite transcript. `edges()` and `materialize_revision_bodies()`
+  cover the retained occurrences only, and `materialize_revision` of a retired
+  revision returns `TranscriptRevisionRetired`. `commits()`, `commit_count()`,
+  `commit(i)`, `rewrite_prefix()` and `graph_prefix()` are unchanged.
+- The SQLite session store's schema domain moves to v5 (table
+  `session_transcript_retirements`). Opening a store migrates it forward.
+  Binaries from before this release refuse a v5 file, as they refuse any
+  newer schema.
+- `meerkat_mob::MobError` gains `RuntimeOwnerConflict` (#1550). An explicit
+  `MobBuilder::with_runtime_adapter` must now be the session service's actual
+  runtime owner (a clone of its `MeerkatMachine`), not merely another machine
+  over the same runtime store. A different live owner is refused with
+  `RuntimeOwnerConflict` before anything is provisioned, so a mob's sessions
+  and the service's archive path always resolve the same owner.
+- MCP OAuth login is host-driven (security batch). The native authority no
+  longer binds a listener or opens a browser:
+  - `meerkat_auth_core::BrowserOpener`, `meerkat_auth_core::SystemBrowserOpener`
+    and `McpOAuthAuthority::interactive_login` are removed. Use
+    `McpOAuthAuthority::login_start` / `login_complete` / `login_cancel`, or
+    `meerkat::HostAuthService::mcp_login_start` / `mcp_login_complete` /
+    `mcp_login_cancel`.
+  - `McpOAuthAuthority::new` is now `new(persistence, auth_lease)` and
+    `McpOAuthAuthority::with_http` is now `with_http(persistence, http,
+    auth_lease)`; the browser parameter is gone.
+  - `McpOAuthError::Browser` and `McpOAuthError::InteractiveRequiresTty` are
+    removed; `McpOAuthError` gains `HumanAuthorizationRequired { server_name }`
+    and `Callback { server_name, reason }`.
+  - `meerkat_mcp::McpError` gains `AuthorizationRequired { target }`.
+  - Behaviour-only (not measured by the gate): the `McpAuthResolver` impl for
+    `McpOAuthAuthority` returns `HumanAuthorizationRequired` from
+    `interactive_login` instead of opening a browser.
+  - `meerkat::AgentBuildConfig` gains the public field `mcp_auth_resolver`
+    (feature `mcp`, native only); struct literals must set it (`None` keeps
+    today's behaviour).
+  - `meerkat::HostAuthError` gains `McpOAuth(McpOAuthError)` and
+    `McpTarget(HostMcpTargetRefusal)`.
+- `auth/login/start`, `auth/login/complete` and `auth/status/get` accept an MCP
+  server target, and `auth/login/cancel` (RPC and `POST /auth/login/cancel`)
+  is new. Provider JSON is unchanged, but the Rust and SDK types change:
+  - `meerkat_contracts::LoginStartParams` replaces `provider`, `realm_id`,
+    `binding_id` and `profile_id` with `target: WireLoginTarget`.
+  - `meerkat_contracts::LoginCompleteParams` replaces the same fields with
+    `target: WireLoginTarget`; its `Debug` now redacts `code` and `state`. An
+    MCP completion carries only `code`, `state` and `redirect_uri`: issuer,
+    client and resource come from the admitted attempt.
+  - `meerkat_contracts::WireLoginStart` replaces `provider` with
+    `target: WireLoginStartTarget`; its `Debug` now redacts `authorize_url` and
+    `state`.
+  - `meerkat_contracts::WireLoginReady` replaces `identity`, `profile_id` and
+    `provider` with `target: WireLoginReadyTarget`.
+  - `auth/status/get` is catalogued as `AuthStatusParams` ->
+    `WireAuthStatusResult` (was `BindingIdParams` -> `WireAuthStatusDetail`).
+  - Generated Python and TypeScript `LoginStartParams`, `LoginCompleteParams`,
+    `WireLoginStart`, `WireLoginReady`, `AuthStatusParams` and
+    `WireAuthStatusResult` are unions of a provider and an MCP variant. The
+    Python generated types are no longer constructible dataclasses; the client
+    wrappers build the request dicts.
+  - Behaviour-only: a request mixing provider fields with `mcp` is refused.
+  - Behaviour-only: provider `auth/login/start` and `auth/login/complete`
+    params now refuse unknown fields (they were ignored), and
+    `auth/status/get` refuses a case-variant `mcp` key instead of falling back
+    to a binding status. The `auth/status/get` binding arm (`BindingIdParams`)
+    deliberately keeps tolerating other unknown fields for compatibility; only
+    the MCP target arms deny unknown fields.
+- Runtime delivery acknowledgement (#1507, fixing #1497) extends the
+  generated RuntimeDelivery machine. In `meerkat_machine_schema`:
+  `RuntimeDeliveryMachineState` gains the public field
+  `acknowledged_sequences`; `RuntimeDeliveryInput` and
+  `RuntimeDeliveryInputVariant` gain `AcknowledgeDelivery` and
+  `AdvanceAcknowledgedPrefix`; `RuntimeDeliveryEffect` and
+  `RuntimeDeliveryEffectVariant` gain `DeliveryAcknowledged`,
+  `AcknowledgedPrefixAdvanced` and `AcknowledgedPrefixAtRest`. In the
+  generated kernel `meerkat_machine_kernels::generated::runtime_delivery`:
+  `State` gains `acknowledged_sequences`; `Input` and `InputKind` gain
+  `AcknowledgeDelivery` and `AdvanceAcknowledgedPrefix`; `Effect` and
+  `EffectKind` gain `DeliveryAcknowledged`, `AcknowledgedPrefixAdvanced` and
+  `AcknowledgedPrefixAtRest`; `TransitionId` gains `AcknowledgeNextDelivery`,
+  `AcknowledgeAheadOfCursor`, `ObserveAlreadyAppliedAcknowledgement`,
+  `AdvanceOverAcknowledgedDelivery` and
+  `AdvanceAcknowledgedPrefixNothingParked`. Struct literals and exhaustive
+  matches must handle them.
+- Owner drain feedback is bound to obligation members (#1481):
+  - `meerkat_machine_schema::FeedbackFieldSource` gains `ObligationMember`.
+    Exhaustive matches must handle it.
+  - `meerkat_runtime::protocol_auth_release_oauth_flow_drain::submit_expire_o_auth_browser_flow`
+    and `submit_expire_o_auth_device_flow` take the drained `flow_id` and now
+    return `Result<AuthMachineTransition,
+    ObligationMemberFeedbackError<AuthMachineTransitionError>>` (was
+    `Result<AuthMachineTransition, AuthMachineTransitionError>`). A flow id
+    outside the obligation is refused with
+    `ObligationMemberFeedbackError::NotObligationMember`.
+
+### Security
+
+- Agent mob tools no longer accept host-only configuration from model
+  arguments. The agent `mob_create` deserialized the internal
+  `MobDefinition`, so a member with create authority could put
+  `tools.mcp_servers` (MCP server configs, including a stdio `command`, its
+  `args` and `env`) and `rust_bundles` into a profile, and child members
+  built from it would launch those servers on the host. The public paths
+  already decoded through the public contract. Now every model-facing input
+  does:
+  - `mob_create` decodes `MobDefinitionInput` through
+    `decode_public_mob_definition`.
+  - `mob_profile_create` and `mob_profile_update` decode `MobProfileInput`
+    (new `meerkat_mob_mcp::decode_public_profile`), which also closes the
+    indirect route of storing MCP server configs in a realm profile and
+    referencing it from a later `mob_create`.
+  - The `tooling` of `mob_spawn_member` and `delegate` takes an inline
+    profile as `MobProfileInput`.
+  - `mob_spawn_member`'s `initial_message`, and the `MobMcpDispatcher` spawn
+    and respawn messages, take `WireContentInput`.
+  - Two refusals apply on the agent surface only (host-facing surfaces are
+    unchanged): a definition's skill source may not be a host filesystem
+    `path` (inline skill content still works), and an image may not
+    reference a stored blob by `blob_id` (inline image bytes still work),
+    because the blob store has no fact showing the calling session may read
+    it, and a video may not reference a `uri`, which the provider would fetch
+    with the host's credentials (inline video bytes still work) (#1543).
+  Behaviour change: a model-supplied definition or profile that names an
+  internal-only field (`mcp_servers`, `rust_bundles`, `is_implicit`,
+  `session_cleanup_policy`, ...), a host-path skill source, a blob image
+  reference or a video URI is now refused with `InvalidArguments` before anything is
+  created; previously such input was accepted.
+
+### Added
+
+- `meerkat_runtime::MeerkatMachine::is_same_runtime_owner`: whether two
+  handles are the same live runtime owner (clones share it; a separately
+  constructed machine over the same store does not).
+- `MobStopReport` (`meerkat_mob::{MobStopReport, MemberStopOutcome,
+  MemberStopRun, MemberRunStarts, NotHoldableReason}`): what a mob Stop did to
+  each member's run (`NoRun`, `CancelledAtBoundary`, `RunEndedBeforeCancel`,
+  `LeftRunning`, `Interrupted`) and whether its run starts are held (`Held`,
+  `NotHoldable` with the reason, or `NotBound` for a member the mob cannot
+  reach right now: a placed member whose host carrier is dormant, or an
+  unbound remote peer, which is held on its next bind).
+- `meerkat_runtime::MeerkatMachine::hold_run_starts` (returns
+  `RunStartsHold { current_run }`) and `release_run_starts`.
+- Supervisor bridge: `BridgeCommand::HoldRunStarts` /
+  `BridgeCommand::ReleaseRunStarts`, `BridgeReply::RunStartsHeld`, and the
+  `BridgeCapabilities::run_start_hold` capability bit.
+- `MobProvisioner::stop_member_runtime` and `release_member_run_starts`, with
+  defaults that interrupt as before and report the member as not holdable.
+- One runtime delivery inbox per persistence bundle, with an in-process
+  commit signal (#1497):
+  - `meerkat::PersistenceBundle::runtime_delivery_inbox()` returns a clone of
+    the single inbox the bundle owns. RPC and the shared runtime-backed
+    builder now use it instead of each constructing their own.
+  - `RuntimeDeliveryInbox::subscribe_commits()` is a watch whose generation
+    advances once per newly committed row; exact replays do not advance it.
+  - `RuntimeDeliveryInbox::shares_commit_signal_with()`.
 - `meerkat::session_runtime::live_orchestration::LIVE_PLAYBACK_TERMINAL_SETTLEMENT_BOUND`
   names the 30 s an accepted playback terminal may wait for its provider
   acknowledgement before it is treated as ambiguous (previously an unnamed
@@ -169,6 +470,96 @@ them.
   (the operation a `LifecycleOperationPending { "explicit_resume member ..." }`
   names) to end.
 
+- Host-driven MCP OAuth. `McpOAuthAuthority::login_start` admits an attempt
+  through the AuthMachine OAuth flow owner (PKCE and one-time state) and
+  returns the host-only `McpOAuthLoginStart`. `login_complete` verifies the
+  host's `McpOAuthCallback` against the admitted attempt, exchanges the code
+  and persists the credential, returning the secret-free
+  `McpOAuthLoginComplete`. `login_cancel` retires an abandoned attempt. Login
+  start, callback and completion types redact secrets in `Debug`.
+  - A start for a target that already has a pending attempt returns that
+    attempt's projection with `McpOAuthLoginDisposition::Joined`; no second
+    attempt is admitted. The flow owner answers through the read-only
+    `OAuthFlowAuthority::pending_connector_browser_attempt` (default `None`).
+  - `McpOAuthAuthority::begin_loopback_login` binds the host's loopback
+    callback and returns `McpOAuthLoopbackBegin::Started(McpOAuthPendingLogin)`
+    or `Joined`. `McpOAuthPendingLogin::cancel` (and drop) retire the callback
+    binding and the attempt; `complete` waits for the callback;
+    `launch_browser` / `launch_system_browser` open the browser on the
+    blocking pool and return the advisory `McpOAuthBrowserLaunch`, which never
+    retries or cancels the attempt.
+  - `PkceChallenge::s256_for_verifier`.
+  - Completion is anchored on the admitted attempt: the flow owner must name a
+    live attempt for `state` (the new read-only
+    `OAuthFlowAuthority::admitted_connector_browser_attempt`, default `None`)
+    before any network I/O, and only the recorded issuer's metadata is then
+    fetched. Every non-success exit retires the attempt; dropping an
+    unfinished `McpOAuthPendingLogin::complete` retires the binding and the
+    attempt. `McpOAuthAuthority::cancel_attempt` retires an attempt by
+    `state`; `McpOAuthLoginStart::remaining` bounds the callback wait by the
+    attempt's own expiry.
+  - Start-or-join is serialized per target, the redirect URI must be an http
+    loopback address (RFC 8252), `McpOAuthAuthority::new` uses an HTTP client
+    that follows no redirects, and a 3xx answer to discovery or registration
+    is refused. `McpOAuthError::Callback` reports loopback bind, callback and
+    timeout failures.
+  - `open_system_browser` launches the platform opener without logging the
+    URL; `launch_system_browser` uses it instead of the `webbrowser` crate,
+    which logged the command line at debug.
+  - `McpOAuthAuthority::stored_only`. The `McpAuthResolver` impl and the CLI
+    resolver keep stored-only semantics for servers without `oauth_account`,
+    so servers that need no OAuth connect as before. Interactive login for
+    such a server is refused with `AccountSelectionRequired`.
+- `meerkat_auth_core::OidcUserInfoAccountStrategy`: the production MCP
+  account strategy. It requests `openid`, calls the issuer's UserInfo
+  endpoint with the new access token and binds `sub` to the server's
+  `oauth_account`.
+- `meerkat::HostAuthService::mcp_begin_loopback_login`, `mcp_login_start`,
+  `mcp_login_complete`, `mcp_login_cancel_by_state`,
+  `mcp_login_cancel`, `mcp_status`, `mcp_oauth_authority` and
+  `with_mcp_account_strategy`; `meerkat::HostMcpAuthStatus` and
+  `HostMcpAuthPhase`; `meerkat::resolve_configured_mcp_target` and
+  `HostMcpTargetRefusal`; `mcp_auth_target_to_wire` and
+  `mcp_login_disposition_to_wire`. RPC and REST MCP login and status resolve
+  the requested server against the configured MCP servers: an unknown name, a
+  different URL or account, or a server without OAuth login is refused
+  (invalid params / 400) before any discovery, registration or credential
+  write. The facade re-exports the MCP OAuth host types.
+  The `host_auth` docs state the host obligation: the browser context must be
+  unobservable by agent tools.
+- `meerkat::AgentFactory::mcp_auth_resolver` installs the default MCP
+  credential source for factory builds.
+- Runtime-backed hosts (RPC, REST, MCP server) get interactive MCP auth by
+  default. Once the runtime's AuthMachine flow owner exists,
+  `build_runtime_backed_service_with_capacities` installs the native MCP
+  OAuth authority as the factory's MCP credential source (a host-supplied
+  `AgentFactory::mcp_auth_resolver` wins), and RPC and REST live `mcp/add`
+  routers use it too. A missing credential is the typed
+  `AuthorizationRequired` host status, never a browser. New:
+  `meerkat::default_mcp_auth_resolver`, `AgentFactory::has_mcp_auth_resolver`,
+  `FactoryAgentBuilder::with_mcp_auth_resolver`,
+  `meerkat_rpc::session_runtime::SessionRuntime::default_mcp_auth_resolver`. The facade re-exports `McpAuthResolver` and
+  `McpAuthMode`.
+- Typed host status for MCP servers awaiting human authorization:
+  `McpRouter::servers_awaiting_authorization` and
+  `McpRouterAdapter::servers_awaiting_authorization`. This is not an agent
+  event.
+- `McpOAuthError::is_refusal` classifies MCP OAuth errors for surfaces.
+- Wire: `LoginCancelParams`, `WireLoginCancelled`, `WireMcpAuthTarget`,
+  `WireMcpAuthStatus`, `WireMcpAuthPhase`,
+  `WireMcpLoginDisposition` (`started` / `joined` on the MCP login start) and
+  the target enums above. A joined start returns the pending attempt's URL
+  and state: wire callers are host-privileged by contract. Python: `auth_mcp_login_start`,
+  `auth_mcp_login_complete`, `auth_mcp_login_cancel`, `auth_mcp_status`.
+  TypeScript: `authLoginCancel`, `authMcpStatus`. Web: `Auth.loginCancel`,
+  `Auth.mcpStatus`.
+- `rkat mcp login` and `rkat run --mcp-auth interactive` drive the host split
+  (the CLI owns the loopback callback and the browser). They require the
+  server's `oauth_account`. `rkat mcp login` refuses to run without a terminal
+  unless `--allow-headless` is given.
+- `meerkat` feature `test-mcp-oauth-fixtures`:
+  `meerkat::test_fixtures::mcp_oauth`, an OAuth-protected MCP fixture server
+  for the MCP OAuth canaries (test-support only).
 - `meerkat_machine_schema::SymbolRef::parse` is a public constructor for a
   coverage anchor path, so a crate outside Meerkat can build a coverage
   manifest for its own machines. The check is lexical and never touches the
@@ -233,6 +624,94 @@ them.
   is public, so live end-to-end checks can strip the speech-transcript note
   exactly instead of copying its wording.
 
+- Machine schemas can declare the TLC payload domain of an unsigned input
+  field (`MachineSchema::input_field_domains`, built with
+  `MachineSchemaMetadata::with_input_field_domain`). An
+  `InputFieldDomainKind::AdditionalValues` set is explored on top of the
+  default `0..2`; an `InputFieldDomainKind::StateField` binding explores
+  exactly the current value of a same-typed state field. The declaration is
+  rendered into the generated model, so `machine-check-drift` and the TLC
+  lane check exactly what it declares; the generated Rust machine is
+  unchanged. Validation refuses an unknown or non-unsigned field, a field no
+  transition binds, a duplicate, an empty or out-of-range value set
+  (`TLC_MAX_UNSIGNED_INPUT_SAMPLE`), an unknown or differently typed state
+  field, and a TLC representative input, each as a typed
+  `InputFieldDomainError`. This replaces the codegen's hard-coded rule that
+  bound any `expected_revision` input to a `revision` state field: WorkGraph
+  and WorkAttention now declare it with
+  `MachineSchemaMetadata::with_state_bound_input_field`, and every generated
+  model is byte-identical.
+- `meerkat_machine_schema` exposes the semantic coverage validator that
+  `xtask` used privately, so a catalog outside Meerkat validates its coverage
+  manifests with the same rules: `validate_coverage_catalog`,
+  `validate_machine_coverage`, `validate_composition_coverage`,
+  `validate_machine_anchor_target`, `validate_composition_anchor_target` and
+  `validate_semantic_entries`, each returning a typed
+  `CoverageValidationError`. The checks are pure (no filesystem access, so
+  anchor file existence stays with the catalog owner). The mode is always
+  explicit and has no default: `CoverageValidationMode::RequireEntries` is
+  today's rule (every element has an entry; an honestly unclaimed entry is
+  permitted) and is what Meerkat's own catalog uses;
+  `CoverageValidationMode::RequireClaims` additionally requires every entry to
+  name a code anchor and a scenario. `xtask` now calls the library, and every
+  refusal keeps its previous message.
+- `[compaction] history_retained_rewrites` (realm config, default 4;
+  `CompactionConfig::history_retained_rewrites` in Rust) bounds how many
+  recent transcript rewrites keep their bodies in the session document. The
+  pieces behind it:
+  - `Session::retire_transcript_history`;
+  - `TranscriptHistoryRetention`;
+  - `RetiredTranscriptPrefix`;
+  - `TranscriptHistoryState::{retired_count, retired_prefix,
+    oldest_retained_revision, is_retired_revision, retired_revision_refusal}`;
+  - the defaulted `Compactor::transcript_history_retention`, which
+    `DefaultCompactor` reads from its config.
+- Head-canonical stores can bound their rows to the same retention cut:
+  - `PreparedHeadCanonicalRewriteMutation::transcript_retired_count`;
+  - `RetiredTranscriptGraphBase`;
+  - `ValidatedTranscriptHistory::{retired_through,
+    from_store_replayed_retired_graph}`;
+  - `VerifiedHeadCanonicalTranscriptHistory::history`;
+  - the defaulted `IncrementalSessionStore::transcript_row_retention`
+    (`TranscriptRowRetention::{RetiresToCut, KeepsAll}`). A `KeepsAll` store
+    stays correct but unbounded, and `PersistentSessionService` warns about
+    it once at construction.
+- Exact keyed WorkGraph item admission (#1496):
+  `meerkat_workgraph::WorkGraphService::create_idempotent(admission_key, request)`
+  returns `WorkAdmissionOutcome::{Created, Replayed, Conflict { admission_key,
+  existing_item_id }}`.
+  - Within a realm and namespace a `WorkAdmissionKey` admits one item.
+  - The same key with the same request returns the existing item unchanged,
+    in any phase, terminal included, and writes nothing.
+  - The same key with a different request is a typed conflict and writes
+    nothing.
+  - The owner computes a domain-separated SHA-256 digest of the exact request
+    (with scope resolved). The new `WorkItemAdmissionMachine` owns the item's
+    admission identity and decides replay versus conflict
+    (`ClassifyAdmissionReplay`). It is bound to `WorkGraphLifecycleMachine` in
+    the `workgraph_attention_bundle` composition: every lifecycle `Created`
+    routes to the admission `Bind`, and `Bind` originates only from that
+    route, so no keyed item exists without its admission and no admission
+    without its item. The lifecycle machine's state space is unchanged.
+  - A create with a half-present identity (a key without a digest, or the
+    reverse) is a typed machine refusal (`UnpairedAdmissionIdentityRejected`),
+    surfaced as the new `WorkGraphError::UnpairedAdmissionIdentity`
+    (public class `invalid_arguments`), never a guard failure.
+  - Item JSON is unchanged; existing items load as unkeyed.
+  - A file stamped workgraph schema version 4 whose catalog is not this v4
+    (for example a development file from an unreleased build that used v4 for
+    a different admissions table) is refused with
+    `WorkGraphError::SchemaMismatch` naming the missing or changed objects, on
+    open and on every operation; it is never treated as current. Recreate such
+    files.
+  - SQLite indexes the key in the new `workgraph_item_admissions` table
+    (workgraph schema version 4; version 3 files migrate on open), in the
+    same transaction as the item and its event: a failure between the writes
+    leaves none of them. Concurrent admissions of one key create exactly once.
+  - New store capability `WorkGraphStore::insert_item_admitted` returns
+    `WorkItemAdmissionInsert::{Inserted, Existing}`. It defaults to
+    unsupported; the memory and SQLite stores implement it.
+  - `ExternalWorkRef` stays provenance only and is never a dedupe key.
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a
@@ -348,6 +827,21 @@ them.
   idempotency key and returns its id. The driver signals every accepted
   input, so the wait is woken by the admission rather than re-reading on a
   timer. It returns `Ok(None)` for a session without a live registration.
+- `release-workflow-dispatch --mode assets --assets-run-id RUN_ID` (workflow
+  input `assets_run_id`, or `ASSETS_RUN_ID=RUN_ID make release-assets`)
+  publishes the archives an earlier asset recovery run built, instead of
+  rebuilding them. The build jobs are skipped; the publisher downloads that
+  run's archives and requires the run to be a `release.yml` dispatch on main
+  at a commit in main's history with a successful `Release binary build gate`,
+  every archive attested by `release.yml` at that commit on `refs/heads/main`,
+  and the source stamps to name the tag commit. A run from before the stamps
+  (v0.8.50 run 36988090176) is accepted only when the tag is an ancestor of
+  its commit and every path changed between them is under `.github/` or
+  `CHANGELOG.md`. Every publish also checks again that each binary in each
+  archive embeds the release version.
+- `meerkat_contracts::wire` now re-exports `WireImageData` and
+  `WireVideoData`, the inline media types the agent mob tools decode
+  (#1538, see Security).
 
 ### Deprecated
 
@@ -479,6 +973,23 @@ them.
   its terminal reply instead of failing when `retire` runs out of its wait
   budget.
 
+- SQLite stores refuse a database path that SQLite cannot safely address by
+  one name, instead of opening and mutating it (#1551). SQLite names a
+  database's journal, WAL and SHM files after the path it opened, so a hard
+  link to another store's file gave the same database a second set of
+  sidecars and broke coordinated access and crash recovery.
+  - Every open goes through `meerkat_sqlite::open_with`, which validates the
+    file before any connection: it must be a regular file with exactly one
+    hard link where the platform reports link counts.
+  - The file is checked again once the connection holds it, before any
+    pragma or schema work, so a file replaced in between is refused.
+  - The maintenance-fence guard and the runtime repair constructor's
+    read-only preflight run the same check.
+  - The runtime store maps the refusal to `RuntimeStoreError::Unsupported`,
+    and the session store to `StoreError::UnsupportedDatabaseFile`. Refused
+    opens leave every database, WAL, SHM and journal file byte-identical.
+  - The check keeps a cooperating owner's namespace honest. It is not a
+    defense against an adversary replacing paths concurrently.
 - Three meerkat-mob-mcp tests no longer fail on a loaded host (#1509). They
   now assert ordering with events instead of wall-clock margins.
   `relink_past_max_run_retires_a_child_still_running` relies on the child's
@@ -499,6 +1010,94 @@ them.
   (`deliver_detached_completion_to_member_when_revivable`) and the
   post-restore council and fork re-link sweeps.
 
+- A refused OAuth token refresh no longer copies the token endpoint's
+  response body into error text. `OAuthError::TokenEndpoint` used to render
+  `status=.. body=..`, and on the MCP refresh path that text became
+  `McpError::ConnectionFailed` and the agent-visible connection notice
+  (`ExternalToolDelta` detail), so a non-conforming authorization server that
+  echoed the refresh grant in its error body leaked it to the agent. Its
+  `Display` now shows only the status and a well-formed RFC 6749 `error` code,
+  and its `Debug` reports the body by length. The raw body stays in the field
+  for host code that reads it deliberately. The MCP refresh path logs status
+  and body size at debug level, never the body. This also covers the
+  authorization-code and device-code grants, which share the error type.
+- An asset recovery dispatched from main (`release-workflow-dispatch --mode
+  assets`) can publish its release archives. It runs main's workflow against
+  the tag, so its build attestations name main's commit, and the exact-tag
+  provenance check refused every archive (v0.8.50 run 36988090176). Each build
+  job now checks that its checkout is the tag commit and stamps every archive
+  with it (`<archive>.source-commit`, attested with the archive); for those
+  recovery runs the publisher verifies each archive and stamp against
+  release.yml at the run's commit on `refs/heads/main` and requires the stamp
+  to name the tag commit. Tag pushes and dispatches on the tag ref keep the
+  exact-tag check.
+- A session document no longer grows without bound. The transcript rewrite
+  graph in session metadata kept one full pre-rewrite transcript plus every
+  message appended between rewrites, forever. Compaction shrank the live
+  transcript, but the document kept every message the session ever produced.
+  A blob-persisted session writes that whole document at every turn boundary,
+  so cost per turn grew with lifetime history: one OB3 coordinator reached
+  286 MB and was rewritten in full at each boundary.
+  - After each compaction the graph now re-anchors at the oldest of the most
+    recent `history_retained_rewrites` rewrites. The new anchor is that
+    rewrite's re-proved child plus its row-lineage token.
+  - Every commit stays, together with the rewrite- and graph-prefix
+    accumulators at the cut. The rolling graph identity is byte-identical, so
+    physical heads and save guards that bind it still verify.
+  - Documents written before this change load unchanged and re-anchor on
+    their next compaction.
+  - Reads of a retired revision (fork, rewind, restore, revision reads,
+    projections, and suffix proofs that would start before the cut) fail with
+    the typed `TranscriptRevisionRetired` naming the oldest retained revision.
+    They never return a wrong anchor.
+  - A head-canonical store that keeps all rows (`TranscriptRowRetention::
+    KeepsAll`) can still serve retired revisions from its rewrite records.
+    A re-anchored graph cannot be laid out as head-canonical strands
+    (blob-to-SQLite conversion), which is refused typed.
+  - The SQLite store bounds its rows to the same cut. In a rewrite
+    mutation's transaction it:
+    - replays its stored graph and re-anchors it through the graph owner;
+    - persists the retired base;
+    - deletes the `session_rewrites` rows below the cut;
+    - collects strands that only retired history could reach.
+  - Cold loads replay the retained rows from that base, with the same rolling
+    identity. A head's row-lineage anchor rotates once the retention cut
+    passes it, so cold row replay never needs a retired row. Proofs that
+    would need rows below the cut refuse typed.
+  - Measured over 40 compaction cycles, keeping 3: 3 rewrite rows and 17
+    strand rows from cycle 20 on, with stored bytes growing only by the
+    retained commit list.
+  - Residual: each retained commit is about 640 B, so the document still
+    grows by about 640 KB per 1,000 compactions. Missing-receipt repair
+    writes those commit values, so they stay; folding them below an
+    audit-coverage watermark is tracked in #1534.
+- The mob actor keeps serving commands while a spawn's supervisor
+  private-trust install waits on a slow member runtime or comms.
+  - The install used to run inside `finalize_spawn_admit` on the actor, so
+    one parked install held every other command behind it. A host saw a
+    mob-phase query and five spawns go unserved for 70 s.
+  - The install now runs off the actor, with the spawn's endpoint
+    observation, through the actor's member-effect lane (ticket-fenced
+    commit). `finalize_spawn_admit` consumes the outcome at the same point in
+    its ladder, so failure handling is unchanged. An install that finalize
+    never reached (an earlier failure) is revoked.
+- A member spawn no longer waits for another member's turn to end.
+  - Many `EphemeralSessionService` operations (also used inside
+    `PersistentSessionService`) held the service-wide session map while
+    waiting for a session task's reply. A session task serves no commands
+    while its turn runs. Examples: `update_session_mob_authority_context`,
+    `set_session_tool_visibility_state`, the session client and tool-filter
+    updates, the identity hot swap, and the live transcript commits.
+  - One such call aimed at a busy session therefore pinned the map for that
+    whole turn. Because the lock is fair, the next session create (a spawned
+    member's session) and every later session read of any session queued
+    behind it.
+  - Seen in a host whose coordinator spawned review workers from a tool call:
+    the spawns completed only after the coordinator's turn released.
+  - The session map is now a type whose only access is a synchronous
+    closure (or a cloned handle fact), so no guard can be held across an
+    `.await`. Every session-task round trip takes the task's command sender
+    and sends and waits with the map released.
 - The machine TLA generator parenthesizes a field's pending value when a
   later expression in the same update block reads it. A conditionally
   updated field was spliced bare as `IF c THEN a ELSE b`, so TLA+ precedence
@@ -508,6 +1107,32 @@ them.
   equality would have aborted TLC with a non-boolean IF condition. The Rust
   kernels were unaffected, and every existing invariant, audit and witness
   result is unchanged on the regenerated models.
+- Out-of-order acknowledgement no longer wedges a session's runtime delivery
+  cursor (#1497).
+  - The cursor wedged in two ways:
+    - The shell acknowledged a job terminal while an earlier row (a monitor
+      notification, or another job's terminal that completed later) was still
+      pending. `mark_applied` refused it as out of order, the failure was only
+      logged, and every later delivery for that session stayed blocked.
+    - The same happened when two concurrent shell jobs completed out of order.
+  - `RuntimeDeliveryInbox::acknowledge` now records an out-of-band
+    acknowledgement ahead of the cursor in generated `RuntimeDeliveryMachine`
+    authority (new `AcknowledgeDelivery` / `AdvanceAcknowledgedPrefix`
+    inputs). The cursor still moves strictly in order and advances over the
+    contiguous acknowledged prefix. `AdvanceAcknowledgedPrefix` is total: with
+    nothing parked at the cursor the machine reports the prefix at rest
+    (`AcknowledgedPrefixAtRest`), so the shell never decides when to stop.
+  - The job applier marks acknowledged rows applied without re-running their
+    sinks. `RuntimeDeliveryInbox::acknowledged_pending_sequences` and
+    `RuntimeDeliveryAcknowledgement` are new.
+  - Delivering an off-RPC monitor notification itself still needs the library
+    applier, which is held with the ingress work.
+- `rkat auth login`'s browser step for provider OAuth no longer writes the
+  authorize URL, with its one-time `state` and PKCE challenge, to debug
+  logs. It opened the URL through `webbrowser::open`, which logs the
+  spawned command (URL included) at debug level, and the CLI forwards
+  `log` records into its tracing output under `RUST_LOG=debug`. It now uses
+  the same non-logging `open_system_browser` as the MCP login.
 - A prompt admitted to a session while its executor attachment was still
   being prepared could stay queued forever. The attachment read its queue to
   decide whether to wake its runtime loop, then handed the session mutation
@@ -518,8 +1143,8 @@ them.
   gate again through commit.
 - The post-restore temporary council sweep no longer ends with an outcome
   still owed when its first pass runs before the host registers the
-  convener's mob (MobKit inserts restored mob handles after constructing the
-  state). The sweep now also waits for the managed-mob set to change and
+  convener's mob (a host may insert restored mob handles after constructing
+  the state). The sweep now also waits for the managed-mob set to change and
   delivers once the mob is registered and running.
 - A repeated `council` call that arrived just as the original run finished no
   longer joins the finished execution and reports `replayed: false`. The
@@ -583,6 +1208,24 @@ them.
   landed between the wait's checks and its registration could also be missed;
   the wait now re-reads both after registering.
 
+- MCP server removal and readiness waits are event-driven (#1461).
+  - The removal drain in meerkat-rpc and meerkat-rest slept 100 ms between
+    passes. `McpRouterAdapter::wait_until_ready` polled every 100 ms. Both now
+    wait on a router progress signal: a finished call, a delivered connect
+    result or a finalized removal. The drain also wakes at the earliest
+    removal timeout.
+  - The drain queues its lifecycle actions before releasing the router lock.
+    Whoever observes a removal finalized also finds its action queued for the
+    next boundary.
+  - A removal staged just as the drain exited saw the running flag still set,
+    and nothing drained it. The drain now reclaims the flag for it.
+  - Three meerkat-rpc MCP lifecycle tests are no longer ignored. They staged
+    a remove or set an in-flight call right after an asynchronous add turn,
+    before the server was installed. A remove staged during a pending add is
+    deferred to a later boundary, and the in-flight hook silently did nothing.
+    They now wait for the server with `wait_until_ready`, and wait for the
+    drain with typed waits instead of fixed sleeps. Each passes 30/30 at 10
+    copies on two pinned cores.
 - A delivery whose caller left while it was parked behind a member's
   in-flight admission no longer runs as a ghost turn. The admission lane
   skips such a delivery by checking its reply channel, but `SubmitWork` ran
@@ -623,7 +1266,6 @@ them.
     (run in the canonical TLC lane) proves unregister stays reachable through
     the close transitions from an admitted, staged and bound channel, and
     from a session running a turn or retired during one.
-
 - The GitHub-hosted Linux release binary jobs no longer fail in their first
   minute with "detected dubious ownership": the release container marks the
   workspace safe for Git before setup-rust-ci asks Git for the repository
@@ -634,7 +1276,34 @@ them.
   (9.0 GB) and was SIGKILLed on aarch64. The catalog crate now builds at
   `opt-level = 1` in release (6.3 GB; it is not on a hot path) and the
   Linux build runs two jobs.
-
+- Composition owner feedback can no longer discharge a handoff obligation by
+  naming a value the obligation does not carry. The OAuth release drain bound
+  each expired flow id with an owner-context source drawn from the whole string
+  domain, and one feedback cleared the entire obligation, so a feedback naming
+  an unrelated flow "discharged" the drain while the flow stayed outstanding and
+  Release could never commit. The new `FeedbackFieldSource::ObligationMember`
+  source names one member of a set-valued obligation field: the generated
+  model quantifies it over that set and removes only that member (the
+  obligation stays open while any member-bearing field is non-empty), and the
+  generated Rust submitter rejects a non-member with
+  `ObligationMemberFeedbackError::NotObligationMember`. The drain's browser and
+  device flow bindings use it, and two new `auth_lease_bundle` witnesses prove
+  a release drains its flow and reaches Released under every owner choice.
+  `NoOpenObligationsOnTerminal_*` is now generated only for `AckRequired`
+  protocols: a `PublicationOnly` protocol has no feedback to close its
+  obligations, so the invariant could only fail once its producer reached a
+  terminal phase (25 such invariants are dropped; state counts are unchanged).
+- The canonical TLC lane no longer lets a composition pass with zero TLC
+  coverage. `auth_lease_bundle` had no witness and its main sweep reaches only
+  its initial state (compositions move only on queued inputs), so TLC checked
+  nothing in it. It gains two scripted witnesses that drive the embedded
+  AuthMachine through Acquire, the freshness classifications
+  (`ObserveCredentialFreshnessValid`, `ExpiredFromValid`, `ExpiringFromValid`)
+  and a refresh round trip (6 and 8 distinct states). `xtask machine-verify`
+  now fails closed, naming the composition, when a composition has neither a
+  witness whose completion TLC proved nor a main sweep that explores past its
+  initial state, and fails closed, naming each one, on any declared route that
+  no completed witness or coverage hit exercised.
 - Tests that need the `mcp-test-server` fixture binary no longer pass
   without running when it is missing. Each test hand-rolled a
   `target/debug/mcp-test-server` lookup and returned early when nothing was
@@ -651,7 +1320,7 @@ them.
   - Bazel gives every test target of such a crate the fixture, keyed on the
     dev-dependency. Generation fails if one lacks it.
   - Three meerkat-rpc MCP lifecycle tests this exposed as failing under load
-    are ignored with that reason pending #1461.
+    are fixed and run again (#1461, above).
 - Explicit mob resume no longer waits forever on a member whose session
   claim settled as an actor without an executor. If another in-process owner
   materializes that actor after the resume's preparation step and never
@@ -662,7 +1331,6 @@ them.
   (discard the actor, release its exact registration) and re-attempts. It
   still waits on in-flight claims. The competitor's old bindings and
   registration witness are refused typed afterwards.
-
 - `MeerkatMachine::wait_input_terminal_receipt` resolves a directed
   (peer-request) batch's input when its receipt is finalized, not only once
   its interaction terminals publish. The runtime finalizes a directed
@@ -708,9 +1376,55 @@ them.
   Turbo S harness answers every request with real decoded counters (a media
   fault on an audible channel fails the run) and retries an exchange only
   after a journaled media-fault close and reopen.
+- rkat-rpc over TCP: a new connection no longer overwrites the shared
+  runtime's callback channel, id counter and tool registry (#1451). Before,
+  callbacks for an older connection's new sessions went to the newest
+  connection, its registered tools were cleared, and callback ids restarted
+  in another connection's id space. On connection close the server now fails
+  pending callbacks before its graceful request shutdown, so a session waiting
+  on a gone client gets the typed failure immediately.
+- A dropped `EphemeralSessionService`'s runtime machine is never handed to a
+  new service (#1450). `MobSessionService::runtime_adapter` answered from a
+  process-global cache keyed by the service's address, so a new service
+  allocated at a freed address while the old machine was still held got that
+  machine. The service now owns its machine in a per-instance slot created on
+  first use, and the global cache is gone. `meerkat-session`'s optional
+  `meerkat-runtime` dependency moves behind a new `runtime-machine` feature on
+  every target (`session-store` implies it), so wasm mobs get the same typed
+  slot (#1457).
+- Pushes to `release/**` integration branches run the same push-only CI lanes
+  as `main` (workspace unit tests in eight shards, wasm-check, sdk-host and
+  the other push-gated lanes), so reverse-dependency suites run before the
+  final merge to `main`. Attestation stays `main`-only (#1560).
+- The CI gate's 2700 s runaway ceiling no longer counts runner queue: it
+  applies to each lane's terminal minus the queue on its path, so a pull
+  request whose lanes all pass is not failed while hosted runners are
+  saturated. Queue is still reported (#1548).
+- Test and build hygiene with no product change: the facade's pre-ledger
+  bridge tests derive their target versions from each domain instead of a
+  literal (#1559); the queued-steer mob test waits for the steer's admission
+  receipt instead of a 50 ms sleep (#1554); the barge-in recovered fixture
+  registers the session its live channel is bound to (#1510); and the
+  `meerkat-machine-schema` Bazel BUILD file is regenerated (#1515).
 
 ### Changed
 
+- Generated machine TLA models lead each quantified `Next` disjunct with its
+  transition's source-phase guard. The meaning is unchanged (the guard is also
+  the first conjunct of the action), but TLC no longer enumerates every
+  parameter tuple of every transition in every state: work_graph_lifecycle's
+  ci sweep drops from 276 s to 161 s and occurrence_lifecycle's from 143 s to
+  90 s, with identical generated and distinct state counts on every machine.
+- The GitHub-hosted release builds each surface binary in its own job (16
+  jobs: 4 targets x rkat, rkat-rpc, rkat-rest, rkat-mcp) instead of four
+  sequential `cargo build -p` runs per target, so a target takes the slowest
+  single package instead of the sum (the v0.8.50 asset run spent 3-4+ hours
+  per target). x86_64 macOS now builds natively on the free `macos-15-intel`
+  label instead of the billed `macos-15-large` runner (257 billed minutes per
+  release on v0.8.50). The binaries are unchanged: one `cargo build` for all
+  four would unify features across them, and the unit graphs show every
+  binary would link different code (rkat-mcp would gain live/mcp, native
+  keyring and OAuth), so each package still builds alone.
 - Supervisor rotation no longer polls a member for convergence. A member
   advertising `rotation_observe_hold` answers a held
   `ObserveSupervisorRotation` when the operation is terminal, waking on a
@@ -1117,7 +1831,7 @@ them.
   constructors keep their default handler. Host factories receive the exact
   selected server configuration; authentication remains with the auth resolver.
   Other callbacks are not enabled by this first profile. AgentFactory, SDK and
-  Toolkit configuration of this optional service remain separate follow-ups.
+  host configuration of this optional service remain separate follow-ups.
 - `ServiceMemberLiveHost::forget_live_context_summary`,
   `ServiceMemberLiveHost::retained_live_context_summary` (read-only
   provenance) and `ServiceMemberLiveHost::prune_retained_live_context_summaries`

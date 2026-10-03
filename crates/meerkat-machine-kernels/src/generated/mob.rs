@@ -9686,6 +9686,10 @@ pub mod effects {
     #[allow(unused_imports)]
     use super::*;
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HoldMemberRunStarts {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseMemberRunStarts {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DefinitionEpochAdvanced {
         pub previous_epoch: u64,
         pub epoch: u64,
@@ -10531,6 +10535,8 @@ pub mod effects {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Effect {
+    HoldMemberRunStarts(effects::HoldMemberRunStarts),
+    ReleaseMemberRunStarts(effects::ReleaseMemberRunStarts),
     DefinitionEpochAdvanced(effects::DefinitionEpochAdvanced),
     RequestRuntimeBinding(effects::RequestRuntimeBinding),
     SpawnProfileAuthorized(effects::SpawnProfileAuthorized),
@@ -10684,6 +10690,8 @@ pub enum Effect {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
+    HoldMemberRunStarts,
+    ReleaseMemberRunStarts,
     DefinitionEpochAdvanced,
     RequestRuntimeBinding,
     SpawnProfileAuthorized,
@@ -11898,7 +11906,9 @@ pub enum TransitionId {
     DisposeRemoteTurnObligationCompleted,
     DisposeRemoteTurnObligationDestroyed,
     BeginPlacedCompletionLifecycleQuiesceFresh,
+    BeginPlacedCompletionLifecycleQuiesceFreshStop,
     BeginPlacedCompletionLifecycleQuiesceReplay,
+    BeginPlacedCompletionLifecycleQuiesceReplayStop,
     BeginPlacedCompletionLifecycleQuiesceStoppedFresh,
     BeginPlacedCompletionLifecycleQuiesceStoppedReplay,
     BeginPlacedCompletionLifecycleQuiesceCompletedFresh,
@@ -12232,6 +12242,7 @@ pub enum TransitionId {
     RetireAllStopped,
     RetireAllCompleted,
     CompleteSpawnRunning,
+    CompleteSpawnStopped,
     CompleteSpawnLateArrivalRunning,
     CompleteSpawnLateArrivalStopped,
     CompleteSpawnLateArrivalCompleted,

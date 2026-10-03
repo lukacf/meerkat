@@ -544,7 +544,7 @@ impl RuntimeOAuthFlowHandle {
             if let Err(err) = self.expire_browser(&target, &flow_id) {
                 tracing::debug!(
                     target: "meerkat::auth::oauth",
-                    binding_target = ?target, %flow_id,
+                    binding_target = ?target, action = ?OAuthBrowserActionRef::project(&flow_id),
                     "expire_collected_flows: browser flow expiry no-op (legitimate interleaving): {err}"
                 );
             }
@@ -1530,6 +1530,48 @@ impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
 }
 
 impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
+    fn admitted_connector_browser_attempt(
+        &self,
+        state: &str,
+        target: &AuthCredentialIdentity,
+    ) -> Result<Option<OAuthFlowRecord>, OAuthFlowError> {
+        let _payload_guard = self
+            .payload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.sync_persisted_payloads("admitted_oauth_browser_flow")?;
+        let Some(record) = self
+            .registry
+            .admitted_connector_browser_attempt(state, target)
+        else {
+            return Ok(None);
+        };
+        match self.verify_browser(target, state, &record.provider, &record.redirect_uri) {
+            Ok(()) => Ok(Some(record)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn pending_connector_browser_attempt(
+        &self,
+        target: &AuthCredentialIdentity,
+    ) -> Result<Option<(String, OAuthFlowRecord)>, OAuthFlowError> {
+        let _payload_guard = self
+            .payload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.sync_persisted_payloads("pending_oauth_browser_flow")?;
+        let Some((state, record)) = self.registry.pending_connector_browser_attempt(target) else {
+            return Ok(None);
+        };
+        // The machine owns liveness: a projection it no longer admits is not
+        // a pending attempt, and the caller starts a fresh one.
+        match self.verify_browser(target, &state, &record.provider, &record.redirect_uri) {
+            Ok(()) => Ok(Some((state, record))),
+            Err(_) => Ok(None),
+        }
+    }
+
     fn generated_credential_lifecycle(
         &self,
     ) -> Option<meerkat_core::handles::GeneratedAuthLeaseHandle> {

@@ -580,3 +580,42 @@ fn composition_route_owner_expected_revision_uses_target_revision() {
         "route-provided expected_revision must not use the generic numeric domain:\n{rendered}"
     );
 }
+
+#[test]
+fn obligation_member_feedback_ranges_over_the_obligation_and_discharges_only_that_member() {
+    let model = render_composition_semantic_model(
+        &meerkat_machine_schema::catalog::auth_lease_bundle_composition(),
+    )
+    .expect("render auth_lease_bundle");
+    let action = model
+        .lines()
+        .skip_while(|line| {
+            !line.starts_with(
+                "OwnerFeedback_auth_machine_auth_release_oauth_flow_drain_ExpireOAuthBrowserFlow ==",
+            )
+        })
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The owner can only name a flow the drain obligation carries.
+    assert!(
+        action.contains("\\E member_browser_flow_ids \\in token.browser_flow_ids"),
+        "{action}"
+    );
+    assert!(!action.contains("\\in StringValues"), "{action}");
+    // It discharges only that member; the token stays open while flows remain.
+    assert!(
+        action.contains("[token EXCEPT !.browser_flow_ids = @ \\ {member_browser_flow_ids}]"),
+        "{action}"
+    );
+    assert!(action.contains("= (IF "), "{action}");
+    // Terminal obligation closure applies to the AckRequired drain protocol,
+    // not to the PublicationOnly lifecycle publication (no feedback can close it).
+    assert!(
+        model.contains("NoOpenObligationsOnTerminal_auth_machine_auth_release_oauth_flow_drain ==")
+    );
+    assert!(
+        !model
+            .contains("NoOpenObligationsOnTerminal_auth_machine_auth_lease_lifecycle_publication")
+    );
+}

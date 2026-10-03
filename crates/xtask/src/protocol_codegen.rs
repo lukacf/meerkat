@@ -7441,6 +7441,11 @@ fn generate_handle_bridge_helpers(
                         to_snake_case(field.as_str())
                     ));
                 }
+                FeedbackFieldSource::ObligationMember(field) => bail!(
+                    "handle-bridge feedback cannot bind obligation member `{field}` (protocol `{}`); \
+                     use an effect-extractor protocol",
+                    protocol.name
+                ),
                 FeedbackFieldSource::OwnerContext(name) => {
                     let snake = to_snake_case(name);
                     if snake == "cause" {
@@ -7582,14 +7587,45 @@ fn generate_feedback_submitter(
             .context("feedback error type missing")?,
     );
     let owner_params = owner_context_params(target_variant, feedback)?;
-    let obligation_param = if feedback
+    // `(owner parameter, obligation set field)` per obligation member: the
+    // submitter refuses a member the obligation does not carry.
+    let members = feedback
         .field_bindings
         .iter()
-        .any(|binding| matches!(binding.source, FeedbackFieldSource::ObligationField(_)))
+        .filter_map(|binding| match &binding.source {
+            FeedbackFieldSource::ObligationMember(field) => Some((
+                to_snake_case(binding.input_field.as_str()),
+                to_snake_case(field.as_str()),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let obligation_param = if !members.is_empty()
+        || feedback
+            .field_bindings
+            .iter()
+            .any(|binding| matches!(binding.source, FeedbackFieldSource::ObligationField(_)))
     {
         "obligation"
     } else {
         "_obligation"
+    };
+    let error_type = if members.is_empty() {
+        error_type.to_owned()
+    } else {
+        if !out.contains("pub enum ObligationMemberFeedbackError<E>") {
+            writeln!(
+                out,
+                "/// Owner feedback naming an obligation member, rejected before it reaches the\n\
+                 /// machine (the member is not in the obligation) or by the machine itself.\n\
+                 #[derive(Debug, Clone, PartialEq, Eq)]\n\
+                 pub enum ObligationMemberFeedbackError<E> {{\n\
+                 \x20   NotObligationMember {{ field: &'static str }},\n\
+                 \x20   Transition(E),\n\
+                 }}\n"
+            )?;
+        }
+        format!("ObligationMemberFeedbackError<{error_type}>")
     };
     let fn_name = format!("submit_{}", to_snake_case(feedback.input_variant.as_str()));
     let return_type = match return_kind {
@@ -7610,15 +7646,26 @@ fn generate_feedback_submitter(
         if owner_params.is_empty() { "" } else { ", " },
         owner_params.join(", ")
     )?;
+    for (param, field) in &members {
+        writeln!(
+            out,
+            "    if !obligation.{field}.contains(&{param}) {{\n        return Err(ObligationMemberFeedbackError::NotObligationMember {{ field: \"{field}\" }});\n    }}"
+        )?;
+    }
     writeln!(
         out,
-        "    let transition = authority.apply({}::{})?;",
+        "    let transition = authority.apply({}::{}){}?;",
         input_enum,
         ctor_field_list_from_bindings(
             target_variant,
             feedback,
             rust.input_payload_module_path.as_deref()
-        )?
+        )?,
+        if members.is_empty() {
+            ""
+        } else {
+            ".map_err(ObligationMemberFeedbackError::Transition)"
+        }
     )?;
     match return_kind {
         FeedbackReturnKind::Effects => writeln!(out, "    Ok(transition.into_effects())")?,
@@ -7745,9 +7792,15 @@ fn owner_context_params(
     let mut params = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for binding in &feedback.field_bindings {
-        if let FeedbackFieldSource::OwnerContext(name) = &binding.source
-            && seen.insert(name.clone())
-        {
+        // An obligation member is supplied by the owner too, then checked
+        // against the obligation's set field by the submitter.
+        let name = match &binding.source {
+            FeedbackFieldSource::OwnerContext(name) => name.clone(),
+            FeedbackFieldSource::ObligationMember(_) => binding.input_field.as_str().to_owned(),
+            FeedbackFieldSource::ObligationField(_) => continue,
+        };
+        if seen.insert(name.clone()) {
+            let name = &name;
             let field = target_variant
                 .field_named(binding.input_field.as_str())
                 .with_context(|| {
@@ -7820,6 +7873,9 @@ fn ctor_field_list_from_bindings(
                     format!("obligation.{}", to_snake_case(source.as_str()))
                 }
                 FeedbackFieldSource::OwnerContext(name) => to_snake_case(name),
+                FeedbackFieldSource::ObligationMember(_) => {
+                    to_snake_case(binding.input_field.as_str())
+                }
             };
             if field.name.as_str() == value {
                 Ok(value)
@@ -7862,7 +7918,8 @@ fn ctor_field_list_from_bindings_without_obligation(
                 })?;
             let value = match &binding.source {
                 FeedbackFieldSource::OwnerContext(name) => to_snake_case(name),
-                FeedbackFieldSource::ObligationField(source) => bail!(
+                FeedbackFieldSource::ObligationField(source)
+                | FeedbackFieldSource::ObligationMember(source) => bail!(
                     "notify helper cannot synthesize obligation field `{source}` for `{}`",
                     field.name
                 ),

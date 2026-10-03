@@ -996,6 +996,28 @@ pub trait OAuthFlowAuthority: Send + Sync {
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError>;
 
+    /// The live connector browser attempt admitted under `state` for
+    /// `target`. Read-only and local: no network, no admission, no retirement.
+    /// Owners that cannot answer report `None`.
+    fn admitted_connector_browser_attempt(
+        &self,
+        _state: &str,
+        _target: &AuthCredentialIdentity,
+    ) -> Result<Option<OAuthFlowRecord>, OAuthFlowError> {
+        Ok(None)
+    }
+
+    /// The newest live connector browser attempt admitted for `target`, as
+    /// `(state, record)`. Read-only: it admits, extends, consumes or retires
+    /// nothing. Owners that cannot answer report `None`, so callers start a
+    /// fresh attempt.
+    fn pending_connector_browser_attempt(
+        &self,
+        _target: &AuthCredentialIdentity,
+    ) -> Result<Option<(String, OAuthFlowRecord)>, OAuthFlowError> {
+        Ok(None)
+    }
+
     /// Retire an exact browser attempt through its existing owner. Cancellation
     /// does not consume an authorization response or publish a credential.
     fn expire(
@@ -1098,6 +1120,41 @@ impl OAuthFlowRegistry {
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError> {
         <Self as OAuthFlowAuthority>::consume(self, state, target, provider.into(), redirect_uri)
+    }
+
+    /// The unexpired connector browser attempt admitted under `state` for
+    /// `target`.
+    pub fn admitted_connector_browser_attempt(
+        &self,
+        state: &str,
+        target: &AuthCredentialIdentity,
+    ) -> Option<OAuthFlowRecord> {
+        let mut flows = self.flows.lock();
+        prune_expired_locked(&mut flows, self.ttl);
+        flows
+            .get(state)
+            .filter(|record| {
+                &record.target == target
+                    && matches!(record.provider, OAuthBrowserFlowIdentity::Connector { .. })
+            })
+            .cloned()
+    }
+
+    /// The newest unexpired connector browser attempt for `target`.
+    pub fn pending_connector_browser_attempt(
+        &self,
+        target: &AuthCredentialIdentity,
+    ) -> Option<(String, OAuthFlowRecord)> {
+        let mut flows = self.flows.lock();
+        prune_expired_locked(&mut flows, self.ttl);
+        flows
+            .iter()
+            .filter(|(_, record)| {
+                &record.target == target
+                    && matches!(record.provider, OAuthBrowserFlowIdentity::Connector { .. })
+            })
+            .max_by_key(|(_, record)| record.created_at)
+            .map(|(state, record)| (state.clone(), record.clone()))
     }
 
     /// Remove a private projection only after its native flow owner retired it.
@@ -1407,6 +1464,25 @@ impl Default for OAuthFlowRegistry {
 }
 
 impl OAuthFlowAuthority for OAuthFlowRegistry {
+    fn admitted_connector_browser_attempt(
+        &self,
+        state: &str,
+        target: &AuthCredentialIdentity,
+    ) -> Result<Option<OAuthFlowRecord>, OAuthFlowError> {
+        Ok(OAuthFlowRegistry::admitted_connector_browser_attempt(
+            self, state, target,
+        ))
+    }
+
+    fn pending_connector_browser_attempt(
+        &self,
+        target: &AuthCredentialIdentity,
+    ) -> Result<Option<(String, OAuthFlowRecord)>, OAuthFlowError> {
+        Ok(OAuthFlowRegistry::pending_connector_browser_attempt(
+            self, target,
+        ))
+    }
+
     fn start(
         &self,
         target: AuthCredentialIdentity,

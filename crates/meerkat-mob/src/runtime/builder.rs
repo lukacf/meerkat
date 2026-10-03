@@ -352,7 +352,7 @@ async fn drive_recovered_placed_lifecycle_intent(
             return;
         }
         let result = match intent {
-            mob_dsl::PlacedCompletionLifecycleIntentKind::Stop => handle.stop().await,
+            mob_dsl::PlacedCompletionLifecycleIntentKind::Stop => handle.stop().await.map(|_| ()),
             mob_dsl::PlacedCompletionLifecycleIntentKind::Reset => handle.reset().await,
             mob_dsl::PlacedCompletionLifecycleIntentKind::Complete => handle.complete().await,
             mob_dsl::PlacedCompletionLifecycleIntentKind::RetireAll => handle.retire_all().await,
@@ -2592,12 +2592,14 @@ fn canonical_runtime_adapter_for_session_service(
 ) -> Result<RuntimeAdapterOption, MobError> {
     let service_adapter = session_service.runtime_adapter();
     match (runtime_adapter, service_adapter) {
+        // One owner of record: the session service archives and controls
+        // sessions through its own machine, so an explicit adapter must be
+        // that same owner (a clone), not merely another machine over the same
+        // store (#1550).
         (Some(adapter), Some(service_adapter))
-            if !adapter.shares_runtime_persistence_with(&service_adapter) =>
+            if !adapter.is_same_runtime_owner(&service_adapter) =>
         {
-            Err(MobError::Internal(
-                "explicit mob runtime adapter does not share the session service runtime persistence authority".to_string(),
-            ))
+            Err(MobError::RuntimeOwnerConflict)
         }
         (Some(adapter), _) => Ok(Some(adapter)),
         (None, service_adapter) => Ok(service_adapter),
@@ -9907,6 +9909,9 @@ impl MobBuilder {
                 autonomous_initial_turns: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
                 autonomous_stop_interrupts: BTreeMap::new(),
                 autonomous_stop_interrupted: BTreeMap::new(),
+                stop_member_outcomes: BTreeMap::new(),
+                #[cfg(test)]
+                resume_readiness_fault: None,
                 pending_autonomous_stop: None,
                 next_autonomous_stop_ticket: 0,
                 pending_autonomous_stop_controls: VecDeque::new(),

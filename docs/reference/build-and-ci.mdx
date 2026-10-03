@@ -201,16 +201,18 @@ need the unbounded verification set.
 ## CI Shape
 
 Pull-request CI is `.github/workflows/ci.yml`. It runs on pull requests,
-pushes to `main`, and manual dispatches (a branch head runs once, through its
-pull request), entirely with Cargo on GitHub-hosted `ubuntu-latest` runners
+pushes to `main` and to `release/**` integration branches, and manual
+dispatches (any other branch head runs once, through its pull request), entirely with Cargo on GitHub-hosted `ubuntu-latest` runners
 (4 vCPU), and it is sized to a 25-minute lane execution budget. Compiled
 objects are cached by sccache (content-addressed, shared by every lane and
 readable from `main` by every pull request); rust-cache holds only the
 registry, because per-lane target caches exceeded the repository's 10 GB
 cache limit in one pull request:
 
-What runs where (`pull_request` is budgeted; `push: main` is not; nightly and
-the release tag carry the rest):
+What runs where (`pull_request` is budgeted; `push: main` is not; a push to a
+`release/**` integration branch runs the same push-only lanes as `main`, so
+reverse-dependency suites run on every release merge, but only `main` writes
+the exact-tree attestation; nightly and the release tag carry the rest):
 
 | Lane | `pull_request` | `push: main` | nightly | release tag |
 | --- | --- | --- | --- | --- |
@@ -226,7 +228,7 @@ the release tag carry the rest):
 | `sdk-host`: Python + TypeScript SDK suites | deferred | yes | yes, plus Web SDK | Bazel SDK suites |
 | `example-web`: build the `sdks/web` wasm runtime once (wasm-pack 0.13.1, no wasm-opt), then run examples 031, 032 and 033 in Playwright Chromium | when `sdks/web/`, `crates/meerkat-web-runtime/`, `crates/meerkat-contracts/` or those examples change | yes | - | - |
 | integration-fast, `e2e-fast`, dense Mob topology, bounded TLC, feature matrices, minimal builds, audit, `e2e-system`, release packaging | - | - | yes | BuildBuddy `full-fresh` graph |
-| `gate` (`CI gate`): fail-closed aggregate; on pull requests a 1500-second lane execution budget and a 2700-second push-to-terminal runaway ceiling, runner queue reported as a warning; schema-4 attestation on `main` | yes | yes (no budget) | - | consumed by `require_ci_green` |
+| `gate` (`CI gate`): fail-closed aggregate; on pull requests a 1500-second lane execution budget and a 2700-second push-to-terminal runaway ceiling, both excluding runner queue, which is reported as a warning; schema-4 attestation on `main` | yes | yes (no budget) | - | consumed by `require_ci_green` |
 
 How the budget is measured: the gate reads every completed lane from the
 Actions jobs API and splits its time into runner queue (`created_at` to
@@ -238,11 +240,13 @@ it enforces two limits:
   slowest lane. This is the part the code controls: a lane that grows or an
   aggregate that drifts fails here. Run times belong to the job, so
   re-running only the gate cannot turn an overrun green.
-- **Push-to-terminal, 2700 s** (`CI_MAX_TERMINAL_SECONDS`): the runaway
-  backstop on the latest lane terminal, queue included, each lane timed from
-  the start of the run attempt it ran in (a re-run lane gets a fresh clock, a
-  carried-over lane keeps its attempt's clock). Past it a run is stuck,
-  whatever the cause.
+- **Push-to-terminal excluding runner queue, 2700 s**
+  (`CI_MAX_TERMINAL_SECONDS`): the runaway backstop on the latest lane
+  terminal minus the runner queue on that lane's path (its own queue plus the
+  change classification's, in the same attempt). Each lane is timed from the
+  start of the run attempt it ran in: a re-run lane gets a fresh clock, and a
+  carried-over lane keeps its attempt's clock. Past the ceiling a run's jobs
+  are stuck. Waiting for runners alone never fails it.
 
 Runner queue wait is reported, not budgeted: at 300 s or more on the critical
 path (`CI_QUEUE_WARN_SECONDS`) the gate emits a `CI runner queue wait`

@@ -51,6 +51,7 @@ fn every_catalog_machine_schema_is_constructed_at_most_once() {
     use dsl::session_turn_admission::SessionTurnAdmissionMachineState;
     use dsl::temporary_council_lifecycle::TemporaryCouncilLifecycleMachineState;
     use dsl::work_attention_lifecycle::WorkAttentionLifecycleMachineState;
+    use dsl::work_item_admission::WorkItemAdmissionMachineState;
     use dsl::workgraph_lifecycle::WorkGraphLifecycleMachineState;
 
     assert_construction_is_cached(MeerkatMachineState::schema_static, "MeerkatMachine");
@@ -84,6 +85,10 @@ fn every_catalog_machine_schema_is_constructed_at_most_once() {
     assert_construction_is_cached(
         WorkGraphLifecycleMachineState::schema_static,
         "WorkGraphLifecycleMachine",
+    );
+    assert_construction_is_cached(
+        WorkItemAdmissionMachineState::schema_static,
+        "WorkItemAdmissionMachine",
     );
     assert_construction_is_cached(
         WorkAttentionLifecycleMachineState::schema_static,

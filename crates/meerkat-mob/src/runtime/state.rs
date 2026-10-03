@@ -631,6 +631,15 @@ pub(super) struct MemberStatusProjectionTarget {
     pub(super) fence_token: Option<FenceToken>,
 }
 
+/// Which internal-error site of the explicit resume's readiness fan-out a
+/// test fails (#1500).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResumeReadinessFaultForTest {
+    BeginReadiness,
+    TicketExhausted,
+}
+
 pub(super) enum MobCommand {
     Spawn {
         spec: Box<super::handle::SpawnMemberSpec>,
@@ -745,6 +754,13 @@ pub(super) enum MobCommand {
     BeginStopQuiesceForTest {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Test-only: make the next explicit resume's readiness fan-out fail at
+    /// one of its internal-error sites (#1500 re-hold coverage).
+    #[cfg(test)]
+    FailNextResumeReadinessForTest {
+        fault: ResumeReadinessFaultForTest,
+        reply_tx: oneshot::Sender<()>,
+    },
     #[cfg(test)]
     SpawnPreparationProbe {
         agent_identity: AgentIdentity,
@@ -828,6 +844,10 @@ pub(super) enum MobCommand {
         ticket: super::actor::ResumeStepTicket,
         result: Result<Vec<super::actor::ExplicitResumeMemberRebuild>, MobError>,
     },
+    /// Internal re-entry sent by an exact autonomous stop interrupt task
+    /// after its result is available: re-drives a stop or resume rollback
+    /// parked on interrupts.
+    AutonomousStopInterruptSettled,
     /// Internal re-entry carrying the concurrent per-member end-of-turn
     /// outcomes of a parked Stop or Shutdown. `ticket` fences a stale
     /// resolution.
@@ -1457,7 +1477,7 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<super::event_pump::MemberEventTap, MobError>>,
     },
     Stop {
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
+        reply_tx: oneshot::Sender<Result<super::stop_report::MobStopReport, MobError>>,
     },
     ResumeLifecycle {
         deadline: meerkat_core::time_compat::Instant,
@@ -1679,6 +1699,8 @@ impl MobCommand {
             #[cfg(test)]
             Self::BeginStopQuiesceForTest { .. } => "BeginStopQuiesceForTest",
             #[cfg(test)]
+            Self::FailNextResumeReadinessForTest { .. } => "FailNextResumeReadinessForTest",
+            #[cfg(test)]
             Self::SpawnActivationCustodyProbe { .. } => "SpawnActivationCustodyProbe",
             #[cfg(test)]
             Self::MemberStatusLaneProbe { .. } => "MemberStatusLaneProbe",
@@ -1689,6 +1711,7 @@ impl MobCommand {
             Self::ResumeLifecycleReadinessResolved { .. } => "ResumeLifecycleReadinessResolved",
             Self::ResumeLifecyclePreparationResolved { .. } => "ResumeLifecyclePreparationResolved",
             Self::AutonomousMemberStopsResolved { .. } => "AutonomousMemberStopsResolved",
+            Self::AutonomousStopInterruptSettled => "AutonomousStopInterruptSettled",
             Self::ResumeLifecycleMemberObserved { .. } => "ResumeLifecycleMemberObserved",
             Self::ResumeLifecycleMemberReady { .. } => "ResumeLifecycleMemberReady",
             Self::ResumeLifecycleMemberSettled { .. } => "ResumeLifecycleMemberSettled",

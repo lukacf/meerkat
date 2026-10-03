@@ -155,6 +155,25 @@ fi
 echo "running bounded live delegation steer TLC audit"
 TLC_WORKERS="${tlc_workers}" "${live_steer_audit}" "${LIVE_STEER_AUDIT_MAX_STEPS:-16}"
 
+# The run-start hold (#1500: a mob Stop holds member run starts so an input
+# admitted before the stop runs only after Resume) is model-checked by a
+# hand-written audit over the same generated model: one session, one queued
+# input and two runs through every hold and release arm, every arm that
+# establishes a new run and its Held twin, one turn, the run endings and the
+# retired queue drain, under every generated invariant plus two action
+# properties (no new run while held; hold and release never touch the queue
+# or the current run). It also requires a counterexample to each witness
+# negation (refused while held, released then runs, a run that finishes while
+# held then a refusal, the retired drain refused). 12 steps reach every
+# witness; deeper bounds run by hand.
+run_start_hold_audit="${workspace_root}/specs/machines/meerkat_machine/run_start_hold_audit.sh"
+if [[ ! -x "${run_start_hold_audit}" ]]; then
+  echo "error: run-start hold audit runner is missing from workspace runfiles: ${run_start_hold_audit}" >&2
+  exit 1
+fi
+echo "running bounded run-start hold TLC audit"
+TLC_WORKERS="${tlc_workers}" "${run_start_hold_audit}" "${RUN_START_HOLD_AUDIT_MAX_STEPS:-12}"
+
 # UnregisterSession against live channels (#1476): unregister is guarded on
 # every live channel being closed and its close custody settled, and then
 # clears the session's terminal context-preparation records. A third

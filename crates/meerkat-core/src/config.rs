@@ -1011,6 +1011,11 @@ impl Config {
                 "compaction.min_turns_between_compactions must be greater than 0".to_string(),
             ));
         }
+        if self.compaction.history_retained_rewrites == 0 {
+            return Err(ConfigError::Validation(
+                "compaction.history_retained_rewrites must be greater than 0".to_string(),
+            ));
+        }
 
         // Plan §6.9 deleted the per-provider config enum block, so
         // there is no longer a nominal conflict between the legacy
@@ -1981,6 +1986,12 @@ pub struct CompactionRuntimeConfig {
     pub max_summary_tokens: u32,
     /// Minimum session-scoped pre-LLM boundaries between compactions.
     pub min_turns_between_compactions: u32,
+    /// How many recent transcript rewrites keep their bodies in the session
+    /// document. Older rewrites are retired after each compaction: their
+    /// commits and digests stay, their bodies (the pre-compaction history)
+    /// go, so the document stays bounded however long the session runs.
+    /// Fork, rewind and restore targets older than the window are refused.
+    pub history_retained_rewrites: usize,
 }
 
 impl Default for CompactionRuntimeConfig {
@@ -1992,6 +2003,7 @@ impl Default for CompactionRuntimeConfig {
             recent_turn_budget: 4,
             max_summary_tokens: 4096,
             min_turns_between_compactions: 3,
+            history_retained_rewrites: crate::TranscriptHistoryRetention::DEFAULT_RETAINED_REWRITES,
         }
     }
 }
@@ -2011,6 +2023,11 @@ impl Serialize for CompactionRuntimeConfig {
         if self.max_request_bytes.is_some() {
             len += 1;
         }
+        let include_retention =
+            self.history_retained_rewrites != defaults.history_retained_rewrites;
+        if include_retention {
+            len += 1;
+        }
 
         let mut state = serializer.serialize_struct("CompactionRuntimeConfig", len)?;
         if include_threshold {
@@ -2025,6 +2042,9 @@ impl Serialize for CompactionRuntimeConfig {
             "min_turns_between_compactions",
             &self.min_turns_between_compactions,
         )?;
+        if include_retention {
+            state.serialize_field("history_retained_rewrites", &self.history_retained_rewrites)?;
+        }
         state.end()
     }
 }
@@ -2041,6 +2061,7 @@ impl<'de> Deserialize<'de> for CompactionRuntimeConfig {
             recent_turn_budget: Option<usize>,
             max_summary_tokens: Option<u32>,
             min_turns_between_compactions: Option<u32>,
+            history_retained_rewrites: Option<usize>,
         }
 
         let seed = Seed::deserialize(deserializer)?;
@@ -2060,6 +2081,9 @@ impl<'de> Deserialize<'de> for CompactionRuntimeConfig {
             min_turns_between_compactions: seed
                 .min_turns_between_compactions
                 .unwrap_or(defaults.min_turns_between_compactions),
+            history_retained_rewrites: seed
+                .history_retained_rewrites
+                .unwrap_or(defaults.history_retained_rewrites),
         })
     }
 }
@@ -2072,6 +2096,7 @@ impl From<CompactionRuntimeConfig> for crate::CompactionConfig {
             recent_turn_budget: value.recent_turn_budget,
             max_summary_tokens: value.max_summary_tokens,
             min_turns_between_compactions: value.min_turns_between_compactions,
+            history_retained_rewrites: value.history_retained_rewrites,
         }
     }
 }
@@ -4289,6 +4314,48 @@ max_request_bytes = 9000000
         assert!(
             err.to_string()
                 .contains("compaction.min_turns_between_compactions")
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_history_retained_rewrites() {
+        let config = Config {
+            compaction: CompactionRuntimeConfig {
+                history_retained_rewrites: 0,
+                ..CompactionRuntimeConfig::default()
+            },
+            ..Config::default()
+        };
+        let err = config
+            .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
+            .expect_err("history_retained_rewrites=0 should be invalid");
+        assert!(
+            err.to_string()
+                .contains("compaction.history_retained_rewrites")
+        );
+    }
+
+    #[test]
+    fn history_retained_rewrites_round_trips_and_defaults_stay_unserialized() {
+        let default_json = serde_json::to_value(CompactionRuntimeConfig::default()).unwrap();
+        assert!(
+            default_json.get("history_retained_rewrites").is_none(),
+            "the default bound keeps existing config bytes unchanged"
+        );
+        let custom = CompactionRuntimeConfig {
+            history_retained_rewrites: 9,
+            ..CompactionRuntimeConfig::default()
+        };
+        let json = serde_json::to_value(&custom).unwrap();
+        assert_eq!(json["history_retained_rewrites"], 9);
+        let decoded: CompactionRuntimeConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, custom);
+        let core: crate::CompactionConfig = decoded.into();
+        assert_eq!(core.transcript_history_retention().retained_rewrites(), 9);
+        let absent: CompactionRuntimeConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            absent.history_retained_rewrites,
+            crate::TranscriptHistoryRetention::DEFAULT_RETAINED_REWRITES
         );
     }
 

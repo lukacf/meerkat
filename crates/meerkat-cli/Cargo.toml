@@ -166,6 +166,8 @@ skills = ["meerkat/skills"]
 integration-real-tests = []
 
 [dev-dependencies]
+# OAuth-protected MCP fixture for the MCP OAuth canaries (test-only).
+meerkat = { workspace = true, features = ["test-mcp-oauth-fixtures"] }
 meerkat-mob = { workspace = true, features = ["test-support"] }
 meerkat-runtime = { workspace = true, features = ["test-support"] }
 parking_lot = { workspace = true }

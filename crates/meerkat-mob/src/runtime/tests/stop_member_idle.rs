@@ -32,7 +32,9 @@ async fn spawn_winding_down_member(
     session_id
 }
 
-async fn enqueue_stop(handle: &MobHandle) -> oneshot::Receiver<Result<(), MobError>> {
+async fn enqueue_stop(
+    handle: &MobHandle,
+) -> oneshot::Receiver<Result<crate::MobStopReport, MobError>> {
     handle
         .enqueue_actor_command_for_test(|reply_tx| MobCommand::Stop { reply_tx })
         .await
@@ -46,7 +48,7 @@ type LifecycleTask = tokio::task::JoinHandle<Result<(), MobError>>;
 /// the members' end of turn.
 fn start_stop(handle: &MobHandle) -> LifecycleTask {
     let handle = handle.clone();
-    tokio::spawn(async move { handle.stop().await })
+    tokio::spawn(async move { handle.stop().await.map(|_| ()) })
 }
 
 /// Wait until a stop is parked on the end of turn of every listed session.
@@ -70,7 +72,7 @@ async fn actor_round_trip(handle: &MobHandle) -> MobState {
         .expect("phase query")
 }
 
-async fn expect_reply_ok(reply: oneshot::Receiver<Result<(), MobError>>, context: &str) {
+async fn expect_reply_ok<T>(reply: oneshot::Receiver<Result<T, MobError>>, context: &str) {
     tokio::time::timeout(STEP, reply)
         .await
         .unwrap_or_else(|_| panic!("{context}: completes once the turns end"))
@@ -86,7 +88,7 @@ async fn expect_task_ok(task: LifecycleTask, context: &str) {
         .unwrap_or_else(|error| panic!("{context}: failed: {error}"));
 }
 
-fn still_waiting(reply: &mut oneshot::Receiver<Result<(), MobError>>) -> bool {
+fn still_waiting<T>(reply: &mut oneshot::Receiver<Result<T, MobError>>) -> bool {
     matches!(
         reply.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
@@ -284,6 +286,47 @@ async fn shutdown_waits_for_a_member_turn_and_a_second_shutdown_joins_it() {
         interrupts,
         "a joined shutdown does not interrupt the member again"
     );
+    assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+}
+
+#[tokio::test]
+async fn a_stop_command_parks_on_its_in_flight_interrupt_and_completes_when_it_settles() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_start_turn_delay_ms(600_000);
+    let identity = AgentIdentity::from("gated-interrupt");
+    let mut spec = SpawnMemberSpec::new("worker", identity.as_str());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn autonomous member");
+    let session = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("session-backed autonomous member");
+    wait_for_start_turn_call_count(
+        service.as_ref(),
+        1,
+        "the member's turn is in flight, so the stop must interrupt it",
+    )
+    .await;
+    let gate = service.install_interrupt_gate(&session).await;
+
+    // A Stop command with no handle retry around it: the exact interrupt is
+    // still in flight, and the stop parks on it instead of answering
+    // AutonomousStopInterruptsPending.
+    let mut stop = enqueue_stop(&handle).await;
+    tokio::time::timeout(STEP, service.interrupt_gate_entered.notified())
+        .await
+        .expect("the stop's interrupt reaches the member");
+    assert_eq!(actor_round_trip(&handle).await, MobState::Running);
+    assert!(
+        still_waiting(&mut stop),
+        "the stop waits on its in-flight interrupt"
+    );
+
+    gate.release_all();
+    expect_reply_ok(stop, "stop after its interrupt settles").await;
     assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
 }
 

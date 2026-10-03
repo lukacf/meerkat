@@ -382,6 +382,10 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireAuthProfileCleared": schema_for!(crate::wire::WireAuthProfileCleared),
         "WireLoginStart": schema_for!(crate::wire::WireLoginStart),
         "WireLoginReady": schema_for!(crate::wire::WireLoginReady),
+        "WireMcpAuthTarget": schema_for!(crate::wire::WireMcpAuthTarget),
+        "WireLoginCancelled": schema_for!(crate::wire::WireLoginCancelled),
+        "WireMcpAuthStatus": schema_for!(crate::wire::WireMcpAuthStatus),
+        "WireAuthStatusResult": schema_for!(crate::wire::WireAuthStatusResult),
         "WireDeviceStart": schema_for!(crate::wire::WireDeviceStart),
         "WireDeviceCompleteResult": schema_for!(crate::wire::WireDeviceCompleteResult),
         "WireProvisionApiKeyResult": schema_for!(crate::wire::WireProvisionApiKeyResult),
@@ -635,9 +639,11 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "MobMemberLiveControlParams": schema_for!(crate::wire::MobMemberLiveControlParams),
         "RealmIdParams": schema_for!(crate::wire::RealmIdParams),
         "BindingIdParams": schema_for!(crate::wire::BindingIdParams),
+        "AuthStatusParams": schema_for!(crate::wire::AuthStatusParams),
         "CreateProfileParams": schema_for!(crate::wire::CreateProfileParams),
         "LoginStartParams": schema_for!(crate::wire::LoginStartParams),
         "LoginCompleteParams": schema_for!(crate::wire::LoginCompleteParams),
+        "LoginCancelParams": schema_for!(crate::wire::LoginCancelParams),
         "DeviceStartParams": schema_for!(crate::wire::DeviceStartParams),
         "DeviceCompleteParams": schema_for!(crate::wire::DeviceCompleteParams),
         "ProvisionApiKeyParams": schema_for!(crate::wire::ProvisionApiKeyParams),
@@ -1478,8 +1484,8 @@ mod tests {
             .find(|method| method["name"] == "auth/status/get")
             .expect("auth/status/get catalog entry");
         assert_eq!(
-            auth_status["result_type"], "WireAuthStatusDetail",
-            "auth/status/get should catalog its concrete detailed response"
+            auth_status["result_type"], "WireAuthStatusResult",
+            "auth/status/get should catalog its binding-or-MCP status response"
         );
 
         fs::remove_dir_all(&output_dir).unwrap();

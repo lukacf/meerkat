@@ -1380,6 +1380,27 @@ impl MemberRegistrationReload {
     }
 }
 
+/// What an exact-run stop cancel did to the run a run-start hold found
+/// current (#1500). The run can end on its own between the hold and the
+/// cancel; that is reported, not treated as a failed stop.
+pub(super) fn classify_stop_member_cancel(
+    cancelled: Result<bool, meerkat_runtime::RuntimeDriverError>,
+    run_id: meerkat_core::lifecycle::RunId,
+) -> Result<super::stop_report::MemberStopRun, meerkat_runtime::RuntimeDriverError> {
+    use super::stop_report::MemberStopRun;
+    match cancelled {
+        Ok(true) => Ok(MemberStopRun::CancelledAtBoundary { run_id }),
+        Ok(false) => Ok(MemberStopRun::RunEndedBeforeCancel { run_id }),
+        // The run's attachment was replaced or the runtime left Running
+        // between the hold and the cancel: the run is over.
+        Err(
+            meerkat_runtime::RuntimeDriverError::StaleAuthority { .. }
+            | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+        ) => Ok(MemberStopRun::RunEndedBeforeCancel { run_id }),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait MobProvisioner: Send + Sync {
@@ -1514,6 +1535,36 @@ pub trait MobProvisioner: Send + Sync {
         member_ref: &MemberRef,
         expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
     ) -> Result<(), MobError>;
+    /// Stop the member for a mob Stop (#1500): hold its run starts, so input
+    /// admitted before the stop stays queued until Resume, and when
+    /// `cancel_current_run`, cancel exactly the run the hold found current.
+    ///
+    /// The default cannot hold: it interrupts as before and reports the
+    /// member as not holdable, so the caller never mistakes it for paused.
+    async fn stop_member_runtime(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+        cancel_current_run: bool,
+    ) -> Result<super::stop_report::MemberStopOutcome, MobError> {
+        if cancel_current_run {
+            self.interrupt_member(member_ref, expected_member).await?;
+        }
+        Ok(super::stop_report::MemberStopOutcome {
+            run: super::stop_report::MemberStopRun::Interrupted,
+            starts: super::stop_report::MemberRunStarts::NotHoldable {
+                reason: super::stop_report::NotHoldableReason::ProvisionerLacksCapability,
+            },
+        })
+    }
+    /// Release a hold taken by [`Self::stop_member_runtime`] (Resume).
+    async fn release_member_run_starts(
+        &self,
+        _member_ref: &MemberRef,
+        _expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+    ) -> Result<(), MobError> {
+        Ok(())
+    }
     async fn hard_cancel_member(
         &self,
         member_ref: &MemberRef,
@@ -12559,6 +12610,84 @@ impl MobProvisioner for SessionBackend {
         Ok(())
     }
 
+    async fn stop_member_runtime(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+        cancel_current_run: bool,
+    ) -> Result<super::stop_report::MemberStopOutcome, MobError> {
+        use super::stop_report::{MemberRunStarts, MemberStopOutcome, MemberStopRun};
+        let session_id = Self::require_session(member_ref, "stop")?;
+        let Some(adapter) = &self.runtime_adapter else {
+            // No runtime authority to hold: interrupt as before, and say so.
+            if cancel_current_run {
+                self.interrupt_member(member_ref, expected_member).await?;
+            }
+            return Ok(MemberStopOutcome {
+                run: MemberStopRun::Interrupted,
+                starts: MemberRunStarts::NotHoldable {
+                    reason: super::stop_report::NotHoldableReason::ProvisionerLacksCapability,
+                },
+            });
+        };
+        if !adapter.contains_session(&session_id).await {
+            // An unregistered runtime has no queue and no run.
+            return Ok(MemberStopOutcome {
+                run: MemberStopRun::NoRun,
+                starts: MemberRunStarts::Held,
+            });
+        }
+        let hold = adapter
+            .hold_run_starts(&session_id)
+            .await
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "holding run starts for '{session_id}' failed: {error}"
+                ))
+            })?;
+        let run = match hold.current_run {
+            None => MemberStopRun::NoRun,
+            Some(run_id) if !cancel_current_run => MemberStopRun::LeftRunning { run_id },
+            Some(run_id) => classify_stop_member_cancel(
+                adapter
+                    .cancel_after_boundary_run_if_current(&session_id, &run_id)
+                    .await,
+                run_id,
+            )
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "cancelling a run of '{session_id}' failed: {error}"
+                ))
+            })?,
+        };
+        Ok(MemberStopOutcome {
+            run,
+            starts: MemberRunStarts::Held,
+        })
+    }
+
+    async fn release_member_run_starts(
+        &self,
+        member_ref: &MemberRef,
+        _expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+    ) -> Result<(), MobError> {
+        let session_id = Self::require_session(member_ref, "resume")?;
+        let Some(adapter) = &self.runtime_adapter else {
+            return Ok(());
+        };
+        if !adapter.contains_session(&session_id).await {
+            return Ok(());
+        }
+        adapter
+            .release_run_starts(&session_id)
+            .await
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "releasing run starts for '{session_id}' failed: {error}"
+                ))
+            })
+    }
+
     async fn hard_cancel_member(
         &self,
         member_ref: &MemberRef,
@@ -13436,6 +13565,135 @@ type PeerOnlyBindingParts<'a> = (&'a str, &'a str, Option<&'a str>, [u8; 32]);
 
 #[cfg(feature = "runtime-adapter")]
 impl MultiBackendProvisioner {
+    /// Whether a remote command failed because the peer is not bound to this
+    /// supervisor right now (it rebinds later).
+    fn peer_not_bound(error: &MobError) -> bool {
+        matches!(
+            error,
+            MobError::BridgeCommandRejected {
+                cause: super::bridge_protocol::BridgeRejectionCause::NotBound
+                    | super::bridge_protocol::BridgeRejectionCause::StaleSupervisor
+                    | super::bridge_protocol::BridgeRejectionCause::SenderMismatch,
+                ..
+            }
+        )
+    }
+
+    /// Send a run-start release owed from a Resume to a peer that has just
+    /// bound again (#1500). A failure leaves the release owed to its next bind.
+    async fn release_run_starts_on_bound_peer(
+        &self,
+        peer: &TrustedPeerDescriptor,
+        peer_id: &str,
+        expected_member: Option<super::bridge_protocol::BridgeMemberIncarnation>,
+        timeout: Duration,
+    ) {
+        let released = async {
+            let supervisor = self.bridge_supervisor_payload_for_recipient(peer).await?;
+            let command = super::bridge_protocol::BridgeCommand::ReleaseRunStarts(
+                super::bridge_protocol::BridgeRunStartReleasePayload {
+                    supervisor: supervisor.supervisor,
+                    epoch: supervisor.epoch,
+                    protocol_version: supervisor.protocol_version,
+                    expected_member: expected_member.clone(),
+                },
+            );
+            self.send_bridge_command_typed::<super::bridge_protocol::BridgeAck>(
+                peer, &command, timeout,
+            )
+            .await
+            .map(|_| ())
+        }
+        .await;
+        if let Err(error) = released {
+            tracing::warn!(
+                peer_id,
+                error = %error,
+                "releasing a rebound member's run-start hold failed; still owed"
+            );
+            self.supervisor_bridge
+                .mark_run_start_release_pending(peer_id, expected_member);
+        }
+    }
+
+    /// Send a run-start hold owed from a Stop to a peer that has just bound
+    /// again (#1500). A failure keeps the hold owed.
+    async fn hold_run_starts_on_bound_peer(
+        &self,
+        peer: &TrustedPeerDescriptor,
+        peer_id: &str,
+        expected_member: Option<super::bridge_protocol::BridgeMemberIncarnation>,
+        timeout: Duration,
+    ) {
+        let held = async {
+            let supervisor = self.bridge_supervisor_payload_for_recipient(peer).await?;
+            let command = super::bridge_protocol::BridgeCommand::HoldRunStarts(
+                super::bridge_protocol::BridgeRunStartHoldPayload {
+                    supervisor: supervisor.supervisor,
+                    epoch: supervisor.epoch,
+                    protocol_version: supervisor.protocol_version,
+                    expected_member: expected_member.clone(),
+                    cancel_current_run: false,
+                },
+            );
+            self.send_bridge_command_typed::<super::bridge_protocol::BridgeRunStartHoldResponse>(
+                peer, &command, timeout,
+            )
+            .await
+            .map(|_| ())
+        }
+        .await;
+        if let Err(error) = held {
+            tracing::warn!(
+                peer_id,
+                error = %error,
+                "holding a rebound member's run starts failed; still owed"
+            );
+            self.supervisor_bridge
+                .mark_run_start_hold_pending(peer_id, expected_member);
+        }
+    }
+
+    /// Authorize the supervisor at a remote member host and return the peer
+    /// and the supervisor payload for a member-addressed command.
+    async fn authorized_remote_member_peer(
+        &self,
+        peer_id: &str,
+        address: &str,
+        pubkey: [u8; 32],
+        bootstrap_token: Option<&super::bridge_protocol::BridgeBootstrapToken>,
+        context: &str,
+    ) -> Result<
+        (
+            TrustedPeerDescriptor,
+            super::bridge_protocol::BridgeSupervisorPayload,
+        ),
+        MobError,
+    > {
+        let peer = Self::peer_only_spec_from_parts(peer_id, address, pubkey)?;
+        let authorization = self
+            .ensure_supervisor_authorized(
+                &peer,
+                Some((
+                    peer_id,
+                    address,
+                    bootstrap_token.map(super::bridge_protocol::BridgeBootstrapToken::as_str),
+                    pubkey,
+                )),
+                None,
+            )
+            .await?;
+        if let Some(observation) = authorization.rebind_required {
+            return Err(MobError::BridgeCommandRejected {
+                cause: observation.rejection_cause,
+                reason: format!("peer-only {context} was rejected by the remote member"),
+            });
+        }
+        let peer = authorization.peer;
+        let supervisor = self.bridge_supervisor_payload_for_recipient(&peer).await?;
+        Ok((peer, supervisor))
+    }
+
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: Option<Arc<MeerkatMachine>>,
@@ -14414,6 +14672,38 @@ impl MultiBackendProvisioner {
                     &payload.peer_id,
                     payload.capabilities.rotation_observe_hold,
                 );
+                self.supervisor_bridge.record_peer_run_start_hold(
+                    &payload.peer_id,
+                    payload.capabilities.run_start_hold,
+                );
+                // A Stop or Resume that could not reach this peer while it
+                // was unbound owes it a run-start hold or release (#1500):
+                // send it now that the peer is bound again.
+                if let Some(owed) = self
+                    .supervisor_bridge
+                    .take_run_start_release_pending(&payload.peer_id)
+                {
+                    match owed.command {
+                        super::supervisor_bridge::OwedRunStartCommand::Release => {
+                            self.release_run_starts_on_bound_peer(
+                                peer,
+                                &payload.peer_id,
+                                owed.expected_member,
+                                timeout,
+                            )
+                            .await;
+                        }
+                        super::supervisor_bridge::OwedRunStartCommand::Hold => {
+                            self.hold_run_starts_on_bound_peer(
+                                peer,
+                                &payload.peer_id,
+                                owed.expected_member,
+                                timeout,
+                            )
+                            .await;
+                        }
+                    }
+                }
                 Ok((payload, install))
             }
             Err(error) => Err(MobError::ExternalMemberCleanupUncertain {
@@ -15894,6 +16184,203 @@ impl MobProvisioner for MultiBackendProvisioner {
             _ => {
                 self.session
                     .interrupt_member(member_ref, expected_member)
+                    .await
+            }
+        }
+    }
+
+    async fn stop_member_runtime(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+        cancel_current_run: bool,
+    ) -> Result<super::stop_report::MemberStopOutcome, MobError> {
+        use super::stop_report::{MemberRunStarts, MemberStopOutcome, MemberStopRun};
+        match member_ref {
+            MemberRef::BackendPeer {
+                peer_id,
+                address,
+                pubkey,
+                bootstrap_token,
+                session_id,
+                ..
+            } if expected_member.is_some() || session_id.is_none() => {
+                // A remote member is held through its host when the host
+                // supports it (#1500); otherwise it is interrupted as before
+                // and reported as not holdable. A new hold supersedes a
+                // release still owed from an earlier Resume.
+                let _ = self
+                    .supervisor_bridge
+                    .take_run_start_release_pending(peer_id);
+                // A peer that is not bound to this supervisor cannot be held
+                // now: its next bind sends the hold first.
+                let owe_hold_on_bind = || {
+                    self.supervisor_bridge
+                        .mark_run_start_hold_pending(peer_id, expected_member.cloned());
+                    Ok(MemberStopOutcome {
+                        run: MemberStopRun::NoRun,
+                        starts: MemberRunStarts::NotBound,
+                    })
+                };
+                if self.supervisor_bridge.peer_run_start_hold(peer_id) != Some(false) {
+                    let (peer, supervisor) = match self
+                        .authorized_remote_member_peer(
+                            peer_id,
+                            address,
+                            *pubkey,
+                            bootstrap_token.as_ref(),
+                            "run-start hold",
+                        )
+                        .await
+                    {
+                        Ok(authorized) => authorized,
+                        Err(error) if Self::peer_not_bound(&error) => return owe_hold_on_bind(),
+                        Err(error) => return Err(error),
+                    };
+                    let command = super::bridge_protocol::BridgeCommand::HoldRunStarts(
+                        super::bridge_protocol::BridgeRunStartHoldPayload {
+                            supervisor: supervisor.supervisor,
+                            epoch: supervisor.epoch,
+                            protocol_version: supervisor.protocol_version,
+                            expected_member: expected_member.cloned(),
+                            cancel_current_run,
+                        },
+                    );
+                    match self
+                        .send_bridge_command_typed::<super::bridge_protocol::BridgeRunStartHoldResponse>(
+                            &peer,
+                            &command,
+                            Duration::from_secs(5),
+                        )
+                        .await
+                    {
+                        Ok(response) => {
+                            let run = match response.run {
+                                super::bridge_protocol::BridgeHeldRun::NoRun => MemberStopRun::NoRun,
+                                super::bridge_protocol::BridgeHeldRun::CancelledAtBoundary {
+                                    run_id,
+                                } => MemberStopRun::CancelledAtBoundary { run_id },
+                                super::bridge_protocol::BridgeHeldRun::RunEndedBeforeCancel {
+                                    run_id,
+                                } => MemberStopRun::RunEndedBeforeCancel { run_id },
+                                super::bridge_protocol::BridgeHeldRun::LeftRunning { run_id } => {
+                                    MemberStopRun::LeftRunning { run_id }
+                                }
+                                other => {
+                                    return Err(MobError::Internal(format!(
+                                        "remote member returned an unknown held-run outcome: {other:?}"
+                                    )));
+                                }
+                            };
+                            return Ok(MemberStopOutcome {
+                                run,
+                                starts: MemberRunStarts::Held,
+                            });
+                        }
+                        // A host that predates the command rejects it.
+                        Err(MobError::BridgeCommandRejected {
+                            cause: super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                            ..
+                        }) => {
+                            self.supervisor_bridge
+                                .record_peer_run_start_hold(peer_id, false);
+                        }
+                        Err(error) if Self::peer_not_bound(&error) => return owe_hold_on_bind(),
+                        Err(error) => return Err(error),
+                    }
+                }
+                if cancel_current_run {
+                    self.interrupt_member(member_ref, expected_member).await?;
+                }
+                Ok(MemberStopOutcome {
+                    run: MemberStopRun::Interrupted,
+                    starts: MemberRunStarts::NotHoldable {
+                        reason: super::stop_report::NotHoldableReason::PeerLacksCapability,
+                    },
+                })
+            }
+            _ => {
+                self.session
+                    .stop_member_runtime(member_ref, expected_member, cancel_current_run)
+                    .await
+            }
+        }
+    }
+
+    async fn release_member_run_starts(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+    ) -> Result<(), MobError> {
+        match member_ref {
+            MemberRef::BackendPeer {
+                peer_id,
+                address,
+                pubkey,
+                bootstrap_token,
+                session_id,
+                ..
+            } if expected_member.is_some() || session_id.is_none() => {
+                if self.supervisor_bridge.peer_run_start_hold(peer_id) == Some(false) {
+                    // Never held.
+                    return Ok(());
+                }
+                let (peer, supervisor) = match self
+                    .authorized_remote_member_peer(
+                        peer_id,
+                        address,
+                        *pubkey,
+                        bootstrap_token.as_ref(),
+                        "run-start release",
+                    )
+                    .await
+                {
+                    Ok(authorized) => authorized,
+                    Err(error) if Self::peer_not_bound(&error) => {
+                        // The peer is not bound to this supervisor right now:
+                        // its next bind sends the release.
+                        self.supervisor_bridge
+                            .mark_run_start_release_pending(peer_id, expected_member.cloned());
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
+                let command = super::bridge_protocol::BridgeCommand::ReleaseRunStarts(
+                    super::bridge_protocol::BridgeRunStartReleasePayload {
+                        supervisor: supervisor.supervisor,
+                        epoch: supervisor.epoch,
+                        protocol_version: supervisor.protocol_version,
+                        expected_member: expected_member.cloned(),
+                    },
+                );
+                match self
+                    .send_bridge_command_typed::<super::bridge_protocol::BridgeAck>(
+                        &peer,
+                        &command,
+                        Duration::from_secs(5),
+                    )
+                    .await
+                {
+                    Ok(_ack) => Ok(()),
+                    Err(MobError::BridgeCommandRejected {
+                        cause: super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                        ..
+                    }) => {
+                        self.supervisor_bridge
+                            .record_peer_run_start_hold(peer_id, false);
+                        Ok(())
+                    }
+                    Err(error) if Self::peer_not_bound(&error) => {
+                        self.supervisor_bridge
+                            .mark_run_start_release_pending(peer_id, expected_member.cloned());
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            _ => {
+                self.session
+                    .release_member_run_starts(member_ref, expected_member)
                     .await
             }
         }

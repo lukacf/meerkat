@@ -224,6 +224,10 @@ pub fn open_with(
     profile: ConnectionProfile,
     options: OpenOptions,
 ) -> Result<Connection, SqliteStoreError> {
+    // Validate the file before SQLite sees it, then again once the
+    // connection holds it and before any pragma or schema work runs: a file
+    // replaced or linked in between is refused rather than mutated.
+    let expected = validate_database_file(path)?;
     let conn = match profile {
         ConnectionProfile::Primary { create: true } => {
             if let Some(parent) = path.parent() {
@@ -252,6 +256,15 @@ pub fn open_with(
         .unwrap_or_else(|| profile.default_busy_timeout())
         .min(MAX_BUSY_TIMEOUT);
     conn.busy_timeout(busy)?;
+    let opened = validate_database_file(path)?;
+    if let (Some(expected), Some(opened)) = (expected, opened)
+        && expected != opened
+    {
+        return Err(SqliteStoreError::UnsupportedDatabaseFile {
+            path: path.to_path_buf(),
+            detail: "the database file was replaced while it was being opened".to_string(),
+        });
+    }
 
     // Schema eligibility preflight runs before any mutating pragma: a refusal
     // leaves the database's logical content unmodified (WAL-mode
@@ -338,6 +351,62 @@ fn set_wal_journal_mode(
     }
 }
 
+/// Device and inode of a validated database file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DatabaseFileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+/// Refuse a database path SQLite cannot safely address by that one name.
+///
+/// SQLite names a database's journal, WAL and SHM files after the path it
+/// opened, so two hard links to one database give two sets of sidecars and
+/// break coordinated access and crash recovery ([SQLite: multiple links to
+/// the same file](https://www.sqlite.org/howtocorrupt.html#multiple_links_to_the_same_file)).
+/// An existing path must be a regular file (after following symlinks, which
+/// SQLite resolves itself) and, where the platform reports link counts, have
+/// exactly one hard link. A missing path is accepted: creating it is the
+/// opener's decision. Returns the file's identity on platforms that expose
+/// one, so a caller can confirm the opened file is the validated one.
+///
+/// This keeps the storage namespace honest for a cooperating owner; it does
+/// not defend against an adversary replacing paths concurrently.
+pub fn validate_database_file(
+    path: &Path,
+) -> Result<Option<DatabaseFileIdentity>, SqliteStoreError> {
+    let refuse = |detail: String| SqliteStoreError::UnsupportedDatabaseFile {
+        path: path.to_path_buf(),
+        detail,
+    };
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() {
+        return Err(refuse("not a regular file".to_string()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.nlink() > 1 {
+            return Err(refuse(format!(
+                "the file has {} hard links; SQLite needs exactly one name per database",
+                metadata.nlink()
+            )));
+        }
+        Ok(Some(DatabaseFileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(None)
+    }
+}
+
 fn open_existing(
     path: &Path,
     profile: ConnectionProfile,
@@ -369,6 +438,83 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    /// #1551: an existing database must be a regular file with one name.
+    #[test]
+    fn database_file_validation_accepts_one_name_and_refuses_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.sqlite3");
+        assert_eq!(validate_database_file(&missing).unwrap(), None);
+
+        let directory = dir.path().join("directory.sqlite3");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(matches!(
+            validate_database_file(&directory),
+            Err(SqliteStoreError::UnsupportedDatabaseFile { .. })
+        ));
+        assert!(matches!(
+            open_with(
+                &directory,
+                ConnectionProfile::PRIMARY,
+                OpenOptions::default()
+            ),
+            Err(SqliteStoreError::UnsupportedDatabaseFile { .. })
+        ));
+
+        let single = dir.path().join("single.sqlite3");
+        drop(open_with(&single, ConnectionProfile::PRIMARY, OpenOptions::default()).unwrap());
+        #[cfg(unix)]
+        assert!(validate_database_file(&single).unwrap().is_some());
+        drop(open_with(&single, ConnectionProfile::PRIMARY, OpenOptions::default()).unwrap());
+    }
+
+    /// #1551: a hard-linked database is refused through either name before
+    /// SQLite opens it, so neither name gains WAL or SHM sidecars and the
+    /// database bytes are untouched.
+    #[cfg(unix)]
+    #[test]
+    fn hard_linked_database_is_refused_before_any_sqlite_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original.sqlite3");
+        {
+            let conn = Connection::open(&original).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE canary (value INTEGER); INSERT INTO canary VALUES (1);",
+            )
+            .unwrap();
+        }
+        let linked = dir.path().join("linked.sqlite3");
+        std::fs::hard_link(&original, &linked).unwrap();
+        let bytes = std::fs::read(&original).unwrap();
+        for name in [&original, &linked] {
+            for profile in [
+                ConnectionProfile::PRIMARY,
+                ConnectionProfile::ReadOnly,
+                ConnectionProfile::Maintenance { write: true },
+            ] {
+                assert!(
+                    matches!(
+                        open_with(name, profile, OpenOptions::default()),
+                        Err(SqliteStoreError::UnsupportedDatabaseFile { .. })
+                    ),
+                    "{} through {}",
+                    profile.name(),
+                    name.display()
+                );
+            }
+            assert!(matches!(
+                crate::fence::OperationGuard::for_database(name),
+                Err(SqliteStoreError::UnsupportedDatabaseFile { .. })
+            ));
+            let (wal, shm) = sidecar_paths(name);
+            assert!(
+                !wal.exists() && !shm.exists(),
+                "no sidecar for {}",
+                name.display()
+            );
+        }
+        assert_eq!(std::fs::read(&original).unwrap(), bytes);
+    }
 
     fn sidecar_paths(path: &Path) -> (PathBuf, PathBuf) {
         let mut wal = path.as_os_str().to_os_string();
@@ -621,7 +767,8 @@ mod tests {
         .expect_err("partial current must be refused");
         assert!(matches!(
             err,
-            SqliteStoreError::SchemaFingerprintMismatch { version: 1, .. }
+            SqliteStoreError::CurrentSchemaMismatch { version: 1, ref changed_objects, .. }
+                if changed_objects == &vec!["table:preflight_t".to_string()]
         ));
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .expect("reopen raw");

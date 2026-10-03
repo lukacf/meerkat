@@ -10687,6 +10687,10 @@
             "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
             "type": "boolean"
           },
+          "run_start_hold": {
+            "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
+            "type": "boolean"
+          },
           "supported_protocol_versions": {
             "default": [
               2,
@@ -10903,6 +10907,10 @@
       },
       "rotation_observe_hold": {
         "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
+        "type": "boolean"
+      },
+      "run_start_hold": {
+        "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
         "type": "boolean"
       },
       "supported_protocol_versions": {
@@ -14924,6 +14932,87 @@
       },
       {
         "additionalProperties": false,
+        "description": "Hold the member's run starts for a mob Stop (#1500). A peer without\n[`BridgeCapabilities::run_start_hold`] rejects it at decode.",
+        "properties": {
+          "cancel_current_run": {
+            "default": false,
+            "description": "Cancel, at its next boundary, exactly the run the hold found current.",
+            "type": "boolean"
+          },
+          "command": {
+            "const": "hold_run_starts",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expected_member": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BridgeMemberIncarnation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Release a run-start hold (mob Resume).",
+        "properties": {
+          "command": {
+            "const": "release_run_starts",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expected_member": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BridgeMemberIncarnation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
         "description": "Retire one exact peer-only controller-member runtime incarnation (V5).\n\nSupervisor authentication proves who issued the command. `member_fence`\nseparately proves which exact Mob incarnation and runtime/session epoch the\ncontroller is authorized to retire. Neither authority may be inferred from\nthe other or from the addressed session id.",
         "properties": {
           "command": {
@@ -18136,6 +18225,10 @@
             "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
             "type": "boolean"
           },
+          "run_start_hold": {
+            "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
+            "type": "boolean"
+          },
           "supported_protocol_versions": {
             "default": [
               2,
@@ -18484,6 +18577,10 @@
             "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
             "type": "boolean"
           },
+          "run_start_hold": {
+            "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
+            "type": "boolean"
+          },
           "supported_protocol_versions": {
             "default": [
               2,
@@ -18757,6 +18854,10 @@
           },
           "rotation_observe_hold": {
             "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
+            "type": "boolean"
+          },
+          "run_start_hold": {
+            "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
             "type": "boolean"
           },
           "supported_protocol_versions": {
@@ -37371,6 +37472,10 @@
             "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
             "type": "boolean"
           },
+          "run_start_hold": {
+            "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
+            "type": "boolean"
+          },
           "supported_protocol_versions": {
             "default": [
               2,
@@ -37889,6 +37994,79 @@
           "invoke_and_observe"
         ],
         "type": "string"
+      },
+      "BridgeHeldRun": {
+        "description": "What a [`BridgeCommand::HoldRunStarts`] did to the member's run.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The member had no run.",
+            "properties": {
+              "run": {
+                "const": "no_run",
+                "type": "string"
+              }
+            },
+            "required": [
+              "run"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run was cancelled at its next boundary.",
+            "properties": {
+              "run": {
+                "const": "cancelled_at_boundary",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run ended on its own between the hold and the cancel.",
+            "properties": {
+              "run": {
+                "const": "run_ended_before_cancel",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run continues; no cancel was requested.",
+            "properties": {
+              "run": {
+                "const": "left_running",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "BridgeHostBootstrapProof": {
         "description": "Dedicated host-bind proof carrier. This is intentionally distinct from\n[`BridgeBootstrapToken`]: the raw bearer lives only in the out-of-band\nhost descriptor, while a `BindHost` command may carry only the\nrequest-bound HMAC derived from it.",
@@ -46098,6 +46276,24 @@
       },
       {
         "additionalProperties": false,
+        "description": "Reply to [`BridgeCommand::HoldRunStarts`].",
+        "properties": {
+          "result": {
+            "const": "run_starts_held",
+            "type": "string"
+          },
+          "run": {
+            "$ref": "#/$defs/BridgeHeldRun"
+          }
+        },
+        "required": [
+          "result",
+          "run"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
         "description": "Response to a retire command.",
         "properties": {
           "outcome": {
@@ -51662,6 +51858,10 @@
             "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
             "type": "boolean"
           },
+          "run_start_hold": {
+            "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
+            "type": "boolean"
+          },
           "supported_protocol_versions": {
             "default": [
               2,
@@ -52111,6 +52311,87 @@
               "operation_id",
               "expected_run_id",
               "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Hold the member's run starts for a mob Stop (#1500). A peer without\n[`BridgeCapabilities::run_start_hold`] rejects it at decode.",
+            "properties": {
+              "cancel_current_run": {
+                "default": false,
+                "description": "Cancel, at its next boundary, exactly the run the hold found current.",
+                "type": "boolean"
+              },
+              "command": {
+                "const": "hold_run_starts",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMemberIncarnation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Release a run-start hold (mob Resume).",
+            "properties": {
+              "command": {
+                "const": "release_run_starts",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMemberIncarnation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
             ],
             "type": "object"
           },
@@ -53838,6 +54119,79 @@
         ],
         "type": "string"
       },
+      "BridgeHeldRun": {
+        "description": "What a [`BridgeCommand::HoldRunStarts`] did to the member's run.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The member had no run.",
+            "properties": {
+              "run": {
+                "const": "no_run",
+                "type": "string"
+              }
+            },
+            "required": [
+              "run"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run was cancelled at its next boundary.",
+            "properties": {
+              "run": {
+                "const": "cancelled_at_boundary",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run ended on its own between the hold and the cancel.",
+            "properties": {
+              "run": {
+                "const": "run_ended_before_cancel",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run continues; no cancel was requested.",
+            "properties": {
+              "run": {
+                "const": "left_running",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "BridgeHostBootstrapProof": {
         "description": "Dedicated host-bind proof carrier. This is intentionally distinct from\n[`BridgeBootstrapToken`]: the raw bearer lives only in the out-of-band\nhost descriptor, while a `BindHost` command may carry only the\nrequest-bound HMAC derived from it.",
         "type": "string"
@@ -54971,6 +55325,24 @@
               "expected_member",
               "operation_id",
               "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Reply to [`BridgeCommand::HoldRunStarts`].",
+            "properties": {
+              "result": {
+                "const": "run_starts_held",
+                "type": "string"
+              },
+              "run": {
+                "$ref": "#/$defs/BridgeHeldRun"
+              }
+            },
+            "required": [
+              "result",
+              "run"
             ],
             "type": "object"
           },
@@ -66412,6 +66784,87 @@
           },
           {
             "additionalProperties": false,
+            "description": "Hold the member's run starts for a mob Stop (#1500). A peer without\n[`BridgeCapabilities::run_start_hold`] rejects it at decode.",
+            "properties": {
+              "cancel_current_run": {
+                "default": false,
+                "description": "Cancel, at its next boundary, exactly the run the hold found current.",
+                "type": "boolean"
+              },
+              "command": {
+                "const": "hold_run_starts",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMemberIncarnation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Release a run-start hold (mob Resume).",
+            "properties": {
+              "command": {
+                "const": "release_run_starts",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMemberIncarnation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
             "description": "Retire one exact peer-only controller-member runtime incarnation (V5).\n\nSupervisor authentication proves who issued the command. `member_fence`\nseparately proves which exact Mob incarnation and runtime/session epoch the\ncontroller is authorized to retire. Neither authority may be inferred from\nthe other or from the addressed session id.",
             "properties": {
               "command": {
@@ -73285,6 +73738,10 @@
             "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
             "type": "boolean"
           },
+          "run_start_hold": {
+            "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
+            "type": "boolean"
+          },
           "supported_protocol_versions": {
             "default": [
               2,
@@ -73803,6 +74260,79 @@
           "invoke_and_observe"
         ],
         "type": "string"
+      },
+      "BridgeHeldRun": {
+        "description": "What a [`BridgeCommand::HoldRunStarts`] did to the member's run.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The member had no run.",
+            "properties": {
+              "run": {
+                "const": "no_run",
+                "type": "string"
+              }
+            },
+            "required": [
+              "run"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run was cancelled at its next boundary.",
+            "properties": {
+              "run": {
+                "const": "cancelled_at_boundary",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run ended on its own between the hold and the cancel.",
+            "properties": {
+              "run": {
+                "const": "run_ended_before_cancel",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run continues; no cancel was requested.",
+            "properties": {
+              "run": {
+                "const": "left_running",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "BridgeHostBootstrapProof": {
         "description": "Dedicated host-bind proof carrier. This is intentionally distinct from\n[`BridgeBootstrapToken`]: the raw bearer lives only in the out-of-band\nhost descriptor, while a `BindHost` command may carry only the\nrequest-bound HMAC derived from it.",
@@ -74784,6 +75314,24 @@
               "expected_member",
               "operation_id",
               "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Reply to [`BridgeCommand::HoldRunStarts`].",
+            "properties": {
+              "result": {
+                "const": "run_starts_held",
+                "type": "string"
+              },
+              "run": {
+                "$ref": "#/$defs/BridgeHeldRun"
+              }
+            },
+            "required": [
+              "result",
+              "run"
             ],
             "type": "object"
           },
@@ -110598,6 +111146,9 @@
       },
       "ok": {
         "type": "boolean"
+      },
+      "stop_report": {
+        "description": "For `stop`: what the stop did to each member's run and whether its\nrun starts are held (#1500). A member reported `not_holdable` may\nstill start a turn while the mob is stopped."
       }
     },
     "required": [
@@ -140796,6 +141347,215 @@
     "title": "WireAuthStatusDetail",
     "type": "object"
   },
+  "WireAuthStatusResult": {
+    "$defs": {
+      "AuthStatusPhase": {
+        "description": "Public auth status phase shared by REST, RPC, CLI, and generated SDK wire\npayloads.\n\nThis is the compatibility projection of typed auth lease truth. Surfaces\nshould map to this enum first and only then emit [`Self::as_public_str`].",
+        "oneOf": [
+          {
+            "enum": [
+              "valid",
+              "expiring",
+              "expired",
+              "reauth_required",
+              "refresh_failed"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "released",
+            "description": "The lease was explicitly released (credential lifecycle torn down).",
+            "type": "string"
+          },
+          {
+            "const": "absent",
+            "description": "No lease phase is tracked at all for this binding.",
+            "type": "string"
+          },
+          {
+            "const": "missing_credential",
+            "description": "A lease may exist but holds no live credential material.",
+            "type": "string"
+          }
+        ]
+      },
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
+      "ProfileId": {
+        "description": "Opaque slug identifying an auth profile override on a connection.",
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
+        "type": "string"
+      },
+      "WireAuthBindingRef": {
+        "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
+        "properties": {
+          "binding": {
+            "$ref": "#/$defs/BindingId"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "realm": {
+            "$ref": "#/$defs/RealmId"
+          }
+        },
+        "required": [
+          "realm",
+          "binding"
+        ],
+        "type": "object"
+      },
+      "WireAuthStatusDetail": {
+        "description": "`GET /auth/bindings/{binding_id}/status` success body. Richer than\n[`WireAuthStatus`] — also carries `realm_id` / `binding_id` /\n`auth_binding` / `has_refresh_token` so the caller can key by\nbinding directly.",
+        "properties": {
+          "account_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "auth_binding": {
+            "$ref": "#/$defs/WireAuthBindingRef"
+          },
+          "auth_method": {
+            "type": "string"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "has_refresh_token": {
+            "type": "boolean"
+          },
+          "last_refresh_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profile_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/AuthStatusPhase"
+          }
+        },
+        "required": [
+          "realm_id",
+          "binding_id",
+          "auth_binding",
+          "profile_id",
+          "provider",
+          "auth_method",
+          "state",
+          "has_refresh_token"
+        ],
+        "type": "object"
+      },
+      "WireMcpAuthPhase": {
+        "description": "Secret-free authorization phase of an MCP server target.",
+        "oneOf": [
+          {
+            "enum": [
+              "authorized",
+              "reauth_required"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "authorization_required",
+            "description": "No usable credential: awaiting human authorization through the host.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireMcpAuthStatus": {
+        "description": "`auth/status/get` result for an MCP server target.",
+        "properties": {
+          "account_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mcp": {
+            "$ref": "#/$defs/WireMcpAuthTarget"
+          },
+          "phase": {
+            "$ref": "#/$defs/WireMcpAuthPhase"
+          }
+        },
+        "required": [
+          "mcp",
+          "phase"
+        ],
+        "type": "object"
+      },
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`auth/status/get` result: a provider binding status or an MCP status.",
+    "oneOf": [
+      {
+        "$ref": "#/$defs/WireAuthStatusDetail"
+      },
+      {
+        "$ref": "#/$defs/WireMcpAuthStatus"
+      }
+    ],
+    "title": "WireAuthStatusResult"
+  },
   "WireBackendProfile": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Wire projection of [`meerkat_core::BackendProfile`].",
@@ -156902,6 +157662,49 @@
     ],
     "title": "WireLiveTransportBootstrap"
   },
+  "WireLoginCancelled": {
+    "$defs": {
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`auth/login/cancel` success body.",
+    "properties": {
+      "cancelled": {
+        "type": "boolean"
+      },
+      "mcp": {
+        "$ref": "#/$defs/WireMcpAuthTarget"
+      }
+    },
+    "required": [
+      "mcp",
+      "cancelled"
+    ],
+    "title": "WireLoginCancelled",
+    "type": "object"
+  },
   "WireLoginReady": {
     "$defs": {
       "BindingId": {
@@ -156942,6 +157745,47 @@
         ],
         "type": "object"
       },
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      },
+      "WireMcpLoginReady": {
+        "description": "MCP arm of [`WireLoginReadyTarget`].",
+        "properties": {
+          "account_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mcp": {
+            "$ref": "#/$defs/WireMcpAuthTarget"
+          }
+        },
+        "required": [
+          "mcp"
+        ],
+        "type": "object"
+      },
       "WireOAuthProvider": {
         "description": "Canonical OAuth issuer identity carried by login request/response contracts.\n\nDeserialization accepts the CLI-compatible aliases owned by\n[`meerkat_core::OAuthProviderIdentity`], while serialization always emits\none canonical wire value.",
         "enum": [
@@ -156951,17 +157795,47 @@
           "copilot"
         ],
         "type": "string"
+      },
+      "WireProviderLoginReady": {
+        "description": "Provider arm of [`WireLoginReadyTarget`].",
+        "properties": {
+          "auth_binding": {
+            "$ref": "#/$defs/WireAuthBindingRef"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/WireOAuthProvider"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "binding_id",
+          "auth_binding",
+          "profile_id",
+          "provider"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "`POST /auth/login/complete` / ready leg of device-code success body.\n\nThe optional `state` field distinguishes the flat `POST\n/auth/login/complete` response (no `state` set) from the device-code\nready leg (`state = \"ready\"`) which is part of the pending/slow_down/\naccess_denied/expired/ready tagged protocol.",
+    "oneOf": [
+      {
+        "$ref": "#/$defs/WireProviderLoginReady"
+      },
+      {
+        "$ref": "#/$defs/WireMcpLoginReady"
+      }
+    ],
     "properties": {
-      "auth_binding": {
-        "$ref": "#/$defs/WireAuthBindingRef"
-      },
-      "binding_id": {
-        "type": "string"
-      },
       "expires_at": {
         "type": [
           "string",
@@ -156970,15 +157844,6 @@
       },
       "has_refresh_token": {
         "type": "boolean"
-      },
-      "profile_id": {
-        "type": "string"
-      },
-      "provider": {
-        "$ref": "#/$defs/WireOAuthProvider"
-      },
-      "realm_id": {
-        "type": "string"
       },
       "scopes": {
         "items": {
@@ -156994,11 +157859,6 @@
       }
     },
     "required": [
-      "realm_id",
-      "binding_id",
-      "auth_binding",
-      "profile_id",
-      "provider",
       "has_refresh_token",
       "scopes"
     ],
@@ -157007,6 +157867,54 @@
   },
   "WireLoginStart": {
     "$defs": {
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      },
+      "WireMcpLoginDisposition": {
+        "description": "Whether `auth/login/start` admitted a new MCP attempt or returned the one\nalready pending for the target (no second attempt is ever admitted).",
+        "enum": [
+          "started",
+          "joined"
+        ],
+        "type": "string"
+      },
+      "WireMcpLoginStart": {
+        "additionalProperties": false,
+        "description": "MCP arm of [`WireLoginStartTarget`]. A joined start returns the pending\nattempt's authorize URL and state: wire callers are host-privileged by\ncontract.",
+        "properties": {
+          "disposition": {
+            "$ref": "#/$defs/WireMcpLoginDisposition"
+          },
+          "mcp": {
+            "$ref": "#/$defs/WireMcpAuthTarget"
+          }
+        },
+        "required": [
+          "mcp",
+          "disposition"
+        ],
+        "type": "object"
+      },
       "WireOAuthProvider": {
         "description": "Canonical OAuth issuer identity carried by login request/response contracts.\n\nDeserialization accepts the CLI-compatible aliases owned by\n[`meerkat_core::OAuthProviderIdentity`], while serialization always emits\none canonical wire value.",
         "enum": [
@@ -157016,16 +157924,34 @@
           "copilot"
         ],
         "type": "string"
+      },
+      "WireProviderLoginStart": {
+        "additionalProperties": false,
+        "description": "Provider arm of [`WireLoginStartTarget`].",
+        "properties": {
+          "provider": {
+            "$ref": "#/$defs/WireOAuthProvider"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "`POST /auth/login/start` success body.",
+    "description": "`POST /auth/login/start` success body. Host-channel data: the\nauthorize URL and state must never reach an agent, tool result,\ntranscript or log.",
+    "oneOf": [
+      {
+        "$ref": "#/$defs/WireProviderLoginStart"
+      },
+      {
+        "$ref": "#/$defs/WireMcpLoginStart"
+      }
+    ],
     "properties": {
       "authorize_url": {
         "type": "string"
-      },
-      "provider": {
-        "$ref": "#/$defs/WireOAuthProvider"
       },
       "redirect_uri": {
         "type": "string"
@@ -157037,10 +157963,106 @@
     "required": [
       "authorize_url",
       "state",
-      "redirect_uri",
-      "provider"
+      "redirect_uri"
     ],
     "title": "WireLoginStart",
+    "type": "object"
+  },
+  "WireMcpAuthStatus": {
+    "$defs": {
+      "WireMcpAuthPhase": {
+        "description": "Secret-free authorization phase of an MCP server target.",
+        "oneOf": [
+          {
+            "enum": [
+              "authorized",
+              "reauth_required"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "authorization_required",
+            "description": "No usable credential: awaiting human authorization through the host.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`auth/status/get` result for an MCP server target.",
+    "properties": {
+      "account_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "expires_at": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "mcp": {
+        "$ref": "#/$defs/WireMcpAuthTarget"
+      },
+      "phase": {
+        "$ref": "#/$defs/WireMcpAuthPhase"
+      }
+    },
+    "required": [
+      "mcp",
+      "phase"
+    ],
+    "title": "WireMcpAuthStatus",
+    "type": "object"
+  },
+  "WireMcpAuthTarget": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+    "properties": {
+      "oauth_account": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "server_name": {
+        "type": "string"
+      },
+      "server_url": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "server_name",
+      "server_url"
+    ],
+    "title": "WireMcpAuthTarget",
     "type": "object"
   },
   "WireMemberHealthClass": {

@@ -330,13 +330,25 @@ pub use factory::{
     encode_llm_client_override_for_service, provider_key, resolve_create_session_default_model,
     resolve_create_session_model, resolve_provider_catalog_default_model,
 };
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+pub use host_auth::default_mcp_auth_resolver;
 #[cfg(not(target_arch = "wasm32"))]
 pub use host_auth::{
     HostAuthDevicePoll, HostAuthDeviceStart, HostAuthError, HostAuthLoginComplete,
-    HostAuthLoginStart, HostAuthService, HostAuthStatus, HostAuthTarget,
+    HostAuthLoginStart, HostAuthService, HostAuthStatus, HostAuthTarget, HostMcpAuthPhase,
+    HostMcpAuthStatus, HostMcpTargetRefusal, mcp_auth_target_to_wire,
+    mcp_login_disposition_to_wire, resolve_configured_mcp_target,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_providers::auth_store::{ProviderAuthPersistence, TokenStoreBackend};
+#[cfg(not(target_arch = "wasm32"))]
+pub use meerkat_providers::mcp_oauth::{
+    MCP_INTERACTIVE_LOGIN_TIMEOUT, MCP_OAUTH_CALLBACK_PATH, McpAuthMode, McpOAuthAccountStrategy,
+    McpOAuthAuthority, McpOAuthBrowserLaunch, McpOAuthCallback, McpOAuthCeremonyContext,
+    McpOAuthError, McpOAuthLoginComplete, McpOAuthLoginDisposition, McpOAuthLoginStart,
+    McpOAuthLoopbackBegin, McpOAuthPendingLogin, McpServerIdentity, OidcUserInfoAccountStrategy,
+    open_system_browser,
+};
 
 pub mod help;
 
@@ -387,7 +399,13 @@ pub mod session_runtime;
 // Explicitly-featured deterministic test fixtures (ADJ-P6B-4). Native-only:
 // the scripted realtime fakes park on tokio sync primitives the wasm alias
 // does not expose, and no wasm lane consumes them.
-#[cfg(all(feature = "test-realtime-fixtures", not(target_arch = "wasm32")))]
+#[cfg(all(
+    any(
+        feature = "test-realtime-fixtures",
+        feature = "test-mcp-oauth-fixtures"
+    ),
+    not(target_arch = "wasm32")
+))]
 pub mod test_fixtures;
 
 // Session service
@@ -551,8 +569,8 @@ pub use meerkat_tools::{FileTaskStore, ensure_rkat_dir, find_project_root};
 // Re-export MCP client
 #[cfg(feature = "mcp")]
 pub use meerkat_mcp::{
-    McpApplyDelta, McpApplyResult, McpConnection, McpError, McpLifecycleAction, McpLifecyclePhase,
-    McpReloadTarget, McpRouter, McpRouterAdapter, McpServerLifecycleState,
+    McpApplyDelta, McpApplyResult, McpAuthResolver, McpConnection, McpError, McpLifecycleAction,
+    McpLifecyclePhase, McpReloadTarget, McpRouter, McpRouterAdapter, McpServerLifecycleState,
 };
 #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
 pub mod mcp;

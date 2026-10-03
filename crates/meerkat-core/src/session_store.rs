@@ -955,7 +955,10 @@ pub fn find_transcript_rewrite_commit_chain_extending_session_with_memo<'a>(
                 Some(prefix) => prefix,
                 None => SessionMessageRowPrefixAccumulator::from_messages(previous.messages())?,
             };
-            if previous_count == state.anchor().row_prefix().row_count()
+            // Only a whole graph's anchor is the pre-rewrite transcript a
+            // history-less predecessor can equal.
+            if state.retired_count() == 0
+                && previous_count == state.anchor().row_prefix().row_count()
                 && previous_prefix == *state.anchor().row_prefix()
             {
                 return Ok(Some(state.commits().collect()));
@@ -1004,7 +1007,9 @@ pub fn find_transcript_rewrite_commit_chain_extending_session_with_memo<'a>(
         // edge's exact row-lineage transition. This scans only compact edges
         // and the relevant parent delta; it never reconstructs a full body.
         if selected.is_none() && chain.is_empty() && cursor == previous_revision {
-            for index in 0..state.commit_count() {
+            // Retired occurrences have no edge to prove a parent relation
+            // from; only retained ones can be selected here.
+            for index in state.retired_count()..state.commit_count() {
                 let edge = state
                     .edge(index)
                     .ok_or_else(|| SessionStoreError::Corrupted(previous.id().clone()))?;
@@ -1040,15 +1045,9 @@ fn compact_edge_parent_extends_session(
         .ok_or_else(|| SessionStoreError::Corrupted(previous.id().clone()))?;
     let previous_count = u64::try_from(previous.messages().len())
         .map_err(|_| SessionStoreError::Corrupted(previous.id().clone()))?;
-    let base_prefix = if edge_index == 0 {
-        state.anchor().row_prefix()
-    } else {
-        state
-            .edge(edge_index - 1)
-            .map(TranscriptRevisionEdge::result_witness)
-            .map(|witness| witness.row_prefix())
-            .ok_or_else(|| SessionStoreError::Corrupted(previous.id().clone()))?
-    };
+    let (_, base_prefix) = state
+        .occurrence_base_endpoint(edge_index)
+        .ok_or_else(|| SessionStoreError::Corrupted(previous.id().clone()))?;
     if base_prefix.row_count() != edge.messages_before_base() as u64
         || previous_count < base_prefix.row_count()
         || previous_count > edge.messages_before() as u64
@@ -2292,6 +2291,13 @@ impl VerifiedHeadCanonicalTranscriptHistory {
             endpoint,
             current,
         })
+    }
+
+    /// The replayed graph this proof binds to the physical head.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn history(&self) -> &ValidatedTranscriptHistory {
+        &self.history
     }
 }
 
@@ -4214,6 +4220,10 @@ pub struct PreparedHeadCanonicalRewriteMutation {
     steps: Vec<PreparedHeadCanonicalRewriteStep>,
     tail_base_seq: u64,
     serialized_tail: Vec<Vec<u8>>,
+    /// Occurrences the live graph has retired (its retention cut). A store
+    /// that bounds its rows retires its persisted graph to this count in the
+    /// same transaction; one that ignores it stays correct, only unbounded.
+    transcript_retired_count: u64,
 }
 
 impl PreparedHeadCanonicalRewriteMutation {
@@ -4434,27 +4444,23 @@ impl PreparedHeadCanonicalRewriteMutation {
 
         for (pending_index, edge) in pending_edges.iter().enumerate() {
             let commit = edge.commit();
-            let base_witness = if pending_index == 0 {
-                if observed_count == 0 {
-                    None
-                } else {
-                    history
-                        .state()
-                        .edge(observed_count - 1)
-                        .map(|edge| edge.result_witness())
-                }
+            // The first pending occurrence advances from the observed
+            // physical endpoint: the anchor when it is the first retained
+            // occurrence (of a whole or re-anchored graph), otherwise the
+            // preceding occurrence's result.
+            let (base_count, base_prefix) = if pending_index == 0 {
+                history
+                    .state()
+                    .occurrence_base_endpoint(observed_count)
+                    .ok_or_else(|| SessionStoreError::Corrupted(session.id().clone()))?
             } else {
                 pending_edges
                     .get(pending_index - 1)
-                    .map(|edge| edge.result_witness())
-            };
-            let base_count = match base_witness {
-                Some(witness) => witness.message_count(),
-                None => history.anchor().messages().len(),
-            };
-            let base_prefix = match base_witness {
-                Some(witness) => witness.row_prefix(),
-                None => history.anchor().row_prefix(),
+                    .map(|edge| {
+                        let witness = edge.result_witness();
+                        (witness.message_count(), witness.row_prefix())
+                    })
+                    .ok_or_else(|| SessionStoreError::Corrupted(session.id().clone()))?
             };
             if base_count != edge.messages_before_base() || current_len > edge.messages_before() {
                 return Err(SessionStoreError::InvalidTranscriptRewrite {
@@ -4738,11 +4744,17 @@ impl PreparedHeadCanonicalRewriteMutation {
         }
         let successor_rewrite_count = u64::try_from(history.commit_count())
             .map_err(|_| SessionStoreError::Corrupted(session.id().clone()))?;
+        let transcript_retired_count = u64::try_from(history.retired_count())
+            .map_err(|_| SessionStoreError::Corrupted(session.id().clone()))?;
+        // A row-lineage anchor older than the retention cut would make cold
+        // row replay read rewrite rows the store retires, so the successor
+        // rotates to a new anchor (a compaction successor: small).
         let preserved_row_lineage_anchor =
             observed_head.row_lineage_anchor.clone().filter(|anchor| {
-                successor_rewrite_count
-                    .checked_sub(anchor.rewrite_count())
-                    .is_some_and(|delta| delta < SESSION_ROW_LINEAGE_REBASE_INTERVAL)
+                anchor.rewrite_count() >= transcript_retired_count
+                    && successor_rewrite_count
+                        .checked_sub(anchor.rewrite_count())
+                        .is_some_and(|delta| delta < SESSION_ROW_LINEAGE_REBASE_INTERVAL)
             });
         let successor_head = SessionHead::from_session_with_message_row_prefix(
             session,
@@ -4794,7 +4806,15 @@ impl PreparedHeadCanonicalRewriteMutation {
             steps,
             tail_base_seq,
             serialized_tail,
+            transcript_retired_count,
         }))
+    }
+
+    /// The live graph's retention cut: occurrences a row-bounding store may
+    /// retire from its persisted graph in this mutation's transaction.
+    #[must_use]
+    pub const fn transcript_retired_count(&self) -> u64 {
+        self.transcript_retired_count
     }
 
     #[must_use]
@@ -5062,6 +5082,22 @@ fn validate_store_issued_head_identity_pair(
     Ok(())
 }
 
+/// Whether an [`IncrementalSessionStore`] bounds its persisted transcript
+/// history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptRowRetention {
+    /// The store retires its persisted graph to the cut a prepared rewrite
+    /// mutation carries
+    /// ([`PreparedHeadCanonicalRewriteMutation::transcript_retired_count`])
+    /// in that mutation's transaction, deleting the rewrite rows and strands
+    /// below it. Stored rows stay bounded by the retention window.
+    RetiresToCut,
+    /// The store keeps every rewrite row. It stays correct (the rolling graph
+    /// identity is unchanged by retirement), but disk and cold-load replay
+    /// grow with session history.
+    KeepsAll,
+}
+
 /// Capability trait for O(delta) session persistence.
 ///
 /// Every retained transcript body is addressed by a strand delta: an exact
@@ -5093,6 +5129,16 @@ fn validate_store_issued_head_identity_pair(
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait IncrementalSessionStore: SessionStore {
+    /// Whether this store bounds its persisted transcript history; see
+    /// [`TranscriptRowRetention`].
+    ///
+    /// The default is [`TranscriptRowRetention::KeepsAll`], which session
+    /// services report once at construction, so an unbounded store is
+    /// visible rather than silent.
+    fn transcript_row_retention(&self) -> TranscriptRowRetention {
+        TranscriptRowRetention::KeepsAll
+    }
+
     /// Activate every physical HeadCanonical session in one backend snapshot.
     ///
     /// This operation is required and deliberately has no default. A durable
@@ -5901,6 +5947,19 @@ pub fn strand_layout_for_history(
         });
     };
     let state = history.state();
+    // Head-canonical rows replay a graph from its pre-rewrite anchor through
+    // every occurrence. A re-anchored graph no longer holds the retired
+    // bodies, so it has no faithful strand layout.
+    if state.retired_count() != 0 {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: id.clone(),
+            reason: format!(
+                "transcript graph retired its first {} rewrite occurrence(s) (oldest retained revision {}); a head-canonical strand layout needs the whole graph",
+                state.retired_count(),
+                state.oldest_retained_revision()
+            ),
+        });
+    }
     let serialized_anchor = state
         .anchor()
         .messages()

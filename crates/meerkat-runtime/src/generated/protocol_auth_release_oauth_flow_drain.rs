@@ -41,24 +41,42 @@ pub fn extract_obligations(
         .collect()
 }
 
+/// Owner feedback naming an obligation member, rejected before it reaches the
+/// machine (the member is not in the obligation) or by the machine itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObligationMemberFeedbackError<E> {
+    NotObligationMember { field: &'static str },
+    Transition(E),
+}
+
 pub fn submit_expire_o_auth_browser_flow(
     authority: &mut AuthMachineAuthority,
-    _obligation: AuthReleaseOauthFlowDrainObligation,
-    browser_flow_id: String,
-) -> Result<AuthMachineTransition, AuthMachineTransitionError> {
-    let transition = authority.apply(AuthMachineInput::ExpireOAuthBrowserFlow {
-        flow_id: browser_flow_id,
-    })?;
+    obligation: AuthReleaseOauthFlowDrainObligation,
+    flow_id: String,
+) -> Result<AuthMachineTransition, ObligationMemberFeedbackError<AuthMachineTransitionError>> {
+    if !obligation.browser_flow_ids.contains(&flow_id) {
+        return Err(ObligationMemberFeedbackError::NotObligationMember {
+            field: "browser_flow_ids",
+        });
+    }
+    let transition = authority
+        .apply(AuthMachineInput::ExpireOAuthBrowserFlow { flow_id })
+        .map_err(ObligationMemberFeedbackError::Transition)?;
     Ok(transition)
 }
 
 pub fn submit_expire_o_auth_device_flow(
     authority: &mut AuthMachineAuthority,
-    _obligation: AuthReleaseOauthFlowDrainObligation,
-    device_flow_id: String,
-) -> Result<AuthMachineTransition, AuthMachineTransitionError> {
-    let transition = authority.apply(AuthMachineInput::ExpireOAuthDeviceFlow {
-        flow_id: device_flow_id,
-    })?;
+    obligation: AuthReleaseOauthFlowDrainObligation,
+    flow_id: String,
+) -> Result<AuthMachineTransition, ObligationMemberFeedbackError<AuthMachineTransitionError>> {
+    if !obligation.device_flow_ids.contains(&flow_id) {
+        return Err(ObligationMemberFeedbackError::NotObligationMember {
+            field: "device_flow_ids",
+        });
+    }
+    let transition = authority
+        .apply(AuthMachineInput::ExpireOAuthDeviceFlow { flow_id })
+        .map_err(ObligationMemberFeedbackError::Transition)?;
     Ok(transition)
 }

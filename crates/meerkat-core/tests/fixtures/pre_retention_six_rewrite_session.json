@@ -1,0 +1,716 @@
+{
+  "version": 3,
+  "id": "01a0fe3c-c47a-79f0-bfa8-dcdb6b1e1900",
+  "messages": [
+    {
+      "role": "user",
+      "content": "summary of cycle 5",
+      "created_at": "2026-10-02T20:09:50.465352122Z"
+    },
+    {
+      "role": "user",
+      "content": "live tail after the last rewrite",
+      "created_at": "2026-10-02T20:09:50.466372543Z"
+    }
+  ],
+  "created_at": {
+    "secs_since_epoch": 1790971790,
+    "nanos_since_epoch": 458800655
+  },
+  "updated_at": {
+    "secs_since_epoch": 1790971790,
+    "nanos_since_epoch": 466386453
+  },
+  "metadata": {
+    "session_transcript_history_state_v1": {
+      "format": "anchor_occurrence_edges_v1",
+      "anchor": {
+        "revision": "sha256:dd99aafcef9f1adbe270b5de9ffa93a3490d70f965a9258b59d36a47db821ba6",
+        "messages": [
+          {
+            "role": "user",
+            "content": "cycle 0 turn 0: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+            "created_at": "2026-10-02T20:09:50.458930029Z"
+          },
+          {
+            "role": "user",
+            "content": "cycle 0 turn 1: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+            "created_at": "2026-10-02T20:09:50.459017149Z"
+          },
+          {
+            "role": "user",
+            "content": "cycle 0 turn 2: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+            "created_at": "2026-10-02T20:09:50.459047154Z"
+          },
+          {
+            "role": "user",
+            "content": "cycle 0 turn 3: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+            "created_at": "2026-10-02T20:09:50.459076498Z"
+          },
+          {
+            "role": "user",
+            "content": "cycle 0 turn 4: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+            "created_at": "2026-10-02T20:09:50.459106554Z"
+          },
+          {
+            "role": "user",
+            "content": "cycle 0 turn 5: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+            "created_at": "2026-10-02T20:09:50.459137039Z"
+          },
+          {
+            "role": "user",
+            "content": "cycle 0 turn 6: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+            "created_at": "2026-10-02T20:09:50.459166373Z"
+          },
+          {
+            "role": "user",
+            "content": "cycle 0 turn 7: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+            "created_at": "2026-10-02T20:09:50.459195567Z"
+          }
+        ],
+        "row_prefix": {
+          "version": 1,
+          "row_count": 8,
+          "digest": "row-lineage-v1-sha256:1b10276b6a854872ea3881e2c6e6e4e0cd54eb1f65591406858d12d840fead13"
+        },
+        "created_at": {
+          "secs_since_epoch": 1790971790,
+          "nanos_since_epoch": 459224370
+        }
+      },
+      "edges": [
+        {
+          "commit": {
+            "rewrite_generation": 1,
+            "parent_revision": "sha256:dd99aafcef9f1adbe270b5de9ffa93a3490d70f965a9258b59d36a47db821ba6",
+            "revision": "sha256:840f201a8612e871bbf1a41b197a426d5a44585be35d4c2fa08cda6bc8869e00",
+            "selection": {
+              "type": "edit_message_range",
+              "range": {
+                "start": 0,
+                "end": 8
+              }
+            },
+            "original_span_digest": "sha256:dd99aafcef9f1adbe270b5de9ffa93a3490d70f965a9258b59d36a47db821ba6",
+            "replacement_digest": "sha256:840f201a8612e871bbf1a41b197a426d5a44585be35d4c2fa08cda6bc8869e00",
+            "messages_before": 8,
+            "messages_after": 1,
+            "reason": {
+              "kind": "compaction"
+            },
+            "actor": "fixture",
+            "committed_at": {
+              "secs_since_epoch": 1790971790,
+              "nanos_since_epoch": 459613374
+            }
+          },
+          "rewrite_prefix": {
+            "occurrence_count": 1,
+            "digest": "sha256:13225d0b3302dbe93adccd91e7b30aa457901244a61f4419d78dbeec8e8e624d"
+          },
+          "base_revision": "sha256:dd99aafcef9f1adbe270b5de9ffa93a3490d70f965a9258b59d36a47db821ba6",
+          "messages_before_base": 8,
+          "parent_advance": {
+            "kind": "exact_append"
+          },
+          "parent_row_prefix": {
+            "version": 1,
+            "row_count": 8,
+            "digest": "row-lineage-v1-sha256:1b10276b6a854872ea3881e2c6e6e4e0cd54eb1f65591406858d12d840fead13"
+          },
+          "rewrite": {
+            "at": 0,
+            "replacement": [
+              {
+                "role": "user",
+                "content": "summary of cycle 0",
+                "created_at": "2026-10-02T20:09:50.459225792Z"
+              }
+            ]
+          },
+          "result_witness": {
+            "message_count": 1,
+            "row_prefix": {
+              "version": 1,
+              "row_count": 1,
+              "digest": "row-lineage-v1-sha256:6e2fa30a7580aa0884206ce897e5b0d6fb46c0bfd80c52e1b85ede25d93d2c06"
+            }
+          },
+          "parent_created_at": {
+            "secs_since_epoch": 1790971790,
+            "nanos_since_epoch": 459224370
+          },
+          "revision_created_at": {
+            "secs_since_epoch": 1790971790,
+            "nanos_since_epoch": 459613374
+          }
+        },
+        {
+          "commit": {
+            "rewrite_generation": 2,
+            "parent_revision": "sha256:9c6372b74b3c1af926a140bfb0a979b33b3a53b7d77255bbdc0eb089ab542ab5",
+            "revision": "sha256:6b7e5cde3b179809dad6db9c16dda9eca199bcbaf79f434c0d2651bbfdccdbfe",
+            "selection": {
+              "type": "edit_message_range",
+              "range": {
+                "start": 0,
+                "end": 9
+              }
+            },
+            "original_span_digest": "sha256:9c6372b74b3c1af926a140bfb0a979b33b3a53b7d77255bbdc0eb089ab542ab5",
+            "replacement_digest": "sha256:6b7e5cde3b179809dad6db9c16dda9eca199bcbaf79f434c0d2651bbfdccdbfe",
+            "messages_before": 9,
+            "messages_after": 1,
+            "reason": {
+              "kind": "compaction"
+            },
+            "actor": "fixture",
+            "committed_at": {
+              "secs_since_epoch": 1790971790,
+              "nanos_since_epoch": 460734035
+            }
+          },
+          "rewrite_prefix": {
+            "occurrence_count": 2,
+            "digest": "sha256:3bda4a3b23d889b8b12a801fca6f18864a735e96785d4dc641ff52cd71fe9317"
+          },
+          "base_revision": "sha256:840f201a8612e871bbf1a41b197a426d5a44585be35d4c2fa08cda6bc8869e00",
+          "messages_before_base": 1,
+          "parent_advance": {
+            "kind": "exact_append",
+            "appended": [
+              {
+                "role": "user",
+                "content": "cycle 1 turn 0: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.460244891Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 1 turn 1: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.460275978Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 1 turn 2: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.460305312Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 1 turn 3: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.460334405Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 1 turn 4: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.460363910Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 1 turn 5: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.460393033Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 1 turn 6: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.460422257Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 1 turn 7: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.460451451Z"
+              }
+            ]
+          },
+          "parent_row_prefix": {
+            "version": 1,
+            "row_count": 9,
+            "digest": "row-lineage-v1-sha256:837bd0a190e19b559f6d005e3a22b10f42472fdd1660ddeb6ff0c873153801a0"
+          },
+          "rewrite": {
+            "at": 0,
+            "replacement": [
+              {
+                "role": "user",
+                "content": "summary of cycle 1",
+                "created_at": "2026-10-02T20:09:50.460480845Z"
+              }
+            ]
+          },
+          "result_witness": {
+            "message_count": 1,
+            "row_prefix": {
+              "version": 1,
+              "row_count": 1,
+              "digest": "row-lineage-v1-sha256:5101660b1dfd88e51268a40eeb6c0c0d4086e7596619afcbbb91bd7fc5c3d51f"
+            }
+          },
+          "parent_created_at": {
+            "secs_since_epoch": 1790971790,
+            "nanos_since_epoch": 460480504
+          },
+          "revision_created_at": {
+            "secs_since_epoch": 1790971790,
+            "nanos_since_epoch": 460734035
+          }
+        },
+        {
+          "commit": {
+            "rewrite_generation": 3,
+            "parent_revision": "sha256:821b2c9e3ed07ec91f48c9037ac54ba8bcb63da6c8c055f34b2a0d3f4c46d7f5",
+            "revision": "sha256:ae48be779fc8a9935ad6b23918e2ecb8d7c38cd0839853f1bcf05ffcf131642f",
+            "selection": {
+              "type": "edit_message_range",
+              "range": {
+                "start": 0,
+                "end": 9
+              }
+            },
+            "original_span_digest": "sha256:821b2c9e3ed07ec91f48c9037ac54ba8bcb63da6c8c055f34b2a0d3f4c46d7f5",
+            "replacement_digest": "sha256:ae48be779fc8a9935ad6b23918e2ecb8d7c38cd0839853f1bcf05ffcf131642f",
+            "messages_before": 9,
+            "messages_after": 1,
+            "reason": {
+              "kind": "compaction"
+            },
+            "actor": "fixture",
+            "committed_at": {
+              "secs_since_epoch": 1790971790,
+              "nanos_since_epoch": 461951771
+            }
+          },
+          "rewrite_prefix": {
+            "occurrence_count": 3,
+            "digest": "sha256:41ecd4585e030d53afd1a61b8493b2d82183adabc4678e5b86dbcc370fd35639"
+          },
+          "base_revision": "sha256:6b7e5cde3b179809dad6db9c16dda9eca199bcbaf79f434c0d2651bbfdccdbfe",
+          "messages_before_base": 1,
+          "parent_advance": {
+            "kind": "exact_append",
+            "appended": [
+              {
+                "role": "user",
+                "content": "cycle 2 turn 0: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.461458652Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 2 turn 1: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.461488917Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 2 turn 2: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.461518251Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 2 turn 3: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.461547265Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 2 turn 4: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.461576569Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 2 turn 5: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.461614806Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 2 turn 6: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.461644020Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 2 turn 7: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.461673083Z"
+              }
+            ]
+          },
+          "parent_row_prefix": {
+            "version": 1,
+            "row_count": 9,
+            "digest": "row-lineage-v1-sha256:5ac751d19bf681006e19494872cd6ca2ac9c90a10c1c9818b4c1b9671cc1f37c"
+          },
+          "rewrite": {
+            "at": 0,
+            "replacement": [
+              {
+                "role": "user",
+                "content": "summary of cycle 2",
+                "created_at": "2026-10-02T20:09:50.461702447Z"
+              }
+            ]
+          },
+          "result_witness": {
+            "message_count": 1,
+            "row_prefix": {
+              "version": 1,
+              "row_count": 1,
+              "digest": "row-lineage-v1-sha256:85a8deb74b1d57ee90674f41ddd2367758edaf919896b1395743fcbf353956b9"
+            }
+          },
+          "parent_created_at": {
+            "secs_since_epoch": 1790971790,
+            "nanos_since_epoch": 461702247
+          },
+          "revision_created_at": {
+            "secs_since_epoch": 1790971790,
+            "nanos_since_epoch": 461951771
+          }
+        },
+        {
+          "commit": {
+            "rewrite_generation": 4,
+            "parent_revision": "sha256:cac52c1942fb172c7c6b7a2f6c7b8eeceeb4fdec618e0fc2365cb8a5fcdfaa33",
+            "revision": "sha256:ac7e8bef1c7a3e1fd163070fc6bb535e72ffc86d8352a6ef90ff4343a8d1f8bb",
+            "selection": {
+              "type": "edit_message_range",
+              "range": {
+                "start": 0,
+                "end": 9
+              }
+            },
+            "original_span_digest": "sha256:cac52c1942fb172c7c6b7a2f6c7b8eeceeb4fdec618e0fc2365cb8a5fcdfaa33",
+            "replacement_digest": "sha256:ac7e8bef1c7a3e1fd163070fc6bb535e72ffc86d8352a6ef90ff4343a8d1f8bb",
+            "messages_before": 9,
+            "messages_after": 1,
+            "reason": {
+              "kind": "compaction"
+            },
+            "actor": "fixture",
+            "committed_at": {
+              "secs_since_epoch": 1790971790,
+              "nanos_since_epoch": 463167054
+            }
+          },
+          "rewrite_prefix": {
+            "occurrence_count": 4,
+            "digest": "sha256:37b9d636084d9049f39143fc6b1d4bc549fe3607675eefc145cab290f1559a84"
+          },
+          "base_revision": "sha256:ae48be779fc8a9935ad6b23918e2ecb8d7c38cd0839853f1bcf05ffcf131642f",
+          "messages_before_base": 1,
+          "parent_advance": {
+            "kind": "exact_append",
+            "appended": [
+              {
+                "role": "user",
+                "content": "cycle 3 turn 0: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.462673804Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 3 turn 1: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.462703820Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 3 turn 2: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.462733083Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 3 turn 3: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.462762247Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 3 turn 4: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.462791651Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 3 turn 5: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.462820905Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 3 turn 6: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.462850089Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 3 turn 7: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.462879142Z"
+              }
+            ]
+          },
+          "parent_row_prefix": {
+            "version": 1,
+            "row_count": 9,
+            "digest": "row-lineage-v1-sha256:5dfad4dfb5ee815cca29f67aca5498a87d652c4a32143f49bf9aef35a53b1881"
+          },
+          "rewrite": {
+            "at": 0,
+            "replacement": [
+              {
+                "role": "user",
+                "content": "summary of cycle 3",
+                "created_at": "2026-10-02T20:09:50.462908146Z"
+              }
+            ]
+          },
+          "result_witness": {
+            "message_count": 1,
+            "row_prefix": {
+              "version": 1,
+              "row_count": 1,
+              "digest": "row-lineage-v1-sha256:5c80836d7f39f51dad26f29f7789e05b4476298d66ae5dd1b507f28b20ccf19d"
+            }
+          },
+          "parent_created_at": {
+            "secs_since_epoch": 1790971790,
+            "nanos_since_epoch": 462907936
+          },
+          "revision_created_at": {
+            "secs_since_epoch": 1790971790,
+            "nanos_since_epoch": 463167054
+          }
+        },
+        {
+          "commit": {
+            "rewrite_generation": 5,
+            "parent_revision": "sha256:bc3dc2924f3f85b91875e0e5a2658b6a41d6df13fbaef2b25eed5bdf7ce17c9c",
+            "revision": "sha256:9766eb065a49ec818a46faf8bbdb8e993bdbce73c43ed5bec9f3769687fa20b4",
+            "selection": {
+              "type": "edit_message_range",
+              "range": {
+                "start": 0,
+                "end": 9
+              }
+            },
+            "original_span_digest": "sha256:bc3dc2924f3f85b91875e0e5a2658b6a41d6df13fbaef2b25eed5bdf7ce17c9c",
+            "replacement_digest": "sha256:9766eb065a49ec818a46faf8bbdb8e993bdbce73c43ed5bec9f3769687fa20b4",
+            "messages_before": 9,
+            "messages_after": 1,
+            "reason": {
+              "kind": "compaction"
+            },
+            "actor": "fixture",
+            "committed_at": {
+              "secs_since_epoch": 1790971790,
+              "nanos_since_epoch": 464397039
+            }
+          },
+          "rewrite_prefix": {
+            "occurrence_count": 5,
+            "digest": "sha256:9b1120ff84c04267fc5f66767d15508813553561e51c0c373a9c8ef28b3eaf09"
+          },
+          "base_revision": "sha256:ac7e8bef1c7a3e1fd163070fc6bb535e72ffc86d8352a6ef90ff4343a8d1f8bb",
+          "messages_before_base": 1,
+          "parent_advance": {
+            "kind": "exact_append",
+            "appended": [
+              {
+                "role": "user",
+                "content": "cycle 4 turn 0: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.463889328Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 4 turn 1: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.463919042Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 4 turn 2: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.463948356Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 4 turn 3: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.463977670Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 4 turn 4: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.464006884Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 4 turn 5: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.464035767Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 4 turn 6: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.464064851Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 4 turn 7: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.464093935Z"
+              }
+            ]
+          },
+          "parent_row_prefix": {
+            "version": 1,
+            "row_count": 9,
+            "digest": "row-lineage-v1-sha256:4166509cd7988688beb2ccdf7188e5fe1eb900898ea4d0d8d7e10c7acbe5f306"
+          },
+          "rewrite": {
+            "at": 0,
+            "replacement": [
+              {
+                "role": "user",
+                "content": "summary of cycle 4",
+                "created_at": "2026-10-02T20:09:50.464123169Z"
+              }
+            ]
+          },
+          "result_witness": {
+            "message_count": 1,
+            "row_prefix": {
+              "version": 1,
+              "row_count": 1,
+              "digest": "row-lineage-v1-sha256:a45614d94178a0e03187cf7b1202498b076859bb61b1de9b619b2d0f30a89b97"
+            }
+          },
+          "parent_created_at": {
+            "secs_since_epoch": 1790971790,
+            "nanos_since_epoch": 464122958
+          },
+          "revision_created_at": {
+            "secs_since_epoch": 1790971790,
+            "nanos_since_epoch": 464397039
+          }
+        },
+        {
+          "commit": {
+            "rewrite_generation": 6,
+            "parent_revision": "sha256:496d3801b274552c96dd8f3e206176206f5da1e720eadd8dcfd7f46072c0a16d",
+            "revision": "sha256:f2fe0859c6a578a1b8471bde06fce9cd1c05df2cb7394ac76682e712d9141056",
+            "selection": {
+              "type": "edit_message_range",
+              "range": {
+                "start": 0,
+                "end": 9
+              }
+            },
+            "original_span_digest": "sha256:496d3801b274552c96dd8f3e206176206f5da1e720eadd8dcfd7f46072c0a16d",
+            "replacement_digest": "sha256:f2fe0859c6a578a1b8471bde06fce9cd1c05df2cb7394ac76682e712d9141056",
+            "messages_before": 9,
+            "messages_after": 1,
+            "reason": {
+              "kind": "compaction"
+            },
+            "actor": "fixture",
+            "committed_at": {
+              "secs_since_epoch": 1790971790,
+              "nanos_since_epoch": 465653774
+            }
+          },
+          "rewrite_prefix": {
+            "occurrence_count": 6,
+            "digest": "sha256:8e5b3ea503276cf9b035be95402773823f1285e50dcceb7ac38950078e1d9b87"
+          },
+          "base_revision": "sha256:9766eb065a49ec818a46faf8bbdb8e993bdbce73c43ed5bec9f3769687fa20b4",
+          "messages_before_base": 1,
+          "parent_advance": {
+            "kind": "exact_append",
+            "appended": [
+              {
+                "role": "user",
+                "content": "cycle 5 turn 0: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.465118371Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 5 turn 1: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.465148426Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 5 turn 2: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.465177720Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 5 turn 3: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.465206544Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 5 turn 4: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.465235948Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 5 turn 5: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.465265202Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 5 turn 6: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.465294125Z"
+              },
+              {
+                "role": "user",
+                "content": "cycle 5 turn 7: history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history history ",
+                "created_at": "2026-10-02T20:09:50.465323118Z"
+              }
+            ]
+          },
+          "parent_row_prefix": {
+            "version": 1,
+            "row_count": 9,
+            "digest": "row-lineage-v1-sha256:a4ffb34873e9b9fe6884d23ab77cf7b87e28268204388811d0dd90646ac2c08b"
+          },
+          "rewrite": {
+            "at": 0,
+            "replacement": [
+              {
+                "role": "user",
+                "content": "summary of cycle 5",
+                "created_at": "2026-10-02T20:09:50.465352122Z"
+              }
+            ]
+          },
+          "result_witness": {
+            "message_count": 1,
+            "row_prefix": {
+              "version": 1,
+              "row_count": 1,
+              "digest": "row-lineage-v1-sha256:c377ba540ef3c6fee51f53baf5dcfbbcb245564f7ad8ca5a9b624640ba2a993c"
+            }
+          },
+          "parent_created_at": {
+            "secs_since_epoch": 1790971790,
+            "nanos_since_epoch": 465351952
+          },
+          "revision_created_at": {
+            "secs_since_epoch": 1790971790,
+            "nanos_since_epoch": 465653774
+          }
+        }
+      ],
+      "rewrite_prefix": {
+        "occurrence_count": 6,
+        "digest": "sha256:8e5b3ea503276cf9b035be95402773823f1285e50dcceb7ac38950078e1d9b87"
+      },
+      "graph_prefix": {
+        "occurrence_count": 6,
+        "digest": "sha256:bb982a18209409eca4cbbd8d4149fb7a7325378c889e17284cb0dd95ec8d0329"
+      },
+      "digest_format": 3
+    },
+    "session_transcript_rewrite_prefix_authority_v1": {
+      "occurrence_count": 6,
+      "digest": "sha256:8e5b3ea503276cf9b035be95402773823f1285e50dcceb7ac38950078e1d9b87"
+    },
+    "realtime_transcript_state": {
+      "items": {},
+      "first_seen_order": [],
+      "seen_delta_ids": [],
+      "assistant_completions": {}
+    }
+  },
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_creation_tokens": null,
+    "cache_read_tokens": null
+  }
+}

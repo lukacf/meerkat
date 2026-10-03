@@ -1478,33 +1478,21 @@ fn transcript_rewrite_audit_receipt_for_commits(
                 "transcript rewrite receipt session has no sealed graph".to_string(),
             ))
         })?;
-    let suffix = history
-        .prove_commit_suffix_starting_with(first)
+    // Receipts carry commits and rewrite prefixes only, so this proof also
+    // covers occurrences whose bodies the graph has retired.
+    let receipt = history
+        .audit_receipt_starting_with(first)
         .map_err(|error| {
             SessionError::Agent(AgentError::InternalError(format!(
-                "transcript rewrite receipt suffix is invalid: {error}"
+                "failed to seal transcript rewrite receipt: {error}"
             )))
         })?;
-    let proved = suffix.commits();
-    if proved.len() != commits.len()
-        || !proved
-            .zip(commits)
-            .all(|(proved, supplied)| proved == supplied)
-    {
+    if receipt.commits() != commits {
         return Err(SessionError::Agent(AgentError::InternalError(
             "transcript rewrite receipt commits are not the exact sealed graph suffix".to_string(),
         )));
     }
-    meerkat_core::TranscriptRewriteAuditReceiptBatch::new(
-        suffix.start_prefix().clone(),
-        commits.to_vec(),
-        suffix.end_prefix().clone(),
-    )
-    .map_err(|error| {
-        SessionError::Agent(AgentError::InternalError(format!(
-            "failed to seal transcript rewrite receipt: {error}"
-        )))
-    })
+    Ok(receipt)
 }
 
 async fn append_prepared_transcript_rewrite_receipt(
@@ -2452,6 +2440,15 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     incremental: Option<Arc<dyn IncrementalSessionStore>>,
     runtime_store: Arc<dyn RuntimeStore>,
     blob_store: Arc<dyn BlobStore>,
+    /// The runtime machine that hosts this service's session runtimes.
+    ///
+    /// The surface composition that builds the service binds the machine it
+    /// returns and installs its hosts on (`with_canonical_runtime_adapter`),
+    /// so every consumer that asks the service for its runtime reaches that
+    /// one machine. A service constructed directly, outside a composition,
+    /// gets a machine of its own on first use, which lives and dies with this
+    /// instance.
+    runtime_adapter: std::sync::OnceLock<Arc<MeerkatMachine>>,
     event_store: Option<Arc<dyn EventStore>>,
     projector: Option<Arc<SessionProjector>>,
     /// Gates for active keep-alive checkpointers, keyed by session ID.
@@ -2788,6 +2785,17 @@ fn view_from_authoritative_session(session: &Session) -> SessionView {
             usage: session.reported_total_usage(),
         },
     }
+}
+
+/// How a live-authority check observes the live actor's transcript authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveAuthorityObservation {
+    /// A command to the session task, ordered after the caller's earlier
+    /// commands. Waits for a running turn to end.
+    Ordered,
+    /// The authority the task last published between commands and turns.
+    /// Never waits on the task; observation-only readers use it.
+    Published,
 }
 
 enum LiveSessionAuthority {
@@ -4897,9 +4905,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<LiveSessionAuthority, SessionError> {
+        self.live_session_authority_with(id, LiveAuthorityObservation::Ordered)
+            .await
+    }
+
+    async fn live_session_authority_with(
+        &self,
+        id: &SessionId,
+        observation: LiveAuthorityObservation,
+    ) -> Result<LiveSessionAuthority, SessionError> {
         let mut retry = OptimisticReadRetry::new(id, "live session authority");
         loop {
-            let live_authority = match self.inner.observe_session_transcript_authority(id).await {
+            let observed = match observation {
+                LiveAuthorityObservation::Ordered => {
+                    self.inner.observe_session_transcript_authority(id).await
+                }
+                LiveAuthorityObservation::Published => {
+                    self.inner
+                        .observe_published_session_transcript_authority(id)
+                        .await
+                }
+            };
+            let live_authority = match observed {
                 Ok(authority) => authority,
                 Err(SessionError::NotFound { .. }) => {
                     return Ok(LiveSessionAuthority::NoLive);
@@ -5157,13 +5184,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<LiveSessionAuthority, SessionError> {
-        let mut result = self.live_session_authority(id).await;
+        let mut result = self
+            .live_session_authority_with(id, LiveAuthorityObservation::Published)
+            .await;
         for _ in 1..OBSERVATION_LOAD_ATTEMPTS {
             if !Self::is_transcript_revision_conflict(&result) {
                 break;
             }
             let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
-            result = self.live_session_authority(id).await;
+            result = self
+                .live_session_authority_with(id, LiveAuthorityObservation::Published)
+                .await;
         }
         result
     }
@@ -8552,6 +8583,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
         let incremental = store.as_incremental();
+        if let Some(incremental) = incremental.as_ref()
+            && incremental.transcript_row_retention()
+                == meerkat_core::TranscriptRowRetention::KeepsAll
+        {
+            tracing::warn!(
+                "incremental session store keeps every transcript rewrite row (no row retention); \
+                 session graphs stay bounded in memory, but this store's disk use and cold-load \
+                 replay grow with session history"
+            );
+        }
         Self {
             inner: Arc::new(EphemeralSessionService::new(
                 builder,
@@ -8560,6 +8601,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             incremental,
             runtime_store,
             blob_store,
+            runtime_adapter: std::sync::OnceLock::new(),
             event_store: None,
             projector: None,
             checkpointer_gates: Mutex::new(HashMap::new()),
@@ -8597,6 +8639,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Decoded sessions typically take a small multiple of their serialized
     /// size in memory. Zero disables retention: every consumer then decodes
     /// the committed document itself.
+    /// Bind the runtime machine the surface composition built for this
+    /// service: the machine it returns and installs its hosts (LLM
+    /// reconfigure, interrupted-tool evidence) on. [`Self::canonical_runtime_adapter`]
+    /// then answers with exactly that machine.
+    #[must_use]
+    pub fn with_canonical_runtime_adapter(self, adapter: Arc<MeerkatMachine>) -> Self {
+        // A fresh service has no machine yet; binding replaces nothing.
+        let _ = self.runtime_adapter.set(adapter);
+        self
+    }
+
+    /// The runtime machine hosting this service's session runtimes: the one
+    /// the surface composition bound, or, for a service constructed directly,
+    /// a machine of its own created on first use and owned by this instance.
+    pub fn canonical_runtime_adapter(&self) -> Arc<MeerkatMachine> {
+        Arc::clone(self.runtime_adapter.get_or_init(|| {
+            Arc::new(MeerkatMachine::persistent(
+                Arc::clone(&self.runtime_store),
+                Arc::clone(&self.blob_store),
+            ))
+        }))
+    }
+
     #[must_use]
     pub fn with_whole_blob_body_cache_bytes(mut self, bytes: usize) -> Self {
         self.whole_blob_body_budget_bytes = bytes;
@@ -13672,7 +13737,11 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                             hook().await;
                         }
                     }
-                    match self.inner.observe_session_transcript_authority(id).await {
+                    match self
+                        .inner
+                        .observe_published_session_transcript_authority(id)
+                        .await
+                    {
                         Ok(current) if current == snapshot => {
                             retry.finish();
                             return Ok(view);
@@ -13940,6 +14009,13 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for PersistentSe
             match fallback {
                 Some(messages) => messages,
                 None => {
+                    if let Some(history) = history.as_ref()
+                        && history.is_retired_revision(&revision)
+                    {
+                        return Err(history
+                            .retired_revision_refusal(&revision)
+                            .into_session_error());
+                    }
                     return Err(SessionError::Agent(
                         meerkat_core::error::AgentError::ConfigError(format!(
                             "transcript revision {revision} not found for session {id}",
@@ -26095,9 +26171,11 @@ mod tests {
     }
 
     /// A member-status observation of a session mid-turn reads the watches
-    /// the actor publishes. The authority-arbitrating `read` asks the session
-    /// task, which serves no command during a turn, so it waits for the
-    /// whole turn; the status view must not.
+    /// the actor publishes, and so does the authority-arbitrating `read`: it
+    /// compares against the transcript authority the session task published
+    /// before the turn, never asking the busy task. The ordered observation
+    /// (a command to the task, for export and commit callers that need it
+    /// ordered after their own commands) still waits for the turn.
     #[tokio::test]
     async fn live_session_view_observation_does_not_wait_for_active_turn() {
         let builder = BlockingRunBuilder::new();
@@ -26140,14 +26218,22 @@ mod tests {
                 .await
         });
         builder.wait_for_entered_runs(1).await;
+        let busy_read = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            SessionService::read(service.as_ref(), &id),
+        )
+        .await
+        .expect("the authority-arbitrating read must not wait for the active turn")
+        .unwrap();
+        assert_eq!(busy_read.state.session_id, id);
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(100),
-                SessionService::read(service.as_ref(), &id),
+                service.inner.observe_session_transcript_authority(&id),
             )
             .await
             .is_err(),
-            "the authority-arbitrating read queues behind the running turn"
+            "the ordered transcript-authority observation queues behind the running turn"
         );
         let busy_view = tokio::time::timeout(
             std::time::Duration::from_secs(1),

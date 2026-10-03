@@ -667,6 +667,15 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
+            "/auth/login/cancel",
+            vec![RestOperationDescriptor::with_json_request(
+                "post",
+                "Retire a pending MCP OAuth attempt by its state",
+                "LoginCancelParams",
+                "WireLoginCancelled",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/auth/login/device/start",
             vec![RestOperationDescriptor::with_json_request(
                 "post",

@@ -3932,6 +3932,9 @@ END";
                     path: path.display().to_string(),
                 }
             }
+            unsafe_file @ meerkat_sqlite::SqliteStoreError::UnsupportedDatabaseFile { .. } => {
+                RuntimeStoreError::Unsupported(unsafe_file.to_string())
+            }
             other => RuntimeStoreError::WriteFailed(other.to_string()),
         }
     }
@@ -9671,6 +9674,11 @@ ORDER BY runtime_id";
         whole_blob_transcript_facts: Arc<RecordedWholeBlobTranscriptFacts>,
         #[cfg(test)]
         unregister_finalization_fault: AtomicU8,
+        /// Notified when unregister finalization is about to wait for the
+        /// runtime write lock (just before `BEGIN IMMEDIATE`), so the
+        /// worker-starvation test can act while the wait is underway.
+        #[cfg(test)]
+        unregister_finalization_lock_wait: Arc<tokio::sync::Notify>,
         /// Candidate bytes shipped into the snapshot byte-equality probe.
         /// Observability seam for the length-gate regression tests only.
         #[cfg(test)]
@@ -9776,6 +9784,8 @@ ORDER BY runtime_id";
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
                 #[cfg(test)]
+                unregister_finalization_lock_wait: Arc::new(tokio::sync::Notify::new()),
+                #[cfg(test)]
                 snapshot_byte_probe_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
                     0,
                 )),
@@ -9815,6 +9825,9 @@ ORDER BY runtime_id";
         fn preflight_existing_runtime_schema_read_only(
             path: &Path,
         ) -> Result<(), RuntimeStoreError> {
+            // #1551: even a read-only connection names sidecars after this
+            // path; refuse an unsafe database file before opening it.
+            meerkat_sqlite::validate_database_file(path).map_err(map_shared_sqlite_error)?;
             let conn = Connection::open_with_flags(
                 path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -9877,6 +9890,8 @@ ORDER BY runtime_id";
                 whole_blob_transcript_facts: Arc::default(),
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
+                #[cfg(test)]
+                unregister_finalization_lock_wait: Arc::new(tokio::sync::Notify::new()),
                 #[cfg(test)]
                 snapshot_byte_probe_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
                     0,
@@ -15559,6 +15574,8 @@ ORDER BY runtime_id";
             let fault = self.unregister_finalization_fault.swap(0, Ordering::SeqCst);
             #[cfg(not(test))]
             let fault = 0_u8;
+            #[cfg(test)]
+            let lock_wait = Arc::clone(&self.unregister_finalization_lock_wait);
             // Retain finalization in this poll: a detached blocking task could
             // outlive cancellation and cross a same-runtime-ID replacement.
             // On a multithread runtime, hand the worker back before waiting
@@ -15579,6 +15596,8 @@ ORDER BY runtime_id";
                     .iter()
                     .map(|(input_id, _)| input_id.clone())
                     .collect::<Vec<_>>();
+                #[cfg(test)]
+                lock_wait.notify_one();
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let before_observation = observe_unregister_finalization(
                     &tx,
@@ -16154,6 +16173,70 @@ ORDER BY runtime_id";
         use tempfile::TempDir;
 
         use super::*;
+
+        /// #1551: SQLite derives journal, WAL and SHM names from the path it
+        /// opened, so two hard-linked names for one database break
+        /// coordinated access and crash recovery. Every runtime constructor
+        /// must refuse a multiply linked database typed, through either name,
+        /// before any SQLite open or profile mutation touches either name.
+        #[cfg(unix)]
+        #[test]
+        fn hard_linked_database_is_refused_before_open_mutates_either_name() {
+            let dir = TempDir::new().unwrap();
+            let first_dir = dir.path().join("first");
+            let second_dir = dir.path().join("second");
+            std::fs::create_dir_all(&first_dir).unwrap();
+            std::fs::create_dir_all(&second_dir).unwrap();
+            let original = first_dir.join("runtime.sqlite3");
+            drop(SqliteRuntimeStore::new(&original).expect("create runtime database"));
+            {
+                // Canary: a refused open must not convert the journal to WAL.
+                let conn = rusqlite::Connection::open(&original).unwrap();
+                let mode: String = conn
+                    .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(mode, "delete");
+            }
+            let linked = second_dir.join("runtime.sqlite3");
+            std::fs::hard_link(&original, &linked).unwrap();
+
+            let unrelated = dir.path().join("unrelated.sqlite3");
+            drop(SqliteRuntimeStore::new(&unrelated).expect("a single-link database still opens"));
+
+            let capture = |name: &Path| -> Vec<Option<Vec<u8>>> {
+                ["", "-wal", "-shm", "-journal"]
+                    .iter()
+                    .map(|suffix| std::fs::read(format!("{}{suffix}", name.display())).ok())
+                    .collect()
+            };
+            let before = (capture(&original), capture(&linked));
+            for name in [&original, &linked] {
+                let attempts = [
+                    ("new", SqliteRuntimeStore::new(name).map(drop)),
+                    (
+                        "new_head_canonical",
+                        SqliteRuntimeStore::new_head_canonical(name).map(drop),
+                    ),
+                    (
+                        "open_existing_whole_blob",
+                        SqliteRuntimeStore::open_existing_whole_blob(name).map(drop),
+                    ),
+                ];
+                for (constructor, result) in attempts {
+                    assert!(
+                        matches!(result, Err(RuntimeStoreError::Unsupported(_))),
+                        "{constructor} through {}: expected a typed Unsupported refusal, got {result:?}",
+                        name.display()
+                    );
+                    assert_eq!(
+                        (capture(&original), capture(&linked)),
+                        before,
+                        "{constructor} through {} changed a database, WAL, SHM or journal file",
+                        name.display()
+                    );
+                }
+            }
+        }
 
         #[tokio::test]
         async fn external_activation_advances_only_representation_side_predecessor() {
@@ -22013,40 +22096,53 @@ ORDER BY runtime_id";
                 epoch,
                 crate::meerkat_machine::DeleteOpsFinalizationAuthority::for_store_test(),
             );
-            let (locked_tx, locked_rx) = std::sync::mpsc::sync_channel(1);
+            // Every handoff is a typed signal; no step has a wall-clock
+            // margin. The writer holds the runtime write lock until the
+            // heartbeat task runs, and the heartbeat runs only after the
+            // finalizer has started waiting for that lock. A finalizer that
+            // waits on the single Tokio worker therefore keeps the heartbeat
+            // from ever running: the writer never releases, and the
+            // finalizer fails with SQLITE_BUSY at the store's own busy
+            // timeout. A finalizer that hands the worker back lets the
+            // heartbeat release the writer, and then commits.
+            let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
             let (progress_tx, progress_rx) = std::sync::mpsc::sync_channel(1);
             let path = store.path.clone();
             let writer = std::thread::spawn(move || {
                 let mut conn = open_runtime_connection(&path).unwrap();
                 let tx = begin_runtime_transaction(&mut conn).unwrap();
                 locked_tx.send(()).unwrap();
-                let progressed = progress_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+                let progressed = progress_rx.recv().is_ok();
                 drop(tx);
                 progressed
             });
-            locked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-            let entered = Arc::new(tokio::sync::Notify::new());
+            locked_rx
+                .await
+                .expect("writer holds the runtime write lock");
+            let lock_wait = Arc::clone(&store.unregister_finalization_lock_wait);
             let finalizer = tokio::spawn({
                 let store = store.clone();
                 let runtime_id = runtime_id.clone();
-                let entered = entered.clone();
                 async move {
-                    entered.notify_one();
                     store
                         .commit_unregister_finalization(&runtime_id, finalization)
                         .await
                 }
             });
-            entered.notified().await;
             let heartbeat = tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                let _ = progress_tx.send(());
+                lock_wait.notified().await;
+                progress_tx
+                    .send(())
+                    .expect("writer waits for the heartbeat");
             });
-            finalizer.await.unwrap().unwrap();
+            finalizer.await.unwrap().expect(
+                "SQLite finalization starved the Tokio worker: the heartbeat could not run \
+                 while finalization waited for the write lock",
+            );
             heartbeat.await.unwrap();
             assert!(
                 writer.join().unwrap(),
-                "SQLite finalization starved the Tokio worker"
+                "the writer released the lock on the heartbeat"
             );
             assert!(
                 crate::store::load_machine_lifecycle(store.as_ref(), &runtime_id)

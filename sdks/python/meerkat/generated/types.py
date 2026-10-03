@@ -531,6 +531,21 @@ class WorkItemsResult:
 # config or wrapped with an optimistic-concurrency generation).
 ConfigSetParams = dict[str, Any]
 
+@dataclass
+class WireMcpAuthTarget:
+    """OAuth-protected MCP server addressed by `auth/login/*` and
+`auth/status/get` instead of a provider binding.
+
+`server_name` and `server_url` identify the configured server;
+`oauth_account` is the selected account the login must prove (the OIDC
+subject for the default account strategy). Login is host-driven: the
+authorize URL and state are host-channel data and must never reach an
+agent, tool result, transcript or log."""
+    server_name: str
+    server_url: str
+    oauth_account: Optional[str] = None
+
+
 # Wire payload for InstructionActivationDisposition.
 InstructionActivationDisposition = Any
 
@@ -653,6 +668,89 @@ class WireDeviceCompleteResultReady(TypedDict, total=False):
     state: Required[Literal['ready']]
 
 WireDeviceCompleteResult = WireDeviceCompleteResultPending | WireDeviceCompleteResultSlowDown | WireDeviceCompleteResultAccessDenied | WireDeviceCompleteResultExpired | WireDeviceCompleteResultReady
+
+# Request payload for `auth/status/get`: a provider binding (the original
+# flat fields) or an MCP server (`{"mcp": {...}}`).
+class AuthStatusParamsBindingIdParams(TypedDict, total=False):
+    binding_id: Required[str]
+    profile_id: NotRequired[Optional[str]]
+    realm_id: Required[str]
+
+class AuthStatusParamsMcpLoginTarget(TypedDict, total=False):
+    mcp: Required[WireMcpAuthTarget]
+
+AuthStatusParams = AuthStatusParamsBindingIdParams | AuthStatusParamsMcpLoginTarget
+
+# Request payload for `auth/login/complete`. For an MCP target, issuer,
+# client and resource come from the admitted attempt named by `state`;
+# nothing else is echoed. `Debug` redacts `code` and `state`.
+class LoginCompleteParamsProviderLoginTarget(TypedDict, total=False):
+    code: Required[str]
+    redirect_uri: Required[str]
+    state: Required[str]
+    binding_id: Required[str]
+    profile_id: NotRequired[Optional[str]]
+    provider: Required[Literal['anthropic', 'openai', 'google', 'copilot']]
+    realm_id: Required[str]
+
+class LoginCompleteParamsMcpLoginTarget(TypedDict, total=False):
+    code: Required[str]
+    redirect_uri: Required[str]
+    state: Required[str]
+    mcp: Required[WireMcpAuthTarget]
+
+LoginCompleteParams = LoginCompleteParamsProviderLoginTarget | LoginCompleteParamsMcpLoginTarget
+
+# Request payload for `auth/login/start`.
+class LoginStartParamsProviderLoginTarget(TypedDict, total=False):
+    redirect_uri: Required[str]
+    binding_id: Required[str]
+    profile_id: NotRequired[Optional[str]]
+    provider: Required[Literal['anthropic', 'openai', 'google', 'copilot']]
+    realm_id: Required[str]
+
+class LoginStartParamsMcpLoginTarget(TypedDict, total=False):
+    redirect_uri: Required[str]
+    mcp: Required[WireMcpAuthTarget]
+
+LoginStartParams = LoginStartParamsProviderLoginTarget | LoginStartParamsMcpLoginTarget
+
+# `auth/status/get` result: a provider binding status or an MCP status.
+class WireAuthStatusResultAuthStatusDetail(TypedDict, total=False):
+    account_id: NotRequired[Optional[str]]
+    auth_binding: Required[WireAuthBindingRef]
+    auth_method: Required[str]
+    binding_id: Required[str]
+    expires_at: NotRequired[Optional[str]]
+    has_refresh_token: Required[bool]
+    last_refresh_at: NotRequired[Optional[str]]
+    profile_id: Required[str]
+    provider: Required[str]
+    realm_id: Required[str]
+    state: Required[Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed'] | Literal['released'] | Literal['absent'] | Literal['missing_credential']]
+
+class WireAuthStatusResultMcpAuthStatus(TypedDict, total=False):
+    account_id: NotRequired[Optional[str]]
+    expires_at: NotRequired[Optional[str]]
+    mcp: Required[WireMcpAuthTarget]
+    phase: Required[Literal['authorized', 'reauth_required'] | Literal['authorization_required']]
+
+WireAuthStatusResult = WireAuthStatusResultAuthStatusDetail | WireAuthStatusResultMcpAuthStatus
+
+@dataclass
+class LoginCancelParams:
+    """Request payload for `auth/login/cancel`: retire the pending MCP attempt
+admitted under `state` for this configured server. `Debug` redacts `state`."""
+    mcp: WireMcpAuthTarget
+    state: str
+
+
+@dataclass
+class WireLoginCancelled:
+    """`auth/login/cancel` success body."""
+    cancelled: bool
+    mcp: WireMcpAuthTarget
+
 
 @dataclass
 class ActivateInstructionParams:
@@ -1098,28 +1196,6 @@ class ListSessionsParams:
 class ListSessionsResult:
     """Result for `session/list`."""
     sessions: list[dict[str, Any]]
-
-
-@dataclass
-class LoginCompleteParams:
-    """Request payload for `auth/login/complete`."""
-    binding_id: str
-    code: str
-    provider: Literal['anthropic', 'openai', 'google', 'copilot']
-    realm_id: str
-    redirect_uri: str
-    state: str
-    profile_id: Optional[str] = None
-
-
-@dataclass
-class LoginStartParams:
-    """Request payload for `auth/login/start`."""
-    binding_id: str
-    provider: Literal['anthropic', 'openai', 'google', 'copilot']
-    realm_id: str
-    redirect_uri: str
-    profile_id: Optional[str] = None
 
 
 @dataclass
@@ -1825,6 +1901,7 @@ class MobLifecycleResult:
     mob_id: str
     ok: bool
     destroy_report: Optional[Any] = None
+    stop_report: Optional[Any] = None
 
 
 @dataclass
@@ -4073,6 +4150,7 @@ class BridgeCapabilities:
     resolvable_providers: Optional[list[Provider]] = None
     retire_member: Optional[bool] = None
     rotation_observe_hold: Optional[bool] = None
+    run_start_hold: Optional[bool] = None
     supported_protocol_versions: Optional[list[BridgeProtocolVersion]] = None
     tracked_input_cancel: Optional[bool] = None
     unwire_member: Optional[bool] = None
@@ -5878,32 +5956,58 @@ class WireAuthProfileCleared:
 
 
 @dataclass
-class WireLoginStart:
-    """`POST /auth/login/start` success body."""
-    authorize_url: str
-    provider: Literal['anthropic', 'openai', 'google', 'copilot']
-    redirect_uri: str
-    state: str
-
-
-@dataclass
-class WireLoginReady:
-    """`POST /auth/login/complete` / ready leg of device-code success body.
-
-The optional `state` field distinguishes the flat `POST
-/auth/login/complete` response (no `state` set) from the device-code
-ready leg (`state = "ready"`) which is part of the pending/slow_down/
-access_denied/expired/ready tagged protocol."""
-    auth_binding: WireAuthBindingRef
-    binding_id: str
-    has_refresh_token: bool
-    profile_id: str
-    provider: Literal['anthropic', 'openai', 'google', 'copilot']
-    realm_id: str
-    scopes: list[str]
+class WireMcpAuthStatus:
+    """`auth/status/get` result for an MCP server target."""
+    mcp: WireMcpAuthTarget
+    phase: Literal['authorized', 'reauth_required'] | Literal['authorization_required']
+    account_id: Optional[str] = None
     expires_at: Optional[str] = None
-    state: Optional[str] = None
 
+
+# `POST /auth/login/start` success body. Host-channel data: the
+# authorize URL and state must never reach an agent, tool result,
+# transcript or log.
+class WireLoginStartProviderLoginStart(TypedDict, total=False):
+    authorize_url: Required[str]
+    redirect_uri: Required[str]
+    state: Required[str]
+    provider: Required[Literal['anthropic', 'openai', 'google', 'copilot']]
+
+class WireLoginStartMcpLoginStart(TypedDict, total=False):
+    authorize_url: Required[str]
+    redirect_uri: Required[str]
+    state: Required[str]
+    disposition: Required[Literal['started', 'joined']]
+    mcp: Required[WireMcpAuthTarget]
+
+WireLoginStart = WireLoginStartProviderLoginStart | WireLoginStartMcpLoginStart
+
+# `POST /auth/login/complete` / ready leg of device-code success body.
+#
+# The optional `state` field distinguishes the flat `POST
+# /auth/login/complete` response (no `state` set) from the device-code
+# ready leg (`state = "ready"`) which is part of the pending/slow_down/
+# access_denied/expired/ready tagged protocol.
+class WireLoginReadyProviderLoginReady(TypedDict, total=False):
+    expires_at: NotRequired[Optional[str]]
+    has_refresh_token: Required[bool]
+    scopes: Required[list[str]]
+    state: NotRequired[Optional[str]]
+    auth_binding: Required[WireAuthBindingRef]
+    binding_id: Required[str]
+    profile_id: Required[str]
+    provider: Required[Literal['anthropic', 'openai', 'google', 'copilot']]
+    realm_id: Required[str]
+
+class WireLoginReadyMcpLoginReady(TypedDict, total=False):
+    expires_at: NotRequired[Optional[str]]
+    has_refresh_token: Required[bool]
+    scopes: Required[list[str]]
+    state: NotRequired[Optional[str]]
+    account_id: NotRequired[Optional[str]]
+    mcp: Required[WireMcpAuthTarget]
+
+WireLoginReady = WireLoginReadyProviderLoginReady | WireLoginReadyMcpLoginReady
 
 @dataclass
 class WireDeviceStart:
@@ -7814,6 +7918,21 @@ class BridgeCommandStopMemberRun(TypedDict, total=False):
     reason: Required[str]
     supervisor: Required[BridgePeerSpec]
 
+class BridgeCommandHoldRunStarts(TypedDict, total=False):
+    cancel_current_run: NotRequired[bool]
+    command: Required[Literal['hold_run_starts']]
+    epoch: Required[int]
+    expected_member: NotRequired[Optional[BridgeMemberIncarnation]]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandReleaseRunStarts(TypedDict, total=False):
+    command: Required[Literal['release_run_starts']]
+    epoch: Required[int]
+    expected_member: NotRequired[Optional[BridgeMemberIncarnation]]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
 class BridgeCommandRetireMember(TypedDict, total=False):
     command: Required[Literal['retire_member']]
     epoch: Required[int]
@@ -8040,7 +8159,7 @@ class BridgeCommandRevokeForkedParticipant(TypedDict, total=False):
     source_member: Required[BridgeMemberIncarnation]
     supervisor: Required[BridgePeerSpec]
 
-BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant
+BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandHoldRunStarts | BridgeCommandReleaseRunStarts | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant
 
 # Outcome of a delivery attempt.
 class BridgeDeliveryOutcomeAccepted(TypedDict, total=False):
@@ -8276,6 +8395,10 @@ class BridgeReplyMemberRunStopped(TypedDict, total=False):
     receipt: Required[WireRunStopReceipt]
     result: Required[Literal['member_run_stopped']]
 
+class BridgeReplyRunStartsHeld(TypedDict, total=False):
+    result: Required[Literal['run_starts_held']]
+    run: Required[dict[str, Literal['no_run']] | dict[str, Any]]
+
 class BridgeReplyRetire(TypedDict, total=False):
     outcome: Required[dict[str, Any]]
     result: Required[Literal['retire']]
@@ -8396,7 +8519,7 @@ class BridgeReplyForkedParticipantRevoked(TypedDict, total=False):
     outcome: Required[dict[str, Any] | dict[str, Literal['pending_attached_release']] | dict[str, Literal['converged']]]
     result: Required[Literal['forked_participant_revoked']]
 
-BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked
+BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRunStartsHeld | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked
 
 # Input content that can be either a plain text string or multimodal content blocks.
 #

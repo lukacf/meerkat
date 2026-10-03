@@ -168,11 +168,14 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         ci.contains("format('main-{0}-{1}', github.ref_name, github.sha)"),
         "release commits, re-runs and dispatches keep one group per commit"
     );
-    let supersedable = "github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v')";
+    // Release integration branches are never superseded either: every merge
+    // there needs its own completed verdict.
+    let supersedable = "github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v') && !startsWith(github.ref, 'refs/heads/release/')";
     assert_eq!(
         ci.matches(supersedable).count(),
         2,
-        "the superseding group and its cancel-in-progress use the same condition"
+        "the superseding group and its cancel-in-progress use the same condition, \
+         both exempting release/** pushes"
     );
 
     let jobs = doc

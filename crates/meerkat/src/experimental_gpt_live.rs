@@ -638,7 +638,9 @@ pub enum ExperimentalLiveCloseConvergence {
 }
 
 /// Longest a spoken owner append waits for the provider to end an open user
-/// turn before it is sent anyway.
+/// turn before it is sent anyway: the failure bound for a user turn the
+/// provider never closes, not a pacing delay (a turn ends on its finish or
+/// on the client delegation joined to it).
 pub const SPOKEN_CONTEXT_USER_TURN_BOUND: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// Framing for a summary of the earlier text conversation. For a summary
@@ -4096,6 +4098,36 @@ impl ExperimentalGptLiveDeferredAdapter {
     /// turn, so the assistant does not talk over the user. Returns when the
     /// turn ends, the adapter closes, or `bound` elapses; the bound keeps a
     /// user turn the provider never closes from stalling context forever.
+    /// Follow the provider's user turn for [`Self::wait_for_quiet_user`], in
+    /// provider order. The observation pump is the sole caller, for every
+    /// sideband observation, before any of them is fanned out (adapter
+    /// ingress is lowered asynchronously, so tracking there could reorder a
+    /// turn start after the delegation that ended it).
+    ///
+    /// A user turn opens on its start and ends on its finish, or on the
+    /// client delegation joined to it: the delegation is that turn's
+    /// terminal observation and no finish follows it, so without this the
+    /// delegation's own narration waited out the whole bound (about 8 s
+    /// late on every delegated request). A late tail continuing the
+    /// delegation's utterance holds spoken context again until its finish.
+    fn track_user_turn(&self, kind: &LiveSidebandObservationKind) {
+        let open = match kind {
+            LiveSidebandObservationKind::TurnStarted {
+                role: LiveSidebandTurnRole::User,
+                ..
+            }
+            | LiveSidebandObservationKind::UserTurnContinuesDelegation { .. } => true,
+            LiveSidebandObservationKind::TurnFinished {
+                role: LiveSidebandTurnRole::User,
+                ..
+            }
+            | LiveSidebandObservationKind::DelegationRequested { .. } => false,
+            _ => return,
+        };
+        self.user_turn_open.store(open, Ordering::Release);
+        self.user_turn_changed.notify_waiters();
+    }
+
     async fn wait_for_quiet_user(&self, bound: std::time::Duration) {
         let deadline = tokio::time::Instant::now() + bound;
         loop {
@@ -4786,8 +4818,6 @@ impl ExperimentalGptLiveDeferredAdapter {
                 turn,
                 role: LiveSidebandTurnRole::User,
             } => {
-                self.user_turn_open.store(true, Ordering::Release);
-                self.user_turn_changed.notify_waiters();
                 if let Some(observation_id) = context_observation_id {
                     let Ok(mut observations) = self.turn_context_observations.lock() else {
                         return Some(LiveAdapterObservation::Error {
@@ -4866,8 +4896,6 @@ impl ExperimentalGptLiveDeferredAdapter {
                 transcript,
             } => match role {
                 LiveSidebandTurnRole::User => {
-                    self.user_turn_open.store(false, Ordering::Release);
-                    self.user_turn_changed.notify_waiters();
                     let Ok(mut observations) = self.turn_context_observations.lock() else {
                         return Some(LiveAdapterObservation::Error {
                             code: LiveAdapterErrorCode::InternalError,
@@ -7291,6 +7319,7 @@ fn spawn_sideband_actors(
                     // custody is different: nothing further can be applied
                     // for this channel, so the stream ends instead of
                     // leaving a call that refuses every turn.
+                    observation_adapter.track_user_turn(observation.kind());
                     if lifecycle_observation {
                         match activation
                             .activator
@@ -9246,6 +9275,143 @@ mod tests {
         tokio::time::advance(SPOKEN_CONTEXT_USER_TURN_BOUND + std::time::Duration::from_millis(10))
             .await;
         assert!(bounded.await.expect("bounded waiter") >= SPOKEN_CONTEXT_USER_TURN_BOUND);
+    }
+
+    fn quiet_user_test_adapter() -> Arc<ExperimentalGptLiveDeferredAdapter> {
+        Arc::new(ExperimentalGptLiveDeferredAdapter::new(
+            meerkat_core::SessionLlmIdentity {
+                model: "gpt-live-1".to_string(),
+                provider: meerkat_core::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: None,
+            },
+        ))
+    }
+
+    fn user_turn_test_ref(turn_id: &str) -> LiveSidebandTurnRef {
+        LiveSidebandTurnRef::__from_provider_observation(
+            &meerkat_live::LiveChannelId::new("quiet-user"),
+            "adapter-1".to_string(),
+            turn_id.to_string(),
+        )
+        .expect("turn ref")
+    }
+
+    fn delegation_test_ref() -> LiveSidebandDelegationRef {
+        LiveSidebandDelegationRef::__from_provider_observation(
+            "delegation:1".to_string(),
+            "dlg_1".to_string(),
+        )
+        .expect("delegation ref")
+    }
+
+    /// A waiter parked in `wait_for_quiet_user` (the spawned task has run to
+    /// its first await before this returns), timed from its spawn.
+    async fn spawn_quiet_user_waiter(
+        adapter: &Arc<ExperimentalGptLiveDeferredAdapter>,
+    ) -> tokio::task::JoinHandle<std::time::Duration> {
+        let waiter = Arc::clone(adapter);
+        let started = tokio::time::Instant::now();
+        let handle = tokio::spawn(async move {
+            waiter
+                .wait_for_quiet_user(SPOKEN_CONTEXT_USER_TURN_BOUND)
+                .await;
+            started.elapsed()
+        });
+        tokio::task::yield_now().await;
+        handle
+    }
+
+    /// The client delegation joined to an open user turn is that turn's
+    /// terminal observation: spoken context held for the turn (the
+    /// delegation's own narration) is released at once, not at the bound.
+    #[tokio::test(start_paused = true)]
+    async fn a_client_delegation_ends_the_user_turn_and_releases_spoken_context() {
+        let adapter = quiet_user_test_adapter();
+        let turn = user_turn_test_ref("turn-user-1");
+        adapter.track_user_turn(&LiveSidebandObservationKind::TurnStarted {
+            turn: turn.clone(),
+            role: LiveSidebandTurnRole::User,
+        });
+        let waited = spawn_quiet_user_waiter(&adapter).await;
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(
+            !waited.is_finished(),
+            "the open user turn holds spoken context"
+        );
+        adapter.track_user_turn(&LiveSidebandObservationKind::DelegationRequested {
+            turn,
+            delegation: delegation_test_ref(),
+            final_transcript: "write a note".to_string(),
+            request_transcript: "write a note".to_string(),
+            assistant_context: String::new(),
+            represented_user_rows: Vec::new(),
+        });
+        let waited = waited.await.expect("waiter");
+        assert_eq!(
+            waited,
+            std::time::Duration::from_secs(1),
+            "released by the delegation, not by the {SPOKEN_CONTEXT_USER_TURN_BOUND:?} bound"
+        );
+        // Spoken context after the delegation does not wait at all.
+        let after = spawn_quiet_user_waiter(&adapter).await;
+        assert_eq!(after.await.expect("waiter"), std::time::Duration::ZERO);
+    }
+
+    /// A late tail that continues the delegation's utterance is the user
+    /// still speaking: spoken context is held again until that turn's
+    /// finish.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_tail_continuing_a_delegation_holds_spoken_context_until_it_finishes() {
+        let adapter = quiet_user_test_adapter();
+        let turn = user_turn_test_ref("turn-user-1");
+        adapter.track_user_turn(&LiveSidebandObservationKind::TurnStarted {
+            turn: turn.clone(),
+            role: LiveSidebandTurnRole::User,
+        });
+        adapter.track_user_turn(&LiveSidebandObservationKind::DelegationRequested {
+            turn,
+            delegation: delegation_test_ref(),
+            final_transcript: "book a".to_string(),
+            request_transcript: "book a".to_string(),
+            assistant_context: String::new(),
+            represented_user_rows: Vec::new(),
+        });
+        let tail = user_turn_test_ref("turn-user-2");
+        adapter.track_user_turn(&LiveSidebandObservationKind::UserTurnContinuesDelegation {
+            turn: tail.clone(),
+            delegation: delegation_test_ref(),
+            transcript: " table".to_string(),
+        });
+        let waited = spawn_quiet_user_waiter(&adapter).await;
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        assert!(
+            !waited.is_finished(),
+            "the continuing tail holds spoken context while the user speaks"
+        );
+        // Unrelated observations change nothing.
+        adapter.track_user_turn(&LiveSidebandObservationKind::TurnFinished {
+            turn: user_turn_test_ref("turn-assistant-1"),
+            role: LiveSidebandTurnRole::Assistant,
+            transcript: "one moment".to_string(),
+        });
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(
+            !waited.is_finished(),
+            "an assistant finish does not end the user turn"
+        );
+        adapter.track_user_turn(&LiveSidebandObservationKind::TurnFinished {
+            turn: tail,
+            role: LiveSidebandTurnRole::User,
+            transcript: " table".to_string(),
+        });
+        let waited = waited.await.expect("waiter");
+        assert_eq!(
+            waited,
+            std::time::Duration::from_secs(3),
+            "the tail's finish releases spoken context, inside the bound"
+        );
     }
 
     #[tokio::test]

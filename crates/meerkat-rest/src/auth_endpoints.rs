@@ -2266,11 +2266,8 @@ mod tests {
     }
 
     fn install_ephemeral_auth_state(state: &mut AppState) {
-        let auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
-        state
-            .runtime_adapter
-            .set_runtime_auth_lease_handle(Arc::clone(&auth_lease))
-            .expect("initial runtime authority installation");
+        // Retain the installed owner: REST status and session runtimes must
+        // observe the same AuthMachine even with isolated token storage.
         state.auth_lease = state.runtime_adapter.generated_auth_lease_handle();
         state.provider_auth_persistence = ProviderAuthPersistence::new(
             Arc::new(EphemeralTokenStore::new()),

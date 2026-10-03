@@ -63,7 +63,7 @@ use meerkat_rpc::session_runtime::SessionRuntime;
 use serde_json::{Value, json};
 use tokio::io::BufReader;
 use tokio::sync::watch;
-use tokio::time::{Duration, Instant, sleep};
+use tokio::time::{Duration, timeout};
 
 use replay::{Cassette, ClientKey, Fixture, fixture_findings};
 use support::evidence::{self, Journal};
@@ -133,6 +133,8 @@ struct ScriptedLlm {
     conversations: AtomicUsize,
     jobs: AtomicUsize,
     calls: std::sync::Mutex<Vec<(Purpose, String)>>,
+    /// Advanced on every call, so a test can await one by purpose.
+    called: watch::Sender<usize>,
 }
 
 impl ScriptedLlm {
@@ -165,6 +167,30 @@ impl ScriptedLlm {
             return Purpose::DelegatedJob(self.jobs.fetch_add(1, Ordering::SeqCst));
         }
         Purpose::Conversation(self.conversations.fetch_add(1, Ordering::SeqCst))
+    }
+}
+
+impl ScriptedLlm {
+    /// Wait until a call for `purpose` has been made (each call notifies).
+    async fn wait_for_call(&self, purpose: Purpose) -> Result<(), Box<dyn std::error::Error>> {
+        let mut called = self.called.subscribe();
+        let seen = |calls: &std::sync::Mutex<Vec<(Purpose, String)>>| {
+            calls
+                .lock()
+                .expect("calls")
+                .iter()
+                .any(|(made, _)| *made == purpose)
+        };
+        timeout(CONVERGENCE_BOUND, async {
+            while !seen(&self.calls) {
+                if called.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await
+        .map_err(|_| format!("the scripted LLM never received a {purpose:?} call"))?;
+        Ok(())
     }
 }
 
@@ -203,6 +229,7 @@ impl LlmClient for ScriptedLlm {
             eprintln!("REPLAY_REQUEST purpose={purpose:?} messages={roles:#?}");
         }
         self.calls.lock().expect("calls").push((purpose, newest));
+        self.called.send_modify(|count| *count += 1);
         let script = self.scripts.get(&purpose).cloned();
         let model = request.model.clone();
         Box::pin(
@@ -343,7 +370,7 @@ struct ReplayHost {
     _temp: tempfile::TempDir,
     rpc: JsonlRpcClient,
     _server: tokio::task::JoinHandle<()>,
-    runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    session_runtime: Arc<SessionRuntime>,
     member_host: Arc<ServiceMemberLiveHost>,
     authority: Arc<ExperimentalGptLiveOpenAuthority>,
     transport: Arc<ExperimentalGptLiveWebrtcTransport>,
@@ -355,6 +382,9 @@ struct OpenChannel {
     id: LiveChannelId,
     pending_receipt: String,
     activation_receipt: String,
+    /// The session's event stream, subscribed before the channel opened, so
+    /// the committed close's `AgentEvent::LiveChannelClosed` cannot be missed.
+    events: meerkat_core::EventStream,
 }
 
 struct HostOptions<'a> {
@@ -572,7 +602,7 @@ async fn open_replay_host(
         _temp: temp,
         rpc,
         _server: server,
-        runtime: runtime.runtime_adapter(),
+        session_runtime: Arc::clone(&runtime),
         member_host,
         authority,
         transport: public_transport,
@@ -589,6 +619,10 @@ impl ReplayHost {
         evidence: &Journal,
     ) -> Result<(u32, OpenChannel), Box<dyn std::error::Error>> {
         let channel = evidence.next_channel()?;
+        let events = self
+            .session_runtime
+            .subscribe_session_events(&self.session_id)
+            .await?;
         let open = async {
             let pending = self
                 .member_host
@@ -604,7 +638,7 @@ impl ReplayHost {
                 )
                 .await?;
             let WireLiveTransportBootstrap::Webrtc { token, .. } = &pending.open().transport else {
-                return Err::<OpenChannel, Box<dyn std::error::Error>>(
+                return Err::<(LiveChannelId, String, String), Box<dyn std::error::Error>>(
                     "replay requires the WebRTC bootstrap".into(),
                 );
             };
@@ -638,46 +672,69 @@ impl ReplayHost {
             let Some(activation_receipt) = custody.phase().activation_receipt() else {
                 return Err("the replayed answer did not activate the pending channel".into());
             };
-            Ok(OpenChannel {
-                id: pending.channel_id().clone(),
-                pending_receipt: pending.pending_receipt().to_string(),
-                activation_receipt: activation_receipt.to_string(),
-            })
+            Ok((
+                pending.channel_id().clone(),
+                pending.pending_receipt().to_string(),
+                activation_receipt.to_string(),
+            ))
         };
-        let opened = evidence
+        let (id, pending_receipt, activation_receipt) = evidence
             .provider_recording(channel)
             .scope(evidence.wire(channel).scope(open))
             .await?;
         evidence.require_attached(channel)?;
         evidence.channel(channel, evidence::ChannelAction::Connected)?;
-        Ok((channel, opened))
+        Ok((
+            channel,
+            OpenChannel {
+                id,
+                pending_receipt,
+                activation_receipt,
+                events,
+            },
+        ))
     }
 
     /// The channel was closed (by the provider at the recording's
-    /// disconnect, or by the host): wait for the exact channel's custody to
-    /// converge to Closed. A custody read can fail while the close is in
-    /// transition (the activation it validates is being retired); that is
-    /// not yet an answer, and only the bound turns the last one into the
-    /// error.
-    async fn closed(&self, open: &OpenChannel) -> Result<(), Box<dyn std::error::Error>> {
-        let deadline = Instant::now() + CONVERGENCE_BOUND;
-        loop {
-            let phase = self
-                .member_host
-                .validate_experimental_live_channel_custody(&open.id, &open.pending_receipt)
-                .await
-                .map(|custody| custody.phase().clone());
-            if matches!(phase, Ok(ExperimentalLiveChannelPhaseStatus::Closed)) {
-                return Ok(());
+    /// disconnect, or by the host): wait for the committed close's
+    /// `AgentEvent::LiveChannelClosed` for this exact channel on the
+    /// session's event stream, then read its custody once, which must be
+    /// Closed. Any read failure fails the replay. The bound only reports a
+    /// close that never committed.
+    async fn closed(&self, open: &mut OpenChannel) -> Result<(), Box<dyn std::error::Error>> {
+        use futures::StreamExt as _;
+        let channel = open.id.as_str().to_owned();
+        let committed = timeout(CONVERGENCE_BOUND, async {
+            while let Some(envelope) = open.events.next().await {
+                if let meerkat_core::AgentEvent::LiveChannelClosed { channel_id, .. } =
+                    &envelope.payload
+                    && channel_id == &channel
+                {
+                    return true;
+                }
             }
-            if Instant::now() >= deadline {
-                return Err(format!(
-                    "channel custody did not converge to Closed after the close: {phase:?}"
-                )
-                .into());
+            false
+        })
+        .await;
+        match committed {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err("the session event stream ended before the channel closed".into());
             }
-            sleep(Duration::from_millis(20)).await;
+            Err(_) => return Err(format!("no LiveChannelClosed for channel {channel}").into()),
         }
+        let custody = self
+            .member_host
+            .validate_experimental_live_channel_custody(&open.id, &open.pending_receipt)
+            .await?;
+        if custody.phase() != &ExperimentalLiveChannelPhaseStatus::Closed {
+            return Err(format!(
+                "custody after the committed close is {:?}, not Closed",
+                custody.phase()
+            )
+            .into());
+        }
+        Ok(())
     }
 
     /// The host closes the channel, as the recorded run's harness did when
@@ -692,40 +749,6 @@ impl ReplayHost {
             )
             .await?;
         Ok(())
-    }
-
-    /// Wait until at least `count` of the session's live delegations are
-    /// terminal, each having completed.
-    async fn delegations_terminal(&self, count: usize) -> Result<(), Box<dyn std::error::Error>> {
-        use meerkat_runtime::live_execution::LiveDelegationWorkerTerminalKind;
-        let deadline = Instant::now() + CONVERGENCE_BOUND;
-        loop {
-            let snapshots = self
-                .runtime
-                .live_delegation_recovery_snapshots(&self.session_id)
-                .await?;
-            let terminal: Vec<_> = snapshots
-                .iter()
-                .filter_map(|snapshot| snapshot.terminal())
-                .collect();
-            if let Some(failed) = terminal
-                .iter()
-                .find(|kind| **kind != LiveDelegationWorkerTerminalKind::Completed)
-            {
-                return Err(format!("a delegated turn did not complete: {failed:?}").into());
-            }
-            if terminal.len() >= count {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(format!(
-                    "{} of {count} delegated turns reached terminality",
-                    terminal.len()
-                )
-                .into());
-            }
-            sleep(Duration::from_millis(20)).await;
-        }
     }
 }
 
@@ -846,6 +869,11 @@ fn recorded_jobs(fixture: &Fixture) -> Vec<RecordedJob> {
 struct ReplayScript {
     typed_after_channel: BTreeMap<u32, &'static str>,
     merge_gate_on_channel_open: Option<(u32, watch::Sender<bool>)>,
+    /// After this channel closed and released its held jobs, the next
+    /// channel opens only once the scripted LLM received this call: the
+    /// typed sign that those jobs reached the state the recorded run had at
+    /// its reopen (S104: the merged job's reply turn has started).
+    reopen_after_call: BTreeMap<u32, Purpose>,
 }
 
 /// Drive a recording: each channel opens, its markers are stepped in
@@ -854,6 +882,7 @@ struct ReplayScript {
 /// carried its "Started" narration when its result was delivered there, or
 /// once its channel closed when it was not.
 async fn drive_replay(
+    llm: &ScriptedLlm,
     host: &mut ReplayHost,
     cassette: Arc<Cassette>,
     evidence: &Journal,
@@ -879,9 +908,8 @@ async fn drive_replay(
         }
     }
     let mut merge_gate = script.merge_gate_on_channel_open;
-    let mut released_at_close = 0;
     for tape in &cassette.fixture().channels {
-        let (channel, open) = host.connect(evidence).await?;
+        let (channel, mut open) = host.connect(evidence).await?;
         if channel != tape.ordinal {
             return Err(format!("opened channel {channel}, the tape is {}", tape.ordinal).into());
         }
@@ -899,7 +927,7 @@ async fn drive_replay(
             }
         }
         cassette.ended(channel).await?;
-        host.closed(&open).await?;
+        host.closed(&mut open).await?;
         // The recorded test typed during the closure, before the jobs the
         // close left running finished (their merge then waits behind it).
         if let Some(prompt) = script.typed_after_channel.get(&channel) {
@@ -915,15 +943,11 @@ async fn drive_replay(
                 return Err(format!("the typed turn failed: {}", typed["error"]).into());
             }
         }
-        let mut released_now = 0;
         for gate in held_until_close.remove(&channel).unwrap_or_default() {
             gate.send_replace(true);
-            released_now += 1;
         }
-        if released_now > 0 {
-            released_at_close += released_now;
-            // The recorded run reopened only once those jobs were terminal.
-            host.delegations_terminal(released_at_close).await?;
+        if let Some(purpose) = script.reopen_after_call.get(&channel) {
+            llm.wait_for_call(*purpose).await?;
         }
     }
     for opener in gate_openers {
@@ -985,6 +1009,7 @@ fn scripted_llm(scripts: BTreeMap<Purpose, Script>) -> Arc<ScriptedLlm> {
         conversations: AtomicUsize::new(0),
         jobs: AtomicUsize::new(0),
         calls: std::sync::Mutex::new(Vec::new()),
+        called: watch::channel(0).0,
     })
 }
 
@@ -1067,6 +1092,7 @@ async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
     })
     .await?;
     let result = drive_replay(
+        &llm,
         &mut host,
         Arc::clone(&cassette),
         &evidence,
@@ -1075,6 +1101,7 @@ async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
         ReplayScript {
             typed_after_channel: BTreeMap::from([(1, S104_TYPED_PROMPT)]),
             merge_gate_on_channel_open: Some((2, merge_gate)),
+            reopen_after_call: BTreeMap::from([(1, Purpose::MergeReply)]),
         },
     )
     .await;
@@ -1167,6 +1194,7 @@ async fn s106_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
     })
     .await?;
     let result = drive_replay(
+        &llm,
         &mut host,
         Arc::clone(&cassette),
         &evidence,
@@ -1175,6 +1203,7 @@ async fn s106_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
         ReplayScript {
             typed_after_channel: BTreeMap::from([(1, S106_TYPED_PROMPT)]),
             merge_gate_on_channel_open: None,
+            reopen_after_call: BTreeMap::new(),
         },
     )
     .await;

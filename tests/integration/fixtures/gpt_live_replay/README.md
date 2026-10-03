@@ -128,11 +128,15 @@ this directory or the harness changes.
     the job's "Started voice request" narration, when its result was
     delivered on that channel. When it was not (the channel went down
     first, as in S104's first channel), the turn is released once that
-    channel closed, and the next channel opens only after it is terminal.
+    channel closed.
+  - a channel's close is awaited on the session's
+    `AgentEvent::LiveChannelClosed` for that channel, then its custody is
+    read once (Closed, or the replay fails).
     Jobs are joined to their narrations by the provider delegation id.
 - **Scenario-specific steps** are what a recording cannot carry: typed turns
-  between channels, and S104's merge-reply gate (the merged job's reply
-  commits only after channel 2 is up). Nothing waits on a clock: the
+  between channels, and S104's merge gates. The reopen waits for the merged
+  job's reply turn to reach the scripted LLM, and that reply commits only
+  after channel 2 is up. Nothing waits on a clock: the
   cassette waits on recorded events and the gates on typed states.
 - **One allowed difference:** a host close sends the mute, then
   `session.close`. When the recorded transport was already gone, the mute's

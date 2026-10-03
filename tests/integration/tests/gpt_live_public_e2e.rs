@@ -1034,14 +1034,6 @@ impl PublicLiveHarness {
     }
 }
 
-async fn open_public_live(
-    temp_prefix: &str,
-    operator_principal: &'static str,
-    execution_policy: LiveDelegationExecutionPolicy,
-) -> Result<PublicLiveHarness, Box<dyn std::error::Error>> {
-    open_public_live_with_summary(temp_prefix, operator_principal, execution_policy, None).await
-}
-
 async fn open_public_live_with_summary(
     temp_prefix: &str,
     operator_principal: &'static str,
@@ -1529,6 +1521,17 @@ async fn open_public_live_with(
             _temp: temp,
         });
     }
+    // The RPC host opens the channel on its own request tasks, outside any
+    // recorder scope: a recorded run installs the provider-stream recorder
+    // as the process fallback around the open and the answer, when the
+    // provider client is built.
+    let channel = evidence.as_ref().map(Journal::next_channel).transpose()?;
+    let fallback = match (&evidence, channel) {
+        (Some(evidence), Some(channel)) => {
+            Some(evidence.provider_recording(channel).install_fallback())
+        }
+        _ => None,
+    };
     let rejected = rpc
         .call_raw(
             "live/open",
@@ -1551,7 +1554,13 @@ async fn open_public_live_with(
         .await?;
     let channel_id = open["channel_id"].clone();
 
-    let mut peer = BrowserPeer::start(BrowserPeerProtocol::Public).await?;
+    let mut peer = match (&evidence, channel) {
+        (Some(evidence), Some(channel)) => {
+            BrowserPeer::start_recorded(BrowserPeerProtocol::Public, evidence.clone(), channel)
+                .await?
+        }
+        _ => BrowserPeer::start(BrowserPeerProtocol::Public).await?,
+    };
     let offer = peer.call(json!({"type":"prepare"})).await?;
     assert_eq!(offer["protocol"], "public");
     // The answer step is where the host creates the provider session. The
@@ -1576,9 +1585,13 @@ async fn open_public_live_with(
         })?;
     peer.call(json!({"type":"answer","answer_sdp":answer["answer_sdp"]}))
         .await?;
+    drop(fallback);
+    if let (Some(evidence), Some(channel)) = (&evidence, channel) {
+        evidence.channel(channel, evidence::ChannelAction::Connected)?;
+    }
 
     Ok(PublicLiveHarness {
-        evidence: None,
+        evidence,
         rpc,
         peer,
         channel_id,
@@ -1600,6 +1613,27 @@ async fn open_public_live_with(
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
 -> Result<(), Box<dyn std::error::Error>> {
+    // Recorded like every Turbo S scenario: the journal, the browser
+    // evidence and the provider stream, so a failure is attributable from
+    // transcripts (verdict 67bf6160 S97 run 3 had only tracing).
+    let evidence = Journal::create_for("S97", "S97".to_owned())?;
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let result = run_s97_client_context_vertical(evidence.clone()).await;
+    let finished = evidence.finish_classified(match &result {
+        Ok(()) => evidence::Outcome::Passed,
+        Err(_) => evidence::Outcome::Failed,
+    });
+    if let Ok(Some(degradation)) = &finished {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
+    result?;
+    finished?;
+    Ok(())
+}
+
+async fn run_s97_client_context_vertical(
+    evidence: Journal,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat::live_close=info,meerkat_live=debug,meerkat_rpc=debug,meerkat_runtime::meerkat_machine::runtime_control=debug,meerkat_mob_mcp::live_delegation=debug,meerkat_mob::runtime::delegation=debug",
@@ -1607,6 +1641,7 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
         .with_test_writer()
         .try_init();
     require_api_key()?;
+    evidence.stage(EvidenceStage::Opening)?;
     let PublicLiveHarness {
         mut rpc,
         mut peer,
@@ -1614,12 +1649,22 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
         mob_id,
         server_task,
         ..
-    } = open_public_live(
-        "gpt-live-public-e2e-",
-        "scenario-97-operator",
-        LiveDelegationExecutionPolicy::DurableFork,
-    )
+    } = open_public_live_with(PublicLiveOpen {
+        temp_prefix: "gpt-live-public-e2e-",
+        operator_principal: "scenario-97-operator",
+        execution_policy: LiveDelegationExecutionPolicy::DurableFork,
+        bootstrap: None,
+        seed_prompt: None,
+        evidence: Some(evidence.clone()),
+        unmeasured_playback: false,
+        executor_instructions: None,
+        extra_members: Vec::new(),
+        instructions_preface: None,
+        summary_bootstrap: false,
+        shared_host: false,
+    })
     .await?;
+    evidence.stage(EvidenceStage::Connected)?;
 
     // Phase A: greeting with a provider-native barge-in. The public API has
     // no turn identifiers, so the boundary is the first assistant output
@@ -1835,6 +1880,8 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
 
     rpc.call("live/close", json!({"channel_id":channel_id}), 30)
         .await?;
+    peer.stop_evidence().await?;
+    evidence.stage(EvidenceStage::Finished)?;
     peer.close().await;
     drop(rpc);
     server_task.abort();
@@ -10130,12 +10177,31 @@ async fn run_s105_fork_and_merge_parallel(
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen()
 -> Result<(), Box<dyn std::error::Error>> {
-    timeout(Duration::from_secs(480), run_s98_real_audio_and_context())
-        .await
-        .map_err(|_| "S98 overall deadline expired; no completed real-audio qualification")?
+    // Recorded like every Turbo S scenario (journal, browser evidence,
+    // provider stream on both channels).
+    let evidence = Journal::create_for("S98", "Violet".to_owned())?;
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let result = timeout(
+        Duration::from_secs(480),
+        run_s98_real_audio_and_context(evidence.clone()),
+    )
+    .await;
+    let finished = evidence.finish_classified(match &result {
+        Ok(Ok(())) => evidence::Outcome::Passed,
+        Ok(Err(_)) => evidence::Outcome::Failed,
+        Err(_) => evidence::Outcome::TimedOut,
+    });
+    if let Ok(Some(degradation)) = &finished {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
+    result.map_err(|_| "S98 overall deadline expired; no completed real-audio qualification")??;
+    finished?;
+    Ok(())
 }
 
-async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Error>> {
+async fn run_s98_real_audio_and_context(
+    evidence: Journal,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat::live_close=info,meerkat_live=debug,meerkat_rpc=debug",
@@ -10143,12 +10209,23 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
         .with_test_writer()
         .try_init();
     require_api_key()?;
-    let mut live = open_public_live(
-        "gpt-live-public-reopen-e2e-",
-        "scenario-98-operator",
-        LiveDelegationExecutionPolicy::ExistingMember,
-    )
+    evidence.stage(EvidenceStage::Opening)?;
+    let mut live = open_public_live_with(PublicLiveOpen {
+        temp_prefix: "gpt-live-public-reopen-e2e-",
+        operator_principal: "scenario-98-operator",
+        execution_policy: LiveDelegationExecutionPolicy::ExistingMember,
+        bootstrap: None,
+        seed_prompt: None,
+        evidence: Some(evidence.clone()),
+        unmeasured_playback: false,
+        executor_instructions: None,
+        extra_members: Vec::new(),
+        instructions_preface: None,
+        summary_bootstrap: false,
+        shared_host: false,
+    })
     .await?;
+    evidence.stage(EvidenceStage::Connected)?;
     let session_id = live.session_id.clone();
     live.assert_existing_text_identity().await?;
 
@@ -10449,6 +10526,8 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
     }
     live.close_exact().await?;
     live.assert_existing_text_identity().await?;
+    live.peer.stop_evidence().await?;
+    evidence.stage(EvidenceStage::Finished)?;
     live.peer.close().await;
     live.server_task.abort();
     println!(

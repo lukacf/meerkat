@@ -780,6 +780,12 @@ them.
 - `ExperimentalLiveBoundChannelActivator::await_pump_retirement_retry`, a
   provided method (default: never retry) that waits for the typed signal a
   retryable pump-exit retirement refusal names.
+- `meerkat_live::LiveAdapterHost::retire_session_close_tombstones` and the
+  provided `LiveChannelCloseEventPublisher::retire_live_session_close_tombstones`
+  (default no-op). The runtime calls the hook exactly once per committed
+  unregister, after its durability transaction, and never on a resume or a
+  rolled-back unregister. The surface's publisher releases the session's
+  host tombstones there.
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a
@@ -1645,6 +1651,42 @@ them.
   - the registration chain went from 1,490,216 B to 697,224 B.
 
   The canary now also passes at 1536 KiB and 1280 KiB. No behaviour change.
+
+
+- rkat-rpc over TCP: a new connection no longer overwrites the shared
+  runtime's callback channel, id counter and tool registry (#1451). Before,
+  callbacks for an older connection's new sessions went to the newest
+  connection, its registered tools were cleared, and callback ids restarted
+  in another connection's id space. On connection close the server now fails
+  pending callbacks before its graceful request shutdown, so a session waiting
+  on a gone client gets the typed failure immediately.
+
+- `live/status` for a closed channel keeps answering `Closed { reason }`
+  (including `media_fault`) for as long as the machine keeps the channel's
+  Closed record, that is until finalized unregister removes the session's
+  runtime entry. It used to switch to `ChannelNotFound` 60 s after the
+  close, when `LiveAdapterHost` reaped its closed-channel state on a timer.
+  The host now keeps a typed closed tombstone with no TTL, and the runtime
+  releases a session's tombstones from the point the entry is removed.
+
+- Debug worker-stack headroom (#1446): the unregister teardown saga and the
+  session registration chain no longer reserve every section's temporaries
+  in one poll frame. Their numbered phases and sections now run in boxed
+  async blocks, and the registration path's large child futures are built in
+  their own frames, with bodies unchanged. Measured on the 2 MiB stack canary
+  (debug), at the deepest machine apply:
+  - the teardown chain went from 1,487,592 B to 597,784 B (the saga's own
+    poll frame from 787,560 B to 58,584 B);
+  - the registration chain went from 1,490,216 B to 697,224 B.
+
+  The canary now also passes at 1536 KiB and 1280 KiB. No behaviour change.
+- rkat-rpc over TCP: a new connection no longer overwrites the shared
+  runtime's callback channel, id counter and tool registry (#1451). Before,
+  callbacks for an older connection's new sessions went to the newest
+  connection, its registered tools were cleared, and callback ids restarted
+  in another connection's id space. On connection close the server now fails
+  pending callbacks before its graceful request shutdown, so a session waiting
+  on a gone client gets the typed failure immediately.
 - Debug worker-stack headroom (#1462): four more chains no longer reserve
   their callees' futures and every section's temporaries in one poll frame.
   Large child futures are built in their own boxed frames

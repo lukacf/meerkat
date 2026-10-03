@@ -49738,6 +49738,7 @@ struct CapturingLiveChannelClosePublisher {
             bool,
         )>,
     >,
+    retired_tombstones: std::sync::Mutex<Vec<SessionId>>,
 }
 
 #[cfg(feature = "live")]
@@ -49757,6 +49758,57 @@ impl crate::live_execution::LiveChannelCloseEventPublisher for CapturingLiveChan
             reopen_recommended,
         ));
     }
+
+    async fn retire_live_session_close_tombstones(&self, session_id: &SessionId) {
+        self.retired_tombstones
+            .lock()
+            .unwrap()
+            .push(session_id.clone());
+    }
+}
+
+/// Finalized unregister removes the session's runtime entry and with it every
+/// channel's Closed record, so it retires the session's close tombstones
+/// exactly once per committed unregister.
+#[cfg(feature = "live")]
+#[tokio::test]
+async fn finalized_unregister_retires_the_sessions_close_tombstones_once() {
+    let machine = MeerkatMachine::ephemeral();
+    let publisher = Arc::new(CapturingLiveChannelClosePublisher::default());
+    machine.set_live_channel_close_publisher(publisher.clone());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    assert!(publisher.retired_tombstones.lock().unwrap().is_empty());
+
+    machine
+        .unregister_session(&session_id)
+        .await
+        .expect("unregister session");
+    assert_eq!(
+        *publisher.retired_tombstones.lock().unwrap(),
+        vec![session_id.clone()]
+    );
+
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register the session again");
+    assert_eq!(
+        publisher.retired_tombstones.lock().unwrap().len(),
+        1,
+        "registering retires nothing"
+    );
+    machine
+        .unregister_session(&session_id)
+        .await
+        .expect("unregister again");
+    assert_eq!(
+        *publisher.retired_tombstones.lock().unwrap(),
+        vec![session_id.clone(), session_id]
+    );
 }
 
 /// Open one live channel, close it with `reason` through generated close

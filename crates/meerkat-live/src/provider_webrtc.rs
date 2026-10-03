@@ -987,6 +987,14 @@ impl LiveSidebandCommand {
 
     /// Commentary, delegation results, and delegation narration are spoken
     /// aloud by the provider; thinking and instructions appends are quiet.
+    /// Whether this command releases a delegation's result (not a
+    /// narration or a context append): its acknowledgement is the moment
+    /// the provider holds the result.
+    #[must_use]
+    pub fn is_result_release(&self) -> bool {
+        matches!(self.kind, LiveSidebandCommandKind::ReleaseDelegation { .. })
+    }
+
     #[must_use]
     pub fn is_spoken(&self) -> bool {
         matches!(
@@ -1635,6 +1643,39 @@ mod tests {
                 ..
             } if awaiting_peer_replies == ["analyst-pemberton"]
         ));
+    }
+
+    /// Only a result release is marked as one: its acknowledgement is the
+    /// moment the provider holds the delegation's result.
+    #[test]
+    fn only_a_result_release_is_a_result_release() {
+        let delegation = LiveSidebandDelegationRef::__from_provider_observation(
+            "delegation:3".to_string(),
+            "provider-delegation-secret".to_string(),
+        )
+        .expect("opaque provider delegation");
+        let release = LiveSidebandCommand::release_delegation_context(
+            LiveSidebandReleaseAuthority::from_test_machine(
+                binding(),
+                31,
+                LiveResultDisposition::DeferredContext,
+            ),
+            delegation,
+            "the result",
+        )
+        .expect("one result-context delivery");
+        assert!(release.is_result_release());
+        let context = LiveSidebandCommand::append_session_context(
+            LiveSidebandAppendAuthority {
+                binding: binding(),
+                attempt: LiveSidebandAppendAttempt("a-context-row".to_string()),
+                cursor: 33,
+                consumed: Arc::new(AtomicBool::new(false)),
+            },
+            "a context row",
+        )
+        .expect("one context append");
+        assert!(!context.is_result_release());
     }
 
     #[test]

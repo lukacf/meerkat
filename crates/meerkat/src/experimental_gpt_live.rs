@@ -6,7 +6,7 @@
 //! first consume the experimental live admission witness into the lower
 //! opaque admitted target accepted by the OpenAI factory.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -4394,6 +4394,16 @@ impl ExperimentalGptLiveDeferredAdapter {
             })
     }
 
+    /// Whether `adapter_key` names an assistant turn with open playback (a
+    /// snapshot delta of it is assistant speech).
+    fn is_assistant_turn(&self, adapter_key: &str) -> bool {
+        self.playback_by_item.lock().is_ok_and(|playback| {
+            playback
+                .values()
+                .any(|pending| pending.provider_turn_ref == adapter_key)
+        })
+    }
+
     /// Forget a finished turn's admitted ordinal; the pending playback (if
     /// any) already carries it, so the by-turn map stays bounded by open turns.
     fn release_turn_context_observation(&self, adapter_key: &str) {
@@ -7362,6 +7372,47 @@ async fn release_unmeasured_segments_before_terminal(
     }
 }
 
+/// The window in which assistant speech acknowledges a pending delegation
+/// ("let me check", "working on it") rather than stating anything: from a
+/// user turn's `DelegationRequested` until the next delegation result is
+/// acknowledged by the provider, or the user speaks again. Speech opened in
+/// it gets no reassertion ordinal, so the quiet replay after a late summary
+/// never re-asserts it (Turbo S S99 r1: after the summary had answered the
+/// question, the replay re-showed the model its own "I'll confirm once I can
+/// retrieve that earlier text", and it delegated the same question again).
+/// Facts are unaffected: a readout after the result, and any speech outside
+/// a delegation, keep their ordinals. Typed facts only: the delegation
+/// observation, user-turn observations, and the result release's append
+/// attempt.
+#[derive(Debug, Default)]
+struct DelegationAcknowledgementWindow {
+    open: bool,
+}
+
+impl DelegationAcknowledgementWindow {
+    /// Advance on one provider observation; `result_acknowledged` is whether
+    /// it acknowledges a released delegation result.
+    fn observe(&mut self, kind: &LiveSidebandObservationKind, result_acknowledged: bool) {
+        match kind {
+            LiveSidebandObservationKind::DelegationRequested { .. } => self.open = true,
+            LiveSidebandObservationKind::TurnStarted {
+                role: LiveSidebandTurnRole::User,
+                ..
+            }
+            | LiveSidebandObservationKind::UserTranscriptFragment { .. }
+            | LiveSidebandObservationKind::UserTurnContinuesDelegation { .. } => self.open = false,
+            LiveSidebandObservationKind::AppendAcknowledged { .. } if result_acknowledged => {
+                self.open = false;
+            }
+            _ => {}
+        }
+    }
+
+    const fn is_open(&self) -> bool {
+        self.open
+    }
+}
+
 fn spawn_sideband_actors(
     binding: ProviderWebrtcBinding,
     sideband: Arc<dyn ProviderWebrtcSidebandSession>,
@@ -7380,8 +7431,19 @@ fn spawn_sideband_actors(
     adapter.bind_caption_scope(&binding);
     let (command_tx, mut command_rx) = mpsc::channel::<SidebandCommandEnvelope>(32);
     let command_sideband = Arc::clone(&sideband);
+    // Append attempts of released delegation results: the observation actor
+    // reads a result's acknowledgement from them (see
+    // `DelegationAcknowledgementWindow`).
+    let result_release_attempts: Arc<std::sync::Mutex<HashSet<LiveSidebandAppendAttempt>>> =
+        Arc::default();
+    let command_result_attempts = Arc::clone(&result_release_attempts);
     let command_actor = tokio::spawn(async move {
         while let Some(envelope) = command_rx.recv().await {
+            if envelope.command.is_result_release()
+                && let Ok(mut attempts) = command_result_attempts.lock()
+            {
+                attempts.insert(envelope.command.attempt());
+            }
             let result = command_sideband.send_command(envelope.command).await;
             let _ = envelope.result.send(result);
         }
@@ -7404,6 +7466,7 @@ fn spawn_sideband_actors(
         // next snapshot delta opens a new unmeasured segment and needs its
         // own ordinal, admitted after the boundary.
         let mut speech_boundary_pending = false;
+        let mut acknowledgement_window = DelegationAcknowledgementWindow::default();
         loop {
             let next = tokio::select! {
                 () = observation_gate.cancelled() => break,
@@ -7489,7 +7552,35 @@ fn spawn_sideband_actors(
                             LiveSidebandObservationKind::AppendAcknowledged { .. }
                                 | LiveSidebandObservationKind::DelegationRequested { .. }
                         );
-                    let context_observation_id = if adapter_observation && opens_segment {
+                    let result_acknowledged = match observation.kind() {
+                        LiveSidebandObservationKind::AppendAcknowledged { attempt } => {
+                            result_release_attempts
+                                .lock()
+                                .is_ok_and(|mut attempts| attempts.remove(attempt))
+                        }
+                        _ => false,
+                    };
+                    let assistant_speech = match observation.kind() {
+                        LiveSidebandObservationKind::TurnStarted {
+                            role: LiveSidebandTurnRole::Assistant,
+                            ..
+                        }
+                        | LiveSidebandObservationKind::TurnFinished {
+                            role: LiveSidebandTurnRole::Assistant,
+                            ..
+                        } => true,
+                        LiveSidebandObservationKind::TurnSnapshotDelta { turn, .. } => {
+                            observation_adapter.is_assistant_turn(turn.adapter_key())
+                        }
+                        _ => false,
+                    };
+                    acknowledgement_window.observe(observation.kind(), result_acknowledged);
+                    let acknowledgement_speech =
+                        assistant_speech && acknowledgement_window.is_open();
+                    let context_observation_id = if adapter_observation
+                        && opens_segment
+                        && !acknowledgement_speech
+                    {
                         if let Some(recorder) =
                             observation_adapter.context_observation_recorder.get()
                         {
@@ -9643,6 +9734,94 @@ mod tests {
         // Spoken context after the delegation does not wait at all.
         let after = spawn_quiet_user_waiter(&adapter).await;
         assert_eq!(after.await.expect("waiter"), std::time::Duration::ZERO);
+    }
+
+    /// S99 r1's shape on the window that decides which assistant speech
+    /// gets a reassertion ordinal. Speech before any delegation and the
+    /// readout after the result are facts and keep theirs; the delegated
+    /// probe's acknowledgement ("Let me ... I'll confirm once I can retrieve
+    /// that earlier text") does not, across the narration and summary
+    /// acknowledgements that land inside it; a new user turn ends it.
+    #[test]
+    fn delegation_acknowledgement_speech_gets_no_reassertion_ordinal() {
+        let attempt = |id: &str| {
+            LiveSidebandAppendAttempt::__from_generated_append_id(id.to_string()).expect("attempt")
+        };
+        let probe = user_turn_test_ref("turn-user-probe");
+        let assistant = user_turn_test_ref("turn-assistant");
+        let speech_started = LiveSidebandObservationKind::TurnStarted {
+            turn: assistant,
+            role: LiveSidebandTurnRole::Assistant,
+        };
+        let mut window = DelegationAcknowledgementWindow::default();
+        // Ordinary speech outside a delegation is a fact.
+        window.observe(&speech_started, false);
+        assert!(!window.is_open());
+        // The probe turn is closed by its client delegation.
+        window.observe(
+            &LiveSidebandObservationKind::TurnStarted {
+                turn: probe.clone(),
+                role: LiveSidebandTurnRole::User,
+            },
+            false,
+        );
+        window.observe(
+            &LiveSidebandObservationKind::DelegationRequested {
+                turn: probe,
+                delegation: delegation_test_ref(),
+                final_transcript: "what was my historical vault phrase".to_string(),
+                request_transcript: "what was my historical vault phrase".to_string(),
+                assistant_context: String::new(),
+                represented_user_rows: Vec::new(),
+            },
+            false,
+        );
+        // "Let me ... Working on it now. I'll confirm once I can retrieve
+        // that earlier text": acknowledgement, across the narration's and
+        // the summary's acknowledgements.
+        window.observe(&speech_started, false);
+        assert!(window.is_open(), "acknowledgement speech");
+        for other_ack in ["narration-append", "summary-append"] {
+            window.observe(
+                &LiveSidebandObservationKind::AppendAcknowledged {
+                    attempt: attempt(other_ack),
+                },
+                false,
+            );
+            assert!(window.is_open(), "{other_ack} does not end it");
+        }
+        // The result's acknowledgement ends it: the readout is a fact.
+        window.observe(
+            &LiveSidebandObservationKind::AppendAcknowledged {
+                attempt: attempt("result-append"),
+            },
+            true,
+        );
+        assert!(!window.is_open(), "the readout keeps its ordinal");
+        // A user turn also ends a window the result never closed.
+        let second = user_turn_test_ref("turn-user-recall");
+        window.observe(
+            &LiveSidebandObservationKind::DelegationRequested {
+                turn: second.clone(),
+                delegation: delegation_test_ref(),
+                final_transcript: "now tell me my vault phrase".to_string(),
+                request_transcript: "now tell me my vault phrase".to_string(),
+                assistant_context: String::new(),
+                represented_user_rows: Vec::new(),
+            },
+            false,
+        );
+        assert!(window.is_open());
+        window.observe(
+            &LiveSidebandObservationKind::TurnStarted {
+                turn: second,
+                role: LiveSidebandTurnRole::User,
+            },
+            false,
+        );
+        assert!(!window.is_open(), "the user spoke again");
+        window.observe(&user_fragment("and one more thing"), false);
+        assert!(!window.is_open());
     }
 
     fn user_fragment(text: &str) -> LiveSidebandObservationKind {
@@ -12783,9 +12962,18 @@ mod tests {
                 "{instructions}"
             );
             assert!(
-                instructions.contains("Only the older part of the text conversation is summarized"),
+                !instructions.contains("not yet available"),
+                "seeded recent turns carry no pending-summary claim: {instructions}"
+            );
+            // Older history is still not claimed before the summary lands:
+            // the bootstrap framing on this open says the summary arrives
+            // later as quiet context (the basis for S99's history probe
+            // answering "I don't know yet" or delegating before it lands).
+            assert!(
+                instructions.contains(LIVE_CONTEXT_BOOTSTRAP_FRAMING),
                 "{instructions}"
             );
+            assert!(LIVE_CONTEXT_BOOTSTRAP_FRAMING.contains("or as quiet context during the call"));
         }
         server.abort();
     }

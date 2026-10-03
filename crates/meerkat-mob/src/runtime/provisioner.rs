@@ -1401,6 +1401,38 @@ pub(super) fn classify_stop_member_cancel(
     }
 }
 
+/// What a force cancel or cancel-all-work did to the member's run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MemberRunCancelOutcome {
+    /// The member had no run.
+    NoRun,
+    /// The run current when the cancel was taken is cancelled at its next
+    /// boundary.
+    Cancelled {
+        run_id: meerkat_core::lifecycle::RunId,
+    },
+    /// The run ended before the cancel reached it.
+    RunEndedBeforeCancel {
+        run_id: meerkat_core::lifecycle::RunId,
+    },
+}
+
+/// Classify an exact-run cancel's result for the cancel verbs, by type.
+fn classify_member_run_cancel(
+    cancelled: Result<bool, meerkat_runtime::RuntimeDriverError>,
+    run_id: meerkat_core::lifecycle::RunId,
+) -> Result<MemberRunCancelOutcome, meerkat_runtime::RuntimeDriverError> {
+    match cancelled {
+        Ok(true) => Ok(MemberRunCancelOutcome::Cancelled { run_id }),
+        Ok(false)
+        | Err(
+            meerkat_runtime::RuntimeDriverError::StaleAuthority { .. }
+            | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+        ) => Ok(MemberRunCancelOutcome::RunEndedBeforeCancel { run_id }),
+        Err(error) => Err(error),
+    }
+}
+
 /// What a member stop does to the run its run-start hold found current.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MemberRunCancel {
@@ -1581,6 +1613,19 @@ pub trait MobProvisioner: Send + Sync {
     ) -> Result<super::stop_report::MemberStopOutcome, MobError> {
         self.stop_member_runtime(member_ref, expected_member, true)
             .await
+    }
+
+    /// Cancel the member's current run, exactly that run, at its next
+    /// boundary (force cancel, cancel all work). `Ok(())` means the member has
+    /// no run left that this cancel is responsible for: the run current when
+    /// it was taken is cancelled, or there was none, or it ended first. The
+    /// default interrupts the member.
+    async fn cancel_member_current_run_at_boundary(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+    ) -> Result<(), MobError> {
+        self.interrupt_member(member_ref, expected_member).await
     }
 
     /// Release a hold taken by [`Self::stop_member_runtime`] (Resume).
@@ -4737,6 +4782,41 @@ impl SessionBackend {
             run,
             starts: MemberRunStarts::Held,
         })
+    }
+
+    /// Cancel the member's current run, exactly that run, at its next
+    /// boundary through the runtime. A member with no run, or whose run ended
+    /// first, has nothing left to cancel: never an untyped failure for those,
+    /// and never an ambient cancel that a later run could pick up.
+    async fn cancel_member_current_run_at_boundary_exact(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+    ) -> Result<(), MobError> {
+        let session_id = Self::require_session(member_ref, "cancel")?;
+        let Some(adapter) = &self.runtime_adapter else {
+            return self.interrupt_member(member_ref, expected_member).await;
+        };
+        let outcome = match adapter.current_run(&session_id).await {
+            None => MemberRunCancelOutcome::NoRun,
+            Some(run_id) => classify_member_run_cancel(
+                adapter
+                    .cancel_after_boundary_run_if_current(&session_id, &run_id)
+                    .await,
+                run_id,
+            )
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "cancelling the current run of '{session_id}' failed: {error}"
+                ))
+            })?,
+        };
+        tracing::debug!(
+            session_id = %session_id,
+            ?outcome,
+            "member run cancel resolved"
+        );
+        Ok(())
     }
 
     #[cfg(test)]
@@ -12788,6 +12868,15 @@ impl MobProvisioner for SessionBackend {
             .await
     }
 
+    async fn cancel_member_current_run_at_boundary(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+    ) -> Result<(), MobError> {
+        self.cancel_member_current_run_at_boundary_exact(member_ref, expected_member)
+            .await
+    }
+
     async fn release_member_run_starts(
         &self,
         member_ref: &MemberRef,
@@ -16442,6 +16531,26 @@ impl MobProvisioner for MultiBackendProvisioner {
             _ => {
                 self.session
                     .stop_member_runtime_now(member_ref, expected_member)
+                    .await
+            }
+        }
+    }
+
+    async fn cancel_member_current_run_at_boundary(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
+    ) -> Result<(), MobError> {
+        match member_ref {
+            // A remote member's run is cancelled through its host.
+            MemberRef::BackendPeer { session_id, .. }
+                if expected_member.is_some() || session_id.is_none() =>
+            {
+                self.interrupt_member(member_ref, expected_member).await
+            }
+            _ => {
+                self.session
+                    .cancel_member_current_run_at_boundary(member_ref, expected_member)
                     .await
             }
         }

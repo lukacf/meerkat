@@ -830,6 +830,14 @@ them.
     opens leave every database, WAL, SHM and journal file byte-identical.
   - The check keeps a cooperating owner's namespace honest. It is not a
     defense against an adversary replacing paths concurrently.
+- GPT Live Turbo S S105 no longer races its voice recall against executor
+  result delivery. Results are released one at a time per channel, so a
+  result can still be waiting for the previous one's provider
+  acknowledgement when the scenario speaks. The scenario now waits until
+  every live delegation's result is acknowledged `Delivered` and its
+  commentary reached the peer, both before the typed correction and again
+  before the recall (covering the correction's own result).
+
 - Three meerkat-mob-mcp tests no longer fail on a loaded host (#1509). They
   now assert ordering with events instead of wall-clock margins.
   `relink_past_max_run_retires_a_child_still_running` relies on the child's

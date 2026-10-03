@@ -531,7 +531,8 @@ async fn e2e_fast_detached_completion_reaches_owners_that_are_not_live() {
     let (router, mob_state) = make_stack(temp.path(), client).await;
     let runtime = mob_state
         .session_service()
-        .runtime_adapter()
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime adapter")
         .expect("runtime-backed stack");
     let mob_id = format!("not-live-owner-{}", uuid::Uuid::new_v4().simple());
     let mob_id = mob_state
@@ -1076,7 +1077,8 @@ impl AdmissionLane {
         let runtime = self
             .mob_state
             .session_service()
-            .runtime_adapter()
+            .acquire_runtime_adapter(None)
+            .expect("acquire runtime adapter")
             .expect("runtime adapter");
         // Settled: no admitted input across a few consecutive reads, so any
         // wake turn the completion caused has been answered.
@@ -2220,7 +2222,8 @@ async fn run_in_turn_scenario(after_child: AfterChild, label: &str) -> InTurnRun
     let (router, mob_state) = make_stack_over(temp.path(), client, runtime_store).await;
     let runtime = mob_state
         .session_service()
-        .runtime_adapter()
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime adapter")
         .expect("runtime-backed stack");
     let mob_id = format!("in-turn-{label}-{}", uuid::Uuid::new_v4().simple());
     let mob_id = mob_state

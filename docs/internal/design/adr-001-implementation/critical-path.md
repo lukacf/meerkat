@@ -11,11 +11,12 @@ context taint and semantic disclosure prevention are not implementation goals.
 There is no pending user decision about terminality: a permission refusal is
 ordinary feedback to the model, and admitted work retains its usable controller.
 
-The [implementation checkpoint](implementation-progress.md) records current
-source and execution evidence. Native candidate `5c833bdb` still needs normal
-publication acceptance, native PR with green CI, and accepted cost measurement. The dated
-checkpoints below retain their original source scope; their passes do not qualify
-this candidate. Measurement ordering awaits the owner's cost-timing clarification.
+The [implementation checkpoint](implementation-progress.md) separates the 39
+focused native passes from the latest recorded normal push, `9c996bac`, which
+failed before the machine and broad test gates. Caller/lint repairs await
+validation; normal publication, native PR CI and overhead remain unaccepted.
+The dated checkpoints below retain their original source scope. Measurement
+ordering awaits the owner's cost-timing clarification.
 
 The integrated donor is `codex/local-governed-default` in
 `/Users/luka/.codex/worktrees/security-adr/meerkat-native-governed-m1`. Its frozen

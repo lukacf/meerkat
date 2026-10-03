@@ -465,7 +465,8 @@ async fn run_scenario(gate: Gate, steer: meerkat_runtime::Input) -> Outcome {
     let (router, mob_state) = make_stack(temp.path(), client, gate_tools).await;
     let runtime = mob_state
         .session_service()
-        .runtime_adapter()
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime adapter")
         .expect("runtime-backed stack");
     let mob_id = format!("durable-steer-{}", uuid::Uuid::new_v4().simple());
     let mob_id = mob_state

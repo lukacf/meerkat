@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Session } from '../dist/session.js';
+import { MeerkatError, Session } from '../dist/session.js';
 
 function sessionWith(events) {
   return new Session(7, async () => '{}',
@@ -8,6 +8,45 @@ function sessionWith(events) {
     () => undefined, () => JSON.stringify(events),
     async () => '{}', async () => {}, async () => {});
 }
+
+test('runtime readiness details survive a rejected session destroy', async () => {
+  const details = {
+    code: 'SESSION_RUNTIME_UNAVAILABLE',
+    reason: { kind: 'authority_changed' },
+  };
+  let destroyCalls = 0;
+  const session = new Session(7, async () => '{}',
+    async () => JSON.stringify({ session_id: 's1', phase: 'idle' }),
+    async () => {
+      destroyCalls += 1;
+      throw JSON.stringify({
+        code: 'SESSION_RUNTIME_UNAVAILABLE',
+        message: 'session runtime unavailable',
+        details,
+      });
+    },
+    () => '[]', async () => '{}', async () => {}, async () => {});
+
+  await assert.rejects(session.destroy(), error => {
+    assert.ok(error instanceof MeerkatError);
+    assert.equal(error.code, 'SESSION_RUNTIME_UNAVAILABLE');
+    assert.equal(error.message, 'session runtime unavailable');
+    assert.deepEqual(error.data, details);
+    return true;
+  });
+  assert.equal(destroyCalls, 1);
+  assert.equal(await session.sessionId, 's1');
+});
+
+test('typed WASM errors preserve explicit data when details are also present', () => {
+  for (const data of [{ existing: 'data' }, null]) {
+    const error = MeerkatError.fromWasm({
+      code: 'EXISTING_ERROR', message: 'existing error', data,
+      details: { other: 'details' },
+    });
+    assert.deepEqual(error.data, data);
+  }
+});
 
 for (const [kind, retryability] of [
   ['operation_authorization_unavailable', 'non_retryable'],

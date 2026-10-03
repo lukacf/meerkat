@@ -1,14 +1,46 @@
 # ADR-001 implementation checkpoint
 
-## Current first-native-path acceptance, 2026-10-02
+## Recorded checkpoint, 2026-10-03
 
-Current native publication source is `5c833bdbdbfb7106019a81da0dec60f19a3f8bc0`.
+The latest recorded normal native push was
+`9c996bac0b0bba7b709339858c155c57e5523eea`. It failed after 2,319.07s on
+integration-test compilation and lints, before the machine and broad
+deterministic test gates. The caller/lint repair is pending validation. Two
+earlier focused repair gates passed 26 and 13 native tests respectively;
+those 39 passes do not establish a successful normal push or qualify the
+pending repair. Exact sources and raw results are retained under
+`/Users/luka/.codex/adr-001-evidence/custody-repair-20261003`.
+
+The 13-test acceptance gate includes real loopback model/tool/model continuation
+with an exported alias to the same governed owner. Its negative setup refuses
+an ordinary ungoverned bundle before provider calls or catalog rows; sharing the
+same already-governed owner is valid.
+
+Separate Console readiness response compatibility passed 69 UI/state and 70
+transport tests. The existing contracts typecheck reported zero new errors and
+41 documented baseline diagnostics. The source and its guide were committed
+through `bf7930c34207f60458c3e351f1dbdb8cce368c18`; the installed MobKit gateway
+does not yet emit the native readiness code. The Web SDK reason-preservation
+fix passed 96 isolated JS tests. It and its CI unit-route correction are included
+in this repair candidate, awaiting normal gates. These client results do not
+establish integrated gateway or native runtime acceptance.
+
+Physical SQLite custody remains unimplemented; the held C7 tests and temporary
+API scaffold are unexecuted. C4 durable grant, controller and credential
+restoration remains unimplemented. There is no native implementation PR with
+green CI or accepted overhead measurement. Full ABAC, sandbox and supported
+surface/platform coverage remain required.
+
+## Historical first-native-path acceptance, 2026-10-02
+
+The native publication source at this checkpoint was
+`5c833bdbdbfb7106019a81da0dec60f19a3f8bc0`.
 Its initial focused attempt stopped at a mixed-cache bridge-symbol link failure
 after 262.30s, exit 101; zero tests ran. Removing the cross-source target/lane
 overrides allowed the same command on the same source to exit 0 in 273.34s:
 53 selected tests passed in 5.942s of test execution; 4,710 tests were outside
 the selection. Root matched all eight former failures to unique PASS lines.
-The current candidate also passed both non-default-feature governed JSONL tests
+That candidate also passed both non-default-feature governed JSONL tests
 in 0.08s of test execution, 452.55s command time: local refusal followed by
 permitted execution in the same run, and rejection of shared bundles and
 unsupported wire setup. Four earlier functional passes on ancestor `2210e70b6`
@@ -61,7 +93,7 @@ passed 20 component tests and the real checked-save/recovery browser scenario,
 including three exact writes, no read-only writes, and recovery after one
 deliberate failed protected read. This is acceptance of existing MobKit access
 administration, not native governed work, SQLite/restart, or JWT ingress.
-Console source remains on the 0.8.45 dependency line. PR520's old green CI does
+MobKit is version 0.8.45 with Meerkat dependencies pinned to 0.8.50. PR520's old green CI does
 not qualify the reviewed repair; current publication and CI are separate gates.
 
 The earlier publication plan targeted `release/0.8.51`, reserved tip
@@ -70,9 +102,9 @@ no-wedge fix, TLA precedence fix and demonstrated mandatory tip CI blockers.
 That reservation was released at 2026-10-02 19:52 UTC. Development continues on
 its own branches; full-feature integration remains held. Neither a native
 checkpoint PR nor a Console PR520 milestone merge has occurred.
-Regenerated source is committed at `5c833bdb`; its normal commit hooks passed.
+Regenerated source was committed at `5c833bdb`; its normal commit hooks passed.
 The focused repairs and non-default-feature governed JSONL pair passed on that
-source. Normal push hooks and required PR CI remain pending.
+source. Normal push hooks and required PR CI were pending at that checkpoint.
 Source preparation is not a native PR or CI result.
 
 The separate persistent controller-administration extension passed eight focused

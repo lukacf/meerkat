@@ -347,7 +347,7 @@ mod tests {
                 memory_blob_store(),
                 Arc::new(MemoryScheduleStore::new()),
             )
-            .expect("construct runtime authority"),
+            .unwrap(),
             crate::router::NotificationSink::noop(),
         ))
     }

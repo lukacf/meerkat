@@ -44893,7 +44893,7 @@ async fn test_builder_refuses_split_persistent_provisioning_and_archive_owners()
     // Arc allocations differ. Reconciliation must accept this positive case.
     let same_owner = Arc::new(cached.as_ref().clone());
     assert!(!Arc::ptr_eq(&cached, &same_owner));
-    assert!(std::ptr::eq(&**cached, &**same_owner));
+    assert!(std::ptr::eq(&raw const **cached, &raw const **same_owner));
     let positive = MobBuilder::new(sample_definition(), MobStorage::in_memory())
         .with_session_service(service.clone())
         .with_runtime_adapter(same_owner)
@@ -44910,7 +44910,7 @@ async fn test_builder_refuses_split_persistent_provisioning_and_archive_owners()
             .expect("construct runtime authority"),
     );
     assert!(explicit.shares_runtime_store_authority(&runtime_store));
-    assert!(!std::ptr::eq(&**cached, &**explicit));
+    assert!(!std::ptr::eq(&raw const **cached, &raw const **explicit));
     let result = MobBuilder::new(sample_definition(), MobStorage::in_memory())
         .with_session_service(service.clone())
         .with_runtime_adapter(explicit.clone())
@@ -44924,7 +44924,7 @@ async fn test_builder_refuses_split_persistent_provisioning_and_archive_owners()
                 .acquire_runtime_adapter(None)
                 .expect("acquire runtime authority")
                 .expect("original cached owner remains");
-            assert!(std::ptr::eq(&**cached, &**after));
+            assert!(std::ptr::eq(&raw const **cached, &raw const **after));
             assert!(
                 runtime_store
                     .list_runtime_session_catalog_entries(Default::default())
@@ -44955,8 +44955,9 @@ async fn test_builder_refuses_split_persistent_provisioning_and_archive_owners()
                 .acquire_runtime_adapter(None)
                 .expect("acquire runtime authority")
                 .expect("resolve archive owner");
-            let archive_uses_cached = std::ptr::eq(&**cached, &**archive_owner);
-            let archive_uses_explicit = std::ptr::eq(&**explicit, &**archive_owner);
+            let archive_uses_cached = std::ptr::eq(&raw const **cached, &raw const **archive_owner);
+            let archive_uses_explicit =
+                std::ptr::eq(&raw const **explicit, &raw const **archive_owner);
             let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
             let archive_effect = tokio::time::timeout(Duration::from_secs(5), async {
                 let result = service

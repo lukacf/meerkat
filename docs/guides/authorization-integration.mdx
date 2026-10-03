@@ -23,7 +23,7 @@ governed profile.
 
 | Area | Current evidence and remaining work |
 | --- | --- |
-| Native input, grants, and tool feedback | Native candidate `5c833bdb` passed fixed-host, single-connection JSONL with process-lifetime memory storage, loopback model HTTP, local tool refusal, permitted execution, completion, and native audit. These results do not establish SQLite, process restart, JWT ingress, or all-surface support. |
+| Native input, grants, and tool feedback | Recorded fixed-host, single-connection JSONL tests passed with process-lifetime memory storage, loopback model HTTP, local tool refusal, permitted execution, completion, and native audit. The [implementation checkpoint](/internal/design/adr-001-implementation/implementation-progress) records their exact source scope separately from the failed normal publication gate. These results do not establish SQLite, process restart, JWT ingress, or all-surface support. |
 | Model/provider and infrastructure errors | Focused tests exercise primary infrastructure-error classification through three provider adapters, native deferred siblings, and live/fallback fixtures. They do not certify every production route, retry, hosted capability, or live mode. |
 | Controller continuity | Actual controller selection and retained work references exist. Account-policy changes, token release, and concurrent admission still require complete integration and validation. |
 | Durable operation audit | Native row attachment exists. Durable recovery and commit-race coverage remain incomplete; do not advertise durable audit from the in-memory test. |

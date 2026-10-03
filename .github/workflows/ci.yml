@@ -1393,13 +1393,14 @@ jobs:
           cache-targets: "false"
           cache-on-failure: true
 
-      - name: Build the sdks/web wasm runtime
+      - name: Build and test the Web SDK
         working-directory: sdks/web
         # Built once; all three suites read sdks/web/wasm (033 through its
         # sync:runtime copy). The SDK has no lockfile.
         run: |
           npm install --no-fund --no-audit --ignore-scripts
-          npm run build
+          npm run build:wasm
+          npm test
 
       - name: Install example dependencies
         run: |

@@ -324,7 +324,7 @@ impl ClaudeAiOAuthAuthorizer {
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 #[async_trait]
-impl meerkat_core::HttpAuthorizer for ClaudeAiOAuthAuthorizer {
+impl HttpAuthorizer for ClaudeAiOAuthAuthorizer {
     async fn prepare_request(&self) -> Result<(), AuthError> {
         self.current_credential().await.map(|_| ())
     }

@@ -1926,15 +1926,6 @@ class AgentEventCompactionFailed(TypedDict, total=False):
     type: Required[Literal['compaction_failed']]
 
 
-class AgentEventOperationObservationFailed(TypedDict, total=False):
-    """A real operation returned, but its protected audit outcome could not
-    be retained. This safe diagnostic is nonterminal and grants no retry.
-    """
-    operation_id: Required[OperationId]
-    phase: Required[OperationObservationPhase]
-    type: Required[Literal['operation_observation_failed']]
-
-
 class AgentEventBudgetWarning(TypedDict, total=False):
     """Budget warning (approaching limits)
     """
@@ -2202,10 +2193,19 @@ class AgentEventBoundaryAppendsDiscarded(TypedDict, total=False):
     type: Required[Literal['boundary_appends_discarded']]
 
 
+class AgentEventOperationObservationFailed(TypedDict, total=False):
+    """A real operation returned, but its protected audit outcome could not
+    be retained. This safe diagnostic is nonterminal and grants no retry.
+    """
+    operation_id: Required[OperationId]
+    phase: Required[OperationObservationPhase]
+    type: Required[Literal['operation_observation_failed']]
+
+
 # Events emitted during agent execution
 #
 # These events form the streaming API for consumers.
-AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventOperationObservationFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded
+AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventOperationObservationFailed
 
 
 class StreamScopeFramePrimary(TypedDict, total=False):

@@ -5193,13 +5193,14 @@ pub fn scripted_member_client_completing_for_provider(
 }
 
 /// FIRST stream: exactly one tool call; every later stream: `text` + EndTurn
-/// (the overlay-denial row — the denied result comes back, the member then
+/// (the overlay-denial row - the denied result comes back, the member then
 /// completes).
 struct ToolThenTextClient {
     tool: String,
     args: serde_json::Value,
     text: String,
     fired: AtomicBool,
+    requests: Arc<std::sync::Mutex<Vec<Vec<meerkat_core::Message>>>>,
 }
 
 #[async_trait::async_trait]
@@ -5215,6 +5216,10 @@ impl meerkat_client::LlmClient for ToolThenTextClient {
         &'a self,
         request: &'a meerkat_client::LlmRequest,
     ) -> meerkat_client::types::LlmStream<'a> {
+        self.requests
+            .lock()
+            .expect("member request log")
+            .push(request.messages.to_vec());
         let events = if self.fired.swap(true, Ordering::SeqCst) {
             vec![
                 meerkat_client::LlmEvent::TextDelta {
@@ -5273,12 +5278,14 @@ pub fn scripted_member_client_calling_tool_then_completing(
     tool: &str,
     args: serde_json::Value,
     text: &str,
+    requests: Arc<std::sync::Mutex<Vec<Vec<meerkat_core::Message>>>>,
 ) -> Arc<dyn meerkat_client::LlmClient> {
     Arc::new(ToolThenTextClient {
         tool: tool.to_string(),
         args,
         text: text.to_string(),
         fired: AtomicBool::new(false),
+        requests,
     })
 }
 

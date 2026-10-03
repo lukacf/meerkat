@@ -1176,27 +1176,6 @@
             "type": "object"
           },
           {
-            "description": "A real operation returned, but its protected audit outcome could not\nbe retained. This safe diagnostic is nonterminal and grants no retry.",
-            "properties": {
-              "operation_id": {
-                "$ref": "#/components/schemas/OperationId"
-              },
-              "phase": {
-                "$ref": "#/components/schemas/OperationObservationPhase"
-              },
-              "type": {
-                "const": "operation_observation_failed",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "operation_id",
-              "phase"
-            ],
-            "type": "object"
-          },
-          {
             "description": "Budget warning (approaching limits)",
             "properties": {
               "budget_type": {
@@ -1774,6 +1753,27 @@
             },
             "required": [
               "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A real operation returned, but its protected audit outcome could not\nbe retained. This safe diagnostic is nonterminal and grants no retry.",
+            "properties": {
+              "operation_id": {
+                "$ref": "#/components/schemas/OperationId"
+              },
+              "phase": {
+                "$ref": "#/components/schemas/OperationObservationPhase"
+              },
+              "type": {
+                "const": "operation_observation_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "operation_id",
+              "phase"
             ],
             "type": "object"
           }

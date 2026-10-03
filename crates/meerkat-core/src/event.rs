@@ -2469,13 +2469,6 @@ pub enum AgentEvent {
     /// Context compaction failed (non-fatal — agent continues with uncompacted history).
     CompactionFailed { reason: CompactionFailureReason },
 
-    /// A real operation returned, but its protected audit outcome could not
-    /// be retained. This safe diagnostic is nonterminal and grants no retry.
-    OperationObservationFailed {
-        operation_id: crate::OperationId,
-        phase: crate::authorization::OperationObservationPhase,
-    },
-
     // === Budget ===
     /// Budget warning (approaching limits)
     BudgetWarning {
@@ -2729,6 +2722,13 @@ pub enum AgentEvent {
     /// Existing durable-join authority resolved these applications as discarded.
     /// Published only after any required requeue persistence succeeds.
     BoundaryAppendsDiscarded(BoundaryAppendsDiscarded),
+
+    /// A real operation returned, but its protected audit outcome could not
+    /// be retained. This safe diagnostic is nonterminal and grants no retry.
+    OperationObservationFailed {
+        operation_id: crate::OperationId,
+        phase: crate::authorization::OperationObservationPhase,
+    },
 }
 
 /// Exact negative application fact projected from durable boundary join resolution.

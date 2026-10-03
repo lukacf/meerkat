@@ -2821,6 +2821,7 @@ runtime_internal_inputs!(
         DeclareRecoveredTerminalCompletionUnrecoverable,
         BeginUnregisterSession,
         BeginUnregisterUnservedAttachment,
+        BindInputAuthority,
         BindSupervisor,
         BoundaryComplete,
         BoundaryContinue,

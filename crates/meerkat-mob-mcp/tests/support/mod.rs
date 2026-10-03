@@ -325,8 +325,8 @@ enum FixtureRuntime {
     DerivedFromService,
     /// The runtime-backed composition product surfaces use.
     RuntimeBacked,
-    /// No runtime adapter at all.
-    Absent,
+    /// No explicitly supplied adapter; the session service supplies its owner.
+    ImplicitOnly,
 }
 
 pub struct CouncilFixture {
@@ -469,12 +469,17 @@ impl CouncilFixture {
         )
     }
 
-    /// A fixture whose mob state has NO runtime adapter: the host shape that
-    /// cannot admit a detached completion, whatever it declares.
-    pub fn new_without_runtime_adapter(
+    /// A fixture that passes no explicit runtime adapter to the mob state.
+    /// The persistent session service supplies its actual execution owner.
+    pub fn new_with_implicit_runtime_adapter(
         script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
     ) -> Self {
-        Self::build(script, |state, _root| state, FixtureRuntime::Absent, None)
+        Self::build(
+            script,
+            |state, _root| state,
+            FixtureRuntime::ImplicitOnly,
+            None,
+        )
     }
 
     /// [`Self::new`] over a caller-supplied runtime store (for example one
@@ -527,7 +532,7 @@ impl CouncilFixture {
             )
         };
         let state_root = root.join("state");
-        let state = if runtime == FixtureRuntime::Absent {
+        let state = if runtime == FixtureRuntime::ImplicitOnly {
             MobMcpState::new_with_runtime_adapter(service.clone(), None, MobControlPrincipal::Owner)
                 .expect("construct runtime authority")
         } else {

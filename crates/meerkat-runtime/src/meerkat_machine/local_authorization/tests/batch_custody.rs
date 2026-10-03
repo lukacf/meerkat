@@ -473,15 +473,9 @@ fn b1_enter_model_boundary(owner: &mut dsl::MeerkatMachineAuthority, run: &meerk
 }
 
 fn b1_steer_prompt() -> Input {
-    let mut prompt = crate::input::PromptInput::new(
-        "late durable context",
-        Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
-                ..Default::default()
-            },
-        ),
-    );
+    let mut metadata = crate::runtime_stamped_prompt_turn_metadata(None);
+    metadata.handling_mode = Some(meerkat_core::types::HandlingMode::Steer);
+    let mut prompt = crate::input::PromptInput::new("late durable context", Some(metadata));
     prompt.typed_turn_appends = vec![b1_live_append()];
     Input::Prompt(prompt)
 }

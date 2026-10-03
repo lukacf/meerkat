@@ -1374,10 +1374,6 @@ export type AgentEvent = {
   reason: CompactionFailureReason;
   type: "compaction_failed";
 } | {
-  operation_id: OperationId;
-  phase: OperationObservationPhase;
-  type: "operation_observation_failed";
-} | {
   budget_type: BudgetType;
   limit: number;
   percent: number;
@@ -1482,6 +1478,10 @@ export type AgentEvent = {
   run_id: RunId;
   session_id: SessionId;
   type: "boundary_appends_discarded";
+} | {
+  operation_id: OperationId;
+  phase: OperationObservationPhase;
+  type: "operation_observation_failed";
 };
 
 /**

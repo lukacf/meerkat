@@ -1172,12 +1172,6 @@ export interface CompactionFailedEvent {
   type: "compaction_failed";
 }
 
-export interface OperationObservationFailedEvent {
-  operation_id: OperationId;
-  phase: OperationObservationPhase;
-  type: "operation_observation_failed";
-}
-
 export interface BudgetWarningEvent {
   budget_type: BudgetType;
   limit: number;
@@ -1327,6 +1321,12 @@ export interface BoundaryAppendsDiscardedEvent {
   type: "boundary_appends_discarded";
 }
 
+export interface OperationObservationFailedEvent {
+  operation_id: OperationId;
+  phase: OperationObservationPhase;
+  type: "operation_observation_failed";
+}
+
 export const KNOWN_AGENT_EVENT_TYPES = [
   "run_started",
   "run_completed",
@@ -1406,7 +1406,6 @@ export type AgentEvent =
   CompactionStartedEvent |
   CompactionCompletedEvent |
   CompactionFailedEvent |
-  OperationObservationFailedEvent |
   BudgetWarningEvent |
   RetryingEvent |
   SkillsResolvedEvent |
@@ -1428,4 +1427,5 @@ export type AgentEvent =
   ModelFallbackCommittedEvent |
   ModelFallbackTargetFailedEvent |
   BoundaryAppendAppliedEvent |
-  BoundaryAppendsDiscardedEvent;
+  BoundaryAppendsDiscardedEvent |
+  OperationObservationFailedEvent;

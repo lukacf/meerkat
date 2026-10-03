@@ -1254,7 +1254,10 @@ them.
   request is open: one the model's output or a delegation has not answered,
   a typed broker fact that reflected-input silence does not clear (S103 r2).
   A cue that does not fit one 500-byte append (an outcome cue with an open
-  request) is split before the scope sentence.
+  request) is split before the scope sentence. The cue is a thinking append, not an
+  instructions append: instructions persist as standing session
+  instructions, and a persisted cue's delegation framing carried into the
+  next question.
 
 - The LLM reconfigure host's turn-finalization boundary now keeps its session
   service alive. The host holds the service weakly and upgraded it only to

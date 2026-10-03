@@ -12510,9 +12510,9 @@ mod tests {
                 // 1600 ms of output silence: the response has ended.
                 send_json(&mut socket, output_audio_frame(false)).await;
                 let cue = recv_json(&mut socket, &capture).await;
-                assert_eq!(cue["type"], "session.instructions.append");
+                assert_eq!(cue["type"], "session.thinking.append");
                 assert_eq!(cue["delegation_id"], DELEGATION_ID);
-                send_json(&mut socket, json!({"type":"session.instructions.appended","event_id":"a3","start_ms":1602.0,"end_ms":1602.0,"client_event_id":cue["event_id"]})).await;
+                send_json(&mut socket, json!({"type":"session.thinking.appended","event_id":"a3","start_ms":1602.0,"end_ms":1602.0,"client_event_id":cue["event_id"]})).await;
                 // The model reads the result out.
                 send_json(
                     &mut socket,
@@ -12528,9 +12528,9 @@ mod tests {
                 let release_at_ms = if late_tail { 1900.0 } else { 400.0 };
                 send_json(&mut socket, json!({"type":"session.commentary.appended","event_id":"a2","start_ms":release_at_ms,"end_ms":release_at_ms})).await;
                 let cue = recv_json(&mut socket, &capture).await;
-                assert_eq!(cue["type"], "session.instructions.append");
+                assert_eq!(cue["type"], "session.thinking.append");
                 assert_eq!(cue["delegation_id"], DELEGATION_ID);
-                send_json(&mut socket, json!({"type":"session.instructions.appended","event_id":"a3","start_ms":release_at_ms,"end_ms":release_at_ms,"client_event_id":cue["event_id"]})).await;
+                send_json(&mut socket, json!({"type":"session.thinking.appended","event_id":"a3","start_ms":release_at_ms,"end_ms":release_at_ms,"client_event_id":cue["event_id"]})).await;
             }
             let mute = recv_json(&mut socket, &capture).await;
             assert_eq!(mute["type"], "session.input_audio.mute");
@@ -13523,7 +13523,7 @@ mod tests {
         assert_eq!(events[1]["type"], "session.commentary.append");
         assert_eq!(events[1]["delegation_id"], public_wire::DELEGATION_ID);
         assert_eq!(events[1]["content"], "Table booked for two.");
-        assert_eq!(events[2]["type"], "session.instructions.append");
+        assert_eq!(events[2]["type"], "session.thinking.append");
         assert_eq!(events[2]["delegation_id"], public_wire::DELEGATION_ID);
         assert_eq!(events[3]["type"], "session.input_audio.mute");
         assert_eq!(events[4]["type"], "session.close");

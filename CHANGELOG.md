@@ -361,8 +361,8 @@ them.
   (`Session::with_validated_transcript_rewrite_parent_projection`) now gets
   `TranscriptRevisionRetired` for every commit before the cut, where it used
   to get the parent: it must skip such a commit (it has no body to prove
-  against) rather than fail. MobKit's durable-behind admission failed its
-  store write here until it skipped them.
+  against) rather than fail. A host admission that walked every commit
+  failed its store write here until it skipped them.
 - The SQLite session store's schema domain moves to v5 (table
   `session_transcript_retirements`). Opening a store migrates it forward.
   Binaries from before this release refuse a v5 file, as they refuse any
@@ -593,7 +593,6 @@ them.
   are refused rather than forwarded. `make path-classifier-selftest` runs
   `scripts/tests/buildbuddy_launcher_env_test.sh`, which checks this against a
   fake `bb` with no BuildBuddy.
-
 - Agent mob tools no longer accept host-only configuration from model
   arguments. The agent `mob_create` deserialized the internal
   `MobDefinition`, so a member with create authority could put
@@ -1131,7 +1130,6 @@ them.
   not yet available", and gpt-live-1 answered "I don't know that yet" about a
   fact in those very turns, including when asked about "our text chat" (Turbo
   S S99's positive control).
-
 - GPT Live: the narration and other spoken context that follow a client
   delegation no longer arrive about 8 s late. Spoken context waits while the
   provider reports an open user turn, so the assistant does not talk over the
@@ -1153,7 +1151,6 @@ them.
   `openai-live` is off (for example default features with clippy
   `-D warnings`): `meerkat::surface::live_media_health_rms_micros` is now
   compiled only with its users, under `live-webrtc` and `openai-live`.
-
 - `MobHandle::shutdown` no longer fails when its immediate cancel of a
   member's run reports `InterruptDispatchOutcomeUnknown` (the executor saw
   the run end while machine authority still bound it, or its callback
@@ -1318,7 +1315,6 @@ them.
 - A live delegation result interrupted by its channel's close (held,
   in flight, or refused) is merged into the source member as runtime work.
   Before, it was retired without the post-close merge and lost.
-
 - Public GPT Live no longer drops a delegation result's speak cue when the
   result lands soon after the model's last word. Previously a cue was
   suppressed when the gap was under 1000 ms. A result that landed 400 ms
@@ -1326,11 +1322,9 @@ them.
   from -200 to +400 ms after it, so no gap can separate the two cases.
   Every acknowledged result now gets one instructions-lane cue, bound to the
   result's `delegation_id`. It is phrased to be safe either way: tell the
-  user the result unless it was already told.
   user the outcome unless it was already reported since the result arrived.
   Speech before the delivery (an intention such as "I'll use Friday") does
   not count as a report.
-
 - Opening or refreshing a live channel on a member whose turn is in flight no
   longer waits for the turn to end.
   - The realtime open and refresh projections took the session's turn

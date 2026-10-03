@@ -5415,6 +5415,58 @@ async fn s102_dump_comms_rows(live: &mut PublicLiveHarness) {
     }
 }
 
+/// The `request_id` of a successful `send_request` result's
+/// `peer_request_sent` receipt (`content` as `tool_results_named` renders it:
+/// the tool output, JSON-encoded).
+fn sent_request_id(content: &str) -> Option<String> {
+    let mut output: Value = serde_json::from_str(content).ok()?;
+    if let Some(inner) = output.as_str() {
+        output = serde_json::from_str(inner).ok()?;
+    }
+    let receipt = &output["receipt"];
+    (receipt["kind"] == "peer_request_sent")
+        .then(|| receipt["request_id"].as_str().map(str::to_owned))
+        .flatten()
+}
+
+/// Whether a committed row is the executor's incoming terminal peer response
+/// to `request_id`: a comms block of kind `response_terminal` carrying that
+/// request id. Read from the typed row, never its text: a response that
+/// carries the member's own content blocks commits them as the row's text
+/// instead of the "Peer response from" projection (comb5 S102 R3).
+fn is_terminal_response_to(row: &Value, request_id: &str) -> bool {
+    row["blocks"].as_array().is_some_and(|blocks| {
+        blocks
+            .iter()
+            .any(|block| block["kind"] == "response_terminal" && block["request_id"] == request_id)
+    })
+}
+
+/// comb5 S102 R3's committed rows: the receipt as the tool result renders it,
+/// and a terminal response whose member attached content blocks (no "Peer
+/// response from" text anywhere in the row).
+#[test]
+fn s102_matches_the_peer_response_by_its_typed_request_id() {
+    let content = json!(
+        "{\"kind\":\"peer_request\",\"receipt\":{\"kind\":\"peer_request_sent\",\"request_id\":\"9db7c7e2\",\"stream_reserved\":true},\"status\":\"sent\"}"
+    )
+    .to_string();
+    assert_eq!(sent_request_id(&content).as_deref(), Some("9db7c7e2"));
+    let response = json!({"blocks": [{
+        "content": [{"text": "It is currently 13:32 UTC, according to tide_ledger.", "type": "text"}],
+        "direction": "incoming",
+        "kind": "response_terminal",
+        "peer": {"display_name": "mob/executor/analyst-pemberton"},
+        "request_id": "9db7c7e2",
+        "status": "completed",
+    }]});
+    assert!(!response.to_string().contains("Peer response from"));
+    assert!(is_terminal_response_to(&response, "9db7c7e2"));
+    assert!(!is_terminal_response_to(&response, "another-request"));
+    let progress = json!({"blocks": [{"kind": "response_progress", "request_id": "9db7c7e2"}]});
+    assert!(!is_terminal_response_to(&progress, "9db7c7e2"));
+}
+
 /// S102's typed round trip, each step awaited on its own typed state (the
 /// harness's executor-turn wait reads the same way): exactly one successful
 /// executor `send_request`; the member's reply arriving at the executor as an
@@ -5434,8 +5486,16 @@ async fn s102_member_round_trip(
     let executor_history = live.rpc.session_history(json!(live.session_id), 60).await?;
     let requests = tool_results_named(&executor_history, "send_request");
     println!("GPT_LIVE_S102_SEND_REQUEST results={requests:?}");
-    match requests.as_slice() {
-        [(_, false, _)] => {}
+    let request_id = match requests.as_slice() {
+        [(_, false, content)] => match sent_request_id(content) {
+            Some(request_id) => request_id,
+            None => {
+                failures.push(format!(
+                    "the executor's send_request result carries no peer_request_sent receipt: {content}"
+                ));
+                return Ok(failures);
+            }
+        },
         [(_, true, content)] => {
             failures.push(format!(
                 "the executor's send_request to {S102_MEMBER} failed: {content}"
@@ -5449,10 +5509,10 @@ async fn s102_member_round_trip(
             ));
             return Ok(failures);
         }
-    }
-    // The member's reply arrives at the executor as a correlated peer
-    // response (`format_peer_response_projection`), and the executor's turn
-    // over it commits an assistant reply after it. Both are read from
+    };
+    // The member's reply arrives at the executor as the correlated terminal
+    // peer response to that request id, and the executor's turn over it
+    // commits an assistant reply after it. Both are read from
     // `session/history`, the canonical committed rows: the durable half of
     // the contract, which a reopen seed and a replay carry, not only the
     // transport append below.
@@ -5460,10 +5520,9 @@ async fn s102_member_round_trip(
     let (peer_response_at, rows, reply) = loop {
         let history = live.rpc.session_history(json!(live.session_id), 60).await?;
         let messages = history["messages"].as_array().cloned().unwrap_or_default();
-        let response_at = messages.iter().position(|row| {
-            let text = row.to_string();
-            text.contains("Peer response from") && text.contains(S102_MEMBER)
-        });
+        let response_at = messages
+            .iter()
+            .position(|row| is_terminal_response_to(row, &request_id));
         let reply = response_at.and_then(|at| {
             messages[at + 1..]
                 .iter()

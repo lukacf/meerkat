@@ -7,6 +7,8 @@
 
 mod agent_input;
 mod agent_tools;
+mod child_tool_bundles;
+mod child_tool_policy;
 pub mod council_relink;
 pub mod detached_delivery;
 pub mod fork_relink;
@@ -23,6 +25,8 @@ mod workgraph_flow;
 pub use agent_tools::{
     AgentMobToolSurface, AgentMobToolSurfaceFactory, archive_session_with_mob_cleanup,
 };
+pub use child_tool_bundles::{ChildToolBundleAvailability, ChildToolBundles};
+pub use child_tool_policy::ChildToolPolicyRefused;
 pub use detached_delivery::{
     DetachedCompletionDelivered, DetachedCompletionError, DetachedDeliveryUnavailable,
     DetachedOwnerError, DetachedOwnerHost, deliver_detached_completion,
@@ -426,6 +430,12 @@ pub struct MobMcpState {
     default_llm_client: Option<Arc<dyn LlmClient>>,
     default_llm_client_provider: Option<DefaultLlmClientProvider>,
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
+    /// Host bundles; only the child-available ones reach child mob builders.
+    child_tool_bundles: ChildToolBundles,
+    /// Host consequence-policy registry, forwarded to every child builder.
+    tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
+    /// The host's explicit application tool policy for child mob members.
+    child_application_tool_policy: Option<meerkat_core::ApplicationToolPolicyBinding>,
     persistent_storage_root: Option<PathBuf>,
     /// Legacy infallible persistent-root construction records setup failure so
     /// every managed-mob operation fails closed rather than using ephemeral
@@ -561,6 +571,9 @@ impl MobMcpState {
             default_llm_client: None,
             default_llm_client_provider: None,
             external_tools_provider: None,
+            child_tool_bundles: ChildToolBundles::default(),
+            tool_consequence_policy_registry: None,
+            child_application_tool_policy: None,
             persistent_storage_root: None,
             persistent_storage_setup_error: None,
             mobs: Arc::new(RwLock::new(BTreeMap::new())),
@@ -1268,6 +1281,54 @@ impl MobMcpState {
         self
     }
 
+    /// Host Rust tool bundles for mobs created through the mob tools. Callers
+    /// may name only bundles registered as child-available; see
+    /// [`ChildToolBundles`]. The default offers none.
+    pub fn with_child_tool_bundles(mut self, bundles: ChildToolBundles) -> Self {
+        self.child_tool_bundles = bundles;
+        self
+    }
+
+    /// Install the host's tool consequence-policy registry. It is forwarded
+    /// to every child mob builder, and installing it makes the host managed:
+    /// child mob creation then requires
+    /// [`Self::with_child_application_tool_policy`].
+    pub fn with_tool_consequence_policy_registry(
+        mut self,
+        registry: Arc<meerkat_core::ToolConsequencePolicyRegistry>,
+    ) -> Self {
+        self.tool_consequence_policy_registry = Some(registry);
+        self
+    }
+
+    /// The application tool policy every member of a child mob is built
+    /// with. An explicit [`meerkat_core::ApplicationToolPolicyBinding::Unmanaged`]
+    /// is a valid choice; callers can never set or override it.
+    pub fn with_child_application_tool_policy(
+        mut self,
+        binding: meerkat_core::ApplicationToolPolicyBinding,
+    ) -> Self {
+        self.child_application_tool_policy = Some(binding);
+        self
+    }
+
+    /// Refuse child mob creation (the agent `mob_create` tool, and the
+    /// implicit mob `delegate` helpers run in) up front when the host's child
+    /// policy cannot be applied (a managed host without a child policy, a
+    /// provider policy without a registry, or `Inherit`).
+    pub fn admit_child_tool_policy(&self) -> Result<(), ChildToolPolicyRefused> {
+        self.child_tool_policy().map(|_| ())
+    }
+
+    fn child_tool_policy(
+        &self,
+    ) -> Result<meerkat_core::ApplicationToolPolicyBinding, ChildToolPolicyRefused> {
+        child_tool_policy::resolve_child_policy(
+            self.tool_consequence_policy_registry.as_ref(),
+            self.child_application_tool_policy.as_ref(),
+        )
+    }
+
     /// Seed skill source definitions available to realm-referenced profiles.
     pub fn with_realm_skill_sources(mut self, sources: BTreeMap<String, SkillSource>) -> Self {
         self.realm_skill_sources = sources;
@@ -1373,12 +1434,26 @@ impl MobMcpState {
         })
     }
 
-    fn configure_builder(&self, mut builder: MobBuilder) -> MobBuilder {
+    fn configure_builder(
+        &self,
+        mut builder: MobBuilder,
+        scope: child_tool_policy::ChildMobScope,
+    ) -> MobBuilder {
         builder = builder
             .with_session_service(self.session_service.clone())
             .allow_ephemeral_sessions(!self.session_service.supports_persistent_sessions())
             .with_default_external_tools_provider(self.external_tools_provider.clone())
             .with_workgraph_service(self.workgraph_service.clone());
+        builder = self.child_tool_bundles.configure(builder);
+        if let Some(registry) = &self.tool_consequence_policy_registry {
+            builder = builder.with_tool_consequence_policy_registry(Arc::clone(registry));
+        }
+        builder = builder.with_spawn_member_customizer(Arc::new(
+            child_tool_policy::ChildPolicyCustomizer {
+                policy: self.child_tool_policy(),
+                scope,
+            },
+        ));
         if let Some(adapter) = &self.runtime_adapter {
             builder = builder.with_runtime_adapter(adapter.clone());
         }
@@ -1561,10 +1636,19 @@ impl MobMcpState {
                     continue;
                 }
 
+                let scope = child_tool_policy::ChildMobScope::default();
                 let handle = self
-                    .configure_builder(MobBuilder::for_resume(storage))
+                    .configure_builder(MobBuilder::for_resume(storage), scope.clone())
                     .resume()
                     .await?;
+                if handle
+                    .owner_bridge_session_lifecycle_authority()
+                    .is_some_and(|authority| {
+                        child_tool_policy::is_child_mob(authority.destroy_on_owner_archive)
+                    })
+                {
+                    scope.mark_child();
+                }
                 let mob_id = handle.definition().id.clone();
                 match self.mobs.write().await.entry(mob_id.clone()) {
                     Entry::Vacant(entry) => {
@@ -1696,7 +1780,10 @@ impl MobMcpState {
         }
         let (storage, storage_path) = self.storage_for_new_mob(&mob_id).await?;
         let handle = self
-            .configure_builder(MobBuilder::new(definition, storage))
+            .configure_builder(
+                MobBuilder::new(definition, storage),
+                child_tool_policy::ChildMobScope::default(),
+            )
             .create()
             .await?;
         match self.mobs.write().await.entry(mob_id.clone()) {
@@ -1761,7 +1848,18 @@ impl MobMcpState {
             return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
         }
         let (storage, storage_path) = self.storage_for_new_mob(&mob_id).await?;
-        let mut builder = self.configure_builder(MobBuilder::new(definition.clone(), storage));
+        let child = owner_bridge_session_authority.as_ref().is_some_and(
+            |(_, destroy_on_owner_archive, _)| {
+                child_tool_policy::is_child_mob(*destroy_on_owner_archive)
+            },
+        );
+        if child {
+            // Host tool bundles reach a child mob only through the host.
+            self.child_tool_bundles.supply(&mut definition);
+        }
+        let scope = child_tool_policy::ChildMobScope::new(child);
+        let mut builder =
+            self.configure_builder(MobBuilder::new(definition.clone(), storage), scope);
         if let Some((owner_bridge_session_id, destroy_on_owner_archive, implicit_delegation_mob)) =
             owner_bridge_session_authority
         {

@@ -5422,6 +5422,9 @@ struct DeferredResumeProvision {
     agent_identity: AgentIdentity,
     profile: crate::profile::Profile,
     external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Tool names of the bundles the profile resolved when `external_tools`
+    /// was composed, for the declared tool restriction.
+    bundle_tools: std::collections::BTreeMap<String, meerkat_core::ToolNameSet>,
     compaction_curator_override: Option<Arc<dyn meerkat_core::CompactionCurator>>,
     context: Option<serde_json::Value>,
     labels: Option<std::collections::BTreeMap<String, String>>,
@@ -5522,6 +5525,7 @@ impl DeferredResumeProvision {
             agent_identity,
             profile,
             external_tools,
+            bundle_tools,
             compaction_curator_override,
             context,
             labels,
@@ -5580,6 +5584,7 @@ impl DeferredResumeProvision {
             resumed_session: stored_session,
         })
         .await?;
+        super::tools::attach_declared_bundle_tools(&mut config, bundle_tools);
         config.tool_dispatch_admission = tool_dispatch_admission;
         config.keep_alive = keep_alive;
         config.override_web_search = web_search_override;
@@ -29847,6 +29852,8 @@ impl MobActor {
         };
         let precomputed_external_tools =
             self.external_tools_for_profile(&profile, per_spawn_external_tools.clone());
+        let precomputed_bundle_tools =
+            super::tools::resolve_profile_bundle_tools(&profile, &self.tool_bundles);
         let fallback_prompt = self.fallback_spawn_prompt(&profile_name, &agent_identity);
         let preparation_context = spawn_preparation::LocalSpawnPreparationContext::from_actor(self);
         let preparation_identity = agent_identity.clone();
@@ -30048,6 +30055,7 @@ impl MobActor {
                             agent_identity: agent_identity.clone(),
                             profile,
                             external_tools,
+                            bundle_tools: precomputed_bundle_tools.clone(),
                             compaction_curator_override: compaction_curator_override.clone(),
                             context,
                             labels: labels.clone(),
@@ -30138,6 +30146,7 @@ impl MobActor {
                         },
                     )
                     .await?;
+                    super::tools::attach_declared_bundle_tools(&mut config, precomputed_bundle_tools.clone());
                     config.tool_dispatch_admission = tool_dispatch_admission.clone();
                     config.keep_alive =
                         selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
@@ -30235,6 +30244,7 @@ impl MobActor {
                 system_prompt_override,
             })
             .await?;
+            super::tools::attach_declared_bundle_tools(&mut config, precomputed_bundle_tools.clone());
             config.tool_dispatch_admission = tool_dispatch_admission.clone();
             tracing::debug!(
                 mob_id = %preparation_context.definition.id,
@@ -33225,6 +33235,10 @@ impl MobActor {
             system_prompt_override,
         })
         .await?;
+        super::tools::attach_declared_bundle_tools(
+            &mut config,
+            super::tools::resolve_profile_bundle_tools(&profile, &self.tool_bundles),
+        );
         config.keep_alive = runtime_mode == crate::MobRuntimeMode::AutonomousHost;
         config.override_web_search = tool_category_overrides.web_search;
         config.application_tool_policy = application_tool_policy;

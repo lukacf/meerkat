@@ -2090,7 +2090,10 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         | MobError::MobDefinitionAuthorityChanged { .. }
         | MobError::MemberSessionNotLive { .. }
         | MobError::AgentEventCursorRejected { .. }
-        | MobError::RuntimeOwnerConflict => mob_dsl::MobSpawnManyFailureObservationKind::Internal,
+        | MobError::RuntimeOwnerConflict
+        | MobError::ToolBundleUnavailable { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
+        }
         MobError::ProfileNotFound(_) => {
             mob_dsl::MobSpawnManyFailureObservationKind::ProfileNotFound
         }

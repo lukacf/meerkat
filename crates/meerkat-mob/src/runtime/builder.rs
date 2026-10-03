@@ -8945,6 +8945,10 @@ impl MobBuilder {
                         continue;
                     }
                 };
+                super::tools::attach_declared_bundle_tools(
+                    &mut resumed_config,
+                    super::tools::resolve_profile_bundle_tools(profile, tool_bundles),
+                );
                 resumed_config.keep_alive =
                     entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
                 // A fork-derived member is rebuilt with its persisted lineage.
@@ -9170,6 +9174,10 @@ impl MobBuilder {
                 system_prompt_override: restore_spec.system_prompt_override.clone(),
             })
             .await?;
+            super::tools::attach_declared_bundle_tools(
+                &mut config,
+                super::tools::resolve_profile_bundle_tools(&profile, tool_bundles),
+            );
             config.keep_alive = entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
             config.fork_source = entry.fork_source.clone();
             if let Some(ref auth_binding) = restore_spec.auth_binding {

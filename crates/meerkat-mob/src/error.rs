@@ -1174,6 +1174,13 @@ pub enum MobError {
     )]
     RuntimeOwnerConflict,
 
+    /// A member's profile names a tool bundle the mob's builder does not
+    /// register, for example a host bundle the host has withdrawn since the
+    /// mob was created. The member is not built: a bundle is never silently
+    /// dropped or granted.
+    #[error("tool bundle '{bundle}' is not registered on this mob; the host no longer provides it")]
+    ToolBundleUnavailable { bundle: String },
+
     /// An internal error (unexpected state, logic errors).
     #[error("internal error: {0}")]
     Internal(String),

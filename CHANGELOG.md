@@ -230,6 +230,39 @@ them.
   `CloseInFlight(String)`, `SessionBusy(String)` and `Permanent(String)`
   (see Fixed). The default `retire_bound_channel_after_pump_exit` reports
   `Permanent`.
+- Security fix (behaviour, managed hosts): members of child mobs (mobs a
+  member creates with the agent `mob_create` tool, and `delegate` helpers)
+  no longer run without the host's application tool policy. Previously a member
+  constrained by a host consequence policy could create a child mob whose
+  members were unmanaged, because the child builder received neither the
+  host's policy registry nor any binding. Now:
+  - `MobMcpState::with_tool_consequence_policy_registry` installs the host
+    registry, which is forwarded to every child mob builder.
+  - `MobMcpState::with_child_application_tool_policy(binding)` is the host's
+    explicit choice for child members, applied to every spawn into a child
+    mob and never settable by callers. An explicit
+    `ApplicationToolPolicyBinding::Unmanaged` is a valid opt-out.
+  - A managed host (registry installed) with no child policy refuses the
+    agent's `mob_create` and `delegate`, and spawns into existing child mobs,
+    with the typed `ChildToolPolicyRefused::PolicyRequired`, whose message
+    says why and names the fix. The agent sees the refusal as a `policy_denied` tool error
+    (code `child_tool_policy_required`) and its turn continues. A provider
+    child policy without a registry refuses with `RegistryMissing`, and
+    `Inherit` with `InheritNotAllowed`. A host without a registry keeps
+    today's behaviour (unmanaged children).
+  - `delegate` helpers previously ran unmanaged even on a managed host: the
+    implicit delegation mob is now a child mob, so helpers run under the
+    child policy, and `delegate` is refused up front like `mob_create`.
+  - Only child mobs are governed. Mobs the host creates (including public
+    `meerkat_mob_create`), same-mob `fork_off` and `mob_spawn_member`, and
+    temporary councils keep their own member bindings. The classification
+    comes from the mob's persisted owner bridge authority, so it survives
+    restore.
+
+- `meerkat_mob::MobError` gains `ToolBundleUnavailable { bundle }`, the typed
+  refusal for a member whose profile names a tool bundle its mob's builder
+  does not register (previously an untyped `MobError::Internal`). Exhaustive
+  matches must handle it.
 - `meerkat_runtime::EphemeralRuntimeDriver` is no longer `UnwindSafe` or
   `RefUnwindSafe`: it now holds the runtime admission signal added with the
   typed admission wait (#1431). Callers that relied on these auto traits (for
@@ -920,6 +953,26 @@ them.
   unregister, after its durability transaction, and never on a resume or a
   rolled-back unregister. The surface's publisher releases the session's
   host tombstones there.
+- Host tool bundles for child mobs: `MobMcpState::with_child_tool_bundles`
+  takes a `ChildToolBundles` set in which each host bundle is
+  `ChildToolBundleAvailability::HostOnly` (the default) or `ChildAvailable`.
+  The host alone decides what child members get: when a child mob is created
+  (agent `mob_create`, or the implicit mob `delegate` helpers run in), every
+  child-available bundle id is supplied to each inline profile of its
+  definition and persisted with it. Callers never name bundles: the public
+  profile input has no `rust_bundles` field, so naming one is refused, and
+  host-only bundles never reach child mobs. Mobs the host creates are
+  untouched. An agent can still narrow per profile with the profile's deny
+  list, which reads the resolved bundles. The supplied ids persist with the
+  definition, like the child application tool policy persists with its
+  members, so a bundle the host later withdraws is neither silently dropped
+  nor granted: resuming the member refuses with
+  `MobError::ToolBundleUnavailable { bundle }`.
+- A profile's `tools.deny` may name the tools of its own registered
+  `rust_bundles`: each resolved bundle is a `ToolVocabularySource::Bundle`
+  vocabulary on the declared restriction, so a bundle tool the member does not
+  mount is inert and the gate refuses a mounted one by name.
+
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a
@@ -1041,8 +1094,9 @@ them.
     skills, web search, brain swap, image generation, memory, workgraph,
     schedule; whether compiled or enabled or not), the mob operator tools
     (`spawn_member`, `spawn_many_members`, `wire_members`, ...), the agent mob
-    tools (`mob_spawn_member`, `mob_wire`, `mob_create`, ...) and the exposed
-    tool names the profile's declared MCP servers map. A known name the member
+    tools (`mob_spawn_member`, `mob_wire`, `mob_create`, ...), the exposed
+    tool names the profile's declared MCP servers map, and the tools of its
+    registered `rust_bundles`. A known name the member
     does not mount is inert, so one deny set works on every composition and
     build. While the profile declares an MCP server that maps no tool names,
     any other name is deferred to the execution gate and logged at build

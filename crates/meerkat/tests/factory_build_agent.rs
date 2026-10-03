@@ -4839,3 +4839,194 @@ async fn declared_deny_rejects_external_tool_names() {
         "got: {err:?}"
     );
 }
+
+fn bundle_restriction(
+    deny: &[&str],
+    bundle: &str,
+    bundle_tools: &[&str],
+) -> meerkat_core::ops::DeclaredToolRestriction {
+    let mut restriction = declared_restriction(deny, false);
+    restriction.vocabulary.insert(
+        meerkat_core::ToolVocabularySource::Bundle(bundle.to_string()),
+        bundle_tools.iter().copied().collect(),
+    );
+    restriction
+}
+
+/// A tool of the profile's own resolved bundle that the build composed is
+/// deniable by name, and the gate refuses it.
+#[tokio::test]
+async fn declared_deny_may_name_a_composed_bundle_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                external_tools: Some(Arc::new(PolicyProbeDispatcher::new(
+                    &["bundle_write", "bundle_read"],
+                    Arc::clone(&dispatched),
+                ))),
+                declared_tool_restriction: Some(bundle_restriction(
+                    &["bundle_write"],
+                    "probe",
+                    &["bundle_write", "bundle_read"],
+                )),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .expect("a composed bundle tool is deniable");
+    assert!(!gate_admits(&mut agent, "bundle_write").await);
+    assert!(gate_admits(&mut agent, "bundle_read").await);
+}
+
+/// A bundle tool in the restriction's vocabulary that the build did not
+/// mount (for example a bundle whose registration changed) is an inert deny
+/// entry, while a name in no vocabulary fails the build and the error names
+/// the bundle vocabulary it checked.
+#[tokio::test]
+async fn declared_deny_of_an_unmounted_bundle_tool_is_inert_and_unknown_names_fail() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let build = |deny: &'static [&'static str]| AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        external_tools: Some(Arc::new(PolicyProbeDispatcher::new(
+            &["bundle_read"],
+            Arc::clone(&dispatched),
+        ))),
+        declared_tool_restriction: Some(bundle_restriction(
+            deny,
+            "probe",
+            &["bundle_ghost", "bundle_read"],
+        )),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+    let mut agent = temp_factory(&temp)
+        .build_agent(build(&["bundle_ghost"]), &Config::default())
+        .await
+        .expect("a known bundle tool the build did not mount is inert");
+    assert!(gate_admits(&mut agent, "bundle_read").await);
+
+    let err = temp_factory(&temp)
+        .build_agent(build(&["bundle_typo"]), &Config::default())
+        .await
+        .err()
+        .expect("a name in no vocabulary must fail");
+    match &err {
+        BuildAgentError::DeclaredToolUnknown(unknown) => {
+            assert_eq!(unknown.tool, "bundle_typo");
+            assert!(
+                unknown
+                    .vocabulary
+                    .iter()
+                    .any(|source| source == "tool bundle 'probe'"),
+                "{:?}",
+                unknown.vocabulary
+            );
+        }
+        other => panic!("expected DeclaredToolUnknown, got: {other:?}"),
+    }
+    let message = err.to_string();
+    for needle in ["'bundle_typo'", "tool bundle 'probe'", "builtins, comms"] {
+        assert!(message.contains(needle), "{needle} missing from: {message}");
+    }
+}
+
+/// One visible tool plus one deferred catalog entry from `source`.
+struct DeferredCatalogProbe {
+    visible: PolicyProbeDispatcher,
+    deferred: Arc<ToolDef>,
+    source: meerkat_core::types::ToolSourceKind,
+}
+
+#[async_trait::async_trait]
+impl AgentToolDispatcher for DeferredCatalogProbe {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        self.visible.tools()
+    }
+
+    fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        self.visible
+            .tools()
+            .iter()
+            .map(|tool| meerkat_core::ToolCatalogEntry::session_inline(Arc::clone(tool), true))
+            .chain(std::iter::once(
+                meerkat_core::ToolCatalogEntry::session_deferred(
+                    Arc::clone(&self.deferred),
+                    true,
+                    meerkat_core::types::ToolProvenance {
+                        kind: self.source.clone(),
+                        source_id: "probe".into(),
+                    },
+                ),
+            ))
+            .collect()
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        self.visible.dispatch(call).await
+    }
+}
+
+fn deferred_probe(source: meerkat_core::types::ToolSourceKind) -> Arc<DeferredCatalogProbe> {
+    Arc::new(DeferredCatalogProbe {
+        visible: PolicyProbeDispatcher::new(&["bundle_read"], Arc::new(Mutex::new(Vec::new()))),
+        deferred: Arc::new(ToolDef::new(
+            "bundle_deferred",
+            "deferred catalog tool",
+            json!({"type": "object"}),
+        )),
+        source,
+    })
+}
+
+/// A bundle's deferred catalog tool is composed like a visible one and is
+/// deniable the same way.
+#[tokio::test]
+async fn declared_deny_may_name_a_deferred_bundle_catalog_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                external_tools: Some(deferred_probe(
+                    meerkat_core::types::ToolSourceKind::RustBundle,
+                )),
+                declared_tool_restriction: Some(bundle_restriction(
+                    &["bundle_deferred"],
+                    "probe",
+                    &["bundle_read", "bundle_deferred"],
+                )),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .expect("a deferred bundle catalog tool is deniable");
+}
+
+/// A deferred external catalog tool that is not one of the profile's bundle
+/// tools (for example a deferred MCP tool) stays undeniable.
+#[tokio::test]
+async fn declared_deny_rejects_a_deferred_non_bundle_external_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    let err = temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                external_tools: Some(deferred_probe(meerkat_core::types::ToolSourceKind::Mcp)),
+                declared_tool_restriction: Some(declared_restriction(&["bundle_deferred"], false)),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .err()
+        .expect("a deferred external tool outside the bundles must fail");
+    assert!(
+        matches!(&err, BuildAgentError::DeclaredToolUnknown(unknown) if unknown.tool == "bundle_deferred"),
+        "got: {err:?}"
+    );
+}

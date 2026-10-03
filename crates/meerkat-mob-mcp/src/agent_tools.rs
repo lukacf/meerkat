@@ -954,6 +954,11 @@ impl AgentMobToolSurface {
                 allow_overlay: None,
                 deny_overlay: None,
             });
+        // A delegate helper runs in a child mob under the host's child policy;
+        // refuse before the implicit mob is created, as mob_create does.
+        self.state
+            .admit_child_tool_policy()
+            .map_err(Self::child_policy_denial)?;
 
         let (mob_id, first_delegate) = self
             .ensure_implicit_mob()
@@ -1100,6 +1105,15 @@ impl AgentMobToolSurface {
         Self::encode_result_with_effects(call, result, session_effects)
     }
 
+    /// The model-facing form of a child-policy refusal: a typed policy denial
+    /// the turn continues past.
+    fn child_policy_denial(refusal: crate::ChildToolPolicyRefused) -> ToolError {
+        ToolError::policy_denied(meerkat_core::ToolConsequenceDenial::new(
+            refusal.code(),
+            refusal.to_string(),
+        ))
+    }
+
     async fn dispatch_mob_create(
         &self,
         call: ToolCallView<'_>,
@@ -1109,10 +1123,16 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         // The public contract owns what a caller may define: host-only
-        // fields (profile MCP server configs, Rust bundles) have no input,
-        // and a model may not name a host path as a skill source.
+        // fields (profile MCP server configs) have no input, and a model may
+        // not name a host path as a skill source.
         let definition = crate::agent_input::decode_agent_mob_definition(args.definition)
             .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
+        // A child mob's members run under the host's child policy; the refusal
+        // returns to the model as a typed tool error before anything is
+        // created. Host tool bundles reach them only through the host.
+        self.state
+            .admit_child_tool_policy()
+            .map_err(Self::child_policy_denial)?;
 
         // Compute the operator grant from the *intended* mob id (the definition
         // carries the id) BEFORE the durable create mutation lands, so the
@@ -1212,6 +1232,12 @@ impl AgentMobToolSurface {
             .map(crate::agent_input::decode_agent_content_input)
             .transpose()
             .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
+        let tooling = args
+            .tooling
+            .clone()
+            .map(SpawnToolingInput::decode)
+            .transpose()
+            .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
 
         self.ensure_spawn_member_scope_boxed(call.name, &mob_id, &args)
             .await?;
@@ -1237,10 +1263,7 @@ impl AgentMobToolSurface {
         if let Some(auto_wire) = args.auto_wire_parent {
             spec.auto_wire_parent = auto_wire;
         }
-        if let Some(tooling) = args.tooling {
-            let tooling = tooling
-                .decode()
-                .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
+        if let Some(tooling) = tooling {
             let resolved = self.resolve_spawn_tooling_boxed(&tooling).await?;
             spec.inherited_tool_filter = resolved.inherited_tool_filter;
             spec.override_profile = resolved.override_profile;
@@ -2826,7 +2849,7 @@ struct DelegateArgs {
 /// is the public [`MobProfileInput`], so host-only profile fields (MCP server
 /// configs, Rust bundles) cannot come from model arguments; naming one is an
 /// argument error.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 enum SpawnToolingInput {
     InheritParent {
@@ -2845,7 +2868,7 @@ enum SpawnToolingInput {
     },
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ProfileSourceInput {
     RealmProfile { name: String },
@@ -7187,6 +7210,34 @@ mod tests {
         )
         .await;
         assert_refused_as_argument_error(&error, "host's credentials");
+    }
+
+    /// Only the agent mob_create names bundles (child-available ones); a spawn
+    /// tooling profile could reach a host mob whose builder carries host-only
+    /// bundles, so it may not name any.
+    #[tokio::test]
+    async fn spawn_member_tooling_may_not_name_tool_bundles() {
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(Arc::clone(&state));
+        let error = dispatch_err(
+            &surface,
+            "mob_spawn_member",
+            json!({
+                "mob_id": "any",
+                "profile": "worker",
+                "member_id": "w1",
+                "tooling": {
+                    "mode": "profile",
+                    "source": {
+                        "type": "inline",
+                        "model": "claude-sonnet-4-5",
+                        "tools": { "rust_bundles": ["host-only"] }
+                    }
+                },
+            }),
+        )
+        .await;
+        assert_refused_as_argument_error(&error, "rust_bundles");
     }
 
     #[tokio::test]

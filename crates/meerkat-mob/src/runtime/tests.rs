@@ -23634,7 +23634,13 @@ async fn test_spawn_fails_when_tool_bundle_not_registered() {
             None,
         )
         .await;
-    assert!(matches!(result, Err(MobError::Internal(_))));
+    assert!(
+        matches!(
+            &result,
+            Err(MobError::ToolBundleUnavailable { bundle }) if bundle == "missing-bundle"
+        ),
+        "a missing bundle is the typed refusal naming it: {result:?}"
+    );
 
     assert!(handle.list_members().await.is_empty());
     let events = handle.events().replay_all().await.expect("replay");
@@ -78635,6 +78641,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             "host_capability_contract_violation".to_string()
         }
         MobError::RuntimeOwnerConflict => "runtime_owner_conflict".to_string(),
+        MobError::ToolBundleUnavailable { bundle } => format!("tool_bundle_unavailable:{bundle}"),
         MobError::Internal(reason) => format!("internal:{reason}"),
         MobError::ScopeDenied(denial) => format!("scope_denied:{:?}", denial.required),
         MobError::FlowStepDispatchRejected { kind, .. } => {

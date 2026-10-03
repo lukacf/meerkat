@@ -73,12 +73,19 @@ name: CI
 # and in the release workflow; PR CI never starts the remote Bazel fleet.
 
 on:
-  # Pushes run only on main (the attestation boundary). Every other branch
-  # gets CI through its pull request, so one head runs once: a push run and
-  # a pull_request run of the same head would each publish a "CI gate" check.
+  # Pushes run on main (the attestation boundary) and on release
+  # integration branches. Pull requests into a release branch unit-test only
+  # the crates they change, so a merge there must run the push-only lanes
+  # (main-unit over the whole workspace, wasm-check, sdk-host) or
+  # reverse-dependency suites first run at the final merge to main: #1541
+  # broke two facade tests that no release-branch run executed. A merge
+  # commit is never a PR head, so no head runs twice; every other branch
+  # still gets CI only through its pull request. Attestation stays
+  # main-only (its steps check refs/heads/main).
   push:
     branches:
       - main
+      - 'release/**'
   pull_request:
     types:
       - opened

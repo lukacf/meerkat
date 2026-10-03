@@ -7872,8 +7872,8 @@ const S101_JOB2_OFFSET_MS: u64 = 12_000;
 /// so a busy worker never holds a later request back; every executor turn
 /// reaches Completed (job 1 is not cancelled by supersede); at least two
 /// delegations run concurrently (parallel scheduling, journaled with the
-/// WorkGraph items); both marker files exist; a commentary append landed for
-/// each finished job while the channel was live; three executor inputs
+/// WorkGraph items); both marker files exist; every job's result is delivered
+/// to the live channel (typed Delivered) before close; three executor inputs
 /// committed to the canonical session; graceful close.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
@@ -8111,24 +8111,22 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
                 "no two delegations ran concurrently (max_concurrent={max_concurrent}); the channel is still serial"
             ));
         }
-        // Commentary for each finished job while the channel is live.
-        let commentaries = live
-            .peer
-            .wait_for_timeline(Duration::from_secs(60), "three commentary_appended entries", |t| {
-                let count = t.iter().filter(|e| e.kind == TimelineKind::CommentaryAppended).count();
-                (count >= 3).then_some(count)
-            })
-            .await;
+        // Every job's result is delivered to the live channel (the typed
+        // Delivered observation) before the call closes. Counting commentary
+        // appends could not show that: the "Started voice request" narrations
+        // are commentary appends too, so the count passed before any result
+        // landed and the call closed with a result still in flight (soak
+        // round 3: the quick answer was delivered after the disconnect).
+        let results_delivered = wait_all_result_commentaries(&mut live, "S101").await;
         let timeline = live.peer.timeline().await?;
         let commentary_times: Vec<u64> = timeline
             .iter()
             .filter(|e| e.kind == TimelineKind::CommentaryAppended)
             .map(|e| e.t_ms)
             .collect();
-        if let Err(error) = commentaries {
+        if let Err(error) = results_delivered {
             deterministic_failures.push(format!(
-                "fewer than three commentary appends while live (got {:?}): {error}",
-                commentary_times.len()
+                "not every job's result reached the live channel before close: {error}"
             ));
         }
         let quick_timing = SpokenTurn::from_timeline(&timeline, quick);

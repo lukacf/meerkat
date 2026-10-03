@@ -1058,10 +1058,17 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
         RuntimeDriverError,
     > {
-        self.service()?
+        // The host holds the service weakly, and the boundary encloses the
+        // whole hydrate -> commit -> live -> persist transaction, whose later
+        // steps reach the service through this host. The boundary therefore
+        // retains the service; tuple fields drop in order, so the boundary is
+        // released before the service it encloses.
+        let service = self.service()?;
+        let guard = service
             .acquire_runtime_turn_finalization_guard(session_id)
             .await
-            .map_err(session_error_to_runtime_driver)
+            .map_err(session_error_to_runtime_driver)?;
+        Ok(Box::new((guard, service)))
     }
 
     async fn hydrate_session_llm_state(
@@ -1429,6 +1436,183 @@ mod tests {
                 .await
                 .expect("fall back to runtime head");
         assert_eq!(selected, Some(runtime_head));
+    }
+
+    /// A turn-finalization boundary acquired through the host keeps its
+    /// service alive: the host holds the service weakly, so a caller that
+    /// drops its last service handle while it holds the boundary must still
+    /// reach that exact service for the hydrate, live and persist steps of
+    /// the same transaction. The boundary drops before the service.
+    #[tokio::test]
+    async fn a_turn_finalization_boundary_retains_its_service_until_it_drops() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct OrderedGuard {
+            service: std::sync::Weak<dyn SessionRuntimeLlmReconfigureService>,
+            service_alive_at_drop: Arc<AtomicBool>,
+        }
+        impl Drop for OrderedGuard {
+            fn drop(&mut self) {
+                self.service_alive_at_drop
+                    .store(self.service.upgrade().is_some(), Ordering::SeqCst);
+            }
+        }
+
+        struct BoundaryService {
+            me: std::sync::Weak<BoundaryService>,
+            service_alive_at_drop: Arc<AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl SessionRuntimeLlmReconfigureService for BoundaryService {
+            async fn acquire_runtime_turn_finalization_guard(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<
+                Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
+                SessionError,
+            > {
+                let service: std::sync::Weak<dyn SessionRuntimeLlmReconfigureService> =
+                    self.me.clone();
+                Ok(Box::new(OrderedGuard {
+                    service,
+                    service_alive_at_drop: Arc::clone(&self.service_alive_at_drop),
+                }))
+            }
+
+            async fn synchronize_live_session_from_durable_authority(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<(), SessionError> {
+                unreachable!("realm selection does not reconfigure a live session")
+            }
+            async fn live_llm_identity(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<SessionLlmIdentity, SessionError> {
+                unreachable!("realm selection does not read the LLM identity")
+            }
+            async fn live_session_has_instruction_activations(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<bool, SessionError> {
+                unreachable!("realm selection does not inspect the transcript")
+            }
+            async fn live_realm_id(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<Option<RealmId>, SessionError> {
+                Ok(None)
+            }
+            async fn live_tool_visibility_state(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<Option<SessionToolVisibilityState>, SessionError> {
+                unreachable!("realm selection does not read tool visibility")
+            }
+            async fn live_web_search_override(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<meerkat_core::ToolCategoryOverride, SessionError> {
+                unreachable!("realm selection does not read web-search policy")
+            }
+            async fn live_tool_scope_snapshot(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<Option<meerkat_core::ToolScopeSnapshot>, SessionError> {
+                unreachable!("realm selection does not read the tool scope")
+            }
+            async fn apply_live_llm_identity_under_runtime_turn_boundary(
+                &self,
+                _session_id: &SessionId,
+                _client: Arc<dyn AgentLlmClient>,
+                _identity: SessionLlmIdentity,
+                _request_policy: meerkat_core::SessionLlmRequestPolicy,
+            ) -> Result<(), SessionError> {
+                unreachable!("realm selection does not mutate the LLM identity")
+            }
+            async fn apply_live_tool_visibility_state_under_runtime_turn_boundary(
+                &self,
+                _session_id: &SessionId,
+                _state: Option<SessionToolVisibilityState>,
+            ) -> Result<(), SessionError> {
+                unreachable!("realm selection does not mutate tool visibility")
+            }
+            async fn persist_live_under_runtime_turn_boundary(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<(), SessionError> {
+                unreachable!("realm selection does not persist")
+            }
+            async fn discard_live_under_runtime_turn_boundary(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<(), SessionError> {
+                unreachable!("realm selection does not discard")
+            }
+            async fn live_model_routing_control_history(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<
+                meerkat_core::session::model_routing_control::SessionModelRoutingControlHistory,
+                SessionError,
+            > {
+                unreachable!("realm selection does not read the handoff log")
+            }
+            async fn commit_model_routing_control_record_durable_first(
+                self: Arc<Self>,
+                _session_id: &SessionId,
+                _record: meerkat_core::session::model_routing_control::SessionModelRoutingControlRecord,
+            ) -> Result<(), SessionError> {
+                unreachable!("realm selection does not commit handoff resolutions")
+            }
+        }
+
+        let service_alive_at_drop = Arc::new(AtomicBool::new(false));
+        let concrete = Arc::new_cyclic(|me| BoundaryService {
+            me: me.clone(),
+            service_alive_at_drop: Arc::clone(&service_alive_at_drop),
+        });
+        let service: Arc<dyn SessionRuntimeLlmReconfigureService> = concrete;
+        let service_address = Arc::as_ptr(&service).cast::<()>();
+        let weak = Arc::downgrade(&service);
+        let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+        let host = SessionRuntimeLlmReconfigureHost {
+            service: weak.clone(),
+            staged_sessions: Arc::new(StagedSessionRegistry::new()),
+            factory: AgentFactory::minimal(),
+            auth_lease: machine.generated_auth_lease_handle(),
+            default_llm_client: Arc::new(std::sync::RwLock::new(None)),
+            agent_llm_client_decorator: Arc::new(std::sync::RwLock::new(None)),
+            config_runtime: Arc::new(std::sync::RwLock::new(None)),
+            realm_inheritance: Arc::new(std::sync::RwLock::new(None)),
+        };
+
+        let boundary = host
+            .acquire_turn_finalization_boundary(&SessionId::new())
+            .await
+            .expect("the boundary is acquired while the service is alive");
+        drop(service);
+
+        let retained = host
+            .service()
+            .expect("the held boundary keeps the service reachable through the host");
+        assert_eq!(
+            Arc::as_ptr(&retained).cast::<()>(),
+            service_address,
+            "the boundary retains the exact service it was acquired from"
+        );
+        drop(retained);
+
+        drop(boundary);
+        assert!(
+            service_alive_at_drop.load(Ordering::SeqCst),
+            "the boundary drops before the service it retains"
+        );
+        assert!(
+            weak.upgrade().is_none(),
+            "nothing but the boundary kept the service alive"
+        );
     }
 
     /// The host holds its service weakly (the service owns the machine the

@@ -676,3 +676,114 @@ async fn a_managed_host_without_a_child_policy_refuses_delegate() {
     assert!(dispatched.lock().unwrap().is_empty());
     fixture.teardown().await;
 }
+
+/// HomeCore's condition for delegate on a managed host without a child
+/// policy: the refusal reaches the model as a typed tool error result, the
+/// turn continues to the model's next reply, and no implicit mob is created.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_delegate_reaches_the_model_as_a_tool_error_and_the_turn_continues() {
+    let state_slot: Arc<OnceLock<Weak<MobMcpState>>> = Arc::new(OnceLock::new());
+    let slot = Arc::clone(&state_slot);
+    let surface_session = SessionId::new();
+    let owner = surface_session.clone();
+    let provider: meerkat_mob::ExternalToolsProvider = Arc::new(move || {
+        // Unbound: the member's agent loop binds its dispatchers.
+        let state = slot.get()?.upgrade()?;
+        let surface: Arc<dyn AgentToolDispatcher> = Arc::new(AgentMobToolSurface::new(
+            state,
+            None,
+            creator_authority(),
+            "claude-sonnet-4-5".to_string(),
+            owner.clone(),
+            None,
+            None,
+            None,
+        ));
+        Some(surface)
+    });
+    let seen = Arc::new(Mutex::new(None::<ToolResult>));
+    let sink = Arc::clone(&seen);
+    let fixture = CouncilFixture::new_with(
+        move |request| {
+            let tool_result = request
+                .messages
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::ToolResults { results, .. } => results.first().cloned(),
+                    _ => None,
+                });
+            match tool_result {
+                None => ScriptedTurn::ToolCall {
+                    id: "call-delegate".to_string(),
+                    name: "delegate".to_string(),
+                    args: json!({
+                        "task": "summarize the household calendar",
+                        "member_id": "helper",
+                        "result_label": "helper_result",
+                        "max_text_bytes": 4096
+                    }),
+                },
+                Some(result) => {
+                    *sink.lock().unwrap() = Some(result);
+                    ScriptedTurn::Text("carried on".to_string())
+                }
+            }
+        },
+        move |state, _root| {
+            state
+                .with_tool_consequence_policy_registry(registry())
+                .with_external_tools_provider(Some(provider))
+        },
+    );
+    state_slot.set(Arc::downgrade(&fixture.state)).unwrap();
+    fixture.seed_source_mob(&["creator"]).await;
+
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .expect("source mob handle");
+    let spec = BoundedResultSpec::new("turn", 4096).expect("bounded result spec");
+    let work = handle
+        .start_work_for_identity_bounded(
+            AgentIdentity::from("creator"),
+            WorkSpec::new(
+                ContentInput::Text("delegate the calendar summary".to_string()),
+                WorkOrigin::Internal,
+            ),
+            HandlingMode::Queue,
+            spec.clone(),
+        )
+        .await
+        .expect("start a turn");
+    let result = tokio::time::timeout(Duration::from_secs(60), work.wait_bounded(spec))
+        .await
+        .expect("turn completes within the failure bound")
+        .expect("the refusal does not fail the turn");
+    assert_eq!(result.result().result().text(), "carried on");
+
+    let seen = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the model saw a tool result");
+    assert!(seen.is_error, "{seen:?}");
+    let content = seen.text_content();
+    for needle in [
+        "policy_denied",
+        "child_tool_policy_required",
+        "this host runs a tool-policy registry",
+    ] {
+        assert!(content.contains(needle), "{needle} missing from: {content}");
+    }
+    assert!(
+        fixture
+            .state
+            .find_implicit_mob_for_bridge_session(&surface_session.to_string())
+            .await
+            .is_none(),
+        "no implicit mob is created"
+    );
+    fixture.teardown().await;
+}

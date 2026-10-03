@@ -26069,9 +26069,11 @@ mod tests {
     }
 
     /// A member-status observation of a session mid-turn reads the watches
-    /// the actor publishes. The authority-arbitrating `read` asks the session
-    /// task, which serves no command during a turn, so it waits for the
-    /// whole turn; the status view must not.
+    /// the actor publishes, and so does the authority-arbitrating `read`: it
+    /// compares against the transcript authority the session task published
+    /// before the turn, never asking the busy task. The ordered observation
+    /// (a command to the task, for export and commit callers that need it
+    /// ordered after their own commands) still waits for the turn.
     #[tokio::test]
     async fn live_session_view_observation_does_not_wait_for_active_turn() {
         let builder = BlockingRunBuilder::new();
@@ -26114,14 +26116,22 @@ mod tests {
                 .await
         });
         builder.wait_for_entered_runs(1).await;
+        let busy_read = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            SessionService::read(service.as_ref(), &id),
+        )
+        .await
+        .expect("the authority-arbitrating read must not wait for the active turn")
+        .unwrap();
+        assert_eq!(busy_read.state.session_id, id);
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(100),
-                SessionService::read(service.as_ref(), &id),
+                service.inner.observe_session_transcript_authority(&id),
             )
             .await
             .is_err(),
-            "the authority-arbitrating read queues behind the running turn"
+            "the ordered transcript-authority observation queues behind the running turn"
         );
         let busy_view = tokio::time::timeout(
             std::time::Duration::from_secs(1),

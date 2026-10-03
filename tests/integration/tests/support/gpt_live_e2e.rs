@@ -772,6 +772,8 @@ pub struct ReadoutRecord {
     /// still open at snapshot time.
     pub closed_by: Option<String>,
     pub closed_ms: Option<u64>,
+    /// Arrival of the response's latest non-empty output delta.
+    pub last_output_ms: Option<u64>,
     pub text: String,
     /// Sentences of 3 or more normalized words this response spoke more than
     /// once (a measurement: a stutter inside one response).

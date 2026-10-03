@@ -2906,8 +2906,18 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // the summary gate's and not a model that ignores its startup input. It
     // is asked before the unknown probe so that probe's "I don't know yet"
     // cannot prime it.
+    let control_start = live.peer.events().await?.len();
     let seeded = s99_native_exchange(&mut live, "seeded_fact", s99_recalls_seeded_fact).await?;
     assert!(s99_recalls_seeded_fact(&seeded));
+    // Strict: the fact is seeded, so delegating the question fails even when
+    // a native answer came first (soak c43aa3db S99 runs 1 and 5 answered
+    // "nine" and delegated anyway).
+    s99_wait_for_assistant_quiet(&mut live).await?;
+    let control_events = live.peer.events().await?;
+    assert!(
+        !control_events[control_start..].iter().any(is_client_delegation),
+        "the positive control was delegated: a seeded fact must be answered natively"
+    );
     s99_assert_pending(&mut live, &first_capture).await?;
     s99_history_probe(&mut live, &phrase).await?;
     s99_assert_pending(&mut live, &first_capture).await?;
@@ -4016,8 +4026,14 @@ fn sideband_clock_alignment(
         .filter(|e| e.kind == TimelineKind::CommentaryAppended)
         .map(|e| e.t_ms as i64)
         .collect();
+    // The browser sees nothing after its peer disconnects; the sideband may
+    // still receive acks (soak c43aa3db S105 run 1: a result acknowledged
+    // 400 ms after the graceful disconnect). Pair only what both could see.
+    let disconnected = sideband_disconnect_elapsed(lines, channel);
     let sideband: Vec<i64> = sideband_server_frames(lines, channel, "session.commentary.appended")
-        .map(|(elapsed_ms, _)| elapsed_ms as i64)
+        .map(|(elapsed_ms, _)| elapsed_ms)
+        .filter(|elapsed_ms| disconnected.is_none_or(|at| *elapsed_ms < at))
+        .map(|elapsed_ms| elapsed_ms as i64)
         .collect();
     if browser.is_empty() || browser.len() != sideband.len() {
         return Err(format!(
@@ -4041,6 +4057,19 @@ fn sideband_clock_offset(
     channel: u32,
 ) -> Result<i64, String> {
     sideband_clock_alignment(timeline, lines, channel).map(|alignment| alignment.offset_ms)
+}
+
+/// When the test disconnected the browser peer of `channel`, on the sideband
+/// clock: the recorded `disconnect:*` marker (a test-driven step).
+fn sideband_disconnect_elapsed(lines: &[provider_recording::Line], channel: u32) -> Option<u64> {
+    lines.iter().find_map(|line| match &line.entry {
+        provider_recording::Entry::Marker { step }
+            if line.channel_ordinal == channel && step.starts_with("disconnect") =>
+        {
+            Some(line.elapsed_ms)
+        }
+        _ => None,
+    })
 }
 
 /// RMS of one base64 PCM16 little-endian provider audio payload.
@@ -4481,6 +4510,7 @@ fn readout_records_malformed(
             || !opened_ok
             || !closed_ok
             || record.text.trim().is_empty()
+            || record.last_output_ms.is_none()
         {
             return Some(format!(
                 "malformed readout record at position {position}: {record:?}"
@@ -4524,7 +4554,8 @@ enum ReadoutFault {
 /// Verbatim voicing is not required for that: the model paraphrases short
 /// results, and scripted fixtures may cut a readout off. A delivery sent at
 /// or after the session's close request (`close_request_ms`, the user's
-/// sign-off or meerkat's session.close, on the peer's clock) is exempt and
+/// sign-off, the browser's disconnect or meerkat's session.close, on the
+/// peer's clock) is exempt and
 /// journaled as delivered after the close request. Deliveries are counted over
 /// every channel; voicing is checked for the deliveries on `channel`, the
 /// channel of the browser peer whose records these are (a reopen starts a
@@ -4553,9 +4584,15 @@ fn readout_faults(
     }
     for delivery in deliveries_before_close_request(deliveries, channel, offset, close_request_ms) {
         let sent = delivery.elapsed_ms as i64 - offset;
-        let spoken_after = records
-            .iter()
-            .any(|record| record.opened_ms.is_some_and(|opened| opened as i64 >= sent));
+        // Speech after the delivery, in any response: the response that
+        // voices a result may have opened just before it was sent (soak
+        // c43aa3db S102 run 2: " Here's" 1 ms before the send, " what they
+        // said:" after it).
+        let spoken_after = records.iter().any(|record| {
+            record
+                .last_output_ms
+                .is_some_and(|last| last as i64 >= sent)
+        });
         if !spoken_after {
             faults.push(ReadoutFault::MissedReadout {
                 delegation_id: delivery.delegation_id.clone(),
@@ -4690,10 +4727,17 @@ async fn readout_contract(
         }
         _ => None,
     });
-    let close_request_ms = [close_sent, live.sign_off_onset_ms.map(|t| t as i64)]
-        .into_iter()
-        .flatten()
-        .min();
+    // The user hanging up (the browser's disconnect) is a close request too.
+    let disconnect_sent =
+        sideband_disconnect_elapsed(&lines, channel).map(|elapsed_ms| elapsed_ms as i64 - offset);
+    let close_request_ms = [
+        close_sent,
+        disconnect_sent,
+        live.sign_off_onset_ms.map(|t| t as i64),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
     let before_close: Vec<&ResultDelivery> =
         deliveries_before_close_request(&deliveries, channel, offset, close_request_ms).collect();
     for delivery in deliveries.iter().filter(|d| d.channel == channel) {
@@ -10645,6 +10689,7 @@ mod config_tests {
             opened_ms: Some(index * 1000),
             closed_by: closed_ms.map(|_| "session.input_transcript.delta".to_owned()),
             closed_ms,
+            last_output_ms: Some(closed_ms.unwrap_or(index * 1000 + 500)),
             text: text.to_owned(),
             stutters: Vec::new(),
         }
@@ -11004,6 +11049,59 @@ mod config_tests {
             super::unprompted_assistant_response_starts(&silent_fixture, 0),
             vec![2000]
         );
+    }
+
+    /// Speech that follows a delivery inside a response opened just before it
+    /// voices the result: soak c43aa3db S102 run 2 (" Here's" 1 ms before
+    /// the send, " what they said:" after it).
+    #[test]
+    fn speech_after_the_delivery_in_an_earlier_opened_response_is_not_missed() {
+        let deliveries = [result_delivery(
+            "item_a",
+            1000,
+            "I asked Analyst Pemberton.",
+        )];
+        let mut spanning = readout(0, Some(1400), "Here's what they said:");
+        spanning.opened_ms = Some(999);
+        spanning.last_output_ms = Some(1300);
+        assert!(super::readout_faults(&deliveries, 1, &[spanning.clone()], 0, None).is_empty());
+        spanning.last_output_ms = Some(999);
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &[spanning], 0, None),
+            vec![super::ReadoutFault::MissedReadout {
+                delegation_id: "item_a".to_owned()
+            }]
+        );
+    }
+
+    /// Acks the sideband receives after the browser disconnected are not
+    /// paired (soak c43aa3db S105 run 1), and the disconnect is a close
+    /// request.
+    #[test]
+    fn sideband_acks_after_the_disconnect_are_not_paired() {
+        let entries = timeline(&[(1000, "commentary_appended", serde_json::json!({}))]);
+        let mut lines = vec![server_frame(
+            1,
+            1500,
+            serde_json::json!({"type": "session.commentary.appended"}),
+        )];
+        lines.push(super::provider_recording::Line {
+            seq: 2,
+            channel_ordinal: 1,
+            elapsed_ms: 5000,
+            entry: super::provider_recording::Entry::Marker {
+                step: "disconnect:graceful".to_owned(),
+            },
+        });
+        lines.push(server_frame(
+            3,
+            5400,
+            serde_json::json!({"type": "session.commentary.appended"}),
+        ));
+        let alignment = super::sideband_clock_alignment(&entries, &lines, 1).unwrap();
+        assert_eq!((alignment.offset_ms, alignment.pairs), (500, 1));
+        assert_eq!(super::sideband_disconnect_elapsed(&lines, 1), Some(5000));
+        assert_eq!(super::sideband_disconnect_elapsed(&lines, 2), None);
     }
 
     /// Scheduler narration on the commentary lane is not a result; the

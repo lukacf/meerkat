@@ -200,7 +200,7 @@ async function prepare(command) {
       // response spoke more than once (a measurement). The duplicate-readout
       // rule itself lives in the Rust scenario, which joins these records
       // with the delegation results delivered on the sideband.
-      readouts: { closed: [], open: { text: '', opened_by: 'connect', opened_ms: null } },
+      readouts: { closed: [], open: { text: '', opened_by: 'connect', opened_ms: null, last_output_ms: null } },
       energy: {
         threshold: energyConfig.threshold,
         window_ms: energyConfig.window_ms,
@@ -404,7 +404,10 @@ async function prepare(command) {
       const counts = new Map();
       for (const sentence of readoutSentences(open.text)) counts.set(sentence, (counts.get(sentence) ?? 0) + 1);
       const stutters = [...counts].filter(([, count]) => count >= 2).map(([sentence]) => sentence);
-      return { index, opened_by: open.opened_by, opened_ms: open.opened_ms, ...closed, text: open.text, stutters };
+      return {
+        index, opened_by: open.opened_by, opened_ms: open.opened_ms, ...closed,
+        last_output_ms: open.last_output_ms ?? null, text: open.text, stutters,
+      };
     };
     // Close the open response at a boundary event (`kind`) arriving at `t`.
     // An empty response leaves no record; the next one opens at the boundary.
@@ -417,7 +420,7 @@ async function prepare(command) {
           readouts.closed.push(readoutRecord(readouts.open, readouts.closed.length, { closed_by: kind, closed_ms: t }));
         }
       }
-      readouts.open = { text: '', opened_by: kind, opened_ms: t };
+      readouts.open = { text: '', opened_by: kind, opened_ms: t, last_output_ms: null };
     };
     state.readoutSnapshot = () => {
       const readouts = state.readouts;
@@ -673,6 +676,9 @@ async function prepare(command) {
         if (state.response.text.length < 20000) state.response.text += delta;
         if (state.outputLog.length < 20000) state.outputLog.push({ t, text: delta });
         if (state.readouts.open.text.length < 200000) state.readouts.open.text += delta;
+        // Arrival of the response's latest output: a result is voiced when
+        // speech follows its delivery, even inside a response opened before.
+        if (delta.trim()) state.readouts.open.last_output_ms = t;
       }
       if (protocol === 'public' && (isInputDelta
         || parsed?.type === 'session.commentary.appended'

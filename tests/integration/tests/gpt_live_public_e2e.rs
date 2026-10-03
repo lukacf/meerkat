@@ -6983,10 +6983,14 @@ fn s102_premature_claims(
 
 /// Waits until a typed turn's canonical rows (the user prompt and the
 /// assistant's final reply, read from `session/history`) are acknowledged in
-/// the provider conversation: for each, the session-lane
-/// `session.commentary.append` carrying it and the provider's
-/// `session.commentary.appended` for that append. A question asked before
-/// then races the mirror.
+/// the provider conversation on the quiet lane (#1614). Each row rides one
+/// thinking append token (`meerkat-thinking-<token>-<i>`): the text-chat
+/// prefix and the row JSON, split into fragments of at most 500 bytes. A row
+/// is acknowledged when the joined fragments of a token carry it and every
+/// fragment of that token has its `session.thinking.appended`. A typed turn
+/// is text-chat context, never voiced: a `session.commentary.append`
+/// carrying either row fails. A question asked before the rows are
+/// acknowledged races them (verdict tree fb94711f S105 run 3).
 async fn wait_typed_turn_mirrored(
     live: &mut PublicLiveHarness,
     evidence: &Journal,
@@ -7007,44 +7011,112 @@ async fn wait_typed_turn_mirrored(
         .map(assistant_row_text)
         .find(|text| !text.trim().is_empty())
         .ok_or_else(|| format!("{scenario}: the typed turn committed no assistant reply"))?;
-    let probe = |text: &str| -> String { text.trim().chars().take(60).collect() };
-    let probes = [probe(prompt), probe(&reply)];
+    let probes = [typed_row_probe(prompt), typed_row_probe(&reply)];
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let lines = evidence.provider_stream_lines()?;
-        let acknowledged = |probe: &str| {
-            lines.iter().any(|line| match &line.entry {
-                provider_recording::Entry::ClientEvent { event }
-                    if line.channel_ordinal == channel
-                        && event["type"] == "session.commentary.append"
-                        && event["delegation_id"].is_null()
-                        && event["content"]
-                            .as_str()
-                            .is_some_and(|content| commentary_carries(content, probe)) =>
-                {
-                    let id = &event["event_id"];
-                    lines.iter().any(|ack| {
-                        ack.channel_ordinal == channel
-                            && matches!(&ack.entry, provider_recording::Entry::ServerFrame { raw }
-                                if raw["type"] == "session.commentary.appended"
-                                    && &raw["client_event_id"] == id)
-                    })
-                }
-                _ => false,
+        let voiced: Vec<&String> = probes
+            .iter()
+            .filter(|probe| {
+                lines.iter().any(|line| {
+                    matches!(&line.entry, provider_recording::Entry::ClientEvent { event }
+                        if line.channel_ordinal == channel
+                            && event["type"] == "session.commentary.append"
+                            && event["content"]
+                                .as_str()
+                                .is_some_and(|content| carries_row(content, probe)))
+                })
             })
-        };
-        let pending: Vec<&String> = probes.iter().filter(|probe| !acknowledged(probe)).collect();
+            .collect();
+        if !voiced.is_empty() {
+            return Err(format!(
+                "{scenario}: a typed turn's row was voiced on the commentary lane: {voiced:?}"
+            )
+            .into());
+        }
+        let tokens = thinking_tokens(&lines, channel);
+        let pending: Vec<&String> = probes
+            .iter()
+            .filter(|probe| {
+                !tokens
+                    .iter()
+                    .any(|token| token.acknowledged && carries_row(&token.text, probe))
+            })
+            .collect();
         if pending.is_empty() {
             return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "{scenario}: the typed turn's rows never reached the provider conversation within 60 s: {pending:?}"
+                "{scenario}: the typed turn's rows were not acknowledged on the quiet lane within 60 s: {pending:?}"
             )
             .into());
         }
         sleep(Duration::from_millis(250)).await;
     }
+}
+
+/// The first 60 characters of a row's text: what a mirrored row's JSON
+/// carries verbatim (or JSON-escaped).
+fn typed_row_probe(text: &str) -> String {
+    text.trim().chars().take(60).collect()
+}
+
+/// Whether appended content carries a row starting with `probe`, either as
+/// the mirror's row JSON (parsed) or as text holding the probe verbatim or
+/// JSON-escaped (a framed thinking append: prefix, newline, row JSON).
+fn carries_row(content: &str, probe: &str) -> bool {
+    if commentary_carries(content, probe) || content.contains(probe) {
+        return true;
+    }
+    let escaped = serde_json::to_string(probe).unwrap_or_default();
+    let escaped = escaped.trim_matches('"');
+    !escaped.is_empty() && content.contains(escaped)
+}
+
+/// One thinking append token: its fragments' text joined in fragment order,
+/// and whether every fragment was acknowledged.
+#[derive(Debug, PartialEq)]
+struct ThinkingToken {
+    text: String,
+    acknowledged: bool,
+}
+
+/// The channel's thinking append tokens (`meerkat-thinking-<token>-<i>`).
+fn thinking_tokens(lines: &[provider_recording::Line], channel: u32) -> Vec<ThinkingToken> {
+    let mut fragments: BTreeMap<String, Vec<(u64, String, String)>> = BTreeMap::new();
+    for line in lines.iter().filter(|line| line.channel_ordinal == channel) {
+        if let provider_recording::Entry::ClientEvent { event } = &line.entry
+            && event["type"] == "session.thinking.append"
+            && let Some(id) = event["event_id"].as_str()
+            && let Some((token, index)) = id.rsplit_once('-')
+            && let Ok(index) = index.parse::<u64>()
+        {
+            fragments.entry(token.to_owned()).or_default().push((
+                index,
+                id.to_owned(),
+                event["content"].as_str().unwrap_or_default().to_owned(),
+            ));
+        }
+    }
+    let acked = |id: &str| {
+        lines.iter().any(|line| {
+            line.channel_ordinal == channel
+                && matches!(&line.entry, provider_recording::Entry::ServerFrame { raw }
+                    if raw["type"] == "session.thinking.appended"
+                        && raw["client_event_id"] == id)
+        })
+    };
+    fragments
+        .into_values()
+        .map(|mut parts| {
+            parts.sort_by_key(|(index, _, _)| *index);
+            ThinkingToken {
+                acknowledged: parts.iter().all(|(_, id, _)| acked(id)),
+                text: parts.iter().map(|(_, _, text)| text.as_str()).collect(),
+            }
+        })
+        .collect()
 }
 
 /// The text blocks of one `block_assistant` history row, joined.
@@ -10253,6 +10325,9 @@ async fn run_s105_fork_and_merge_parallel(
     Ok(())
 }
 
+/// S98's delayed typed update, committed during the call.
+const S98_TYPED_UPDATE: &str = "A delayed background update changes the code word you must remember from Tangerine to Violet. Acknowledge the new code word Violet briefly. Do not use tools or start another task.";
+
 /// Scenario 98: the public Live lifecycle facts that no provider event
 /// establishes on its own, driven against the real API.
 ///
@@ -10577,21 +10652,27 @@ async fn run_s98_real_audio_and_context(
     // A later ordinary background turn is a new canonical context update,
     // not another result for the already completed voice delegation.
     let before_update = live.peer.events().await?.len();
-    live.rpc.call(
-        "turn/start",
-        json!({
-            "session_id":session_id,
-            "prompt":"A delayed background update changes the code word you must remember from Tangerine to Violet. Acknowledge the new code word Violet briefly. Do not use tools or start another task."
-        }),
-        120,
-    ).await?;
+    live.rpc
+        .call(
+            "turn/start",
+            json!({
+                "session_id":session_id,
+                "prompt":S98_TYPED_UPDATE
+            }),
+            120,
+        )
+        .await?;
     live.assert_existing_text_identity().await?;
     let updated = live.rpc.session_history(json!(session_id), 30).await?;
     assert!(
         updated["messages"].to_string().contains("Violet"),
         "delayed update must first commit to the unchanged background session"
     );
-    // The typed update is voiced as owner commentary; do not speak into it.
+    // The typed update reaches the voice as quiet text-chat context (#1614):
+    // ask the recall only once both rows are acknowledged on the quiet lane,
+    // then after any speech has ended.
+    let channel = evidence.current_channel()?;
+    wait_typed_turn_mirrored(&mut live, &evidence, channel, S98_TYPED_UPDATE, "S98").await?;
     wait_for_assistant_quiet(&mut live.peer).await?;
     let before_updated_recall = live.peer.events().await?.len();
     let audio_baseline = live.peer.audio_evidence().await?;
@@ -11599,6 +11680,65 @@ mod config_tests {
         assert_eq!((alignment.offset_ms, alignment.pairs), (500, 1));
         assert_eq!(super::sideband_disconnect_elapsed(&lines, 1), Some(5000));
         assert_eq!(super::sideband_disconnect_elapsed(&lines, 2), None);
+    }
+
+    /// A typed row split across thinking fragments under one token is
+    /// carried when the token's joined text holds it (escaped or verbatim),
+    /// and acknowledged only when every fragment was (#1614).
+    #[test]
+    fn a_typed_row_is_matched_across_the_fragments_of_one_thinking_token() {
+        let line =
+            |seq: u64, entry: super::provider_recording::Entry| super::provider_recording::Line {
+                seq,
+                channel_ordinal: 1,
+                elapsed_ms: seq * 100,
+                entry,
+            };
+        let append = |seq: u64, id: &str, content: &str| {
+            line(
+                seq,
+                super::provider_recording::Entry::ClientEvent {
+                    event: serde_json::json!({"type": "session.thinking.append", "event_id": id, "content": content}),
+                },
+            )
+        };
+        let ack = |seq: u64, id: &str| {
+            line(
+                seq,
+                super::provider_recording::Entry::ServerFrame {
+                    raw: serde_json::json!({"type": "session.thinking.appended", "client_event_id": id}),
+                },
+            )
+        };
+        let row = "Correction: the number in number.txt must be 21 and \"number2.txt\" must be 42.";
+        let mut lines = vec![
+            append(
+                1,
+                "meerkat-thinking-7-0",
+                "From the text chat during this call: ...\n{\"role\":\"user\",\"text\":\"Correction: the number in number.txt",
+            ),
+            append(
+                2,
+                "meerkat-thinking-7-1",
+                " must be 21 and \\\"number2.txt\\\" must be 42.\"}",
+            ),
+            ack(3, "meerkat-thinking-7-0"),
+        ];
+        let probe = super::typed_row_probe(row);
+        let tokens = super::thinking_tokens(&lines, 1);
+        assert_eq!(tokens.len(), 1);
+        assert!(
+            super::carries_row(&tokens[0].text, &probe),
+            "{:?}",
+            tokens[0].text
+        );
+        assert!(
+            !tokens[0].acknowledged,
+            "one fragment is still unacknowledged"
+        );
+        lines.push(ack(4, "meerkat-thinking-7-1"));
+        assert!(super::thinking_tokens(&lines, 1)[0].acknowledged);
+        assert!(super::thinking_tokens(&lines, 2).is_empty());
     }
 
     /// The vault phrase has five words and never repeats a word back to

@@ -2007,9 +2007,11 @@ them.
     recall is graded on the model's own transcript of its speech, where a
     spoken "maple maple" is ambiguous; exact recall of all five words is
     still required.
-  - S105 asks its recall only after the typed correction's rows (its prompt
-    and the assistant's reply) are acknowledged in the provider conversation;
-    asked earlier, the recall raced the mirrored rows and was talked over.
+  - S105 asks its recall, and S98 its updated-code-word recall, only after
+    the typed turn's rows (its prompt and the assistant's reply) are
+    acknowledged on the quiet lane (`session.thinking.append`, every fragment
+    of the row's token acknowledged); a typed row on the commentary lane
+    fails (#1614). Asked earlier, the recall raced the rows.
   - S97 and S98 are recorded like every other GPT Live Turbo S scenario
     (evidence journal, browser evidence, provider stream). The JSON-RPC host
     opens channels on its own request tasks, so S97's open installs the

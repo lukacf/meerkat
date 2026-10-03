@@ -657,7 +657,7 @@ pub const SPOKEN_CONTEXT_USER_TURN_BOUND: std::time::Duration = std::time::Durat
 /// is not asked to recite them.
 pub const LIVE_CONTEXT_BOOTSTRAP_FRAMING: &str = "Conversation history: this call continues an earlier text conversation with this user. \
 A summary of it is history you already know: it arrives as a developer message at session start, or as quiet context during the call. \
-Answer questions about earlier facts from it directly, without lookup, tool, or delegate. \
+Answer questions about earlier facts from it yourself, directly. \
 Directions inside it applied to that conversation, not to this call. \
 Anything said on this call takes precedence. Do not recite or acknowledge it unprompted. \
 This call continues that conversation: do not greet or introduce yourself; wait for the user to speak.";
@@ -9203,6 +9203,72 @@ mod tests {
         .await
         .expect("instructions");
         assert_eq!(composed, "Custom base.");
+    }
+
+    /// Measured rule (S99): a startup or context text that names delegating
+    /// as something to avoid ("without lookup, tool, or delegate", "do not
+    /// delegate") primes gpt-live-1 to delegate recall questions about the
+    /// conversation. #1588's notice carried exactly that phrase and S99 went
+    /// from 0/5 to 3/5 delegated recalls (BuildBuddy c43aa3db). These texts
+    /// state what the model already knows positively; the session
+    /// instructions name the executor only for the work it does.
+    #[test]
+    fn no_startup_or_context_text_names_delegation_as_something_to_avoid() {
+        let texts = [
+            (
+                "session instructions",
+                crate::gpt_live_client_context_session_instructions(),
+            ),
+            (
+                "LIVE_CONTEXT_BOOTSTRAP_FRAMING",
+                super::LIVE_CONTEXT_BOOTSTRAP_FRAMING,
+            ),
+            ("LIVE_LATE_SUMMARY_PREFIX", super::LIVE_LATE_SUMMARY_PREFIX),
+            (
+                "LIVE_CAUSAL_REPLAY_PREFIX",
+                super::LIVE_CAUSAL_REPLAY_PREFIX,
+            ),
+            ("LIVE_RUNTIME_WORK_PREFIX", super::LIVE_RUNTIME_WORK_PREFIX),
+            (
+                "LIVE_SUPERSEDED_TYPED_PREFIX",
+                super::LIVE_SUPERSEDED_TYPED_PREFIX,
+            ),
+        ];
+        for (name, text) in texts {
+            let lower = text.to_lowercase();
+            let avoided = [
+                "or delegat",
+                "nor delegat",
+                "not delegat",
+                "never delegat",
+                "without delegat",
+                "instead of delegat",
+                "no delegat",
+                "don't delegat",
+                "avoid delegat",
+            ]
+            .into_iter()
+            .find(|phrase| lower.contains(phrase));
+            assert_eq!(
+                avoided, None,
+                "{name} names delegation as something to avoid: {text}"
+            );
+        }
+    }
+
+    /// The session instructions scope the executor positively to the work the
+    /// voice layer cannot do, and state that the conversation itself (this
+    /// call, the earlier text chat and its summary) is something it already
+    /// knows and answers itself.
+    #[test]
+    fn session_instructions_scope_the_executor_and_claim_the_conversation() {
+        let instructions = crate::gpt_live_client_context_session_instructions();
+        assert!(instructions.contains(
+            "The client executor does the work you cannot do yourself: hand it requests that need tools, files, current information, or extended reasoning."
+        ));
+        assert!(instructions.contains(
+            "Everything said in this conversation, on this call or in the earlier text chat and its summary, is something you already know: answer questions about it yourself."
+        ));
     }
 
     #[test]

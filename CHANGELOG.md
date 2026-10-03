@@ -1959,6 +1959,26 @@ them.
   (#1519).
 ### Changed
 
+- GPT Live Turbo S oracles assert typed contracts only. Tolerant, record-only
+  and advisory checks are gone; measurements are journaled as metrics, and
+  `make turbo-s-oracle-gate` (run in CI) rejects soft check shapes in the
+  scenario code.
+  - Talk-over: every barge-in that lands on assistant speech (S100's, and
+    S103's barge-in and correction) must leave the user's onset to the last
+    audible assistant frame within `TALK_OVER_BOUND_MS` (3000 ms). The ingest
+    segment (onset to the provider's first voiced input frame, 500 ms) and the
+    playout segment (the provider's last voiced output frame to last audible,
+    700 ms) are bounded on their own. The provider's turn-taking segment is
+    journaled on every yield. Each bound is derived from the healthy soak
+    maximum plus the browser's 100 ms energy window. The old rule, that the
+    audio ends before the user's utterance does, tied the bound to the
+    fixture's length.
+  - Readouts: every delegation result is delivered into the provider
+    conversation exactly once and voiced inside one response, in every
+    scenario. A repeat inside one response is a stutter, journaled as a
+    metric. The browser peer records responses; it no longer raises
+    `duplicate_readout` itself, and missing or malformed records fail the
+    scenario.
 - Model calls and shell rounds are attributable in debug logs. The agent loop
   logs each model call's session, turn, attempt, elapsed time and outcome
   ("model call settled"); shell tool calls log their tool call id at start and

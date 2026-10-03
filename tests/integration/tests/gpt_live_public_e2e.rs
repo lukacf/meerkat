@@ -29,7 +29,7 @@ use meerkat::experimental_gpt_live::{
     ExperimentalLivePublicObservationDeliveryError, ExperimentalLivePublicObservationKind,
     ExperimentalLivePublicObservationPublisher, GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID,
     GPT_LIVE_PUBLIC_MODEL, LIVE_RUNTIME_WORK_PREFIX, PublicGptLiveOpenAuthorityConfig,
-    PublicGptLivePlaybackPolicy,
+    PublicGptLivePlaybackPolicy, provider_recording,
 };
 use meerkat::session_runtime::live_summary::{
     LiveContextBootstrapMode, LiveContextSummarizer, LiveContextSummaryError,
@@ -3563,7 +3563,8 @@ fn delegations_per_window(
         .collect()
 }
 
-/// The scenario's soft browser faults (journal and live peer), with overlap
+/// The scenario's readout rule (`readout_contract`, an error when violated)
+/// and its soft browser faults (journal and live peer), with overlap
 /// faults reconciled against the backchannel classifier
 /// (`evidence::classify_overlap`): an overlap made only of classified
 /// backchannels (short, no new content, no delegation, yielded to the user)
@@ -3575,6 +3576,7 @@ async fn scenario_browser_faults(
     channel: u32,
     scenario: &str,
 ) -> Result<Vec<evidence::BrowserFault>, Box<dyn std::error::Error>> {
+    readout_contract(evidence, live, channel, scenario).await?;
     let mut faults = evidence.faults()?;
     faults.extend(live.peer.faults().await?);
     let (faults, allowed) = evidence::reconcile_overlap_faults(faults);
@@ -3612,9 +3614,9 @@ fn record_allowed_backchannels(
 /// `response` index, which advances only when a new user utterance starts;
 /// a burst continues the previous burst's response when its index equals
 /// that burst's index at its start or at its end (a late user delta can
-/// advance the index while the assistant is still speaking). Repetition
-/// inside one response is the peer's own `duplicate_readout` fault on the
-/// output transcript text, which every scenario already fails on. The
+/// advance the index while the assistant is still speaking). A result voiced
+/// twice is the readout rule's (`readout_faults`), which every scenario
+/// applies through `scenario_browser_faults`. The
 /// prompt window opens at the previous burst's `last_active_ms`, the last
 /// audible window: the burst's `assistant_audio_end` entry is pushed only
 /// after the hysteresis, so an input final that closed inside it still
@@ -3656,65 +3658,534 @@ fn unprompted_assistant_response_starts(timeline: &[TimelineEntry], from_ms: u64
     unprompted
 }
 
-/// Readout lines an assistant turn spoke twice. The public protocol has no
-/// response lifecycle, so the peer's "response" can span several model turns
-/// (a readout, then a corrected readout after the executor's result arrives).
-/// The assistant transcript is therefore segmented at the provider events
-/// that start a new turn (a commentary append, a delegation, user speech), and
-/// a line repeated within one segment is a duplicate readout.
-fn repeated_readout_lines(events: &[Value]) -> Vec<String> {
-    fn check(segment: &str, repeated: &mut Vec<String>) {
-        let mut seen = std::collections::BTreeSet::new();
-        for line in segment
-            .split(['\n', '.', '!', '?'])
-            .map(normalize_words)
-            .filter(|line| line.split(' ').count() >= 3)
-        {
-            if !seen.insert(line.clone()) && !repeated.contains(&line) {
-                repeated.push(line);
-            }
-        }
-    }
-    let mut repeated = Vec::new();
-    let mut segment = String::new();
-    for event in events {
-        if event["type"] == "session.output_transcript.delta" {
-            if let Some(delta) = event["delta"].as_str().or_else(|| event["text"].as_str()) {
-                segment.push_str(delta);
-            }
-        } else if event["type"] == "session.commentary.appended"
-            || event["type"] == "session.delegation.created"
-            || is_user_input(event)
-        {
-            check(&segment, &mut repeated);
-            segment.clear();
-        }
-    }
-    check(&segment, &mut repeated);
-    repeated
+// ---------------------------------------------------------------------------
+// Talk-over contract (barge-in yield)
+// ---------------------------------------------------------------------------
+
+/// End-to-end talk-over bound: from the user's interrupting speech onset (the
+/// fixture start on the browser clock) to the assistant's last audible frame
+/// in the browser. Derivation, 0.8.51 Turbo S soak: 31 healthy yields
+/// (rounds round2, round3, resoak, finalc) measured onset to last audible
+/// p50 1386 ms, p90 1797 ms, max 2902 ms, and all 71 healthy yields of the
+/// six rounds give the same maximum; at these sample sizes the p99 is the
+/// maximum. No part of it is meerkat's: media flows browser <-> provider over
+/// WebRTC, and the public Live protocol has no cancel, truncate or
+/// output-clear client event, so meerkat has no cut path. Our only cost is
+/// the peer's 100 ms energy window: 2902 + 100, rounded up.
+const TALK_OVER_BOUND_MS: u64 = 3000;
+/// Ingest: onset to the provider reflecting our first voiced input frame on
+/// the sideband (browser WebRTC uplink plus the provider's 200 ms input
+/// framing). Same sample: p50 240 ms, p90 290 ms, max 369 ms; plus the
+/// 100 ms window, rounded up.
+const INGEST_BOUND_MS: u64 = 500;
+/// Playout: the provider's last voiced output frame on the sideband to the
+/// browser's last audible window (provider RTP pacing plus the browser's
+/// jitter buffer). Same sample: p50 428 ms, p90 548 ms, max 572 ms; plus the
+/// 100 ms window, rounded up.
+const PLAYOUT_BOUND_MS: u64 = 700;
+/// PCM16 RMS above which a 200 ms provider audio frame carries speech, the
+/// threshold the derivation used: silent frames measured 0-10, speech
+/// frames 200-3000.
+const VOICED_FRAME_RMS: f64 = 300.0;
+/// Bound on the spread of the sideband-minus-browser clock offsets over the
+/// commentary.appended events both clocks saw (measured 1-31 ms). A larger
+/// spread means the events were mispaired, so no segment can be trusted.
+const SIDEBAND_CLOCK_SPREAD_BOUND_MS: i64 = 100;
+
+/// One barge-in yield split at the points we can observe, on the browser
+/// clock. `turn_taking_ms` (onset to the provider's last voiced output frame
+/// on the sideband) is the provider's decision plus generation; it is
+/// recorded on every yield and bounded only through the end-to-end bound.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct YieldSegments {
+    onset_ms: u64,
+    last_audible_ms: u64,
+    ingest_ms: i64,
+    turn_taking_ms: i64,
+    playout_ms: i64,
 }
 
-/// The yield contract for a barge-in that lands on assistant speech: the
-/// assistant's audio ends before the user's interrupting utterance ends
-/// (fixture onset plus its speech duration). gpt-live-1 owns interruption and
-/// its latency varies (0-2.9 s measured), so this orders two events instead
-/// of bounding a wall-clock gap. `None` when it holds or nothing overlapped.
-fn barge_in_yield_violation(
+impl YieldSegments {
+    fn total_ms(&self) -> i64 {
+        self.last_audible_ms as i64 - self.onset_ms as i64
+    }
+
+    fn violations(&self) -> Vec<String> {
+        let mut violations = Vec::new();
+        if self.total_ms() > TALK_OVER_BOUND_MS as i64 {
+            violations.push(format!(
+                "talked over the user for {} ms (onset to last audible; bound {TALK_OVER_BOUND_MS} ms)",
+                self.total_ms()
+            ));
+        }
+        if self.ingest_ms > INGEST_BOUND_MS as i64 {
+            violations.push(format!(
+                "ingest took {} ms (onset to the provider's first voiced input frame; bound {INGEST_BOUND_MS} ms)",
+                self.ingest_ms
+            ));
+        }
+        if self.playout_ms > PLAYOUT_BOUND_MS as i64 {
+            violations.push(format!(
+                "playout took {} ms (provider's last voiced output frame to last audible; bound {PLAYOUT_BOUND_MS} ms)",
+                self.playout_ms
+            ));
+        }
+        violations
+    }
+
+    fn detail(&self) -> String {
+        format!(
+            "onset_ms={} ingest_ms={} turn_taking_ms={} playout_ms={} total_ms={}",
+            self.onset_ms,
+            self.ingest_ms,
+            self.turn_taking_ms,
+            self.playout_ms,
+            self.total_ms()
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum YieldObservation {
+    /// The assistant was already quiet at the onset: nothing to yield.
+    NotSpeakingAtOnset {
+        onset_ms: u64,
+    },
+    Yield(YieldSegments),
+}
+
+fn sideband_server_frames<'a>(
+    lines: &'a [provider_recording::Line],
+    channel: u32,
+    frame_type: &'a str,
+) -> impl Iterator<Item = (u64, &'a Value)> + 'a {
+    lines.iter().filter_map(move |line| match &line.entry {
+        provider_recording::Entry::ServerFrame { raw }
+            if line.channel_ordinal == channel && raw["type"] == frame_type =>
+        {
+            Some((line.elapsed_ms, raw))
+        }
+        _ => None,
+    })
+}
+
+/// Sideband elapsed_ms minus browser t_ms, from the commentary.appended
+/// events both saw (paired in order; the provider sends each on both
+/// channels). The median offset; an unpaired or widely spread set is an
+/// error, never a guess.
+fn sideband_clock_offset(
+    timeline: &[TimelineEntry],
+    lines: &[provider_recording::Line],
+    channel: u32,
+) -> Result<i64, String> {
+    let browser: Vec<u64> = timeline
+        .iter()
+        .filter(|e| e.kind == TimelineKind::CommentaryAppended)
+        .map(|e| e.t_ms)
+        .collect();
+    let mut offsets: Vec<i64> =
+        sideband_server_frames(lines, channel, "session.commentary.appended")
+            .map(|(elapsed_ms, _)| elapsed_ms as i64)
+            .zip(browser.iter().map(|t| *t as i64))
+            .map(|(sideband, browser)| sideband - browser)
+            .collect();
+    if offsets.is_empty() {
+        return Err(
+            "no commentary.appended event on both the sideband and the browser timeline to align their clocks"
+                .to_owned(),
+        );
+    }
+    offsets.sort_unstable();
+    let spread = offsets[offsets.len() - 1] - offsets[0];
+    if spread > SIDEBAND_CLOCK_SPREAD_BOUND_MS {
+        return Err(format!(
+            "sideband/browser clock offsets spread {spread} ms over {} commentary.appended pairs (bound {SIDEBAND_CLOCK_SPREAD_BOUND_MS} ms): the pairs do not match",
+            offsets.len()
+        ));
+    }
+    Ok(offsets[offsets.len() / 2])
+}
+
+/// RMS of one base64 PCM16 little-endian provider audio payload.
+fn pcm16_rms(payload: &Value) -> Result<f64, String> {
+    use base64::Engine as _;
+    let encoded = payload
+        .as_str()
+        .ok_or("audio frame without a base64 payload")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("audio frame payload is not base64: {error}"))?;
+    let samples: Vec<f64> = bytes
+        .chunks_exact(2)
+        .map(|pair| f64::from(i16::from_le_bytes([pair[0], pair[1]])))
+        .collect();
+    if samples.is_empty() {
+        return Ok(0.0);
+    }
+    Ok((samples.iter().map(|s| s * s).sum::<f64>() / samples.len() as f64).sqrt())
+}
+
+/// Split the yield of the barge-in fixture `fixture` (see [`YieldSegments`]).
+fn yield_segments(
+    timeline: &[TimelineEntry],
+    lines: &[provider_recording::Line],
+    channel: u32,
+    fixture: u64,
+) -> Result<YieldObservation, String> {
+    let onset_ms = fixture_start_entry(timeline, fixture)
+        .ok_or("the barge-in fixture never started")?
+        .t_ms;
+    let end = timeline
+        .iter()
+        .find(|e| e.kind == TimelineKind::AssistantAudioEnd && e.t_ms >= onset_ms)
+        .ok_or("no assistant_audio_end after the barge-in onset")?;
+    let started_ms = end
+        .detail_u64("started_ms")
+        .ok_or("assistant_audio_end without started_ms")?;
+    if started_ms > onset_ms {
+        return Ok(YieldObservation::NotSpeakingAtOnset { onset_ms });
+    }
+    let last_audible_ms = end
+        .detail_u64("last_active_ms")
+        .ok_or("assistant_audio_end without last_active_ms")?;
+    let offset = sideband_clock_offset(timeline, lines, channel)?;
+    let on_browser_clock = |elapsed_ms: u64| elapsed_ms as i64 - offset;
+    let mut first_voiced_input = None;
+    for (elapsed_ms, raw) in sideband_server_frames(lines, channel, "session.input_audio.append") {
+        let t = on_browser_clock(elapsed_ms);
+        if t >= onset_ms as i64 && pcm16_rms(&raw["audio"])? > VOICED_FRAME_RMS {
+            first_voiced_input = Some(t);
+            break;
+        }
+    }
+    let first_voiced_input = first_voiced_input
+        .ok_or("the provider never reflected a voiced input frame after the barge-in onset")?;
+    let mut last_voiced_output = None;
+    for (elapsed_ms, raw) in sideband_server_frames(lines, channel, "session.output_audio.delta") {
+        let t = on_browser_clock(elapsed_ms);
+        if t > last_audible_ms as i64 {
+            break;
+        }
+        if pcm16_rms(&raw["delta"])? > VOICED_FRAME_RMS {
+            last_voiced_output = Some(t);
+        }
+    }
+    let last_voiced_output = last_voiced_output
+        .ok_or("no voiced provider output frame arrived before the last audible window")?;
+    Ok(YieldObservation::Yield(YieldSegments {
+        onset_ms,
+        last_audible_ms,
+        ingest_ms: first_voiced_input - onset_ms as i64,
+        turn_taking_ms: last_voiced_output - onset_ms as i64,
+        playout_ms: last_audible_ms as i64 - last_voiced_output,
+    }))
+}
+
+/// The talk-over contract for one barge-in: measure its segments, record
+/// them as evidence (so a failure says which segment moved), and return the
+/// violations of the end-to-end, ingest and playout bounds. An unmeasurable
+/// yield is a violation, never a pass.
+fn talk_over_violations(
+    evidence: &Journal,
+    channel: u32,
+    scenario: &str,
     timeline: &[TimelineEntry],
     fixture: u64,
     label: &str,
-) -> Option<String> {
-    let start = fixture_start_entry(timeline, fixture)?;
-    let speech_end_ms = start.t_ms + start.detail_u64("speech_ms")?;
-    let quiet_ms = timeline
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let lines = evidence.provider_stream_lines()?;
+    match yield_segments(timeline, &lines, channel, fixture) {
+        Ok(YieldObservation::NotSpeakingAtOnset { onset_ms }) => {
+            record_metric(
+                evidence,
+                channel,
+                scenario,
+                "talk_over",
+                format!("label={label} onset_ms={onset_ms} not_speaking_at_onset"),
+            )?;
+            Ok(Vec::new())
+        }
+        Ok(YieldObservation::Yield(segments)) => {
+            record_metric(
+                evidence,
+                channel,
+                scenario,
+                "talk_over",
+                format!("label={label} {}", segments.detail()),
+            )?;
+            Ok(segments
+                .violations()
+                .into_iter()
+                .map(|violation| format!("{label}: {violation} [{}]", segments.detail()))
+                .collect())
+        }
+        Err(reason) => Ok(vec![format!(
+            "{label}: the yield could not be measured: {reason}"
+        )]),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Readout contract (delivery and voicing of delegation results)
+// ---------------------------------------------------------------------------
+
+/// Starts of the narration the delegation scheduler renders on the
+/// commentary lane (`narration_text` in meerkat-mob-mcp
+/// `live_delegation/schedule.rs`); every other delegation commentary append
+/// is the delegation's result. A template drift fails loudly: an
+/// unrecognized narration counts as a second result delivery, and a result
+/// that starts like a narration leaves its delegation without one.
+const NARRATION_STARTS: [&str; 4] = [
+    "Voice request queued: \"",
+    "Started voice request: \"",
+    "Finished voice request: \"",
+    "Voice request \"",
+];
+const READOUT_BOUNDARIES: [&str; 3] = [
+    "session.input_transcript.delta",
+    "session.commentary.appended",
+    "session.delegation.created",
+];
+
+/// One delegation result delivered into the provider conversation: a
+/// sideband commentary append carrying the delegation id, at its send time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResultDelivery {
+    delegation_id: String,
+    channel: u32,
+    elapsed_ms: u64,
+    text: String,
+}
+
+/// Every result delivery on the sideband, all channels, in send order.
+fn result_deliveries(lines: &[provider_recording::Line]) -> Vec<ResultDelivery> {
+    lines
         .iter()
-        .filter(|e| e.kind == TimelineKind::AssistantAudioEnd && e.t_ms >= start.t_ms)
-        .find_map(|e| e.detail_u64("last_active_ms"))?;
-    (quiet_ms > speech_end_ms).then(|| {
+        .filter_map(|line| match &line.entry {
+            provider_recording::Entry::ClientEvent { event }
+                if event["type"] == "session.commentary.append" =>
+            {
+                let delegation_id = event["delegation_id"].as_str()?;
+                let text = event["content"].as_str()?;
+                (!NARRATION_STARTS.iter().any(|start| text.starts_with(start))).then(|| {
+                    ResultDelivery {
+                        delegation_id: delegation_id.to_owned(),
+                        channel: line.channel_ordinal,
+                        elapsed_ms: line.elapsed_ms,
+                        text: text.to_owned(),
+                    }
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Sentences of 3 or more normalized words (the peer's stutter rule uses the
+/// same split).
+fn readout_sentences(text: &str) -> Vec<String> {
+    text.split(['\n', '.', '!', '?'])
+        .map(normalize_words)
+        .filter(|sentence| sentence.split(' ').count() >= 3)
+        .collect()
+}
+
+/// The peer's readout records are well formed: consecutive indexes, known
+/// boundaries, only the last one open, no overflow, and present whenever the
+/// provider spoke on the channel. Anything else fails closed.
+fn readout_records_malformed(
+    snapshot: &support::ReadoutSnapshot,
+    provider_spoke: bool,
+) -> Option<String> {
+    if snapshot.overflow {
+        return Some("the peer stopped recording responses at its bound".to_owned());
+    }
+    if provider_spoke && snapshot.records.is_empty() {
+        return Some("the provider spoke but the peer recorded no response".to_owned());
+    }
+    let last = snapshot.records.len().saturating_sub(1);
+    for (position, record) in snapshot.records.iter().enumerate() {
+        let opened_ok = (record.opened_by == "connect" && position == 0)
+            || (READOUT_BOUNDARIES.contains(&record.opened_by.as_str())
+                && record.opened_ms.is_some());
+        let closed_ok = match (&record.closed_by, record.closed_ms) {
+            (Some(kind), Some(_)) => READOUT_BOUNDARIES.contains(&kind.as_str()),
+            (None, None) => position == last,
+            _ => false,
+        };
+        if record.index != position as u64
+            || !opened_ok
+            || !closed_ok
+            || record.text.trim().is_empty()
+        {
+            return Some(format!(
+                "malformed readout record at position {position}: {record:?}"
+            ));
+        }
+    }
+    None
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ReadoutFault {
+    /// One delegation's result was delivered into the conversation more
+    /// than once.
+    DuplicateDelivery {
+        delegation_id: String,
+        deliveries: usize,
+    },
+    /// A result sentence was voiced in a response with no delivery of it
+    /// left to account for the voicing: the same result voiced in two
+    /// responses.
+    DuplicateReadout {
+        sentence: String,
+        responses: Vec<u64>,
+    },
+}
+
+/// The readout rule. Every delegation result is delivered exactly once, and
+/// every voicing of it falls inside one response: a sentence of 3 or more
+/// normalized words found verbatim in a delivered result voices that result,
+/// and each response that voices a sentence must be accounted for by its own
+/// delivery containing that sentence, sent before the response closed (two
+/// results may share a line, a brief and its corrected copy, and each may be
+/// read once). A sentence repeated inside one response is a stutter, a
+/// measurement (`ReadoutRecord::stutters`). Deliveries are counted over
+/// every channel; voicing is checked for the deliveries on `channel`, the
+/// channel of the browser peer whose records these are (a reopen starts a
+/// fresh peer). `offset` maps sideband time to that peer's clock.
+fn readout_faults(
+    deliveries: &[ResultDelivery],
+    channel: u32,
+    records: &[support::ReadoutRecord],
+    offset: i64,
+) -> Vec<ReadoutFault> {
+    let mut faults = Vec::new();
+    let mut per_delegation: std::collections::BTreeMap<&str, usize> = Default::default();
+    for delivery in deliveries {
+        *per_delegation
+            .entry(delivery.delegation_id.as_str())
+            .or_default() += 1;
+    }
+    for (delegation_id, count) in per_delegation {
+        if count != 1 {
+            faults.push(ReadoutFault::DuplicateDelivery {
+                delegation_id: delegation_id.to_owned(),
+                deliveries: count,
+            });
+        }
+    }
+    let delivered: Vec<(i64, String)> = deliveries
+        .iter()
+        .filter(|d| d.channel == channel)
+        .map(|d| {
+            (
+                d.elapsed_ms as i64 - offset,
+                format!(" {} ", normalize_words(&d.text)),
+            )
+        })
+        .collect();
+    let mut voicings: std::collections::BTreeMap<String, Vec<&support::ReadoutRecord>> =
+        Default::default();
+    for record in records {
+        let mut spoken: Vec<String> = readout_sentences(&record.text);
+        spoken.sort();
+        spoken.dedup();
+        for sentence in spoken {
+            let padded = format!(" {sentence} ");
+            if delivered.iter().any(|(_, text)| text.contains(&padded)) {
+                voicings.entry(sentence).or_default().push(record);
+            }
+        }
+    }
+    for (sentence, responses) in voicings {
+        let padded = format!(" {sentence} ");
+        let mut sends: Vec<i64> = delivered
+            .iter()
+            .filter(|(_, text)| text.contains(&padded))
+            .map(|(t, _)| *t)
+            .collect();
+        sends.sort_unstable();
+        let mut used = 0usize;
+        let mut unaccounted = false;
+        for response in &responses {
+            let available = sends
+                .iter()
+                .filter(|t| response.closed_ms.is_none_or(|closed| **t <= closed as i64))
+                .count();
+            if available > used {
+                used += 1;
+            } else {
+                unaccounted = true;
+            }
+        }
+        if unaccounted {
+            faults.push(ReadoutFault::DuplicateReadout {
+                sentence,
+                responses: responses.iter().map(|r| r.index).collect(),
+            });
+        }
+    }
+    faults
+}
+
+/// Apply the readout rule to the scenario: sideband deliveries joined with
+/// the peer's readout records. Stutters are recorded as metrics; a fault, a
+/// malformed or missing record set, or an unalignable clock is an error.
+async fn readout_contract(
+    evidence: &Journal,
+    live: &mut PublicLiveHarness,
+    channel: u32,
+    scenario: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let lines = evidence.provider_stream_lines()?;
+    let snapshot = live.peer.readouts().await?;
+    let provider_spoke = sideband_server_frames(&lines, channel, "session.output_transcript.delta")
+        .any(|(_, raw)| raw["delta"].as_str().is_some_and(|d| !d.trim().is_empty()));
+    if let Some(malformed) = readout_records_malformed(&snapshot, provider_spoke) {
+        return Err(format!("{scenario}: readout records unusable: {malformed}").into());
+    }
+    for record in &snapshot.records {
+        for stutter in &record.stutters {
+            record_metric(
+                evidence,
+                channel,
+                scenario,
+                "readout_stutter",
+                format!("response={} sentence={stutter:?}", record.index),
+            )?;
+        }
+    }
+    let deliveries = result_deliveries(&lines);
+    if deliveries.is_empty() {
+        return Ok(());
+    }
+    let offset = if deliveries.iter().any(|d| d.channel == channel) {
+        let timeline = live.peer.timeline().await?;
+        sideband_clock_offset(&timeline, &lines, channel).map_err(|reason| {
+            format!("{scenario}: readout rule cannot order deliveries: {reason}")
+        })?
+    } else {
+        0
+    };
+    let faults = readout_faults(&deliveries, channel, &snapshot.records, offset);
+    record_metric(
+        evidence,
+        channel,
+        scenario,
+        "readout_rule",
         format!(
-            "the assistant kept talking past the end of the {label}: audio until {quiet_ms} ms, utterance ended {speech_end_ms} ms"
-        )
-    })
+            "deliveries={} responses={} faults={}",
+            deliveries.len(),
+            snapshot.records.len(),
+            faults.len()
+        ),
+    )?;
+    if faults.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{scenario}: readout rule violated: {faults:?}").into())
+    }
 }
 
 // ===========================================================================
@@ -3732,8 +4203,8 @@ const S100_SILENCE_HOLD_MS: u64 = 4000;
 /// Follow-ups start this long after the assistant goes quiet.
 const S100_FOLLOW_UP_GAP_MS: u64 = 300;
 /// The barge-in's overlap is measured (printed and journaled), not bounded:
-/// the browser must not fault it. The yield contract is ordering (see
-/// `barge_in_yield_violation`); measured onset-to-quiet ran 0-2900 ms.
+/// the browser must not fault it. The yield contract is the talk-over
+/// contract (`talk_over_violations`, `TALK_OVER_BOUND_MS`).
 const S100_BARGE_IN_OVERLAP_BOUND_MS: u64 = 60_000;
 /// Prefix the mob runtime renders in front of a delegated voice request
 /// (`meerkat_mob::runtime::delegation::render_live_delegation_execution_context`).
@@ -4792,12 +5263,6 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             })
             .map(str::to_owned)
             .collect();
-        let normalized_answer1 = normalize_words(&answer1);
-        let token_spoken = |token: &str| {
-            normalized_answer1.contains(token)
-                || (token.chars().all(|c| c.is_ascii_digit())
-                    && normalized_answer1.contains(token.trim_start_matches('0')))
-        };
         record_metric(
             &evidence,
             channel,
@@ -4912,8 +5377,14 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             barge_in_timing.input_text,
             reissued.trim()
         );
-        if let Some(violation) = barge_in_yield_violation(&timeline, barge_in, "barge-in") {
-            return Err(format!("{violation} (overlap {overlap_ms} ms); timeline:\n{}", format_timeline(&timeline)).into());
+        let talk_over = talk_over_violations(&evidence, channel, "S100", &timeline, barge_in, "barge-in")?;
+        if !talk_over.is_empty() {
+            return Err(format!(
+                "{} (overlap {overlap_ms} ms); timeline:\n{}",
+                talk_over.join("; "),
+                format_timeline(&timeline)
+            )
+            .into());
         }
         assert!(
             !reissued.trim().is_empty(),
@@ -5712,7 +6183,6 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
         .await?;
         live.record_time_to_talk("S102").await?;
         evidence.record(q1.latency_record(channel, 1, None))?;
-        let lower1 = answer1.to_lowercase();
         record_metric(
             &evidence,
             channel,
@@ -5862,8 +6332,8 @@ const S103_BARGE_IN_OFFSET_MS: u64 = 0;
 /// The two interruptions' overlap is measured, not bounded (the browser must
 /// not fault it). gpt-live-1 owns interruption: the browser's media runs to
 /// the provider directly and Meerkat sends no cancel, so the assistant stops
-/// when the provider's turn detection yields. The yield contract is ordering
-/// (see `barge_in_yield_violation`).
+/// when the provider's turn detection yields. The yield contract is the
+/// talk-over contract (`talk_over_violations`, `TALK_OVER_BOUND_MS`).
 const S103_BARGE_IN_OVERLAP_BOUND_MS: u64 = 60_000;
 
 /// Wait until every delegated executor turn is terminal and the assistant
@@ -5919,9 +6389,10 @@ async fn wait_for_settled(
 /// let the user finish, never a runtime heuristic.
 /// The remaining deterministic checks:
 /// after the barge-in every new assistant response starts after a new input
-/// final or a commentary append, and no assistant turn repeats a readout line
-/// (turns segmented at commentary, delegation and user-speech events; see
-/// `repeated_readout_lines`);
+/// final or a commentary append; every delegation result is delivered once
+/// and voiced inside one response (`readout_faults`, applied by
+/// `scenario_browser_faults`); the barge-in and the correction keep the
+/// talk-over bounds (`talk_over_violations`);
 /// overlap beyond the bound only inside the two interruption windows; close
 /// converges; the barge-in lands on assistant speech and is answered (the
 /// provider's next response or delegation closes its input, and an assistant
@@ -6158,7 +6629,6 @@ async fn run_s103_interrupt_and_recover(
         // Readout integrity after the barge-in: every assistant response
         // starts after a new input final or a commentary append.
         let unprompted_starts = unprompted_assistant_response_starts(&timeline, barge_in_start_ms);
-        let provider_events = live.peer.events().await?;
 
         evidence.stage(EvidenceStage::Closing)?;
         live.record_uplink("S103").await?;
@@ -6229,7 +6699,7 @@ async fn run_s103_interrupt_and_recover(
             "GPT_LIVE_S103_MONOLOGUE_TURNS delegations={monologue_delegations} assistant_overlap_ms={monologue_overlap_ms}"
         );
         for (fixture, label) in [(barge_in, "barge-in"), (correction, "correction")] {
-            if let Some(violation) = barge_in_yield_violation(&timeline, fixture, label) {
+            for violation in talk_over_violations(&evidence, channel, "S103", &timeline, fixture, label)? {
                 deterministic_failures.push(format!(
                     "{violation} (overlap barge_in={barge_in_overlap_ms} correction={correction_overlap_ms})"
                 ));
@@ -6243,12 +6713,6 @@ async fn run_s103_interrupt_and_recover(
         if !unprompted_starts.is_empty() {
             deterministic_failures.push(format!(
                 "assistant audio started without a new input final or commentary at ms {unprompted_starts:?} (duplicate readout)"
-            ));
-        }
-        let repeated_lines = repeated_readout_lines(&provider_events);
-        if !repeated_lines.is_empty() {
-            deterministic_failures.push(format!(
-                "an assistant turn repeated readout lines (duplicate readout): {repeated_lines:?}"
             ));
         }
         // Barge-in contract. gpt-live-1's public protocol carries no response
@@ -8630,7 +9094,6 @@ async fn run_s105_fork_and_merge_parallel(
         )
         .await?;
         evidence.record(recall.latency_record(channel, 3, None))?;
-        let lower = normalize_words(&answer);
         record_metric(
             &evidence,
             channel,
@@ -9577,53 +10040,378 @@ mod config_tests {
         assert!(super::unprompted_assistant_response_starts(&entries, 53787).is_empty());
     }
 
-    fn output_deltas(text: &str) -> Vec<serde_json::Value> {
-        text.split_inclusive(['\n', ' '])
-            .map(|delta| serde_json::json!({"type": "session.output_transcript.delta", "delta": delta}))
-            .collect()
+    // ---- readout rule -------------------------------------------------------
+
+    const BRIEF: &str = "Saved as kickoff_brief.md.\n# Kickoff brief\nThe client is the Marigold account.\nThe kickoff is Tuesday afternoon.\nThe deck code name is Pelican.\n";
+    const CORRECTED_BRIEF: &str = "Updated kickoff_brief.md.\n# Kickoff brief\nThe client is the Marigold account.\nThe kickoff is Friday afternoon.\nThe deck code name is Pelican.\n";
+
+    fn result_delivery(delegation_id: &str, elapsed_ms: u64, text: &str) -> super::ResultDelivery {
+        super::ResultDelivery {
+            delegation_id: delegation_id.to_owned(),
+            channel: 1,
+            elapsed_ms,
+            text: text.to_owned(),
+        }
     }
 
-    /// The brief read once, line by line, then read again from its first line
-    /// with no provider event in between (no commentary, delegation or user
-    /// speech): one model turn whose short lines repeat, a duplicate readout.
+    fn readout(index: u64, closed_ms: Option<u64>, text: &str) -> super::support::ReadoutRecord {
+        super::support::ReadoutRecord {
+            index,
+            opened_by: if index == 0 {
+                "connect"
+            } else {
+                "session.commentary.appended"
+            }
+            .to_owned(),
+            opened_ms: (index > 0).then_some(index * 1000),
+            closed_by: closed_ms.map(|_| "session.input_transcript.delta".to_owned()),
+            closed_ms,
+            text: text.to_owned(),
+            stutters: Vec::new(),
+        }
+    }
+
+    /// One delegation's result delivered into the conversation twice is a
+    /// duplicate delivery even when the model voices it only once.
     #[test]
-    fn s103_second_unprompted_readout_of_short_brief_lines_is_flagged() {
-        let brief = "Client: Marigold account.\nKickoff: Tuesday afternoon.\nVenue: Copenhagen office downstairs.\nDeck codename: Pelican.\n";
-        let events = output_deltas(&format!("{brief}{brief}"));
+    fn a_result_delivered_twice_is_a_duplicate_delivery() {
+        let deliveries = [
+            result_delivery("item_a", 1000, BRIEF),
+            result_delivery("item_a", 4000, BRIEF),
+        ];
+        let records = [readout(
+            0,
+            Some(9000),
+            "Here it is. The client is the Marigold account.",
+        )];
         assert_eq!(
-            super::repeated_readout_lines(&events),
-            vec![
-                "client marigold account",
-                "kickoff tuesday afternoon",
-                "venue copenhagen office downstairs",
-                "deck codename pelican"
-            ]
+            super::readout_faults(&deliveries, 1, &records, 0),
+            vec![super::ReadoutFault::DuplicateDelivery {
+                delegation_id: "item_a".to_owned(),
+                deliveries: 2,
+            }]
         );
     }
 
-    /// One readout of the brief, and a confirmation after it, repeat nothing.
+    /// A result delivered once, read in one response and read again in a
+    /// later response (after user speech) is a duplicate readout.
     #[test]
-    fn s103_single_readout_repeats_no_lines() {
-        let events = output_deltas(
-            "Client: Marigold account.\nKickoff: Friday afternoon.\nVenue: Copenhagen office downstairs.\nGot it. I updated the brief.",
+    fn a_result_voiced_in_two_responses_is_a_duplicate_readout() {
+        let deliveries = [result_delivery("item_a", 1000, BRIEF)];
+        let records = [
+            readout(0, Some(900), "Okay, I am on it."),
+            readout(
+                1,
+                Some(6000),
+                "The client is the Marigold account. The kickoff is Tuesday afternoon.",
+            ),
+            readout(2, Some(9000), "Sure. The kickoff is Tuesday afternoon."),
+        ];
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &records, 0),
+            vec![super::ReadoutFault::DuplicateReadout {
+                sentence: "the kickoff is tuesday afternoon".to_owned(),
+                responses: vec![1, 2],
+            }]
         );
-        assert!(super::repeated_readout_lines(&events).is_empty());
     }
 
-    /// The saved brief read, then the corrected brief read after the
-    /// executor's result arrives (a commentary append): two model turns the
-    /// peer cannot tell apart as responses (the public protocol has no
-    /// response lifecycle). Shared lines across the two turns are not a
-    /// duplicate readout (soak round 2, S103 run 5).
+    /// A line repeated back to back inside one response, with one delivery,
+    /// is a model stutter: a measurement, no fault (finalc S103 run 4).
     #[test]
-    fn s103_corrected_readout_after_a_commentary_is_not_a_duplicate() {
-        let mut events = output_deltas(
-            "Here's the brief I saved.\nMarigold kickoff brief.\nThe client is the Marigold account.\nKickoff: Tuesday afternoon.\n",
+    fn a_repeat_inside_one_response_is_a_stutter_not_a_fault() {
+        let deliveries = [result_delivery("item_a", 1000, BRIEF)];
+        let records = [readout(
+            0,
+            None,
+            "Line five. The deck code name is Pelican. Line five. The deck code name is Pelican.",
+        )];
+        assert!(super::readout_faults(&deliveries, 1, &records, 0).is_empty());
+    }
+
+    /// The brief and its corrected copy share lines; each delivery accounts
+    /// for one reading of them (soak round 2, S103 run 5). Reading the
+    /// shared lines again before the corrected copy was delivered is a
+    /// re-voice of the first result.
+    #[test]
+    fn a_corrected_copy_accounts_for_one_more_reading_of_shared_lines() {
+        let deliveries = [
+            result_delivery("item_a", 1000, BRIEF),
+            result_delivery("item_b", 7500, CORRECTED_BRIEF),
+        ];
+        let first = readout(
+            0,
+            Some(6000),
+            "The client is the Marigold account. The kickoff is Tuesday afternoon.",
         );
-        events.push(serde_json::json!({"type": "session.commentary.appended"}));
-        events.extend(output_deltas(
-            "Here is the corrected brief.\nMarigold kickoff brief.\nThe client is the Marigold account.\nKickoff: Friday afternoon.\n",
+        let corrected = readout(
+            1,
+            Some(12000),
+            "The client is the Marigold account. The kickoff is Friday afternoon.",
+        );
+        assert!(super::readout_faults(&deliveries, 1, &[first.clone(), corrected], 0).is_empty());
+        let early = readout(1, Some(7000), "The client is the Marigold account.");
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &[first, early], 0),
+            vec![super::ReadoutFault::DuplicateReadout {
+                sentence: "the client is the marigold account".to_owned(),
+                responses: vec![0, 1],
+            }]
+        );
+    }
+
+    /// Scheduler narration on the commentary lane is not a result; the
+    /// delegation's other commentary append is.
+    #[test]
+    fn narration_appends_are_not_result_deliveries() {
+        let append = |seq: u64, content: &str| super::provider_recording::Line {
+            seq,
+            channel_ordinal: 1,
+            elapsed_ms: seq * 100,
+            entry: super::provider_recording::Entry::ClientEvent {
+                event: serde_json::json!({
+                    "type": "session.commentary.append",
+                    "delegation_id": "item_a",
+                    "content": content,
+                }),
+            },
+        };
+        let lines = [
+            append(
+                1,
+                "Voice request queued: \"x\". 1 request(s) are running ahead of it; it starts when a slot frees.",
+            ),
+            append(2, "Started voice request: \"x\"."),
+            append(
+                3,
+                "Voice request \"x\" is waiting for the assistant to finish its current turn before it starts.",
+            ),
+            append(4, "Finished voice request: \"x\". The result follows."),
+            append(5, BRIEF),
+        ];
+        let deliveries = super::result_deliveries(&lines);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].text, BRIEF);
+    }
+
+    /// Missing or malformed readout records fail closed.
+    #[test]
+    fn readout_records_fail_closed() {
+        assert!(
+            serde_json::from_value::<super::support::ReadoutSnapshot>(serde_json::Value::Null)
+                .is_err()
+        );
+        let snapshot = |records: Vec<super::support::ReadoutRecord>, overflow: bool| {
+            super::support::ReadoutSnapshot { records, overflow }
+        };
+        let well_formed = vec![
+            readout(0, Some(900), "Okay."),
+            readout(1, None, "The client is the Marigold account."),
+        ];
+        assert_eq!(
+            super::readout_records_malformed(&snapshot(well_formed.clone(), false), true),
+            None
+        );
+        assert!(super::readout_records_malformed(&snapshot(Vec::new(), false), true).is_some());
+        assert_eq!(
+            super::readout_records_malformed(&snapshot(Vec::new(), false), false),
+            None
+        );
+        assert!(
+            super::readout_records_malformed(&snapshot(well_formed.clone(), true), true).is_some()
+        );
+        let mut gap = well_formed.clone();
+        gap[1].index = 2;
+        assert!(super::readout_records_malformed(&snapshot(gap, false), true).is_some());
+        let mut open_first = well_formed.clone();
+        open_first[0].closed_by = None;
+        open_first[0].closed_ms = None;
+        assert!(super::readout_records_malformed(&snapshot(open_first, false), true).is_some());
+        let mut unknown_boundary = well_formed;
+        unknown_boundary[1].opened_by = "session.usage.updated".to_owned();
+        assert!(
+            super::readout_records_malformed(&snapshot(unknown_boundary, false), true).is_some()
+        );
+    }
+
+    // ---- talk-over contract -------------------------------------------------
+
+    fn pcm(amplitude: i16) -> String {
+        use base64::Engine as _;
+        let bytes: Vec<u8> = std::iter::repeat_n(amplitude.to_le_bytes(), 4800)
+            .flatten()
+            .collect();
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn server_frame(
+        seq: u64,
+        elapsed_ms: u64,
+        raw: serde_json::Value,
+    ) -> super::provider_recording::Line {
+        super::provider_recording::Line {
+            seq,
+            channel_ordinal: 1,
+            elapsed_ms,
+            entry: super::provider_recording::Entry::ServerFrame { raw },
+        }
+    }
+
+    /// Sideband clock = browser clock + 500 ms (one commentary.appended seen
+    /// at browser 1000 and sideband 1500). Barge-in onset at 10_000; the
+    /// assistant burst started at 9000 and was last audible at 11_400.
+    fn yield_fixture(
+        input_voiced_at: u64,
+        last_output_at: u64,
+    ) -> (
+        Vec<super::TimelineEntry>,
+        Vec<super::provider_recording::Line>,
+    ) {
+        let entries = timeline(&[
+            (
+                1000,
+                "commentary_appended",
+                serde_json::json!({"event_index": 3}),
+            ),
+            (
+                10_000,
+                "fixture_start",
+                serde_json::json!({"id": 7, "speech_ms": 1500}),
+            ),
+            (
+                12_000,
+                "assistant_audio_end",
+                serde_json::json!({"started_ms": 9000, "last_active_ms": 11_400}),
+            ),
+        ]);
+        let lines = vec![
+            server_frame(
+                1,
+                1500,
+                serde_json::json!({"type": "session.commentary.appended"}),
+            ),
+            server_frame(
+                2,
+                10_550,
+                serde_json::json!({"type": "session.input_audio.append", "audio": pcm(4)}),
+            ),
+            server_frame(
+                3,
+                input_voiced_at,
+                serde_json::json!({"type": "session.input_audio.append", "audio": pcm(2000)}),
+            ),
+            server_frame(
+                4,
+                last_output_at,
+                serde_json::json!({"type": "session.output_audio.delta", "delta": pcm(1500)}),
+            ),
+            server_frame(
+                5,
+                last_output_at + 200,
+                serde_json::json!({"type": "session.output_audio.delta", "delta": pcm(5)}),
+            ),
+            // The next response, after the last audible window: not the yield.
+            server_frame(
+                6,
+                13_000,
+                serde_json::json!({"type": "session.output_audio.delta", "delta": pcm(1500)}),
+            ),
+        ];
+        (entries, lines)
+    }
+
+    #[test]
+    fn a_yield_splits_into_ingest_turn_taking_and_playout() {
+        let (entries, lines) = yield_fixture(10_750, 11_200);
+        let observation = super::yield_segments(&entries, &lines, 1, 7).unwrap();
+        let super::YieldObservation::Yield(segments) = observation else {
+            panic!("expected a yield, got {observation:?}");
+        };
+        assert_eq!(
+            segments,
+            super::YieldSegments {
+                onset_ms: 10_000,
+                last_audible_ms: 11_400,
+                ingest_ms: 250,
+                turn_taking_ms: 700,
+                playout_ms: 700,
+            }
+        );
+        assert!(segments.violations().is_empty());
+    }
+
+    /// Each bound fails on its own segment: slow ingest, slow playout, and
+    /// an end-to-end talk-over past the bound.
+    #[test]
+    fn each_talk_over_bound_fails_its_segment() {
+        let (entries, lines) = yield_fixture(11_050, 11_200);
+        let super::YieldObservation::Yield(slow_ingest) =
+            super::yield_segments(&entries, &lines, 1, 7).unwrap()
+        else {
+            panic!("expected a yield");
+        };
+        assert_eq!(slow_ingest.ingest_ms, 550);
+        assert!(
+            matches!(slow_ingest.violations().as_slice(), [v] if v.starts_with("ingest took 550 ms"))
+        );
+        let (entries, lines) = yield_fixture(10_750, 11_150);
+        let super::YieldObservation::Yield(slow_playout) =
+            super::yield_segments(&entries, &lines, 1, 7).unwrap()
+        else {
+            panic!("expected a yield");
+        };
+        assert_eq!(slow_playout.playout_ms, 750);
+        assert!(
+            matches!(slow_playout.violations().as_slice(), [v] if v.starts_with("playout took 750 ms"))
+        );
+        let talk_over = super::YieldSegments {
+            onset_ms: 10_000,
+            last_audible_ms: 13_001,
+            ingest_ms: 250,
+            turn_taking_ms: 2400,
+            playout_ms: 600,
+        };
+        assert!(
+            matches!(talk_over.violations().as_slice(), [v] if v.starts_with("talked over the user for 3001 ms"))
+        );
+    }
+
+    /// An unmeasurable yield is an error (never a pass); a quiet assistant
+    /// at onset has nothing to yield.
+    #[test]
+    fn an_unmeasurable_yield_is_an_error() {
+        let (entries, mut lines) = yield_fixture(10_750, 11_200);
+        lines.retain(|line| !matches!(&line.entry, super::provider_recording::Entry::ServerFrame { raw } if raw["type"] == "session.input_audio.append"));
+        assert!(super::yield_segments(&entries, &lines, 1, 7).is_err());
+        let (entries, mut lines) = yield_fixture(10_750, 11_200);
+        // A second commentary pair 400 ms off the first: mispaired clocks.
+        lines.push(server_frame(
+            7,
+            2900,
+            serde_json::json!({"type": "session.commentary.appended"}),
         ));
-        assert!(super::repeated_readout_lines(&events).is_empty());
+        let mut entries = entries;
+        entries.insert(
+            1,
+            timeline(&[(2000, "commentary_appended", serde_json::json!({}))]).remove(0),
+        );
+        assert!(super::yield_segments(&entries, &lines, 1, 7).is_err());
+        let quiet = timeline(&[
+            (1000, "commentary_appended", serde_json::json!({})),
+            (
+                10_000,
+                "fixture_start",
+                serde_json::json!({"id": 7, "speech_ms": 1500}),
+            ),
+            (
+                12_000,
+                "assistant_audio_end",
+                serde_json::json!({"started_ms": 10_400, "last_active_ms": 11_400}),
+            ),
+        ]);
+        assert_eq!(
+            super::yield_segments(&quiet, &lines, 1, 7),
+            Ok(super::YieldObservation::NotSpeakingAtOnset { onset_ms: 10_000 })
+        );
     }
 }

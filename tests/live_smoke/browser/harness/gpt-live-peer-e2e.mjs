@@ -191,8 +191,16 @@ async function prepare(command) {
       evidence: { enabled: captureEvidence, pending: 0, count: 0, failed: false, chain: Promise.resolve(), timer: null },
       // Ordered {t_ms, kind, detail} observations, bounded.
       timeline: [],
-      // Soft faults the scenario asserts on ({overlap:{ms}} / {duplicate_readout:{text}}).
+      // Soft faults the scenario asserts on ({overlap:{ms}}).
       faults: [],
+      // Readout records, one per response: the assistant output transcript
+      // between consecutive response boundaries (a user transcript delta, a
+      // commentary append, a delegation). Output pauses do not split a
+      // response. `stutters` are sentences of 3 or more normalized words the
+      // response spoke more than once (a measurement). The duplicate-readout
+      // rule itself lives in the Rust scenario, which joins these records
+      // with the delegation results delivered on the sideband.
+      readouts: { closed: [], open: { text: '', opened_by: 'connect', opened_ms: null } },
       energy: {
         threshold: energyConfig.threshold,
         window_ms: energyConfig.window_ms,
@@ -386,23 +394,43 @@ async function prepare(command) {
     };
 
     // ---- responses and duplicate readouts ------------------------------
-    const normalizeSentence = (text) => text.toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
+    // Same normalization and sentence split as the Rust readout rule
+    // (`normalize_words`, `readout_sentences`).
+    const normalizeWords = (text) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const readoutSentences = (text) => text.split(/[\n.!?]/)
+      .map(normalizeWords)
+      .filter((sentence) => sentence.split(' ').length >= 3);
+    const readoutRecord = (open, index, closed) => {
+      const counts = new Map();
+      for (const sentence of readoutSentences(open.text)) counts.set(sentence, (counts.get(sentence) ?? 0) + 1);
+      const stutters = [...counts].filter(([, count]) => count >= 2).map(([sentence]) => sentence);
+      return { index, opened_by: open.opened_by, opened_ms: open.opened_ms, ...closed, text: open.text, stutters };
+    };
+    // Close the open response at a boundary event (`kind`) arriving at `t`.
+    // An empty response leaves no record; the next one opens at the boundary.
+    state.closeReadout = (t, kind) => {
+      const readouts = state.readouts;
+      if (readouts.open.text.trim()) {
+        if (readouts.closed.length >= 2000) {
+          readouts.overflow = true;
+        } else {
+          readouts.closed.push(readoutRecord(readouts.open, readouts.closed.length, { closed_by: kind, closed_ms: t }));
+        }
+      }
+      readouts.open = { text: '', opened_by: kind, opened_ms: t };
+    };
+    state.readoutSnapshot = () => {
+      const readouts = state.readouts;
+      const records = readouts.closed.slice();
+      if (readouts.open.text.trim()) {
+        records.push(readoutRecord(readouts.open, records.length, { closed_by: null, closed_ms: null }));
+      }
+      return { records, overflow: readouts.overflow === true };
+    };
     state.finishResponse = ({ flushed = false } = {}) => {
       const text = state.response.text;
       if (!text.trim()) return;
-      const seen = new Map();
-      for (const sentence of text.split(/(?<=[.!?])\s+/)) {
-        const normalized = normalizeSentence(sentence);
-        if (normalized.split(' ').length < 5) continue;
-        seen.set(normalized, (seen.get(normalized) ?? 0) + 1);
-      }
-      for (const [sentence, count] of seen) {
-        if (count >= 2) {
-          state.pushFault({ duplicate_readout: { text: sentence.slice(0, 200), response: state.response.index } });
-        }
-      }
-      // The text travels with the entry so scenarios can check a readout for
-      // repeated lines (short brief lines fall under the 5-word floor above).
+      // The text travels with the entry so scenarios can check a readout.
       state.pushTimeline('response_end', { index: state.response.index, chars: text.length, text: text.slice(0, 8000), flushed });
       state.response = { text: '', started_ms: null, index: state.response.index + 1 };
     };
@@ -644,6 +672,12 @@ async function prepare(command) {
         if (state.responseTextStarts[state.response.index] === undefined) state.responseTextStarts[state.response.index] = t;
         if (state.response.text.length < 20000) state.response.text += delta;
         if (state.outputLog.length < 20000) state.outputLog.push({ t, text: delta });
+        if (state.readouts.open.text.length < 200000) state.readouts.open.text += delta;
+      }
+      if (protocol === 'public' && (isInputDelta
+        || parsed?.type === 'session.commentary.appended'
+        || parsed?.type === 'session.delegation.created')) {
+        state.closeReadout(t, parsed.type);
       }
       if (parsed?.type === 'session.delegation.created') {
         if (state.delegationTimes.length < 2000) state.delegationTimes.push(t);
@@ -942,6 +976,7 @@ async function snapshot() {
       barge_in: state.bargeIn,
       timeline: state.timeline,
       faults: state.faults,
+      readouts: state.readoutSnapshot(),
       energy: {
         threshold: state.energy.threshold,
         window_ms: state.energy.window_ms,

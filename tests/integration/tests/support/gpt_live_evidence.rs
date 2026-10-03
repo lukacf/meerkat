@@ -1196,6 +1196,39 @@ impl Journal {
         self.0.provider_stream.for_channel(channel).mark(step);
     }
 
+    /// Every complete line recorded so far in `provider-stream.jsonl`. The
+    /// oracles that join the sideband with the browser (talk-over segments,
+    /// result deliveries) read it back while the recorder may still be
+    /// writing, so an unterminated final line is not yet a line. A recording
+    /// that lost a line cannot serve them: that is an error, never an empty
+    /// answer.
+    pub fn provider_stream_lines(&self) -> Result<Vec<provider_recording::Line>, String> {
+        if let Some(failure) = self.0.provider_stream.failure() {
+            return Err(format!(
+                "the provider-stream recording lost a line: {failure}"
+            ));
+        }
+        let directory = self
+            .0
+            .path
+            .parent()
+            .ok_or("the evidence journal has no directory")?;
+        let text = std::fs::read_to_string(directory.join(PROVIDER_STREAM_FILE))
+            .map_err(|error| format!("reading {PROVIDER_STREAM_FILE}: {error}"))?;
+        let complete = match text.rfind('\n') {
+            Some(end) => &text[..end],
+            None => "",
+        };
+        complete
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line).map_err(|error| {
+                    format!("{PROVIDER_STREAM_FILE} holds a malformed line: {error}")
+                })
+            })
+            .collect()
+    }
+
     /// A recording that lost a line is not a fixture: rename it so the
     /// re-capture procedure cannot pick it up. The run's verdict is unchanged.
     fn seal_provider_stream(&self) {

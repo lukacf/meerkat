@@ -408,7 +408,6 @@ them.
   `meerkat_mob` build helpers. It travels as `declared_tool_restriction` and
   the factory conjoins it, so the effective gate is unchanged but code that
   read `tool_access_policy` off a built config no longer sees it.
-
 - Owned member retirement (OB3, see Added and Fixed). Exhaustive matches
   must handle the new `meerkat_mob::MobError` variants
   `MemberRetirementStuck { member_id, stage, cause }` and
@@ -969,6 +968,23 @@ them.
 
 ### Fixed
 
+- GPT Live: the narration and other spoken context that follow a client
+  delegation no longer arrive about 8 s late. Spoken context waits while the
+  provider reports an open user turn, so the assistant does not talk over the
+  user. That turn is closed by its finish, or by the client delegation joined
+  to it, because the delegation is the user turn's terminal observation and no
+  finish follows it. The delegation never closed it, so every delegated
+  request's "Started voice request" narration waited out the full
+  `SPOKEN_CONTEXT_USER_TURN_BOUND`.
+  - Any user speech after the delegation reopens the turn until that turn's
+    own finish. This covers a new utterance, which the provider reports as more
+    input deltas of the delegated turn rather than as a new turn start. It also
+    covers a late tail continuing the delegation's utterance. So an earlier
+    delegation's narration is never spoken over the user's next request.
+  - The 8 s bound remains only as the failure bound for a user turn the
+    provider never closes.
+  - The observation pump now follows the user turn in provider order, before
+    adapter fan-out.
 - The release semver gate (`make semver-breaks`) fails closed on any
   cargo-semver-checks finding whose message shape it cannot read in full.
   Such a finding is now an error naming the lint, not a NOTE. Before, it fell
@@ -1205,7 +1221,6 @@ them.
     closure (or a cloned handle fact), so no guard can be held across an
     `.await`. Every session-task round trip takes the task's command sender
     and sends and waits with the map released.
-    release on its next bind.
 - A member retirement whose stage outlived the caller's 30 s budget was
   dropped after its durable start: the member stayed `Retiring` with no
   owner, its session was never unregistered, and graceful Shutdown never
@@ -1231,7 +1246,6 @@ them.
   waiting on the actor's reply to a command it had sent could never finish
   (OB3's twin run: every runtime session unregistered within 10 s, then the
   actor answered nothing more until SIGKILL at about 330 s).
-
 - The machine TLA generator parenthesizes a field's pending value when a
   later expression in the same update block reads it. A conditionally
   updated field was spliced bare as `IF c THEN a ELSE b`, so TLA+ precedence

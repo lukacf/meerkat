@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use meerkat::experimental_gpt_live::provider_recording;
 use meerkat::experimental_gpt_live::thinking_capture;
 use serde::{Deserialize, Serialize};
 
@@ -1034,10 +1035,19 @@ struct Inner {
     secrets: Vec<String>,
     limits: Limits,
     wire: thinking_capture::Capture,
+    /// Every provider crossing (create request/response, client events,
+    /// raw server frames) in causal order: the raw input of a replay
+    /// fixture, scrubbed by `scripts/gpt-live-scrub-provider-stream` before
+    /// it is committed. Evidence only; a write failure never fails the run,
+    /// it marks the recording incomplete at finish.
+    provider_stream: provider_recording::Recorder,
 }
 
 #[derive(Clone)]
 pub struct Journal(Arc<Inner>);
+
+/// The provider-stream recording beside `journal.jsonl`.
+pub const PROVIDER_STREAM_FILE: &str = "provider-stream.jsonl";
 
 impl Journal {
     pub fn create(expected_phrase: String) -> Result<Self, Fault> {
@@ -1103,6 +1113,9 @@ impl Journal {
             options.mode(0o600);
         }
         let file = options.open(&path).map_err(|_| Fault::Io)?;
+        let provider_stream =
+            provider_recording::Recorder::create(&directory.join(PROVIDER_STREAM_FILE))
+                .map_err(|_| Fault::Io)?;
         secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
         let journal = Self(Arc::new(Inner {
             state: Mutex::new(State {
@@ -1141,6 +1154,7 @@ impl Journal {
             secrets,
             limits,
             wire: thinking_capture::Capture::new(),
+            provider_stream,
         }));
         journal.record(Record::Fixture {
             expected_phrase,
@@ -1167,6 +1181,33 @@ impl Journal {
     }
     pub fn wire(&self, channel: u32) -> thinking_capture::Capture {
         self.0.wire.for_channel(channel)
+    }
+
+    /// The provider-stream recorder for one channel; scope a connect with it
+    /// (next to [`Self::wire`]) so that channel's broker records into
+    /// `provider-stream.jsonl` beside this journal.
+    pub fn provider_recording(&self, channel: u32) -> provider_recording::Recorder {
+        self.0.provider_stream.for_channel(channel)
+    }
+
+    /// Mark a test-driven step (a scheduled utterance, a peer disconnect) in
+    /// the provider stream: a replay holds every later server frame of the
+    /// channel until the replaying test reaches the same step.
+    pub fn provider_step(&self, channel: u32, step: &str) {
+        self.0.provider_stream.for_channel(channel).mark(step);
+    }
+
+    /// A recording that lost a line is not a fixture: rename it so the
+    /// re-capture procedure cannot pick it up. The run's verdict is unchanged.
+    fn seal_provider_stream(&self) {
+        if self.0.provider_stream.failure().is_some()
+            && let Some(directory) = self.0.path.parent()
+        {
+            let _ = std::fs::rename(
+                directory.join(PROVIDER_STREAM_FILE),
+                directory.join(format!("{PROVIDER_STREAM_FILE}.incomplete")),
+            );
+        }
     }
 
     /// An exchange's fixture is about to play; it awaits its input final.
@@ -1779,6 +1820,7 @@ impl Journal {
         if state.finished {
             return state.fault.map_or(Ok(()), Err);
         }
+        self.seal_provider_stream();
         let outcome = if state.fault.is_some() {
             Outcome::Failed
         } else {

@@ -95,7 +95,7 @@ AuditBoundStarts == {"bound"} \cup AuditRecoveryStarts
 
 AuditPrefix ==
     \/ model_step_count = 0 /\ Initialize
-    \/ model_step_count = 1 /\ RegisterSessionIdle(AuditSession, None)
+    \/ model_step_count = 1 /\ RegisterSessionIdle(AuditSession, None, {})
     \* closing-idle: admitted without a runtime binding, close recorded.
     \/ AuditStep(2, {"closing-idle"}) /\ ResolveLiveOpenAdmissionAcceptedIdle(AuditSession, AuditChannel, AuditIdentity)
     \/ AuditStep(3, {"closing-idle"}) /\ RecordLiveCloseClosedIdle(AuditSession, AuditChannel, 1)

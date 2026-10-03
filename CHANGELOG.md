@@ -912,8 +912,11 @@ them.
   finish follows it. The delegation never closed it, so every delegated
   request's "Started voice request" narration waited out the full
   `SPOKEN_CONTEXT_USER_TURN_BOUND`.
-  - A late tail that continues the delegation's utterance still holds spoken
-    context until its own finish.
+  - Any user speech after the delegation reopens the turn until that turn's
+    own finish. This covers a new utterance, which the provider reports as more
+    input deltas of the delegated turn rather than as a new turn start. It also
+    covers a late tail continuing the delegation's utterance. So an earlier
+    delegation's narration is never spoken over the user's next request.
   - The 8 s bound remains only as the failure bound for a user turn the
     provider never closes.
   - The observation pump now follows the user turn in provider order, before

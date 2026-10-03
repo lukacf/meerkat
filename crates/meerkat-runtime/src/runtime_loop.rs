@@ -5021,6 +5021,41 @@ async fn stop_runtime_loop_after_feed_gap(
     .await;
 }
 
+/// Test-support marker of the runtime loop's park: it publishes "parked"
+/// as the loop awaits its next wake with no buffered wake or effect, and
+/// clears it the moment any of them fires, so a test admits input "now that
+/// the loop is idle" on a positive event instead of a state poll (a poll
+/// cannot see a wake buffered while the loop was busy). Zero-sized and inert
+/// outside test builds.
+struct RuntimeLoopParkMarker {
+    #[cfg(any(test, feature = "test-support"))]
+    machine: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
+    #[cfg(any(test, feature = "test-support"))]
+    session_id: meerkat_core::types::SessionId,
+}
+
+impl RuntimeLoopParkMarker {
+    /// Publish the park when the loop's wake and effect channels are drained.
+    fn park_if_drained(&self, drained: bool) {
+        #[cfg(any(test, feature = "test-support"))]
+        if drained && let Some(machine) = self.machine.upgrade() {
+            machine.note_runtime_loop_parked(&self.session_id, true);
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = drained;
+    }
+
+    /// Await one of the loop's wake sources, clearing the park when it fires.
+    async fn unpark_after<F: std::future::Future>(&self, wake: F) -> F::Output {
+        let output = wake.await;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(machine) = self.machine.upgrade() {
+            machine.note_runtime_loop_parked(&self.session_id, false);
+        }
+        output
+    }
+}
+
 /// Spawn the per-session runtime loop with optional completion registry.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_runtime_loop_with_completions(
@@ -5057,6 +5092,12 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     let (serving_release_sender, serving_release_receiver) = tokio::sync::oneshot::channel();
     let startup_guard = RuntimeLoopStartupGuard::new(std::sync::Arc::clone(&startup));
     let teardown_watcher_slot = std::sync::Arc::clone(&teardown_slot);
+    let park_marker = RuntimeLoopParkMarker {
+        #[cfg(any(test, feature = "test-support"))]
+        machine: machine_weak.clone(),
+        #[cfg(any(test, feature = "test-support"))]
+        session_id: session_id.clone(),
+    };
     let teardown_machine = machine_weak;
     let teardown_session_id = session_id;
     tokio::spawn(async move {
@@ -5333,9 +5374,17 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                 }
             };
 
+            // Parked means nothing can wake the loop on its own: no buffered
+            // wake or effect, no unobserved completion-feed advance (the idle
+            // wake resolves at once on one), and no feed hold (it re-polls).
+            let feed_idle = match (completion_feed.as_ref(), ops_lifecycle.as_ref()) {
+                (Some(feed), Some(_)) => feed_hold.is_none() && feed.watermark() <= observed_seq,
+                _ => true,
+            };
+            park_marker.park_if_drained(effect_rx.is_empty() && wake_rx.is_empty() && feed_idle);
             tokio::select! {
                 biased;
-                maybe_effect = effect_rx.recv() => {
+                maybe_effect = park_marker.unpark_after(effect_rx.recv()) => {
                     match maybe_effect {
                         Some(effect) => {
                             let turn_finalization_guard = match executor_or_return!()
@@ -5425,7 +5474,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                         }
                     }
                 }
-                maybe_wake = wake_rx.recv() => {
+                maybe_wake = park_marker.unpark_after(wake_rx.recv()) => {
                     match maybe_wake {
                         Some(()) => {
                             if process_queue(
@@ -5528,7 +5577,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                         }
                     }
                 }
-                () = idle_wake => {
+                () = park_marker.unpark_after(idle_wake) => {
                     // A completion arrived while idle. Generated ops authority
                     // classifies whether it should wake this runtime; other
                     // completions already wake through their owning channels.

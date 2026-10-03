@@ -6365,6 +6365,49 @@ impl MeerkatMachine {
             .send_modify(|parks| *parks = parks.wrapping_add(1));
     }
 
+    /// Record whether `session_id`'s runtime loop is parked: set as it awaits
+    /// its next wake with no buffered wake or effect, cleared the moment any
+    /// of them fires. Test support.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn note_runtime_loop_parked(&self, session_id: &SessionId, parked: bool) {
+        self.test_runtime_loop_parked.send_if_modified(|sessions| {
+            if parked {
+                sessions.insert(session_id.clone())
+            } else {
+                sessions.remove(session_id)
+            }
+        });
+    }
+
+    /// Sessions whose runtime loop is parked: it awaits its next wake with
+    /// none buffered, so input admitted now without a wake stays queued
+    /// unless something genuinely wakes the loop. Test support: a positive
+    /// event, never a state poll, which cannot see a wake buffered while the
+    /// loop was busy. A loop can park while a run is in flight (it awaits the
+    /// run's effect), so a test pairs the park with the settled phase.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn runtime_loop_parked(
+        &self,
+    ) -> crate::tokio::sync::watch::Receiver<std::collections::HashSet<SessionId>> {
+        self.test_runtime_loop_parked.subscribe()
+    }
+
+    /// Buffer one wake for `session_id`'s runtime loop without admitting
+    /// input, as a wake sent while the loop is busy is buffered. Test
+    /// support for the parked-wait regression.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn buffer_runtime_loop_wake_for_test(&self, session_id: &SessionId) -> bool {
+        let wake_tx = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(session_id)
+                .and_then(|entry| entry.wake_sender())
+        };
+        wake_tx.is_some_and(|wake_tx| wake_tx.try_send(()).is_ok())
+    }
+
     /// Deterministically pause the runtime loop after its ready-effect drain
     /// and before queue authority is acquired. Exposed only by test builds so
     /// cross-crate integration tests can admit a complete same-boundary batch.
@@ -9151,6 +9194,12 @@ pub struct MeerkatMachineShared {
     /// wait for the park as a positive event.
     #[cfg(any(test, feature = "test-support"))]
     test_run_start_held_parks: crate::tokio::sync::watch::Sender<u64>,
+    /// Sessions whose runtime loop is parked with no buffered wake or effect:
+    /// it awaits its next wake. Test support, so a test can admit input "now
+    /// that the loop is idle" as a positive event instead of a state poll.
+    #[cfg(any(test, feature = "test-support"))]
+    test_runtime_loop_parked:
+        crate::tokio::sync::watch::Sender<std::collections::HashSet<SessionId>>,
     /// Boundary cancels dispatched to an executor's boundary handle (#1471),
     /// counted so tests can wait for the dispatch as a positive event.
     #[cfg(any(test, feature = "test-support"))]
@@ -10734,6 +10783,10 @@ impl MeerkatMachine {
                 #[cfg(any(test, feature = "test-support"))]
                 test_run_start_held_parks: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_parked: crate::tokio::sync::watch::Sender::new(
+                    std::collections::HashSet::new(),
+                ),
+                #[cfg(any(test, feature = "test-support"))]
                 test_boundary_cancel_dispatches: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(any(test, feature = "test-support"))]
                 test_reload_required_discard_after_successor_publication: StdMutex::new(None),
@@ -10846,6 +10899,10 @@ impl MeerkatMachine {
                 #[cfg(any(test, feature = "test-support"))]
                 test_run_start_held_parks: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_parked: crate::tokio::sync::watch::Sender::new(
+                    std::collections::HashSet::new(),
+                ),
+                #[cfg(any(test, feature = "test-support"))]
                 test_boundary_cancel_dispatches: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(any(test, feature = "test-support"))]
                 test_reload_required_discard_after_successor_publication: StdMutex::new(None),
@@ -10957,6 +11014,10 @@ impl MeerkatMachine {
                 test_runtime_loop_before_executor_apply: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_run_start_held_parks: crate::tokio::sync::watch::Sender::new(0),
+                #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_parked: crate::tokio::sync::watch::Sender::new(
+                    std::collections::HashSet::new(),
+                ),
                 #[cfg(any(test, feature = "test-support"))]
                 test_boundary_cancel_dispatches: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(any(test, feature = "test-support"))]

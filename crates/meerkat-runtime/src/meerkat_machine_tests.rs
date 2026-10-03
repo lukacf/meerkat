@@ -21993,6 +21993,26 @@ impl InterruptYieldingTestRig {
         .expect("runtime should settle attached with empty queues");
     }
 
+    /// Wait for the runtime loop to be idle with nothing pending. The state
+    /// poll only establishes that the run is over ("attached and empty"); it
+    /// cannot see a wake source still pending for the loop (a buffered wake,
+    /// an unobserved completion-feed advance), which runs whatever is
+    /// admitted next. Admission is gated on the loop's park event instead:
+    /// published as it awaits its next wake with none pending and cleared by
+    /// any wake, so a park observed after the run settled means nothing can
+    /// run new input until something genuinely wakes the loop.
+    async fn wait_until_parked_attached_and_empty(&self) {
+        self.wait_until_attached_and_empty().await;
+        let mut parked = self.adapter.runtime_loop_parked();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            parked.wait_for(|sessions| sessions.contains(&self.session_id)),
+        )
+        .await
+        .expect("runtime loop should park once the run settled")
+        .expect("park signal stays open while the machine lives");
+    }
+
     async fn wait_until_completion_is_resolved(&self, input_id: &InputId) {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
@@ -22544,6 +22564,13 @@ async fn run_advancing_during_live_boundary_preparation_preserves_successor_clai
 
     rig.allow_finish.notify_waiters();
     rig.wait_for_apply_calls(2).await;
+    // A wake sent while the successor run is busy is buffered; the loop runs
+    // it once the run settles. The sentinel below must be admitted only once
+    // that buffered wake is spent, which the park-driven wait guarantees and
+    // an "attached and empty" state poll does not.
+    rig.adapter
+        .buffer_runtime_loop_wake_for_test(&rig.session_id)
+        .await;
     let successor_claim = rig
         .adapter
         .meerkat_machine_spine_snapshot(&rig.session_id)
@@ -22566,7 +22593,7 @@ async fn run_advancing_during_live_boundary_preparation_preserves_successor_clai
     );
 
     rig.allow_finish.notify_waiters();
-    rig.wait_until_attached_and_empty().await;
+    rig.wait_until_parked_attached_and_empty().await;
 
     let sentinel = make_progress_input("successor-claim wake sentinel");
     let sentinel_id = sentinel.id().clone();

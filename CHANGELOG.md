@@ -1253,6 +1253,17 @@ them.
 
 ### Fixed
 
+- A GPT Live result cue no longer leaves delegation framing behind for the
+  user's next question (Turbo S S99). Cues go on the instructions lane,
+  which persists. Every cue now ends with a scope sentence that keeps
+  questions about the conversation native: "Only this result: answer
+  questions about this conversation yourself." The "if the user's latest
+  request is still unanswered, answer it first" clause is sent only while a
+  request is open: one the model's output or a delegation has not answered,
+  a typed broker fact that reflected-input silence does not clear (S103 r2).
+  A cue that does not fit one 500-byte append (an outcome cue with an open
+  request) is split before the scope sentence.
+
 - The LLM reconfigure host's turn-finalization boundary now keeps its session
   service alive. The host holds the service weakly and upgraded it only to
   acquire the boundary, so a caller that dropped its last service handle while

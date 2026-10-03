@@ -119,18 +119,25 @@ this directory or the harness changes.
   Answers whose length shapes the client events (an appended reply is split
   into 500-byte fragments, and the fragment index is in the `event_id`) are
   taken from the fixture itself. The summary is a fixed stub.
-- **Ordering the product leaves open:** the test fixes it with typed gates,
-  matching what the recorded run did:
-  - S104: the job's worker turn is released after channel 1 is closed, and
-    the merge reply after channel 2 is connected. The disconnect is stepped
-    only once the job's worker has started, the state the live run had
-    reached by then.
-  - S106: each delegated job is released once its channel carried the
-    job's "Started voice request" narration. The product emits that
-    narration only for a job that runs about 8 s, and spaces the next one
-    the same way, so each S106 delegation takes about 16 s of real time.
-    Ordering still never rides a clock in the replay: the cassette waits
-    on the narration event itself.
+- **The driver** (`drive_replay`) reads the steps from the fixture, so a
+  re-capture needs no new script:
+  - each channel opens, and its markers are stepped in recorded order;
+  - a disconnect followed by a recorded client mute is the host's close (the
+    provider did not end that channel); otherwise the provider closes it;
+  - each delegated job's worker turn is released once its channel carried
+    the job's "Started voice request" narration, when its result was
+    delivered on that channel. When it was not (the channel went down
+    first, as in S104's first channel), the turn is released once that
+    channel closed, and the next channel opens only after it is terminal.
+    Jobs are joined to their narrations by the provider delegation id.
+- **Scenario-specific steps** are what a recording cannot carry: typed turns
+  between channels, and S104's merge-reply gate (the merged job's reply
+  commits only after channel 2 is up). Nothing waits on a clock: the
+  cassette waits on recorded events and the gates on typed states.
+- **One allowed difference:** a host close sends the mute, then
+  `session.close`. When the recorded transport was already gone, the mute's
+  send failed and the close was never attempted, so the recording ends at the
+  mute. A replay may send the close after it.
 - **Assertions:**
   - the replay records its own provider stream through the same journal hook,
     and its client events per channel must equal the fixture's;

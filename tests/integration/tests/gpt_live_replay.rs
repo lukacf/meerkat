@@ -354,6 +354,7 @@ struct ReplayHost {
 struct OpenChannel {
     id: LiveChannelId,
     pending_receipt: String,
+    activation_receipt: String,
 }
 
 struct HostOptions<'a> {
@@ -634,12 +635,13 @@ impl ReplayHost {
                     pending.pending_receipt(),
                 )
                 .await?;
-            if custody.phase().activation_receipt().is_none() {
+            let Some(activation_receipt) = custody.phase().activation_receipt() else {
                 return Err("the replayed answer did not activate the pending channel".into());
-            }
+            };
             Ok(OpenChannel {
                 id: pending.channel_id().clone(),
                 pending_receipt: pending.pending_receipt().to_string(),
+                activation_receipt: activation_receipt.to_string(),
             })
         };
         let opened = evidence
@@ -651,22 +653,26 @@ impl ReplayHost {
         Ok((channel, opened))
     }
 
-    /// The provider closed the channel (the recording's disconnect): wait
-    /// for the exact channel's custody to converge to Closed.
+    /// The channel was closed (by the provider at the recording's
+    /// disconnect, or by the host): wait for the exact channel's custody to
+    /// converge to Closed. A custody read can fail while the close is in
+    /// transition (the activation it validates is being retired); that is
+    /// not yet an answer, and only the bound turns the last one into the
+    /// error.
     async fn closed(&self, open: &OpenChannel) -> Result<(), Box<dyn std::error::Error>> {
         let deadline = Instant::now() + CONVERGENCE_BOUND;
         loop {
-            let custody = self
+            let phase = self
                 .member_host
                 .validate_experimental_live_channel_custody(&open.id, &open.pending_receipt)
-                .await?;
-            if custody.phase() == &ExperimentalLiveChannelPhaseStatus::Closed {
+                .await
+                .map(|custody| custody.phase().clone());
+            if matches!(phase, Ok(ExperimentalLiveChannelPhaseStatus::Closed)) {
                 return Ok(());
             }
             if Instant::now() >= deadline {
                 return Err(format!(
-                    "channel custody did not converge to Closed after the provider closed: {:?}",
-                    custody.phase()
+                    "channel custody did not converge to Closed after the close: {phase:?}"
                 )
                 .into());
             }
@@ -674,32 +680,23 @@ impl ReplayHost {
         }
     }
 
-    /// Wait until the session's live delegation worker has started (its
-    /// recovery snapshot left `StartAuthorized`): the state the recorded run
-    /// had reached when its test stepped the next browser action.
-    async fn delegation_admitted(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let deadline = Instant::now() + CONVERGENCE_BOUND;
-        loop {
-            let snapshots = self
-                .runtime
-                .live_delegation_recovery_snapshots(&self.session_id)
-                .await?;
-            use meerkat_runtime::live_execution::LiveDelegationRecoveryPhase;
-            if snapshots
-                .iter()
-                .any(|snapshot| snapshot.phase() != LiveDelegationRecoveryPhase::StartAuthorized)
-            {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err("the voice job's delegation never gained durable custody".into());
-            }
-            sleep(Duration::from_millis(20)).await;
-        }
+    /// The host closes the channel, as the recorded run's harness did when
+    /// the provider did not end it after the browser left (the recording
+    /// shows the client's mute right after the disconnect step).
+    async fn host_close(&self, open: &OpenChannel) -> Result<(), Box<dyn std::error::Error>> {
+        self.member_host
+            .close_experimental_live_active_channel(
+                self.authority.as_ref(),
+                &open.id,
+                &open.activation_receipt,
+            )
+            .await?;
+        Ok(())
     }
 
-    /// Wait for the session's next live delegation to reach terminality.
-    async fn delegation_terminal(&self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Wait until at least `count` of the session's live delegations are
+    /// terminal, each having completed.
+    async fn delegations_terminal(&self, count: usize) -> Result<(), Box<dyn std::error::Error>> {
         use meerkat_runtime::live_execution::LiveDelegationWorkerTerminalKind;
         let deadline = Instant::now() + CONVERGENCE_BOUND;
         loop {
@@ -707,21 +704,25 @@ impl ReplayHost {
                 .runtime
                 .live_delegation_recovery_snapshots(&self.session_id)
                 .await?;
-            if let Some(snapshot) = snapshots
+            let terminal: Vec<_> = snapshots
                 .iter()
-                .find(|snapshot| snapshot.terminal().is_some())
+                .filter_map(|snapshot| snapshot.terminal())
+                .collect();
+            if let Some(failed) = terminal
+                .iter()
+                .find(|kind| **kind != LiveDelegationWorkerTerminalKind::Completed)
             {
-                if snapshot.terminal() != Some(LiveDelegationWorkerTerminalKind::Completed) {
-                    return Err(format!(
-                        "the delegated turn did not complete: {:?}",
-                        snapshot.terminal()
-                    )
-                    .into());
-                }
+                return Err(format!("a delegated turn did not complete: {failed:?}").into());
+            }
+            if terminal.len() >= count {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                return Err("the delegated turn never reached terminality".into());
+                return Err(format!(
+                    "{} of {count} delegated turns reached terminality",
+                    terminal.len()
+                )
+                .into());
             }
             sleep(Duration::from_millis(20)).await;
         }
@@ -776,11 +777,253 @@ fn replay_fixtures_are_scrubbed() {
     }
 }
 
-/// S104 replayed: open with a concurrent bootstrap summary, a voice job
-/// delegated to a DurableFork worker, the channel dropped while it runs, a
-/// typed turn during the closure, the job merged into the source after the
-/// reopen, and the merge's reply replayed on the reopened channel as quiet
-/// runtime work after the user's question.
+/// One delegated job of a recording, in creation order (the order the
+/// scripted worker sees `Purpose::DelegatedJob(n)`).
+#[derive(Debug, Clone)]
+struct RecordedJob {
+    channel: u32,
+    /// The job's "Started voice request" narration on its channel.
+    started: Option<ClientKey>,
+    /// Its result reached this channel (a "Finished voice request"
+    /// narration followed on it); otherwise the channel went down first and
+    /// the result merged after it.
+    delivered_on_channel: bool,
+    /// The result text the channel received, when it was delivered there.
+    result: Option<String>,
+}
+
+/// Every client delegation of the recording with where its narrations and
+/// result landed, joined by the provider delegation id that the commentary
+/// appends carry.
+fn recorded_jobs(fixture: &Fixture) -> Vec<RecordedJob> {
+    let mut jobs: Vec<(String, RecordedJob)> = Vec::new();
+    for line in &fixture.lines {
+        match &line.entry {
+            provider_recording::Entry::ServerFrame { raw }
+                if raw["type"] == "session.delegation.created"
+                    && raw["delegation"]["target"] == "client" =>
+            {
+                if let Some(id) = raw["delegation"]["id"].as_str() {
+                    jobs.push((
+                        id.to_owned(),
+                        RecordedJob {
+                            channel: line.channel_ordinal,
+                            started: None,
+                            delivered_on_channel: false,
+                            result: None,
+                        },
+                    ));
+                }
+            }
+            provider_recording::Entry::ClientEvent { event }
+                if event["type"] == "session.commentary.append" =>
+            {
+                let (Some(id), Some(content)) =
+                    (event["delegation_id"].as_str(), event["content"].as_str())
+                else {
+                    continue;
+                };
+                let Some((_, job)) = jobs.iter_mut().find(|(job_id, _)| job_id == id) else {
+                    continue;
+                };
+                if content.starts_with("Started voice request") {
+                    job.started = Some(ClientKey::of(event));
+                } else if content.starts_with("Finished voice request") {
+                    job.delivered_on_channel = true;
+                } else if job.delivered_on_channel && job.result.is_none() {
+                    job.result = Some(content.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    jobs.into_iter().map(|(_, job)| job).collect()
+}
+
+/// The scenario-specific steps a recording cannot carry: typed turns the
+/// recorded test made between channels, and a gate the recorded run's
+/// timing set on the merge of a post-close result.
+struct ReplayScript {
+    typed_after_channel: BTreeMap<u32, &'static str>,
+    merge_gate_on_channel_open: Option<(u32, watch::Sender<bool>)>,
+}
+
+/// Drive a recording: each channel opens, its markers are stepped in
+/// recorded order (a disconnect followed by a recorded client mute is the
+/// host's close), and each delegated job is released once its channel
+/// carried its "Started" narration when its result was delivered there, or
+/// once its channel closed when it was not.
+async fn drive_replay(
+    host: &mut ReplayHost,
+    cassette: Arc<Cassette>,
+    evidence: &Journal,
+    jobs: &[RecordedJob],
+    job_gates: Vec<watch::Sender<bool>>,
+    script: ReplayScript,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut gate_openers = Vec::new();
+    let mut held_until_close: BTreeMap<u32, Vec<watch::Sender<bool>>> = BTreeMap::new();
+    for (job, gate) in jobs.iter().zip(job_gates) {
+        match (&job.started, job.delivered_on_channel) {
+            (Some(started), true) => {
+                let cassette = Arc::clone(&cassette);
+                let started = started.clone();
+                let channel = job.channel;
+                gate_openers.push(tokio::spawn(async move {
+                    if cassette.received(channel, &started).await.is_ok() {
+                        gate.send_replace(true);
+                    }
+                }));
+            }
+            _ => held_until_close.entry(job.channel).or_default().push(gate),
+        }
+    }
+    let mut merge_gate = script.merge_gate_on_channel_open;
+    let mut released_at_close = 0;
+    for tape in &cassette.fixture().channels {
+        let (channel, open) = host.connect(evidence).await?;
+        if channel != tape.ordinal {
+            return Err(format!("opened channel {channel}, the tape is {}", tape.ordinal).into());
+        }
+        if let Some((gated, gate)) = merge_gate.take() {
+            if gated == channel {
+                gate.send_replace(true);
+            } else {
+                merge_gate = Some((gated, gate));
+            }
+        }
+        for step in tape.markers() {
+            cassette.release(channel, &step).await?;
+            if step.starts_with("disconnect") && tape.host_closes_after(&step) {
+                host.host_close(&open).await?;
+            }
+        }
+        cassette.ended(channel).await?;
+        host.closed(&open).await?;
+        // The recorded test typed during the closure, before the jobs the
+        // close left running finished (their merge then waits behind it).
+        if let Some(prompt) = script.typed_after_channel.get(&channel) {
+            let typed = host
+                .rpc
+                .call_raw(
+                    "turn/start",
+                    json!({"session_id":host.session_id,"prompt":prompt}),
+                    120,
+                )
+                .await?;
+            if !typed["error"].is_null() {
+                return Err(format!("the typed turn failed: {}", typed["error"]).into());
+            }
+        }
+        let mut released_now = 0;
+        for gate in held_until_close.remove(&channel).unwrap_or_default() {
+            gate.send_replace(true);
+            released_now += 1;
+        }
+        if released_now > 0 {
+            released_at_close += released_now;
+            // The recorded run reopened only once those jobs were terminal.
+            host.delegations_terminal(released_at_close).await?;
+        }
+    }
+    for opener in gate_openers {
+        opener.abort();
+    }
+    Ok(())
+}
+
+/// The replay's own recorded client events, per channel, must equal the
+/// fixture's (type and deterministic `event_id`, in order).
+fn assert_recorded_client_events(
+    evidence: &Journal,
+    fixture: &Fixture,
+    llm: &ScriptedLlm,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let replayed = provider_recording::read(
+        &evidence
+            .path()
+            .with_file_name(support::evidence::PROVIDER_STREAM_FILE),
+    )?;
+    // A channel that sent no client event has no entry on either side.
+    let recorded: BTreeMap<u32, Vec<ClientKey>> = fixture
+        .channels
+        .iter()
+        .filter(|tape| !tape.client_events.is_empty())
+        .map(|tape| (tape.ordinal, tape.client_events.clone()))
+        .collect();
+    // A host close sends the mute, then `session.close`. When the recorded
+    // run's transport was already gone, the mute's send failed and the close
+    // was never attempted, so the recording ends at the mute; the replay's
+    // transport is alive and sends both. That trailing close is the only
+    // difference allowed.
+    let mut replayed = client_events_by_channel(&replayed);
+    for (ordinal, events) in &mut replayed {
+        let recorded_ends_at_mute = recorded
+            .get(ordinal)
+            .and_then(|recorded| recorded.last())
+            .is_some_and(|last| last.kind == "session.input_audio.mute");
+        if recorded_ends_at_mute
+            && events
+                .last()
+                .is_some_and(|last| last.kind == "session.close")
+        {
+            events.pop();
+        }
+    }
+    assert_eq!(
+        replayed,
+        recorded,
+        "the replay's client events (type, event_id) differ from the recording; LLM calls: {:?}",
+        llm.calls.lock().expect("calls")
+    );
+    Ok(())
+}
+
+fn scripted_llm(scripts: BTreeMap<Purpose, Script>) -> Arc<ScriptedLlm> {
+    Arc::new(ScriptedLlm {
+        scripts,
+        conversations: AtomicUsize::new(0),
+        jobs: AtomicUsize::new(0),
+        calls: std::sync::Mutex::new(Vec::new()),
+    })
+}
+
+/// Job scripts from the recording: a delivered job answers with the result
+/// its channel received; each waits on its own gate.
+fn job_scripts(
+    jobs: &[RecordedJob],
+    undelivered_answer: &str,
+) -> (BTreeMap<Purpose, Script>, Vec<watch::Sender<bool>>) {
+    let mut scripts = BTreeMap::new();
+    let mut gates = Vec::new();
+    for (index, job) in jobs.iter().enumerate() {
+        let (gate, gate_rx) = watch::channel(false);
+        gates.push(gate);
+        scripts.insert(
+            Purpose::DelegatedJob(index),
+            Script {
+                text: job
+                    .result
+                    .clone()
+                    .unwrap_or_else(|| undelivered_answer.to_owned()),
+                gate: Some(gate_rx),
+            },
+        );
+    }
+    (scripts, gates)
+}
+
+fn conversation(text: &str) -> Script {
+    Script {
+        text: text.to_owned(),
+        gate: None,
+    }
+}
+
+/// S104 replayed: open with a concurrent bootstrap summary, a voice job on a
+/// DurableFork worker, the channel dropped while it runs, a typed turn during
+/// the closure, the reopen, and the job merged into the source with its
+/// reply replayed on the reopened channel as quiet runtime work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
@@ -791,48 +1034,29 @@ async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
     let fixture = Fixture::parse(S104_FIXTURE)?;
     let merge_reply = runtime_work_reply(&fixture, 2)
         .ok_or("the S104 fixture carries no runtime-work append on channel 2")?;
-    let cassette = Cassette::start(fixture.clone()).await?;
+    let jobs = recorded_jobs(&fixture);
+    let cassette = Arc::new(Cassette::start(fixture.clone()).await?);
     let evidence = Journal::create_for("S104-replay", S104_RESULT_TOKEN.to_owned())?;
 
-    // The recorded interleaving: the job finished only after channel 1 was
-    // down, and its merge reply committed only after channel 2 was up.
-    let (job_gate, job_gate_rx) = watch::channel(false);
+    let (mut scripts, job_gates) = job_scripts(&jobs, &merge_reply);
+    scripts.insert(
+        Purpose::Conversation(0),
+        conversation("Acknowledged: the team mascot is a heron named Bartleby."),
+    );
+    scripts.insert(
+        Purpose::Conversation(1),
+        conversation("Remembered: the meeting room is called Osprey."),
+    );
+    // The recorded run merged the post-close job only after channel 2 was up.
     let (merge_gate, merge_gate_rx) = watch::channel(false);
-    let llm = Arc::new(ScriptedLlm {
-        scripts: BTreeMap::from([
-            (
-                Purpose::Conversation(0),
-                Script {
-                    text: "Acknowledged: the team mascot is a heron named Bartleby.".into(),
-                    gate: None,
-                },
-            ),
-            (
-                Purpose::Conversation(1),
-                Script {
-                    text: "Remembered: the meeting room is called Osprey.".into(),
-                    gate: None,
-                },
-            ),
-            (
-                Purpose::DelegatedJob(0),
-                Script {
-                    text: format!("Wrote coffee.md. {merge_reply}"),
-                    gate: Some(job_gate_rx),
-                },
-            ),
-            (
-                Purpose::MergeReply,
-                Script {
-                    text: merge_reply.clone(),
-                    gate: Some(merge_gate_rx),
-                },
-            ),
-        ]),
-        conversations: AtomicUsize::new(0),
-        jobs: AtomicUsize::new(0),
-        calls: std::sync::Mutex::new(Vec::new()),
-    });
+    scripts.insert(
+        Purpose::MergeReply,
+        Script {
+            text: merge_reply.clone(),
+            gate: Some(merge_gate_rx),
+        },
+    );
+    let llm = scripted_llm(scripts);
     let mut host = open_replay_host(HostOptions {
         base_url: cassette.base_url(),
         llm: llm.clone(),
@@ -842,47 +1066,24 @@ async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
         summary: "The team mascot is a heron named Bartleby.",
     })
     .await?;
-
-    let result = async {
-        // Channel 1: the job is asked for, then the call drops.
-        let (channel1, open1) = host.connect(&evidence).await?;
-        cassette.release(channel1, "play_at:handoff_job").await?;
-        host.delegation_admitted().await?;
-        cassette.release(channel1, "disconnect:graceful").await?;
-        cassette.ended(channel1).await?;
-        host.closed(&open1).await?;
-
-        // Typed turn during the closure, then the job completes.
-        let typed = host
-            .rpc
-            .call_raw(
-                "turn/start",
-                json!({"session_id":host.session_id,"prompt":S104_TYPED_PROMPT}),
-                120,
-            )
-            .await?;
-        if !typed["error"].is_null() {
-            return Err(format!("the typed turn failed: {}", typed["error"]).into());
-        }
-        job_gate.send_replace(true);
-        host.delegation_terminal().await?;
-
-        // Channel 2: reopen, the merge reply commits, the user asks.
-        let (channel2, open2) = host.connect(&evidence).await?;
-        merge_gate.send_replace(true);
-        cassette.release(channel2, "play_at:handoff_back").await?;
-        cassette.release(channel2, "disconnect:graceful").await?;
-        cassette.ended(channel2).await?;
-        host.closed(&open2).await?;
-        Ok::<_, Box<dyn std::error::Error>>((channel1, channel2))
-    }
+    let result = drive_replay(
+        &mut host,
+        Arc::clone(&cassette),
+        &evidence,
+        &jobs,
+        job_gates,
+        ReplayScript {
+            typed_after_channel: BTreeMap::from([(1, S104_TYPED_PROMPT)]),
+            merge_gate_on_channel_open: Some((2, merge_gate)),
+        },
+    )
     .await;
     let finished = evidence.finish(match &result {
-        Ok(_) => evidence::Outcome::Passed,
+        Ok(()) => evidence::Outcome::Passed,
         Err(_) => evidence::Outcome::Failed,
     });
     cassette.diverged()?;
-    let (_, channel2) = result.map_err(|error| {
+    result.map_err(|error| {
         format!(
             "{error}; scripted LLM calls so far: {:?}",
             llm.calls.lock().expect("calls")
@@ -890,8 +1091,8 @@ async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
     })?;
     finished?;
 
-    // Each channel opened with the recorded seed shape (item count and
-    // roles of the startup history; texts follow from the scripted LLM).
+    // Each channel opened with the recorded seed shape (item roles of the
+    // startup history; texts follow from the scripted LLM).
     let seed_roles = |body: &Value| -> Vec<String> {
         body["session"]["input"]
             .as_array()
@@ -913,29 +1114,11 @@ async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
         created, recorded_seeds,
         "the replayed opens' seed shapes differ"
     );
-
-    // The replay sent exactly the recorded client events, per channel.
-    let replayed = provider_recording::read(
-        &evidence
-            .path()
-            .with_file_name(support::evidence::PROVIDER_STREAM_FILE),
-    )?;
-    let recorded: BTreeMap<u32, Vec<ClientKey>> = fixture
-        .channels
-        .iter()
-        .map(|tape| (tape.ordinal, tape.client_events.clone()))
-        .collect();
-    assert_eq!(
-        client_events_by_channel(&replayed),
-        recorded,
-        "the replay's client events (type, event_id) differ from the recording; LLM calls: {:?}",
-        llm.calls.lock().expect("calls")
-    );
-
+    assert_recorded_client_events(&evidence, &fixture, &llm)?;
     // The S104 contract on the reopened channel: the merged job's reply is
     // runtime work on the quiet lane, carrying the job's result.
     let runtime_work: Vec<String> = evidence
-        .owned_thinking_appends(channel2)?
+        .owned_thinking_appends(2)?
         .into_iter()
         .filter(|text| text.starts_with(LIVE_RUNTIME_WORK_PREFIX))
         .collect();
@@ -948,23 +1131,10 @@ async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
     Ok(())
 }
 
-/// The recorded delegation-lane commentary results of `channel`, in order:
-/// the third commentary of each delegation is its result text.
-fn delegation_results(fixture: &Fixture, channel: u32) -> Vec<String> {
-    fixture
-        .client_contents(channel, "session.commentary.append")
-        .into_iter()
-        .filter(|text| {
-            !text.starts_with("Started voice request")
-                && !text.starts_with("Finished voice request")
-        })
-        .collect()
-}
-
-/// S106 replayed: three channels over one ExistingMember executor. Native
-/// exchanges, a delegated job per channel (e3, e6, e9) narrated Started,
-/// Finished and its result on the delegation lane, a typed turn during the
-/// first closure, and reopens seeded from the retained summary.
+/// S106 replayed: three channels over one ExistingMember executor, native
+/// exchanges, delegated jobs narrated Started, Finished and their result on
+/// the delegation lane, a typed turn during the first closure, and reopens
+/// seeded from the retained summary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s106_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
@@ -973,51 +1143,20 @@ async fn s106_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
         .try_init();
     let _replay = REPLAY_LOCK.lock().await;
     let fixture = Fixture::parse(S106_FIXTURE)?;
-    let cassette = Cassette::start(fixture.clone()).await?;
+    let jobs = recorded_jobs(&fixture);
+    let cassette = Arc::new(Cassette::start(fixture.clone()).await?);
     let evidence = Journal::create_for("S106-replay", "Saffron".to_owned())?;
 
-    // One delegated job per channel, each released once the channel carried
-    // its "Started" narration (the recorded run's job ran for seconds).
-    let mut gates = Vec::new();
-    let mut scripts = BTreeMap::from([
-        (
-            Purpose::Conversation(0),
-            Script {
-                text: "Acknowledged: the sponsor's name is Marlow.".into(),
-                gate: None,
-            },
-        ),
-        (
-            Purpose::Conversation(1),
-            Script {
-                text: "Acknowledged: the budget code is Kestrel.".into(),
-                gate: None,
-            },
-        ),
-    ]);
-    for (job, channel) in [(0_usize, 1_u32), (1, 2), (2, 3)] {
-        let result = delegation_results(&fixture, channel)
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                format!("the S106 fixture has no delegation result on channel {channel}")
-            })?;
-        let (gate, gate_rx) = watch::channel(false);
-        gates.push(gate);
-        scripts.insert(
-            Purpose::DelegatedJob(job),
-            Script {
-                text: result,
-                gate: Some(gate_rx),
-            },
-        );
-    }
-    let llm = Arc::new(ScriptedLlm {
-        scripts,
-        conversations: AtomicUsize::new(0),
-        jobs: AtomicUsize::new(0),
-        calls: std::sync::Mutex::new(Vec::new()),
-    });
+    let (mut scripts, job_gates) = job_scripts(&jobs, "Done.");
+    scripts.insert(
+        Purpose::Conversation(0),
+        conversation("Acknowledged: the sponsor's name is Marlow."),
+    );
+    scripts.insert(
+        Purpose::Conversation(1),
+        conversation("Acknowledged: the budget code is Kestrel."),
+    );
+    let llm = scripted_llm(scripts);
     let mut host = open_replay_host(HostOptions {
         base_url: cassette.base_url(),
         llm: llm.clone(),
@@ -1027,64 +1166,20 @@ async fn s106_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
         summary: "The sponsor's name is Marlow. The project codename is Saffron. The launch venue is Lisbon. The budget code is Kestrel.",
     })
     .await?;
-    let started = ClientKey {
-        kind: "session.commentary.append".into(),
-        event_id: Some("meerkat-append-1".into()),
-    };
-
-    let result = async {
-        // Channel 1: e1, e2 native; e3 delegated; e4 native; drop.
-        let (channel1, open1) = host.connect(&evidence).await?;
-        for step in ["play_at:haul_e1", "play_at:haul_e2", "play_at:haul_e3"] {
-            cassette.release(channel1, step).await?;
-        }
-        cassette.received(channel1, &started).await?;
-        gates[0].send_replace(true);
-        cassette.release(channel1, "play_at:haul_e4").await?;
-        cassette.release(channel1, "disconnect:graceful").await?;
-        cassette.ended(channel1).await?;
-        host.closed(&open1).await?;
-
-        // Typed turn during the first closure.
-        let typed = host
-            .rpc
-            .call_raw(
-                "turn/start",
-                json!({"session_id":host.session_id,"prompt":S106_TYPED_PROMPT}),
-                120,
-            )
-            .await?;
-        if !typed["error"].is_null() {
-            return Err(format!("the typed turn failed: {}", typed["error"]).into());
-        }
-
-        // Channel 2: e5 native; e6 delegated; drop.
-        let (channel2, open2) = host.connect(&evidence).await?;
-        for step in ["play_at:haul_e5", "play_at:haul_e6"] {
-            cassette.release(channel2, step).await?;
-        }
-        cassette.received(channel2, &started).await?;
-        gates[1].send_replace(true);
-        cassette.release(channel2, "disconnect:graceful").await?;
-        cassette.ended(channel2).await?;
-        host.closed(&open2).await?;
-
-        // Channel 3: e7, e8 native; e9 delegated; e10 native; drop.
-        let (channel3, open3) = host.connect(&evidence).await?;
-        for step in ["play_at:haul_e7", "play_at:haul_e8", "play_at:haul_e9"] {
-            cassette.release(channel3, step).await?;
-        }
-        cassette.received(channel3, &started).await?;
-        gates[2].send_replace(true);
-        cassette.release(channel3, "play_at:haul_e10").await?;
-        cassette.release(channel3, "disconnect:graceful").await?;
-        cassette.ended(channel3).await?;
-        host.closed(&open3).await?;
-        Ok::<_, Box<dyn std::error::Error>>(())
-    }
+    let result = drive_replay(
+        &mut host,
+        Arc::clone(&cassette),
+        &evidence,
+        &jobs,
+        job_gates,
+        ReplayScript {
+            typed_after_channel: BTreeMap::from([(1, S106_TYPED_PROMPT)]),
+            merge_gate_on_channel_open: None,
+        },
+    )
     .await;
     let finished = evidence.finish(match &result {
-        Ok(_) => evidence::Outcome::Passed,
+        Ok(()) => evidence::Outcome::Passed,
         Err(_) => evidence::Outcome::Failed,
     });
     cassette.diverged()?;
@@ -1096,29 +1191,12 @@ async fn s106_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
     })?;
     finished?;
 
-    // Every reopen is seeded with the summary first (a developer item).
     for body in cassette.create_bodies() {
         assert_eq!(
             body["session"]["input"][0]["role"], "developer",
             "each S106 open is seeded with the summary first: {body}"
         );
     }
-    let replayed = provider_recording::read(
-        &evidence
-            .path()
-            .with_file_name(support::evidence::PROVIDER_STREAM_FILE),
-    )?;
-    let recorded: BTreeMap<u32, Vec<ClientKey>> = fixture
-        .channels
-        .iter()
-        .map(|tape| (tape.ordinal, tape.client_events.clone()))
-        .collect();
-    assert_eq!(
-        client_events_by_channel(&replayed),
-        recorded,
-        "the replay's client events (type, event_id) differ from the recording; LLM calls: {:?}",
-        llm.calls.lock().expect("calls")
-    );
-    let _ = &mut host;
+    assert_recorded_client_events(&evidence, &fixture, &llm)?;
     Ok(())
 }

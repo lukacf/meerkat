@@ -90,6 +90,31 @@ pub struct ChannelTape {
     pub client_events: Vec<ClientKey>,
 }
 
+impl ChannelTape {
+    /// Whether the recording shows the host closing this channel after
+    /// `step`: a client `session.input_audio.mute` recorded after that
+    /// marker (when the provider ended the channel itself, none is).
+    pub fn host_closes_after(&self, step: &str) -> bool {
+        self.steps
+            .iter()
+            .skip_while(|candidate| !matches!(candidate, Step::Marker(marker) if marker == step))
+            .any(|candidate| {
+                matches!(candidate, Step::Await(key) if key.kind == "session.input_audio.mute")
+            })
+    }
+
+    /// The test-driven steps of this channel's sideband, in recorded order.
+    pub fn markers(&self) -> Vec<String> {
+        self.steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Marker(step) => Some(step.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 /// A loaded fixture: its channels in the order they were created.
 #[derive(Clone, Debug)]
 pub struct Fixture {
@@ -283,6 +308,10 @@ impl Cassette {
     /// The API root to hand `with_test_base_url`.
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    pub fn fixture(&self) -> &Fixture {
+        &self.shared.fixture
     }
 
     /// Where `ordinal`'s replay waits now.
@@ -486,8 +515,15 @@ async fn serve_tape(socket: WebSocket, shared: Arc<Shared>, index: usize) {
                 continue;
             };
             let key = ClientKey::of(&event);
+            // A host close sends the mute, then `session.close`. A recording
+            // whose transport was already gone ends at the mute (the close
+            // was never attempted); its replay may still send the close.
+            let close_after_recorded_mute = key.kind == "session.close"
+                && expected
+                    .last()
+                    .is_some_and(|last| last.kind == "session.input_audio.mute");
             reader_shared.update(|state| {
-                if !expected.contains(&key) {
+                if !expected.contains(&key) && !close_after_recorded_mute {
                     state.divergences.push(format!(
                         "channel {ordinal}: Meerkat sent {key}, which the recording never sent"
                     ));

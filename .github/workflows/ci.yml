@@ -112,7 +112,11 @@ on:
 #   - every re-run attempt (run_attempt > 1). A superseded commit that turns
 #     out to be needed (a tag on it, or bisecting a red main) gets its
 #     attestation with `gh run rerun <id>`, and that attempt runs to the end;
-#   - workflow_dispatch runs.
+#   - workflow_dispatch runs;
+#   - every push to a release/** integration branch. Each merge there needs
+#     its own verdict: with superseding, a busy merge train cancelled every
+#     run after 21d00220a (#1575) and about 15 merges went without full CI,
+#     hiding the public_broker_* failure #1556 introduced.
 # A cancelled run never reaches the CI gate (it runs under !cancelled()), so
 # it leaves no exact-tree attestation; require_ci_green only accepts a run
 # that completed with success. A per-ref group with cancellation for every
@@ -122,13 +126,13 @@ concurrency:
   group: >-
     ${{
       github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) ||
-      (github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v')) && format('main-{0}-superseded', github.ref_name) ||
+      (github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v') && !startsWith(github.ref, 'refs/heads/release/')) && format('main-{0}-superseded', github.ref_name) ||
       format('main-{0}-{1}', github.ref_name, github.sha)
     }}
   cancel-in-progress: >-
     ${{
       github.event_name == 'pull_request' ||
-      (github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v'))
+      (github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v') && !startsWith(github.ref, 'refs/heads/release/'))
     }}
 
 permissions:

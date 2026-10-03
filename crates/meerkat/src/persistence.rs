@@ -1502,11 +1502,19 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            landed.contains(&("session-store", 1, 4)),
+            landed.contains(&(
+                "session-store",
+                1,
+                meerkat_store::sqlite_store::SESSION_STORE_DOMAIN.supported_version()
+            )),
             "session-store committed before the refusal and must be reported: {landed:?}"
         );
         assert!(
-            landed.contains(&("schedule-store", 1, 3)),
+            landed.contains(&(
+                "schedule-store",
+                1,
+                meerkat_store::schedule_sqlite_store::SCHEDULE_STORE_DOMAIN.supported_version()
+            )),
             "schedule-store shares no state with runtime-store and must still land: {landed:?}"
         );
 
@@ -1687,11 +1695,25 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             // The three sessions-file co-tenants are pinned exactly: their
-            // source version is the fact this fix turns on.
+            // source version is the fact this fix turns on. The target is
+            // each domain's current version, so a later schema bump does not
+            // strand this test.
             for expected in [
-                ("session-store", 1, 4),
-                ("runtime-store", 1, 3),
-                ("schedule-store", 1, 3),
+                (
+                    "session-store",
+                    1,
+                    meerkat_store::sqlite_store::SESSION_STORE_DOMAIN.supported_version(),
+                ),
+                (
+                    "runtime-store",
+                    1,
+                    meerkat_runtime::store::sqlite::RUNTIME_STORE_DOMAIN.supported_version(),
+                ),
+                (
+                    "schedule-store",
+                    1,
+                    meerkat_store::schedule_sqlite_store::SCHEDULE_STORE_DOMAIN.supported_version(),
+                ),
             ] {
                 assert!(
                     landed.contains(&expected),

@@ -1865,15 +1865,37 @@ async fn run_s97_client_context_vertical(
             evidence.elapsed_ms_at(std::time::Instant::now())
         ),
     )?;
+    // The result states S97's one fact: the executor inspected the empty
+    // scratch workspace. Speech after the ack must voice that fact; speech
+    // that only finishes an earlier reply ("channel ready") is not the
+    // readout (check c009c3b8 S97 run 5 passed on exactly that).
+    let lines = evidence.provider_stream_lines()?;
+    let result = result_deliveries(&lines)
+        .into_iter()
+        .find(|delivery| delivery.delegation_id == provider_delegation_ref)
+        .ok_or("S97: the acknowledged result has no delivery on the provider stream")?;
+    assert!(
+        normalize_words(&result.text)
+            .split(' ')
+            .any(|word| word == S97_RESULT_FACT),
+        "S97: the executor's result does not state the workspace fact {S97_RESULT_FACT:?}: {:?}",
+        result.text
+    );
     let after_ack = usize::try_from(ack_index)? + 1;
     let readout = wait_for_events(&mut peer, 120, |events| {
-        events.get(after_ack..).is_some_and(|after| {
-            after
-                .iter()
-                .any(|event| event["type"] == "session.output_transcript.delta")
+        events.get(after_ack..).is_some_and(|_| {
+            normalize_words(&output_transcript_text(events, after_ack))
+                .split(' ')
+                .any(|word| word == S97_RESULT_FACT)
         })
     })
-    .await?;
+    .await
+    .map_err(|error| {
+        format!(
+            "S97: the result ({:?}) was never voiced after its acknowledgement: {error}",
+            result.text
+        )
+    })?;
     wait_for_spoken_output(&mut peer, ack_audio, 60).await?;
     while let Some(output) = rpc
         .poll_notification(OUTPUT_AVAILABLE, Duration::from_secs(5))
@@ -2428,6 +2450,10 @@ impl Drop for SummaryJobGuard {
         }
     }
 }
+
+/// S97's executor result fact: it inspects the scenario's scratch workspace,
+/// which is empty.
+const S97_RESULT_FACT: &str = "empty";
 
 /// The peer's sighting of the provider's acknowledgement of the result
 /// append for `provider_delegation_id` (keyed by the result's recorded

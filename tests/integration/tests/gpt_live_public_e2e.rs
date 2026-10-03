@@ -3519,6 +3519,55 @@ async fn native_question_once(
     Ok((timing, answer, events_before, fixture_start_ms))
 }
 
+/// A sign-off exchange: play the fixture and wait until the provider's
+/// typed input-transcript deltas since it started carry `tokens` (its
+/// closing words), so the whole utterance was heard. No reply is required:
+/// a model may stay silent after "that's all, close the call". Returns the
+/// fixture's start on the timeline clock.
+async fn sign_off_transcribed(
+    live: &mut PublicLiveHarness,
+    scenario: &str,
+    label: &str,
+    spec: PlayAt,
+    tokens: &[&str],
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let events_before = live.peer.events().await?.len();
+    let schedule_id = live.peer.play_at(&spec).await?;
+    let fixture_start_ms = live
+        .peer
+        .wait_for_timeline(
+            Duration::from_secs(60),
+            &format!("{label} fixture_start"),
+            |t| fixture_start_entry(t, schedule_id).map(|e| e.t_ms),
+        )
+        .await?;
+    let heard = |events: &[Value]| -> String {
+        normalize_words(
+            &events
+                .get(events_before..)
+                .unwrap_or_default()
+                .iter()
+                .filter(|event| is_user_input(event))
+                .filter_map(|event| event["delta"].as_str())
+                .collect::<String>(),
+        )
+    };
+    let events = wait_for_events(&mut live.peer, 60, |events| {
+        let words = heard(events);
+        let words: Vec<&str> = words.split_whitespace().collect();
+        tokens.iter().all(|token| words.contains(token))
+    })
+    .await
+    .map_err(|error| {
+        format!("{label}: the sign-off was never transcribed with {tokens:?}: {error}")
+    })?;
+    println!(
+        "GPT_LIVE_{scenario}_SIGN_OFF label={label} fixture_start_ms={fixture_start_ms} heard={:?}",
+        heard(&events)
+    );
+    Ok(fixture_start_ms)
+}
+
 /// Client delegations created inside each `[start_i, start_{i+1})` window of
 /// the given labelled fixture starts (sorted by time; the last window is
 /// open-ended).
@@ -7207,6 +7256,9 @@ fn s106_seed_prompt() -> String {
         "For the record: the sponsor's name is {S106_SEED_TOKEN}. Just acknowledge in one short sentence."
     )
 }
+/// The closing words of the e10 sign-off fixture ("... Close the call."):
+/// transcribed, they show the provider heard the whole utterance.
+const S106_SIGN_OFF_TOKENS: &[&str] = &["close", "call"];
 const S106_TYPED_PROMPT: &str = "Typed while the voice call is down: the budget code is Kestrel. Reply with one short sentence.";
 const S106_LONG_HOLD_MS: u64 = 20_000;
 const S106_REOPEN_HOLD_MS: u64 = 4000;
@@ -7655,8 +7707,12 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
                 "planted facts {missing:?} never reached the final channel's model as typed input; delivered: {delivered:?}"
             ));
         }
-        let (t10, _a10, _, s10) = native_question(&mut live, "S106", "haul_e10", s106_spec("haul_e10", false)).await?;
-        latencies.extend(t10.input_final_to_audio_ms());
+        // e10 is the sign-off ("Thanks, that's all for today. Close the
+        // call."). Silence after it is valid model behaviour (round 3 r1:
+        // transcribed in real time, then 55 s of no reply), so its contract
+        // is that the provider transcribed it; the host close below ends the
+        // call deterministically.
+        let s10 = sign_off_transcribed(&mut live, "S106", "haul_e10", s106_spec("haul_e10", false), S106_SIGN_OFF_TOKENS).await?;
         let timeline3 = live.peer.timeline().await?;
         delegation_windows.extend(delegations_per_window(
             &timeline3,

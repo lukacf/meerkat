@@ -294,7 +294,51 @@ impl JsonlRpcClient {
         }
         Ok(response["result"].clone())
     }
+
+    /// The whole of a session's `session/history`: pages of
+    /// [`SESSION_HISTORY_PAGE`] rows read by offset until a short page, so a
+    /// check sees every row whatever the history's length. The returned value
+    /// is the first page's result with `messages` holding every row in order.
+    pub async fn session_history(
+        &mut self,
+        session_id: Value,
+        timeout_secs: u64,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let mut history = Value::Null;
+        let mut messages = Vec::new();
+        loop {
+            let page = self
+                .call(
+                    "session/history",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "offset": messages.len(),
+                        "limit": SESSION_HISTORY_PAGE,
+                    }),
+                    timeout_secs,
+                )
+                .await?;
+            let rows = page["messages"]
+                .as_array()
+                .ok_or("session/history page carries no messages array")?
+                .clone();
+            let short = rows.len() < SESSION_HISTORY_PAGE;
+            messages.extend(rows);
+            if history.is_null() {
+                history = page;
+            }
+            if short {
+                break;
+            }
+        }
+        history["messages"] = Value::Array(messages);
+        Ok(history)
+    }
 }
+
+/// Rows per `session/history` page read by [`JsonlRpcClient::session_history`]
+/// (the RPC's default page; its maximum is 1000).
+pub const SESSION_HISTORY_PAGE: usize = 100;
 
 /// Provider protocol observed by the browser peer on the `oai-events` data
 /// channel. Selects the harness mode and the safe event classification used

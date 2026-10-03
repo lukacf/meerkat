@@ -2726,13 +2726,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     }), 120).await?;
     let typed_history = live
         .rpc
-        .call(
-            "session/history",
-            json!({
-                "session_id":live.session_id,"offset":0,"limit":200
-            }),
-            30,
-        )
+        .session_history(json!(live.session_id), 30)
         .await?;
     assert!(history_text(&typed_history).contains("Violet"));
     assert!(history_text(&typed_history).contains("Marigold"));
@@ -2961,16 +2955,7 @@ async fn s99_existing_member_work(
         .into_iter()
         .map(|snapshot| snapshot.operation_id().clone())
         .collect();
-    let history = live
-        .rpc
-        .call(
-            "session/history",
-            json!({
-                "session_id":live.session_id,"offset":0,"limit":200
-            }),
-            30,
-        )
-        .await?;
+    let history = live.rpc.session_history(json!(live.session_id), 30).await?;
     let message_count = history["messages"]
         .as_array()
         .ok_or("missing source history")?
@@ -3012,16 +2997,7 @@ async fn s99_existing_member_work(
         }
         sleep(Duration::from_millis(200)).await;
     }
-    let history = live
-        .rpc
-        .call(
-            "session/history",
-            json!({
-                "session_id":live.session_id,"offset":0,"limit":200
-            }),
-            30,
-        )
-        .await?;
+    let history = live.rpc.session_history(json!(live.session_id), 30).await?;
     let messages: Vec<WireSessionMessage> = serde_json::from_value(history["messages"].clone())?;
     let new_messages = &messages[message_count..];
     let tool =
@@ -4743,7 +4719,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         live.assert_existing_text_identity().await?;
         let history = live
             .rpc
-            .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":200}), 30)
+            .session_history(json!(live.session_id), 30)
             .await?;
         assert!(
             history_text(&history).contains(S100_PROJECT),
@@ -5136,7 +5112,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         let history = loop {
             let history = live
                 .rpc
-                .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":400}), 30)
+                .session_history(json!(live.session_id), 30)
                 .await?;
             let rows = s100_user_rows(&history);
             let committed = rows.spoken.len() >= exchanges && rows.executor_inputs.len() >= requests.len();
@@ -5376,10 +5352,6 @@ fn tool_results_named(history: &Value, name: &str) -> Vec<(String, bool, String)
         .collect()
 }
 
-/// `session/history` page size for the round-trip dump: the RPC maximum, so
-/// the dump never hides a row (an S102 session has about 20).
-const S102_HISTORY_LIMIT: usize = 1000;
-
 /// Characters kept per row in [`s102_dump_comms_rows`].
 const S102_DUMP_ROW_CHARS: usize = 600;
 
@@ -5391,14 +5363,7 @@ async fn s102_dump_comms_rows(live: &mut PublicLiveHarness) {
     fn clip(row: &Value) -> String {
         row.to_string().chars().take(S102_DUMP_ROW_CHARS).collect()
     }
-    let executor = live
-        .rpc
-        .call(
-            "session/history",
-            json!({"session_id": live.session_id, "limit": S102_HISTORY_LIMIT}),
-            60,
-        )
-        .await;
+    let executor = live.rpc.session_history(json!(live.session_id), 60).await;
     match executor {
         Ok(history) => {
             let messages = history["messages"].as_array().cloned().unwrap_or_default();
@@ -5435,15 +5400,7 @@ async fn s102_dump_comms_rows(live: &mut PublicLiveHarness) {
         println!("GPT_LIVE_S102_MEMBER_ROWS no_current_session");
         return;
     };
-    match live
-        .rpc
-        .call(
-            "session/history",
-            json!({"session_id": member_session, "limit": S102_HISTORY_LIMIT}),
-            60,
-        )
-        .await
-    {
+    match live.rpc.session_history(json!(member_session), 60).await {
         Ok(history) => {
             let messages = history["messages"].as_array().cloned().unwrap_or_default();
             println!("GPT_LIVE_S102_MEMBER_ROWS total={}", messages.len());
@@ -5474,14 +5431,7 @@ async fn s102_member_round_trip(
     session_rows_before: usize,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let mut failures = Vec::new();
-    let executor_history = live
-        .rpc
-        .call(
-            "session/history",
-            json!({"session_id": live.session_id}),
-            60,
-        )
-        .await?;
+    let executor_history = live.rpc.session_history(json!(live.session_id), 60).await?;
     let requests = tool_results_named(&executor_history, "send_request");
     println!("GPT_LIVE_S102_SEND_REQUEST results={requests:?}");
     match requests.as_slice() {
@@ -5508,14 +5458,7 @@ async fn s102_member_round_trip(
     // transport append below.
     let deadline = Instant::now() + Duration::from_secs(180);
     let (peer_response_at, rows, reply) = loop {
-        let history = live
-            .rpc
-            .call(
-                "session/history",
-                json!({"session_id": live.session_id}),
-                60,
-            )
-            .await?;
+        let history = live.rpc.session_history(json!(live.session_id), 60).await?;
         let messages = history["messages"].as_array().cloned().unwrap_or_default();
         let response_at = messages.iter().position(|row| {
             let text = row.to_string();
@@ -6231,7 +6174,7 @@ async fn run_s103_interrupt_and_recover(
         // Canonical history: executor inputs.
         let history = live
             .rpc
-            .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":400}), 30)
+            .session_history(json!(live.session_id), 30)
             .await?;
         let rows = s100_user_rows(&history);
         let markdown = s100_markdown_files(&workspace);
@@ -6609,7 +6552,7 @@ async fn run_s107_stuck_close_convergence(
         let (rows, assistant_text) = loop {
             let history = live
                 .rpc
-                .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":400}), 30)
+                .session_history(json!(live.session_id), 30)
                 .await?;
             let rows = s100_user_rows(&history);
             let messages = history["messages"].as_array().cloned().unwrap_or_default();
@@ -6980,7 +6923,7 @@ async fn run_s104_handoff_voice_typed_voice(
         };
         let history = live
             .rpc
-            .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":400}), 30)
+            .session_history(json!(live.session_id), 30)
             .await?;
         let rows = s100_user_rows(&history);
         let all_text = history_text(&history).to_lowercase();
@@ -7844,7 +7787,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         // other. The row count is printed, not asserted.
         let history = live
             .rpc
-            .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":600}), 30)
+            .session_history(json!(live.session_id), 30)
             .await?;
         // Rows the runtime authors itself (a delegation result merged after
         // its channel closed arrives as injected execution context) are
@@ -8267,7 +8210,7 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
 
         let history = live
             .rpc
-            .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":400}), 30)
+            .session_history(json!(live.session_id), 30)
             .await?;
         // Under DurableFork the executor-input rows live in the fork sessions;
         // the canonical (voice) session commits each delegation's final
@@ -8852,14 +8795,7 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
     // confirmation.
     let mut settle_deadline = confirmed_at + Duration::from_secs(3);
     let history = loop {
-        let history = live
-            .rpc
-            .call(
-                "session/history",
-                json!({"session_id":session_id,"offset":0,"limit":200}),
-                30,
-            )
-            .await?;
+        let history = live.rpc.session_history(json!(session_id), 30).await?;
         let text = history_text(&history);
         if history["messages"].as_array().is_some_and(|messages| {
             messages.iter().any(|message| {
@@ -8929,14 +8865,7 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
 
     // Phase C: close drains provider observations and confirms closure.
     live.close_exact().await?;
-    let history_after_close = live
-        .rpc
-        .call(
-            "session/history",
-            json!({"session_id":session_id,"offset":0,"limit":200}),
-            30,
-        )
-        .await?;
+    let history_after_close = live.rpc.session_history(json!(session_id), 30).await?;
     let committed_before_reopen = history_text(&history_after_close);
     assert!(
         committed_before_reopen.contains(&history_text(&history)),
@@ -8995,14 +8924,7 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
     .map(|operation| operation.operation_id().clone())
     .collect();
     println!("GPT_LIVE_PUBLIC_STAGE stage=existing_member_history");
-    let history_before_work = live
-        .rpc
-        .call(
-            "session/history",
-            json!({"session_id":session_id,"offset":0,"limit":200}),
-            30,
-        )
-        .await?;
+    let history_before_work = live.rpc.session_history(json!(session_id), 30).await?;
     let message_count = history_before_work["messages"]
         .as_array()
         .ok_or("missing session history")?
@@ -9061,14 +8983,7 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
             return Err("timed out waiting for the real existing-member delegated turn".into());
         }
     };
-    let history_after_work = live
-        .rpc
-        .call(
-            "session/history",
-            json!({"session_id":session_id,"offset":0,"limit":200}),
-            30,
-        )
-        .await?;
+    let history_after_work = live.rpc.session_history(json!(session_id), 30).await?;
     let messages: Vec<WireSessionMessage> =
         serde_json::from_value(history_after_work["messages"].clone())?;
     let new_messages = &messages[message_count..];
@@ -9116,14 +9031,7 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
         120,
     ).await?;
     live.assert_existing_text_identity().await?;
-    let updated = live
-        .rpc
-        .call(
-            "session/history",
-            json!({"session_id":session_id,"offset":0,"limit":200}),
-            30,
-        )
-        .await?;
+    let updated = live.rpc.session_history(json!(session_id), 30).await?;
     assert!(
         updated["messages"].to_string().contains("Violet"),
         "delayed update must first commit to the unchanged background session"

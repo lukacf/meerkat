@@ -392,6 +392,10 @@ function handleEvent(event: AgentEvent): string {
       return `${event.hook_id}:${event.duration_ms}`;
     case 'hook_failed':
       return event.reason.reason_code;
+    case 'hook_launch_refused':
+      return event.reason.reason_code === 'confinement_refused'
+        ? `${event.hook_id}:${event.point}:${event.tool_use_id ?? ''}:${event.reason.refusal}`
+        : `${event.hook_id}:${event.point}:${event.reason.reason_code}`;
     case 'hook_denied':
       return `${event.reason_code}:${event.message}`;
     case 'text_delta':

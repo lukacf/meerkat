@@ -1,5 +1,44 @@
 # ADR-001 implementation checkpoint
 
+## Publication gate, 2026-10-03
+
+Runtime production remains frozen at `249b13147`. Main integration at
+`87dce8d2` preserved those Rust bytes. The normal push attempt failed in the
+existing Web SDK exhaustive-event test, which omitted the generated
+HookLaunchRefusedEvent. Before that failure, the Web WASM release compile took
+11m43s and the complete build/optimization took 17m00s. The test-only repair
+preserves the typed confinement cause and call reference; the existing Web SDK
+typecheck and all 96 ordinary unit tests then passed. This is SDK contract
+validation, not a new native runtime execution or performance measurement.
+
+The existing CI planner also rejected the actual PR diff before scheduling
+tests. Its estimate followed dependencies' dev fixtures even though Cargo does
+not build them for the runtime unit target. Reusing the existing build-graph
+calculation fixes that estimate while preserving the 16-minute budget and the
+runtime PR unit lane. Tests-first public planning failures and the repaired
+full classifier selftest are recorded. One entry in the existing integration
+suite table now schedules the ordinary authorization tests for authorization,
+contract, core and runtime changes. It adds no job or runner; ignored acceptance
+and timing cases retain their explicit commands. Other consumer-only triggers
+remain a coverage task.
+
+The parallel Console candidate is committed at `42df889d` with current main,
+local-feedback documentation and a browser fixture compatibility fix. Existing
+JS/component/build checks and four mock browser scenarios passed. Production
+JS/assets remain those tested at `4d4559504`. Native hook/confinement cards have
+unit/component qualification; the browser scenarios exercise permission/audit
+feedback and access state. PR 520 still has its previous remote head, so its old
+green checks do not qualify this candidate. Its normal push is queued behind
+the native Rust gate.
+
+Root owns overhead measurement on meerkat-dev after the GCP lead prepares the
+exact published candidate's optimized binary and passes both existing cost
+correctness selectors. The tentative 22:30-23:00 UTC window requires publication
+by 21:45 UTC and explicit quiet-host clearance. Otherwise the lead schedules a
+new window after readiness. No accepted overhead result or green native
+implementation PR CI exists yet. Publication-only repairs continue; additional
+runtime integration remains held.
+
 ## Current local shell and hook checkpoint, 2026-10-03
 
 The native shell continuation is committed locally through

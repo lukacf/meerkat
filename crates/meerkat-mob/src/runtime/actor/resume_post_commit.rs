@@ -288,6 +288,10 @@ impl MobActor {
             "settle_explicit_resume_post_commit",
         );
         let result = settled.and_then(|()| self.finish_explicit_resume_attempt(result));
+        if result.is_ok() {
+            // A resume re-drives every retirement this actor owns as stuck.
+            self.enqueue_stuck_retirement_redrives();
+        }
         let _ = pending.reply_tx.send(result);
     }
 }

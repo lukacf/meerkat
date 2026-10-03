@@ -26,6 +26,26 @@ pub(super) enum RetirementReply {
     },
     IdentityReconcile(IdentityReconcileCompletionAuthority),
     SpawnRollback,
+    /// A re-drive the actor owns itself (on resume): no caller awaits it.
+    Owned,
+}
+
+impl RetirementReply {
+    /// Whether a durably started retirement with this reply is owned until it
+    /// settles: it is never dropped on a stage failure and publishes its
+    /// settlement. Respawn, identity reconciliation and spawn rollback keep
+    /// their own failure handling.
+    fn owns_started_retirement(&self) -> bool {
+        matches!(self, Self::Retire(_) | Self::BatchRetire(_) | Self::Owned)
+    }
+}
+
+/// A retirement that durably started and then stopped at a stage. The mob
+/// actor keeps it until a typed re-drive or a Shutdown accounts for it.
+pub(in crate::runtime) struct StuckRetirement {
+    pub(in crate::runtime) entry: RosterEntry,
+    pub(in crate::runtime) stage: super::super::RetirementStage,
+    pub(in crate::runtime) cause: Arc<MobError>,
 }
 
 #[derive(Clone, Copy)]
@@ -58,7 +78,16 @@ pub(in crate::runtime) struct RetirementState {
     entry: RosterEntry,
     preserve_binding: bool,
     preserve_topology: bool,
+    /// Bound for the provisioner waits of the stages still ahead. Before the
+    /// durable start it is the caller's budget; once the retirement is owned
+    /// it becomes the lifecycle hang guard (see `retirement_take_ownership`).
     deadline: Instant,
+    /// The stage most recently dispatched, and when.
+    stage: super::super::RetirementStage,
+    stage_started_at: Instant,
+    started_at: Instant,
+    /// Cooperative interrupt for the in-flight stage (mob Shutdown).
+    interrupt: tokio_util::sync::CancellationToken,
     admission: Option<tokio::sync::watch::Sender<bool>>,
     reply: RetirementReply,
     detach: Vec<MobDestroyingSessionIngressObligation>,
@@ -307,6 +336,8 @@ impl RetirementArchiveObservationSource {
 struct RetirementCommit {
     identity: AgentIdentity,
     ticket: u64,
+    /// The stage was interrupted cooperatively before it produced a result.
+    interrupted: bool,
     observation: Option<RetirementObservation>,
 }
 
@@ -342,6 +373,18 @@ impl MemberEffectCommit for RetirementCommit {
             continuation
                 .routes
                 .extend(actor.take_retirement_routes(&continuation.entry));
+            if self.interrupted && continuation.reply.owns_started_retirement() {
+                actor
+                    .pending_routed_effects
+                    .append(&mut continuation.routes);
+                let error = MobError::RetirementInterrupted {
+                    member_id: self.identity.clone(),
+                    stage: continuation.stage.as_str().to_string(),
+                };
+                actor.finish_retirement(continuation, Err(error)).await;
+                actor.notify_spawn_cleanup_waiters();
+                return MemberEffectAck::Settled;
+            }
             let Some(observation) = self.observation else {
                 if let Some(rollback) = continuation.rollback.as_mut() {
                     rollback.unsettled = true;
@@ -1366,9 +1409,13 @@ impl MobActor {
             | MobCommand::ReloadMemberRegistration { agent_identity, .. } => {
                 self.retirements.contains_key(agent_identity)
             }
-            MobCommand::SubmitWork { payload, .. } => {
-                self.retirements.contains_key(&payload.runtime_id.identity)
-            }
+            // Work for a member whose retirement is durably started is
+            // refused by the machine's Retiring fence at once; parking it
+            // would hold it for the owned retirement's whole life.
+            MobCommand::SubmitWork { payload, .. } => self
+                .retirements
+                .get(&payload.runtime_id.identity)
+                .is_some_and(|continuation| !continuation.retirement_started),
             MobCommand::Spawn { spec, .. } => self.retirements.contains_key(&spec.identity),
             _ => false,
         }
@@ -1464,6 +1511,7 @@ impl MobActor {
                 Instant::now() + super::super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT,
                 None,
                 RetirementReply::BatchRetire(reply),
+                false,
             )
             .await;
             return true;
@@ -1600,6 +1648,7 @@ impl MobActor {
                 operation_owner,
                 reply,
             },
+            false,
         )
         .await;
         RespawnProgress::DeferredRetirement { result }
@@ -3020,7 +3069,15 @@ impl MobActor {
             .routes
             .extend(self.take_retirement_routes(&continuation.entry));
         match result {
-            Ok(()) => self.retirement_runtime_quiesce(continuation, false),
+            Ok(()) => {
+                tracing::info!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %continuation.entry.agent_identity,
+                    "member retirement durably started; owned until it settles"
+                );
+                self.retirement_take_ownership(&mut continuation);
+                self.retirement_runtime_quiesce(continuation, false);
+            }
             Err(error) => self.finish_retirement(continuation, Err(error)).await,
         }
     }
@@ -3207,6 +3264,7 @@ impl MobActor {
         deadline: Instant,
         admission: Option<tokio::sync::watch::Sender<bool>>,
         reply: RetirementReply,
+        redrive: bool,
     ) {
         let reply = match reply {
             RetirementReply::Retire(reply) => {
@@ -3235,9 +3293,39 @@ impl MobActor {
                     let _ = reply.send(Err(super::super::handle::MobRespawnError::from(error)));
                 }
                 RetirementReply::IdentityReconcile(_) => {}
-                RetirementReply::SpawnRollback => {}
+                RetirementReply::SpawnRollback | RetirementReply::Owned => {}
             }
             return;
+        }
+        if let Some(stuck) = self.stuck_retirements.get(&identity) {
+            if redrive || matches!(reply, RetirementReply::Owned) {
+                tracing::info!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %identity,
+                    stage = %stuck.stage,
+                    cause = %stuck.cause,
+                    "re-driving stuck member retirement"
+                );
+                self.stuck_retirements.remove(&identity);
+            } else {
+                let error = MobError::MemberRetirementStuck {
+                    member_id: identity.clone(),
+                    stage: stuck.stage.as_str().to_string(),
+                    cause: Arc::clone(&stuck.cause),
+                };
+                match reply {
+                    RetirementReply::Retire(reply) | RetirementReply::BatchRetire(reply) => {
+                        let _ = reply.send(Err(error));
+                    }
+                    RetirementReply::Respawn { reply, .. } => {
+                        let _ = reply.send(Err(super::super::handle::MobRespawnError::from(error)));
+                    }
+                    RetirementReply::IdentityReconcile(_)
+                    | RetirementReply::SpawnRollback
+                    | RetirementReply::Owned => {}
+                }
+                return;
+            }
         }
         let entry = self.roster.read().await.get(&identity).cloned();
         let Some(entry) = entry else {
@@ -3270,7 +3358,9 @@ impl MobActor {
                     }
                     self.enqueue_identity_reconcile(identity);
                 }
-                RetirementReply::SpawnRollback => {}
+                // An owned re-drive whose member is already absent has
+                // nothing left to retire.
+                RetirementReply::SpawnRollback | RetirementReply::Owned => {}
             }
             return;
         };
@@ -3287,6 +3377,10 @@ impl MobActor {
             preserve_binding: respawn && !placed,
             preserve_topology: respawn,
             deadline,
+            stage: super::super::RetirementStage::ADMISSION,
+            stage_started_at: Instant::now(),
+            started_at: Instant::now(),
+            interrupt: tokio_util::sync::CancellationToken::new(),
             admission,
             reply,
             detach: Vec::new(),
@@ -3342,6 +3436,9 @@ impl MobActor {
             self.finish_retirement(continuation, Err(error)).await;
             return;
         }
+        // A retirement whose start is already durable (a re-drive) is owned
+        // from here on.
+        self.retirement_take_ownership(&mut continuation);
         if matches!(&continuation.reply, RetirementReply::Retire(_)) {
             self.retirement_retry_pending_anchors(continuation).await;
         } else {
@@ -3826,6 +3923,8 @@ impl MobActor {
         let ticket = self.next_retirement_ticket;
         self.next_retirement_ticket = self.next_retirement_ticket.wrapping_add(1);
         continuation.ticket = ticket;
+        self.retirement_enter_stage(&mut continuation, context);
+        let interrupt = continuation.interrupt.clone();
         let mut members = vec![MemberIncarnationFence::from_entry(&continuation.entry)];
         members.extend(
             continuation
@@ -3840,18 +3939,214 @@ impl MobActor {
             context,
             members: members.into_iter().map(MemberFence::Exact).collect(),
             effects: Box::pin(async move {
+                // A cooperative interrupt (mob Shutdown) ends the stage at
+                // its next await point; the commit then reports the stage as
+                // interrupted rather than as a stage without a result.
+                let observation = tokio::select! {
+                    biased;
+                    () = interrupt.cancelled() => None,
+                    observation = effect => Some(observation),
+                };
                 Box::new(RetirementCommit {
                     identity: commit_identity,
                     ticket,
-                    observation: Some(effect.await),
+                    interrupted: observation.is_none(),
+                    observation,
                 }) as Box<dyn MemberEffectCommit>
             }),
             unsettled_commit: Box::new(RetirementCommit {
                 identity,
                 ticket,
+                interrupted: false,
                 observation: None,
             }),
         });
+    }
+
+    /// Record that `continuation` dispatches `context` next: log the settled
+    /// stage and the new one, and publish progress for an owned retirement.
+    fn retirement_enter_stage(
+        &self,
+        continuation: &mut RetirementContinuation,
+        context: &'static str,
+    ) {
+        let now = Instant::now();
+        let stage = super::super::RetirementStage::new(context);
+        tracing::info!(
+            mob_id = %self.definition.id,
+            agent_identity = %continuation.entry.agent_identity,
+            settled_stage = %continuation.stage,
+            stage_elapsed_ms = now.duration_since(continuation.stage_started_at).as_millis() as u64,
+            stage = %stage,
+            total_elapsed_ms = now.duration_since(continuation.started_at).as_millis() as u64,
+            retirement_started = continuation.retirement_started,
+            "member retirement stage started"
+        );
+        continuation.stage = stage;
+        continuation.stage_started_at = now;
+        if continuation.reply.owns_started_retirement() {
+            self.lifecycle_observations.publish(
+                &continuation.entry.agent_identity,
+                continuation.entry.generation,
+                super::super::RetirementSettlement::InProgress { stage },
+            );
+        }
+    }
+
+    /// A durably started retirement with an owning reply is owned until it
+    /// settles. Its remaining provisioner waits are bounded by the lifecycle
+    /// hang guard instead of the caller's budget: the guard is the failure
+    /// bound for a stage whose typed signal never arrives, never a completion
+    /// signal. The caller's own wait ends at its budget independently.
+    fn retirement_take_ownership(&self, continuation: &mut RetirementContinuation) {
+        if !continuation.retirement_started || !continuation.reply.owns_started_retirement() {
+            return;
+        }
+        let owned_deadline = Instant::now() + super::MEMBER_LIFECYCLE_HANG_GUARD;
+        if continuation.deadline < owned_deadline {
+            continuation.deadline = owned_deadline;
+        }
+    }
+
+    /// Hand every stuck retirement back for re-drive (after a resume).
+    pub(super) fn enqueue_stuck_retirement_redrives(&mut self) {
+        for identity in self.stuck_retirements.keys() {
+            if !self.pending_stuck_redrives.contains(identity) {
+                self.pending_stuck_redrives.push_back(identity.clone());
+            }
+        }
+    }
+
+    /// Start the next queued stuck-retirement re-drive, if the mob is running
+    /// and the member's retirement is not already in flight. Returns whether
+    /// one was started.
+    #[inline(never)]
+    pub(super) async fn start_pending_stuck_retirement_redrive(&mut self) -> bool {
+        if self.state() != MobState::Running {
+            return false;
+        }
+        while let Some(identity) = self.pending_stuck_redrives.pop_front() {
+            if !self.stuck_retirements.contains_key(&identity)
+                || self.retirements.contains_key(&identity)
+            {
+                continue;
+            }
+            self.start_retirement(
+                identity,
+                Instant::now() + super::MEMBER_LIFECYCLE_HANG_GUARD,
+                None,
+                RetirementReply::Owned,
+                true,
+            )
+            .await;
+            return true;
+        }
+        false
+    }
+
+    /// Cooperatively interrupt every in-flight owned retirement stage, for a
+    /// mob Shutdown. Each interrupted stage commits promptly as
+    /// `RetirementInterrupted`, so its retirement settles as stuck (if it
+    /// durably started) and the Shutdown no longer waits on it.
+    pub(super) fn interrupt_owned_retirements(&self) -> usize {
+        let mut interrupted = 0;
+        for continuation in self.retirements.values() {
+            if continuation.reply.owns_started_retirement()
+                && !continuation.interrupt.is_cancelled()
+            {
+                tracing::info!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %continuation.entry.agent_identity,
+                    stage = %continuation.stage,
+                    "interrupting in-flight member retirement for shutdown"
+                );
+                continuation.interrupt.cancel();
+                interrupted += 1;
+            }
+        }
+        interrupted
+    }
+
+    /// Settle an owned retirement: publish its terminal settlement and, for a
+    /// durably started retirement that failed, keep it in the stuck registry.
+    /// Returns the error the caller receives.
+    fn retirement_settle_owned(
+        &mut self,
+        continuation: &RetirementContinuation,
+        result: Result<(), MobError>,
+    ) -> Result<(), MobError> {
+        let identity = continuation.entry.agent_identity.clone();
+        let generation = continuation.entry.generation;
+        let total_elapsed_ms = continuation.started_at.elapsed().as_millis() as u64;
+        match result {
+            Ok(()) => {
+                self.stuck_retirements.remove(&identity);
+                tracing::info!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %identity,
+                    total_elapsed_ms,
+                    "member retirement settled: retired"
+                );
+                self.lifecycle_observations.publish(
+                    &identity,
+                    generation,
+                    super::super::RetirementSettlement::Retired,
+                );
+                Ok(())
+            }
+            Err(error) if continuation.retirement_started => {
+                let cause = Arc::new(error);
+                let stage = continuation.stage;
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %identity,
+                    stage = %stage,
+                    total_elapsed_ms,
+                    cause = %cause,
+                    "member retirement settled: stuck; it stays Retiring and owned until a re-drive"
+                );
+                self.stuck_retirements.insert(
+                    identity.clone(),
+                    StuckRetirement {
+                        entry: continuation.entry.clone(),
+                        stage,
+                        cause: Arc::clone(&cause),
+                    },
+                );
+                self.lifecycle_observations.publish(
+                    &identity,
+                    generation,
+                    super::super::RetirementSettlement::Stuck {
+                        stage,
+                        cause: Arc::clone(&cause),
+                    },
+                );
+                Err(MobError::MemberRetirementStuck {
+                    member_id: identity,
+                    stage: stage.as_str().to_string(),
+                    cause,
+                })
+            }
+            Err(error) => {
+                let cause = Arc::new(error);
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %identity,
+                    stage = %continuation.stage,
+                    total_elapsed_ms,
+                    cause = %cause,
+                    "member retirement settled: not started; the member is unchanged"
+                );
+                self.lifecycle_observations.publish(
+                    &identity,
+                    generation,
+                    super::super::RetirementSettlement::NotStarted {
+                        cause: Arc::clone(&cause),
+                    },
+                );
+                Err(MobError::SharedRetirementFailure(cause))
+            }
+        }
     }
 
     fn finish_retirement(
@@ -3877,10 +4172,16 @@ impl MobActor {
                     .insert(continuation.entry.agent_identity.clone(), continuation);
                 return;
             }
+            let result = if continuation.reply.owns_started_retirement() {
+                self.retirement_settle_owned(&continuation, result)
+            } else {
+                result
+            };
             match continuation.reply {
                 RetirementReply::Retire(reply) | RetirementReply::BatchRetire(reply) => {
                     let _ = reply.send(result);
                 }
+                RetirementReply::Owned => {}
                 RetirementReply::Respawn {
                     snapshot,
                     replacement,
@@ -4106,6 +4407,10 @@ impl MobActor {
             preserve_binding: resumed,
             preserve_topology: false,
             deadline: Instant::now() + Duration::from_secs(30),
+            stage: super::super::RetirementStage::ADMISSION,
+            stage_started_at: Instant::now(),
+            started_at: Instant::now(),
+            interrupt: tokio_util::sync::CancellationToken::new(),
             admission: None,
             reply: RetirementReply::SpawnRollback,
             detach: Vec::new(),

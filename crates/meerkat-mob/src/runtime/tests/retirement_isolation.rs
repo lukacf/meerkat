@@ -45,6 +45,22 @@ async fn retire_exact(
     handle: &MobHandle,
     entry: &RosterEntry,
 ) -> tokio::sync::oneshot::Receiver<Result<(), MobError>> {
+    send_exact_retirement(handle, entry, false).await
+}
+
+/// The typed re-drive of a stuck exact retirement.
+async fn redrive_exact(
+    handle: &MobHandle,
+    entry: &RosterEntry,
+) -> tokio::sync::oneshot::Receiver<Result<(), MobError>> {
+    send_exact_retirement(handle, entry, true).await
+}
+
+async fn send_exact_retirement(
+    handle: &MobHandle,
+    entry: &RosterEntry,
+    redrive: bool,
+) -> tokio::sync::oneshot::Receiver<Result<(), MobError>> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let (admission_tx, _admission_rx) = tokio::sync::watch::channel(false);
     handle
@@ -53,6 +69,7 @@ async fn retire_exact(
             authority: handle.command_authority.clone(),
             cmd: MobCommand::Retire {
                 agent_identity: entry.agent_identity.clone(),
+                redrive,
                 expected_incarnation: RetireMemberIncarnation {
                     agent_identity: entry.agent_identity.clone(),
                     agent_runtime_id: entry.agent_runtime_id.clone(),
@@ -295,7 +312,7 @@ async fn late_archive_failure_retains_exact_incarnation_and_respawn_waits() {
         .write()
         .await
         .remove(&session_id);
-    retire_exact(&handle, &entry)
+    redrive_exact(&handle, &entry)
         .await
         .await
         .expect("retry observer")

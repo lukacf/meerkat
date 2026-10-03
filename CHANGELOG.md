@@ -410,6 +410,48 @@ them.
   the factory conjoins it, so the effective gate is unchanged but code that
   read `tool_access_policy` off a built config no longer sees it.
 
+- Owned member retirement (OB3, see Added and Fixed). Exhaustive matches
+  must handle the new `meerkat_mob::MobError` variants
+  `MemberRetirementStuck { member_id, stage, cause }` and
+  `RetirementInterrupted { member_id, stage }`. Behaviour-only (not measured
+  by the gate):
+  - A retirement that durably started and then failed is no longer dropped:
+    the first caller receives `MemberRetirementStuck` (its typed cause is
+    preserved, see `MobError::retirement_root_cause`), and a later plain
+    `MobHandle::retire` answers `MemberRetirementStuck` instead of re-driving
+    it implicitly. `MobHandle::redrive_retirement` (or a mob resume) drives it.
+  - `MemberRetirementInProgress.stage` names the retirement stage in flight
+    instead of `actor_retirement_saga`.
+  - `MobHandle::shutdown` no longer answers `LifecycleOperationPending
+    { intent: "shutdown_runtime_unregister" }` while a runtime unregister is
+    pending: it awaits each session's unregister within its budget and
+    completes, reporting an unfinished one as `UnregisterPending`. It no longer
+    defers behind in-flight retirements: it interrupts them cooperatively.
+  - Shutdown cancels members' in-flight runs immediately instead of waiting
+    for their next boundary; use Stop to let them finish. The cancelled run
+    ends through its typed cancelled terminal, and
+    `MobShutdownReport::runs` reports it as
+    `MemberStopRun::CancelledByShutdown`.
+  - Shutdown holds the run starts of the members the mob hosts before its
+    interrupts, as Stop does (#1500), so an input admitted before the
+    Shutdown cannot start a run afterwards. MobMachine's `ShutdownRunning`,
+    `ShutdownStopped` and `ShutdownCompleted` emit `HoldMemberRunStarts`.
+    Remote members keep the previous Shutdown behaviour: Shutdown does not
+    contact their host for a hold. A remote member the Shutdown stops is held
+    through its host; any other is reported in the new
+    `MobShutdownReport::run_starts` as `MemberRunStarts::DelegatedToHost`.
+    Run-start releases owed to remote members are dropped.
+  - A member's Stop (and Shutdown's member stop) completes only once the
+    runtime has recorded the interrupted run's end, not when the member's
+    session reports its turn inactive; a run still unrecorded when the hang
+    guard passes is reported at stage `runtime_run_settlement`.
+  - While Shutdown drains and joins its actor-owned work, the actor keeps
+    answering commands: a second Shutdown joins it, and every other command
+    (status queries such as member status projection included) is refused
+    with `MobError::ActorCommandChannelClosed`, the answer it gets once the
+    actor exits. Treat it as "mob shutting down". A task the Shutdown joins
+    can therefore never wait on the actor that joins it.
+
 ### Security
 
 - Agent mob tools no longer accept host-only configuration from model
@@ -894,6 +936,41 @@ them.
 - `meerkat_contracts::wire` now re-exports `WireImageData` and
   `WireVideoData`, the inline media types the agent mob tools decode
   (#1538, see Security).
+- Owned member retirement and an accountable mob Shutdown (OB3):
+  - A durably started retirement is owned by the mob actor until it settles.
+    The caller's 30 s budget only bounds the caller's wait; the stages run on
+    their own typed signals, with the member lifecycle hang guard (600 s) as
+    the failure bound for a stage whose signal never arrives. A stage failure
+    leaves it `Stuck` in an owned registry, re-driven by
+    `MobHandle::redrive_retirement` or on mob resume (including cold start,
+    which now issues one typed re-drive and awaits its settlement instead of
+    re-issuing `retire` on a timer).
+  - `MobHandle::retirement_settlement(identity)` returns a
+    `RetirementSettlementWatch` (per incarnation, `generation()`), whose
+    `settled()` resolves to `RetirementSettlement::{Retired, Stuck,
+    NotStarted}`; `InProgress { stage }` names the stage in flight.
+  - `MobHandle::shutdown_with_report(ShutdownOptions)` returns a per-member
+    `MobShutdownReport` (`MemberShutdownOutcome::{Unregistered,
+    RetirementInterrupted, RetirementStuck, UnregisterPending,
+    EffectCustodyRetained}`). `ShutdownOptions::with_deadline` bounds every
+    Shutdown wait by the caller's own deadline (for example below a k8s
+    termination grace period); members still waited on are reported. Each
+    member's outcome is logged as it settles.
+  - Shutdown's runtime teardown runs off the actor loop: every session's
+    registration transaction and unregister are admitted and awaited
+    concurrently within the Shutdown's budget, so one slow session cannot
+    freeze the actor or the others; it also unregisters Retiring members'
+    sessions, which it used to skip.
+  - Diagnostics: each retirement stage start/settle and each Shutdown step
+    are logged at info with elapsed times.
+- `meerkat_runtime::MeerkatMachine::{current_run, wait_run_settled,
+  wait_current_run_settled}`: the run the machine records for a session, and
+  a typed wait until a run is no longer current. The runtime loop that
+  executes the run signals after recording its end, and the wait re-reads
+  machine truth on every signal, so it never misses one between its read and
+  its wait.
+- `MobProvisioner::stop_member_runtime_now` (defaulted): the Shutdown member
+  stop, holding run starts and cancelling the current run immediately.
 
 ### Deprecated
 
@@ -1125,6 +1202,33 @@ them.
     closure (or a cloned handle fact), so no guard can be held across an
     `.await`. Every session-task round trip takes the task's command sender
     and sends and waits with the map released.
+    release on its next bind.
+- A member retirement whose stage outlived the caller's 30 s budget was
+  dropped after its durable start: the member stayed `Retiring` with no
+  owner, its session was never unregistered, and graceful Shutdown never
+  touched it and could hang behind its teardown (OB3). The retirement is now
+  owned until it settles, and Shutdown progresses past any member it cannot
+  settle and reports it.
+- A retirement's quiesce stage now re-issues its exact-run boundary cancel
+  when an earlier cancel that was blocked behind an undeliverable control path
+  settles while the same run is still current, instead of relying on its first
+  cancel converging.
+- A joined mob Shutdown no longer interrupts a member again (pre-existing,
+  reproduced on 0.8.51 at about 1 in 14 iterations on two cores). Shutdown
+  interrupted autonomous members without holding their run starts, so an
+  admitted kickoff could start a run after the interrupt, and the runtime
+  unregister then hard-cancelled that run. Shutdown now holds run starts
+  first, cancels the current run itself, and completes each member's stop
+  only once the runtime has recorded the run's end.
+- Work submitted to a member whose retirement is durably started is refused
+  at once by the Retiring fence instead of waiting for the retirement to
+  settle.
+- A mob Shutdown could wedge the mob actor until the process was killed: its
+  lifecycle drains and final joins ran inline on the actor, so a joined task
+  waiting on the actor's reply to a command it had sent could never finish
+  (OB3's twin run: every runtime session unregistered within 10 s, then the
+  actor answered nothing more until SIGKILL at about 330 s).
+
 - The machine TLA generator parenthesizes a field's pending value when a
   later expression in the same update block reads it. A conditionally
   updated field was spliced bare as `IF c THEN a ELSE b`, so TLA+ precedence

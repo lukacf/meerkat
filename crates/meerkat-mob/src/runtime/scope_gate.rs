@@ -196,6 +196,7 @@ impl MobCommand {
             | Self::ResumeLifecyclePreparationResolved { .. }
             | Self::AutonomousMemberStopsResolved { .. }
             | Self::AutonomousStopInterruptSettled
+            | Self::ShutdownTeardownResolved { .. }
             | Self::ResumeLifecycleMemberObserved { .. }
             | Self::ResumeLifecycleMemberReady { .. }
             | Self::ResumeLifecycleMemberSettled { .. }
@@ -273,6 +274,9 @@ impl MobCommand {
             | Self::LifecycleSnapshot { .. }
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
+            | Self::SpawnLiveMutationAwaitingActorForTest { .. }
+            | Self::HonourCompletionForTest { .. }
+            | Self::SpawnLiveMutationSendingCompletionForTest { .. }
             | Self::SpawnActivationCustodyProbe { .. }
             | Self::SpawnPreparationProbe { .. }
             | Self::BeginStopQuiesceForTest { .. }
@@ -540,7 +544,7 @@ impl MobCommand {
             | Self::HostRuntimeIncarnationObserved { reply_tx, .. }
             | Self::RecordOperatorActionProvenance { reply_tx, .. }
             | Self::SetSpawnPolicy { reply_tx, .. }
-            | Self::Shutdown { reply_tx } => {
+            | Self::Shutdown { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::EnsureMemberEventTap { reply_tx, .. } => {
@@ -561,6 +565,18 @@ impl MobCommand {
             #[cfg(test)]
             Self::ParkActorForObservationTest { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::SpawnLiveMutationAwaitingActorForTest { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::SpawnLiveMutationSendingCompletionForTest { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::HonourCompletionForTest { .. } => {
+                tracing::error!("scope denial reached a test-only completion; dropped");
             }
             #[cfg(any(test, feature = "test-support"))]
             Self::CrashStopPreservingDurableWorkForTest { reply_tx } => {
@@ -585,6 +601,7 @@ impl MobCommand {
             | Self::ResumeLifecyclePreparationResolved { .. }
             | Self::AutonomousMemberStopsResolved { .. }
             | Self::AutonomousStopInterruptSettled
+            | Self::ShutdownTeardownResolved { .. }
             | Self::ResumeLifecycleMemberObserved { .. }
             | Self::ResumeLifecycleMemberReady { .. }
             | Self::ResumeLifecycleMemberSettled { .. }
@@ -925,6 +942,7 @@ mod tests {
         let (admission_tx, _admission_rx) = tokio::sync::watch::channel(false);
         let cmd = MobCommand::Retire {
             agent_identity: identity.clone(),
+            redrive: false,
             expected_incarnation: super::super::state::RetireMemberIncarnation {
                 agent_identity: identity.clone(),
                 agent_runtime_id: crate::ids::AgentRuntimeId::new(identity, generation),

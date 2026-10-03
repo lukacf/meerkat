@@ -28,7 +28,9 @@ impl MobStopReport {
             .iter()
             .filter_map(|(identity, outcome)| match &outcome.starts {
                 MemberRunStarts::NotHoldable { reason } => Some((identity, reason)),
-                MemberRunStarts::Held | MemberRunStarts::NotBound => None,
+                MemberRunStarts::Held
+                | MemberRunStarts::NotBound
+                | MemberRunStarts::DelegatedToHost => None,
             })
     }
 }
@@ -51,6 +53,9 @@ pub enum MemberStopRun {
     NoRun,
     /// The run was cancelled at its next boundary; the stop waits for it.
     CancelledAtBoundary { run_id: RunId },
+    /// A mob Shutdown cancelled the run immediately rather than at its next
+    /// boundary; the run still ends through its typed cancelled terminal.
+    CancelledByShutdown { run_id: RunId },
     /// The run ended on its own between the hold and the cancel.
     RunEndedBeforeCancel { run_id: RunId },
     /// A turn-driven member's run: Stop does not cancel it, and it finishes
@@ -77,6 +82,11 @@ pub enum MemberRunStarts {
     /// Running), or a remote peer that is unbound (a bind while the mob is
     /// Stopped delivers the hold first).
     NotBound,
+    /// Shutdown only, never in a Stop report (a Stop always contacts remote
+    /// members): a remote member a mob Shutdown did not contact (OB3). Its
+    /// host owns its run starts and teardown; Shutdown never probes a remote
+    /// host it is not otherwise stopping a member on.
+    DelegatedToHost,
 }
 
 /// Why a member's run starts could not be held.

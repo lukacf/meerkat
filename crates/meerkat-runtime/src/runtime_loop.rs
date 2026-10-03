@@ -4450,7 +4450,30 @@ struct RuntimeLoopAuthorityBinding {
     detached_test_gate: Option<std::sync::Arc<crate::tokio::sync::Mutex<()>>>,
 }
 
+/// Signals [`crate::meerkat_machine::MeerkatMachine::wait_run_settled`]
+/// waiters when dropped: the loop scope it spans may have recorded a run's
+/// end, so waiters re-check machine truth.
+struct RunSettlementPublication {
+    machine: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
+}
+
+impl Drop for RunSettlementPublication {
+    fn drop(&mut self) {
+        if let Some(machine) = self.machine.upgrade() {
+            machine.publish_run_settlement();
+        }
+    }
+}
+
 impl RuntimeLoopAuthorityBinding {
+    /// A guard that signals run-settlement waiters when the scope it spans
+    /// ends, however it ends.
+    fn run_settlement_publication(&self) -> RunSettlementPublication {
+        RunSettlementPublication {
+            machine: self.machine.clone(),
+        }
+    }
+
     fn new(
         machine: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
         session_id: meerkat_core::types::SessionId,
@@ -5044,6 +5067,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
             // typed and an explicit resume (member reload) completes (#1248).
             tracing::warn!(
                 session_id = %teardown_session_id,
+                ?disposition,
                 %error,
                 "runtime-loop exit teardown did not complete; the registration is detached until an explicit resume completes its unregister"
             );
@@ -5252,7 +5276,12 @@ pub(crate) fn spawn_runtime_loop_with_completions(
         // hot-spins forever (2026-07 "meerkat-machine-cleanup" incident:
         // 9.94s/10s CPU on the one worker dispatching every session command).
         let mut feed_hold: Option<FeedWakeHoldState> = None;
+        // The loop's exit (stop, terminal handoff) can end a run too.
+        let _loop_exit_run_settlement = authority_binding.run_settlement_publication();
         loop {
+            // Effects handled in an iteration (a terminal run effect, a stop)
+            // can end a run outside `process_queue`.
+            let _run_settlement = authority_binding.run_settlement_publication();
             // Build a future for the idle wake. Backed by the completion feed
             // only when generated ops cursor authority is present; otherwise
             // pends forever because the feed watermark is not delivery
@@ -6082,6 +6111,8 @@ async fn process_queue(
 ) -> bool {
     let post_commit_hooks = authority_binding.post_commit_hooks().await;
     loop {
+        // Each run iteration ends with its run recorded (or never started).
+        let _run_settlement = authority_binding.run_settlement_publication();
         let turn_finalization_guard = match executor.turn_finalization_boundary_handle() {
             Some(boundary) => match boundary.acquire().await {
                 Ok(guard) => Some(guard),

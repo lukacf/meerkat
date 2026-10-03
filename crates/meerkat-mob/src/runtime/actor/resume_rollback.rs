@@ -103,7 +103,10 @@ impl MobActor {
             });
             return;
         }
-        let targets = match self.prepare_all_autonomous_member_stops().await {
+        let targets = match self
+            .prepare_all_autonomous_member_stops(super::PendingAutonomousStopKind::Stop)
+            .await
+        {
             Ok(targets) => targets,
             // Exact interrupts still in flight: each one settling re-drives
             // this rollback (`AutonomousStopInterruptSettled`).

@@ -245,19 +245,41 @@ async fn destroy_during_a_pending_stop_runs_after_it() {
     assert_eq!(handle.status().await.unwrap(), MobState::Destroyed);
 }
 
+/// Shutdown cancels a member's in-flight turn immediately (it does not wait
+/// for the turn's next boundary), reports the run as cancelled by shutdown,
+/// and a second Shutdown arriving meanwhile joins it and receives its result
+/// without interrupting the member again.
 #[tokio::test]
-async fn shutdown_waits_for_a_member_turn_and_a_second_shutdown_joins_it() {
+async fn shutdown_cancels_a_member_turn_and_a_second_shutdown_joins_it() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let session = spawn_winding_down_member(&handle, &service, "shutdown-wind-down").await;
+    let identity = AgentIdentity::from("shutdown-wind-down");
+    // The member's kickoff turn is running: the runtime has its run current.
+    tokio::time::timeout(STEP, service.wait_keep_alive_turn_entered(&session))
+        .await
+        .expect("the kickoff turn starts");
+    let adapter = MobSessionService::runtime_adapter(service.as_ref())
+        .expect("the test mob is runtime-backed");
+    let kickoff_run = adapter
+        .current_run(&session)
+        .await
+        .expect("the kickoff turn's run is current");
 
     let first = tokio::spawn({
         let handle = handle.clone();
-        async move { handle.shutdown().await }
+        async move {
+            handle
+                .shutdown_with_report(crate::runtime::ShutdownOptions::default())
+                .await
+        }
     });
     stop_awaits(std::slice::from_ref(&session)).await;
     let interrupts = service.interrupt_call_count_for(&session);
     let mut second = handle
-        .enqueue_actor_command_for_test(|reply_tx| MobCommand::Shutdown { reply_tx })
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::Shutdown {
+            deadline: None,
+            reply_tx,
+        })
         .await
         .expect("enqueue second shutdown");
     assert_eq!(actor_round_trip(&handle).await, MobState::Running);
@@ -267,8 +289,6 @@ async fn shutdown_waits_for_a_member_turn_and_a_second_shutdown_joins_it() {
     );
 
     service.set_session_active(&session, false).await;
-    // The joined command receives the pending shutdown's own result: done,
-    // or the retryable runtime-unregister lane the handle retries (#1413).
     let joined = tokio::time::timeout(STEP, second)
         .await
         .expect("the joined shutdown answers once the turn ends")
@@ -280,7 +300,26 @@ async fn shutdown_waits_for_a_member_turn_and_a_second_shutdown_joins_it() {
         ),
         "the joined shutdown carries the pending shutdown's result: {joined:?}"
     );
-    expect_task_ok(first, "first shutdown").await;
+    let report = tokio::time::timeout(STEP, first)
+        .await
+        .expect("the first shutdown completes")
+        .expect("first shutdown task")
+        .expect("first shutdown");
+    assert_eq!(
+        report.runs.get(&identity),
+        Some(
+            &crate::runtime::stop_report::MemberStopRun::CancelledByShutdown {
+                run_id: kickoff_run
+            }
+        ),
+        "the shutdown cancelled the member's turn immediately: {:?}",
+        report.runs
+    );
+    assert_eq!(
+        report.run_starts.get(&identity),
+        Some(&crate::runtime::stop_report::MemberRunStarts::Held),
+        "the shutdown held the local member's run starts before its interrupt"
+    );
     assert_eq!(
         service.interrupt_call_count_for(&session),
         interrupts,
@@ -292,7 +331,6 @@ async fn shutdown_waits_for_a_member_turn_and_a_second_shutdown_joins_it() {
 #[tokio::test]
 async fn a_stop_command_parks_on_its_in_flight_interrupt_and_completes_when_it_settles() {
     let (handle, service) = create_test_mob(sample_definition()).await;
-    service.set_start_turn_delay_ms(600_000);
     let identity = AgentIdentity::from("gated-interrupt");
     let mut spec = SpawnMemberSpec::new("worker", identity.as_str());
     spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
@@ -304,12 +342,12 @@ async fn a_stop_command_parks_on_its_in_flight_interrupt_and_completes_when_it_s
         .resolve_bridge_session_id(&identity)
         .await
         .expect("session-backed autonomous member");
-    wait_for_start_turn_call_count(
-        service.as_ref(),
-        1,
-        "the member's turn is in flight, so the stop must interrupt it",
-    )
-    .await;
+    // The member's keep-alive turn is running and ends at its boundary when
+    // the stop's cancel lands (a turn the boundary cancel cannot end is
+    // correctly waited on by the run-settled stop). Property from #1452.
+    tokio::time::timeout(STEP, service.wait_keep_alive_turn_entered(&session))
+        .await
+        .expect("the member's turn is in flight, so the stop must interrupt it");
     let gate = service.install_interrupt_gate(&session).await;
 
     // A Stop command with no handle retry around it: the exact interrupt is
@@ -328,6 +366,43 @@ async fn a_stop_command_parks_on_its_in_flight_interrupt_and_completes_when_it_s
     gate.release_all();
     expect_reply_ok(stop, "stop after its interrupt settles").await;
     assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+}
+
+/// A stopped member's session reports its turn over before the runtime
+/// records the interrupted run's end. The Stop resolves only once the runtime
+/// has, so when it returns no run is current, the Resume that follows runs
+/// against a member with no stopped run left over, and nothing interrupts the
+/// member again.
+#[tokio::test]
+async fn stop_resolves_once_the_runtime_records_the_run_end_and_resume_follows() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let session = spawn_winding_down_member(&handle, &service, "stop-run-settlement").await;
+    let adapter = MobSessionService::runtime_adapter(service.as_ref())
+        .expect("the test mob is runtime-backed");
+
+    let stop = start_stop(&handle);
+    stop_awaits(std::slice::from_ref(&session)).await;
+    let interrupts = service.interrupt_call_count_for(&session);
+    service.set_session_active(&session, false).await;
+    expect_task_ok(stop, "stop once the member's turn ends").await;
+    assert_eq!(
+        adapter.current_run(&session).await,
+        None,
+        "the stop returned only after the runtime recorded the interrupted run's end"
+    );
+    assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+
+    tokio::time::timeout(STEP, handle.resume())
+        .await
+        .expect("resume completes")
+        .expect("resume after the stop");
+    assert_eq!(handle.status().await.unwrap(), MobState::Running);
+    assert_eq!(
+        service.interrupt_call_count_for(&session),
+        interrupts,
+        "neither the settled stop nor the resume interrupts the member again"
+    );
+    handle.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]

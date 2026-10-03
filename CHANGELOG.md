@@ -1107,6 +1107,23 @@ them.
   own boxed frame, and its fallback-origin resume check runs out of line.
   Before, both recovery paths sat inline in one poll frame. The deepest
   debug path now fits in about 1.5 MiB.
+- Public GPT Live holds a delegation result that arrives while the user's
+  latest utterance is unanswered. Appending it then diverted the model into
+  answering the result instead of the user, and the request was never
+  delegated (S100, S101). The result is released in order when provider
+  ordering answers the utterance: the model's next output, or the
+  utterance's `session.delegation.created`. A close or teardown first leaves
+  it unsent, and it settles as interrupted by close. Utterance positions come
+  from the session timeline, so a transcription tail that arrives late is
+  not a new utterance.
+- A result's speak cue is no longer sent while the model speaks past the
+  result's insertion point (output observed ending after the result's
+  acknowledgement position). An instructions append during output could
+  stop the answer mid-sentence: 5 of 44 such cues did in the final soak.
+- A live delegation result interrupted by its channel's close (held,
+  in flight, or refused) is merged into the source member as runtime work.
+  Before, it was retired without the post-close merge and lost.
+
 - Public GPT Live no longer drops a delegation result's speak cue when the
   result lands soon after the model's last word. Previously a cue was
   suppressed when the gap was under 1000 ms. A result that landed 400 ms

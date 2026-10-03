@@ -979,6 +979,63 @@ async fn session_map_is_not_held_across_a_command_parked_on_a_busy_turn() {
     );
 }
 
+/// The session task publishes its transcript authority between commands and
+/// turns, so an observation-only reader never waits for a running turn: the
+/// published observation answers while the turn is held, and the ordered one
+/// (a command to the task) answers once the turn ends.
+#[tokio::test(start_paused = true)]
+async fn published_transcript_authority_answers_while_the_turn_is_held() {
+    let gate = Arc::new(TurnGate::default());
+    let service = make_service(MockAgentBuilder::with_turn_gate(Arc::clone(&gate)));
+    let session = service
+        .create_session(create_req_deferred("held"))
+        .await
+        .expect("create session")
+        .session_id;
+    let idle = service
+        .observe_published_session_transcript_authority(&session)
+        .await
+        .expect("published authority of an idle session");
+
+    let turn = tokio::spawn({
+        let service = Arc::clone(&service);
+        let session = session.clone();
+        async move { service.start_turn(&session, turn_req("hold")).await }
+    });
+    gate.started.notified().await;
+
+    let ordered = tokio::spawn({
+        let service = Arc::clone(&service);
+        let session = session.clone();
+        async move { service.observe_session_transcript_authority(&session).await }
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !ordered.is_finished(),
+        "the ordered observation waits for the turn"
+    );
+
+    let published = tokio::time::timeout(
+        std::time::Duration::from_secs(3600),
+        service.observe_published_session_transcript_authority(&session),
+    )
+    .await
+    .expect("the published observation must not wait for the turn")
+    .expect("published authority while the turn is held");
+    assert_eq!(published.session_id(), idle.session_id());
+    assert_eq!(published.transcript_revision(), idle.transcript_revision());
+    assert_eq!(published.message_count(), idle.message_count());
+    assert_eq!(published.mutation_generation(), idle.mutation_generation());
+    assert!(!turn.is_finished(), "the turn is still held");
+
+    gate.release.notify_one();
+    turn.await.expect("turn task").expect("turn");
+    ordered
+        .await
+        .expect("ordered observation task")
+        .expect("ordered authority once the turn ends");
+}
+
 #[tokio::test]
 async fn test_create_and_run_turn() {
     let service = make_service(MockAgentBuilder::new());

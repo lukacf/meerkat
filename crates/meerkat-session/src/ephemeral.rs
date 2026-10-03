@@ -1462,6 +1462,10 @@ pub struct SessionSnapshot {
 /// must derive it from their canonical live `Session`; runtime-backed wrappers
 /// cannot silently omit the capability and force ordinary authority checks
 /// back through an O(document) export.
+/// The session task's last published transcript authority. Errors carry the
+/// agent's message (the agent error type is not `Clone`).
+type PublishedTranscriptAuthority = Result<SessionTranscriptAuthoritySnapshot, String>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionTranscriptAuthoritySnapshot {
     session_id: SessionId,
@@ -2264,6 +2268,9 @@ struct SessionHandle {
     state_tx: watch::Sender<SessionState>,
     state_rx: watch::Receiver<SessionState>,
     summary_rx: watch::Receiver<SessionSummaryCache>,
+    /// The session task's transcript authority as of its last command or
+    /// turn, so observations never wait behind a running turn.
+    transcript_authority_rx: watch::Receiver<PublishedTranscriptAuthority>,
     llm_identity_rx: watch::Receiver<SessionLlmIdentity>,
     /// Mutexed shell around generated session turn-admission authority.
     turn_admission: Arc<std::sync::Mutex<TurnAdmissionSlot>>,
@@ -2510,6 +2517,7 @@ struct SessionTaskControl {
     actor_witness: LiveSessionActorWitness,
     state_tx: watch::Sender<SessionState>,
     summary_tx: watch::Sender<SessionSummaryCache>,
+    transcript_authority_tx: watch::Sender<PublishedTranscriptAuthority>,
     llm_identity_tx: watch::Sender<SessionLlmIdentity>,
     turn_admission: Arc<std::sync::Mutex<TurnAdmissionSlot>>,
     interrupt_notify: Arc<tokio::sync::Notify>,
@@ -2528,6 +2536,24 @@ struct SessionTaskControl {
 }
 
 impl SessionTaskControl {
+    /// Publish the actor's current transcript authority (bound to this
+    /// incarnation's generation) for observers that must not wait on the
+    /// task. Called whenever the task is between commands and turns.
+    fn publish_transcript_authority<A: SessionAgent>(&self, agent: &A, generation: u64) {
+        let current: PublishedTranscriptAuthority = agent
+            .session_transcript_authority()
+            .map(|snapshot| snapshot.bind_actor_generation(generation))
+            .map_err(|error| error.to_string());
+        self.transcript_authority_tx.send_if_modified(|published| {
+            if *published == current {
+                false
+            } else {
+                *published = current;
+                true
+            }
+        });
+    }
+
     /// Publish first to the singular installed-projector lane, then fan out to
     /// best-effort broadcast subscribers. The dedicated queue absorbs bursts
     /// without letting a slow projector perturb live session ordering or lose
@@ -4214,6 +4240,44 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })?;
 
         Ok(session)
+    }
+
+    /// Observe the live actor's transcript authority as the session task last
+    /// published it, without sending the task a command. A task in the middle
+    /// of a turn answers nothing until the turn ends; this reads the authority
+    /// it published before the turn instead. Observation-only readers (session
+    /// views, presence checks) use it; callers that need an observation
+    /// ordered after their own commands use
+    /// [`Self::observe_session_transcript_authority`].
+    pub async fn observe_published_session_transcript_authority(
+        &self,
+        id: &SessionId,
+    ) -> Result<LiveSessionTranscriptAuthoritySnapshot, SessionError> {
+        let (actor_witness, task_exited, published) = self
+            .sessions
+            .with_handle(id, |handle| {
+                (
+                    handle.actor_witness.clone(),
+                    handle.command_tx.is_closed(),
+                    handle.transcript_authority_rx.borrow().clone(),
+                )
+            })
+            .await
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        if task_exited {
+            return Err(SessionError::Agent(AgentError::InternalError(
+                "Session task has exited".to_string(),
+            )));
+        }
+        let authority =
+            published.map_err(|message| SessionError::Agent(AgentError::InternalError(message)))?;
+        if !actor_witness.is_live() {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        Ok(LiveSessionTranscriptAuthoritySnapshot {
+            actor_witness,
+            authority,
+        })
     }
 
     /// Observe exact actor-owned transcript authority without cloning the
@@ -6784,6 +6848,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             last_assistant_text: initial_summary.last_assistant_text,
         });
         let (llm_identity_tx, llm_identity_rx) = watch::channel(llm_identity);
+        let (transcript_authority_tx, transcript_authority_rx) = watch::channel(
+            agent
+                .session_transcript_authority()
+                .map(|snapshot| snapshot.bind_actor_generation(0))
+                .map_err(|error| error.to_string()),
+        );
         let event_journal = SessionEventJournal::install(
             session_id.clone(),
             self.session_event_line(&session_id).await,
@@ -6807,6 +6877,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 actor_witness: actor_witness.clone(),
                 state_tx,
                 summary_tx,
+                transcript_authority_tx,
                 llm_identity_tx,
                 turn_admission: Arc::clone(&turn_admission),
                 interrupt_notify: interrupt_notify.clone(),
@@ -6830,6 +6901,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 actor_witness: actor_witness.clone(),
                 state_tx,
                 summary_tx,
+                transcript_authority_tx,
                 llm_identity_tx,
                 turn_admission: Arc::clone(&turn_admission),
                 interrupt_notify: interrupt_notify.clone(),
@@ -6851,6 +6923,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             state_tx: state_tx_handle,
             state_rx,
             summary_rx,
+            transcript_authority_rx,
             llm_identity_rx,
             turn_admission: Arc::clone(&turn_admission),
             created_at,
@@ -8359,6 +8432,9 @@ async fn session_task<A: SessionAgent>(
     let source = EventSourceIdentity::session(session_id.clone());
 
     let teardown_authorization = loop {
+        // Between commands and turns: publish what observers may read
+        // without waiting on this task.
+        control.publish_transcript_authority(&agent, transcript_authority_generation);
         let cmd = tokio::select! {
             biased;
             () = control.shutdown_notify.notified() => {

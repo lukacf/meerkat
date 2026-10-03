@@ -2776,6 +2776,17 @@ fn view_from_authoritative_session(session: &Session) -> SessionView {
     }
 }
 
+/// How a live-authority check observes the live actor's transcript authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveAuthorityObservation {
+    /// A command to the session task, ordered after the caller's earlier
+    /// commands. Waits for a running turn to end.
+    Ordered,
+    /// The authority the task last published between commands and turns.
+    /// Never waits on the task; observation-only readers use it.
+    Published,
+}
+
 enum LiveSessionAuthority {
     NoLive,
     LiveAuthoritative {
@@ -4883,9 +4894,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<LiveSessionAuthority, SessionError> {
+        self.live_session_authority_with(id, LiveAuthorityObservation::Ordered)
+            .await
+    }
+
+    async fn live_session_authority_with(
+        &self,
+        id: &SessionId,
+        observation: LiveAuthorityObservation,
+    ) -> Result<LiveSessionAuthority, SessionError> {
         let mut retry = OptimisticReadRetry::new(id, "live session authority");
         loop {
-            let live_authority = match self.inner.observe_session_transcript_authority(id).await {
+            let observed = match observation {
+                LiveAuthorityObservation::Ordered => {
+                    self.inner.observe_session_transcript_authority(id).await
+                }
+                LiveAuthorityObservation::Published => {
+                    self.inner
+                        .observe_published_session_transcript_authority(id)
+                        .await
+                }
+            };
+            let live_authority = match observed {
                 Ok(authority) => authority,
                 Err(SessionError::NotFound { .. }) => {
                     return Ok(LiveSessionAuthority::NoLive);
@@ -5143,13 +5173,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<LiveSessionAuthority, SessionError> {
-        let mut result = self.live_session_authority(id).await;
+        let mut result = self
+            .live_session_authority_with(id, LiveAuthorityObservation::Published)
+            .await;
         for _ in 1..OBSERVATION_LOAD_ATTEMPTS {
             if !Self::is_transcript_revision_conflict(&result) {
                 break;
             }
             let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
-            result = self.live_session_authority(id).await;
+            result = self
+                .live_session_authority_with(id, LiveAuthorityObservation::Published)
+                .await;
         }
         result
     }
@@ -13602,7 +13636,11 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                             hook().await;
                         }
                     }
-                    match self.inner.observe_session_transcript_authority(id).await {
+                    match self
+                        .inner
+                        .observe_published_session_transcript_authority(id)
+                        .await
+                    {
                         Ok(current) if current == snapshot => {
                             retry.finish();
                             return Ok(view);
@@ -26031,9 +26069,11 @@ mod tests {
     }
 
     /// A member-status observation of a session mid-turn reads the watches
-    /// the actor publishes. The authority-arbitrating `read` asks the session
-    /// task, which serves no command during a turn, so it waits for the
-    /// whole turn; the status view must not.
+    /// the actor publishes, and so does the authority-arbitrating `read`: it
+    /// compares against the transcript authority the session task published
+    /// before the turn, never asking the busy task. The ordered observation
+    /// (a command to the task, for export and commit callers that need it
+    /// ordered after their own commands) still waits for the turn.
     #[tokio::test]
     async fn live_session_view_observation_does_not_wait_for_active_turn() {
         let builder = BlockingRunBuilder::new();
@@ -26076,14 +26116,22 @@ mod tests {
                 .await
         });
         builder.wait_for_entered_runs(1).await;
+        let busy_read = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            SessionService::read(service.as_ref(), &id),
+        )
+        .await
+        .expect("the authority-arbitrating read must not wait for the active turn")
+        .unwrap();
+        assert_eq!(busy_read.state.session_id, id);
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(100),
-                SessionService::read(service.as_ref(), &id),
+                service.inner.observe_session_transcript_authority(&id),
             )
             .await
             .is_err(),
-            "the authority-arbitrating read queues behind the running turn"
+            "the ordered transcript-authority observation queues behind the running turn"
         );
         let busy_view = tokio::time::timeout(
             std::time::Duration::from_secs(1),

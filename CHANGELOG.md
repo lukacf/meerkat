@@ -664,6 +664,22 @@ them.
 
 ### Fixed
 
+- Reading a session whose turn is in flight no longer waits for the turn to
+  end.
+  - `PersistentSessionService::read` and `has_live_session` checked the live
+    actor's transcript authority by sending its session task a command. A
+    session task serves no commands while a turn runs, so a session read (for
+    example REST `GET /sessions/{id}`, mob run accounting, or a host status
+    check) waited for the whole turn.
+  - The session task now publishes its transcript authority between commands
+    and turns. Observation-only reads use the new
+    `EphemeralSessionService::observe_published_session_transcript_authority`
+    and never wait on the task. Callers that need an observation ordered after
+    their own commands keep `observe_session_transcript_authority`.
+  - A REST test also pins that stopping an in-flight run
+    (`POST /sessions/{id}/runs/{run_id}/stop`) reaches the interrupt without
+    waiting for the run to end on its own.
+
 - The runtime store test `contended_unregister_finalization_does_not_starve_runtime_worker`
   no longer fails on a loaded host. Its two 1 s wall-clock waits are replaced
   by typed handoffs. The heartbeat now fires on a test-only signal sent when

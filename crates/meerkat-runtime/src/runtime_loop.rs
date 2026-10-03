@@ -4620,6 +4620,15 @@ impl RuntimeLoopAuthorityBinding {
     }
 
     #[cfg(any(test, feature = "test-support"))]
+    async fn run_before_executor_apply_test_hook(&self) {
+        if let Some(machine) = self.machine.upgrade() {
+            machine
+                .run_runtime_loop_before_executor_apply_test_hook(&self.session_id)
+                .await;
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     async fn run_before_queue_authority_test_hook(&self) {
         if let Some(machine) = self.machine.upgrade() {
             machine
@@ -6842,6 +6851,11 @@ async fn process_queue(
                 drop(queue_authority_guard);
 
                 let directed_interaction_ids = staged_directed_interaction_ids;
+
+                #[cfg(any(test, feature = "test-support"))]
+                authority_binding
+                    .run_before_executor_apply_test_hook()
+                    .await;
 
                 // Execute outside the driver lock (this calls start_turn, which is slow).
                 // The staged -> executing transition is bounded and typed: a

@@ -14978,6 +14978,187 @@ async fn a_hold_landing_after_the_loop_woke_parks_it() {
     assert_eq!(applies.load(Ordering::SeqCst), 1);
 }
 
+/// #1471: a boundary cancel taken after the runtime loop started a run but
+/// before the executor entered it (here: blocked at the top of `apply`) is not
+/// lost. The executor receives a cooperative cancel bound to that exact run
+/// while the run is still in flight, nothing reaches the ambient
+/// executor-wide cancel, and nothing hard-cancels the run.
+#[tokio::test]
+async fn boundary_cancel_before_the_executor_enters_reaches_that_exact_run() {
+    struct ExactBoundaryHandle {
+        exact_cancels: Arc<std::sync::Mutex<Vec<RunId>>>,
+        exact_cancel_seen: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for ExactBoundaryHandle {
+        async fn cancel_after_boundary(
+            &self,
+            expected_run_id: &RunId,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.exact_cancels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(expected_run_id.clone());
+            self.exact_cancel_seen.notify_one();
+            Ok(())
+        }
+    }
+
+    struct CountingInterruptHandle {
+        hard_cancels: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorInterruptHandle for CountingInterruptHandle {
+        async fn hard_cancel_run_if_current(
+            &self,
+            _expected_run_id: &RunId,
+            _reason: String,
+        ) -> Result<bool, CoreExecutorError> {
+            self.hard_cancels.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        }
+    }
+
+    struct GatedExecutor {
+        apply_started: Arc<Notify>,
+        allow_apply: Arc<Notify>,
+        ambient_cancels: Arc<AtomicUsize>,
+        exact_cancels: Arc<std::sync::Mutex<Vec<RunId>>>,
+        exact_cancel_seen: Arc<Notify>,
+        hard_cancels: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for GatedExecutor {
+        fn boundary_handle(
+            &self,
+        ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>> {
+            Some(Arc::new(ExactBoundaryHandle {
+                exact_cancels: Arc::clone(&self.exact_cancels),
+                exact_cancel_seen: Arc::clone(&self.exact_cancel_seen),
+            }))
+        }
+
+        fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+            Some(Arc::new(CountingInterruptHandle {
+                hard_cancels: Arc::clone(&self.hard_cancels),
+            }))
+        }
+
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            let allowed = self.allow_apply.notified();
+            self.apply_started.notify_one();
+            allowed.await;
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.ambient_cancels.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let apply_started = Arc::new(Notify::new());
+    let allow_apply = Arc::new(Notify::new());
+    let ambient_cancels = Arc::new(AtomicUsize::new(0));
+    let exact_cancels = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let exact_cancel_seen = Arc::new(Notify::new());
+    let hard_cancels = Arc::new(AtomicUsize::new(0));
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(GatedExecutor {
+                apply_started: Arc::clone(&apply_started),
+                allow_apply: Arc::clone(&allow_apply),
+                ambient_cancels: Arc::clone(&ambient_cancels),
+                exact_cancels: Arc::clone(&exact_cancels),
+                exact_cancel_seen: Arc::clone(&exact_cancel_seen),
+                hard_cancels: Arc::clone(&hard_cancels),
+            }),
+        )
+        .await
+        .expect("register the gated executor");
+
+    let started = apply_started.notified();
+    let (outcome, _completion) = adapter
+        .accept_input_with_completion(&session_id, make_prompt("cancelled before entry"))
+        .await
+        .expect("admit the prompt");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    // Hang guard only.
+    tokio::time::timeout(Duration::from_secs(30), started)
+        .await
+        .expect("the run reaches the executor");
+    let run_id = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("machine state")
+        .current_run_id
+        .expect("the started run");
+
+    // The cancel lands while the executor has not entered the run yet.
+    let delivered = exact_cancel_seen.notified();
+    adapter
+        .cancel_after_boundary(&session_id)
+        .await
+        .expect("cancel after boundary");
+    tokio::time::timeout(Duration::from_secs(30), delivered)
+        .await
+        .expect("the run-bound cancel reaches the executor while the run is in flight");
+    allow_apply.notify_one();
+
+    let exact = exact_cancels
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(
+        exact,
+        vec![RunId::from_uuid(
+            uuid::Uuid::parse_str(&run_id.0).expect("run id")
+        )],
+        "the cancel is bound to that exact run"
+    );
+    assert_eq!(
+        ambient_cancels.load(Ordering::SeqCst),
+        0,
+        "nothing reaches the ambient executor-wide cancel"
+    );
+    assert_eq!(
+        hard_cancels.load(Ordering::SeqCst),
+        0,
+        "nothing hard-cancels the run"
+    );
+}
+
 #[tokio::test]
 async fn hard_cancel_current_run_on_attached_runtime_uses_live_handle_during_apply() {
     struct BlockingExecutor {

@@ -1187,6 +1187,14 @@ them.
 
 ### Fixed
 
+- GPT Live Turbo S S102 no longer fails a run whose member answered
+  correctly. The oracle looked for the text "Peer response from" in the
+  executor's history, which appears only when `send_response` carries no
+  blocks. With blocks, the row's content is the response itself (combined5
+  S102 R3, and S102 r2 before it). The check now reads the typed comms row:
+  `response_terminal` for the exact request id, from the member, with status
+  `completed`.
+
 - GPT Live no longer voices an invented answer from another member while a
   request to that member is still pending (Turbo S S102 r2: "Pemberton said
   it feels like it's around mid-afternoon" the moment the "I asked Analyst

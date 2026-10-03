@@ -1889,6 +1889,97 @@ fn s99_answer_text(events: &[Value], start: usize) -> String {
 }
 
 #[cfg(test)]
+fn s102_response_row(request_id: &str, status: &str, peer: &str, content: &str) -> Value {
+    json!({
+        "role": "system",
+        "kind": "comms",
+        "body": "Peer response terminal",
+        "blocks": [{
+            "type": "comms",
+            "kind": "response_terminal",
+            "direction": "incoming",
+            "content": [{"type": "text", "text": content}],
+            "peer": {"display_name": peer, "id": "967e2b3a-a189-5d4f-951e-2596b4ef3de0"},
+            "request_id": request_id,
+            "status": status,
+            "summary": "Peer response terminal",
+        }],
+    })
+}
+
+/// combined5 S102 R3: the member answered with send_response carrying
+/// blocks, so the executor's row content is the response text, not the
+/// rendered "Peer response from ..." header. The typed fields still identify
+/// it as the member's completed response to this request.
+#[test]
+fn s102_oracle_finds_a_completed_response_that_carried_blocks() {
+    let request = "9db7c7e2-7d66-4c52-8c4b-c7c34a415c5d";
+    let member = format!("gpt-live-public-e2e-82976/executor/{S102_MEMBER}");
+    let row = s102_response_row(
+        request,
+        "completed",
+        &member,
+        "It is currently 13:32 UTC, according to tide_ledger.",
+    );
+    assert!(s102_is_member_response_terminal(&row, request));
+    let rendered = s102_response_row(
+        request,
+        "completed",
+        &member,
+        &format!("Peer response from {member} (to request: {request})\nStatus: completed"),
+    );
+    assert!(s102_is_member_response_terminal(&rendered, request));
+}
+
+/// The oracle stays strict: another request, another peer, a non-completed
+/// status, or a plain peer message is not the member's response.
+#[test]
+fn s102_oracle_rejects_anything_but_the_members_completed_response() {
+    let request = "9db7c7e2-7d66-4c52-8c4b-c7c34a415c5d";
+    let member = format!("gpt-live-public-e2e-82976/executor/{S102_MEMBER}");
+    let answer = "It is currently 13:32 UTC.";
+    assert!(!s102_is_member_response_terminal(
+        &s102_response_row(
+            "00000000-0000-0000-0000-000000000000",
+            "completed",
+            &member,
+            answer
+        ),
+        request
+    ));
+    assert!(!s102_is_member_response_terminal(
+        &s102_response_row(
+            request,
+            "completed",
+            "gpt-live-public-e2e-82976/executor/other",
+            answer
+        ),
+        request
+    ));
+    assert!(!s102_is_member_response_terminal(
+        &s102_response_row(request, "failed", &member, answer),
+        request
+    ));
+    let message =
+        json!({"blocks": [{"type": "comms", "kind": "message", "peer": {"display_name": member}}]});
+    assert!(!s102_is_member_response_terminal(&message, request));
+}
+
+#[test]
+fn s102_sent_request_id_reads_the_receipt_from_either_encoding() {
+    let receipt = r#"{"kind":"peer_request","receipt":{"kind":"peer_request_sent","request_id":"9db7c7e2-7d66-4c52-8c4b-c7c34a415c5d"},"status":"sent"}"#;
+    assert_eq!(
+        s102_sent_request_id(receipt).as_deref(),
+        Some("9db7c7e2-7d66-4c52-8c4b-c7c34a415c5d")
+    );
+    let as_json_string = serde_json::to_string(receipt).expect("encode as a JSON string");
+    assert_eq!(
+        s102_sent_request_id(&as_json_string).as_deref(),
+        Some("9db7c7e2-7d66-4c52-8c4b-c7c34a415c5d")
+    );
+}
+
+#[cfg(test)]
 fn s99_oracle_events(entries: &[(&str, f64, &str)]) -> Vec<Value> {
     entries
         .iter()
@@ -5424,6 +5515,39 @@ async fn s102_dump_comms_rows(live: &mut PublicLiveHarness) {
 /// asking turn. That later turn is conversation the provider has not heard
 /// while the user waits on the call, so the mirror voices it (an ordinary
 /// session-context append); it is not background work to keep quiet.
+/// The `request_id` of the executor's successful `send_request`, from the
+/// tool result's `peer_request_sent` receipt. The result content is the
+/// receipt JSON, sometimes carried as a JSON string holding that JSON.
+fn s102_sent_request_id(content: &str) -> Option<String> {
+    let mut value: Value = serde_json::from_str(content).ok()?;
+    if let Value::String(inner) = &value {
+        value = serde_json::from_str(inner).ok()?;
+    }
+    value["receipt"]["request_id"].as_str().map(str::to_owned)
+}
+
+/// Whether `row` carries the member's completed terminal response to the
+/// executor's request, read from the typed comms block in the executor's
+/// history. The block's content is the rendered "Peer response from ..."
+/// text when the response carried no blocks, and the response's own blocks
+/// when it did (combined5 S102 R3), so the typed fields decide, never text:
+/// kind `response_terminal`, the exact request id, status `completed`, and
+/// the member as the peer.
+fn s102_is_member_response_terminal(row: &Value, request_id: &str) -> bool {
+    let member_suffix = format!("/{S102_MEMBER}");
+    row["blocks"].as_array().is_some_and(|blocks| {
+        blocks.iter().any(|block| {
+            block["type"] == "comms"
+                && block["kind"] == "response_terminal"
+                && block["request_id"] == request_id
+                && block["status"] == "completed"
+                && block["peer"]["display_name"]
+                    .as_str()
+                    .is_some_and(|name| name.ends_with(&member_suffix))
+        })
+    })
+}
+
 async fn s102_member_round_trip(
     live: &mut PublicLiveHarness,
     evidence: &Journal,
@@ -5434,8 +5558,8 @@ async fn s102_member_round_trip(
     let executor_history = live.rpc.session_history(json!(live.session_id), 60).await?;
     let requests = tool_results_named(&executor_history, "send_request");
     println!("GPT_LIVE_S102_SEND_REQUEST results={requests:?}");
-    match requests.as_slice() {
-        [(_, false, _)] => {}
+    let request_id = match requests.as_slice() {
+        [(_, false, content)] => s102_sent_request_id(content),
         [(_, true, content)] => {
             failures.push(format!(
                 "the executor's send_request to {S102_MEMBER} failed: {content}"
@@ -5449,7 +5573,13 @@ async fn s102_member_round_trip(
             ));
             return Ok(failures);
         }
-    }
+    };
+    let Some(request_id) = request_id else {
+        failures.push(format!(
+            "the executor's send_request to {S102_MEMBER} returned no request id: {requests:?}"
+        ));
+        return Ok(failures);
+    };
     // The member's reply arrives at the executor as a correlated peer
     // response (`format_peer_response_projection`), and the executor's turn
     // over it commits an assistant reply after it. Both are read from
@@ -5460,10 +5590,9 @@ async fn s102_member_round_trip(
     let (peer_response_at, rows, reply) = loop {
         let history = live.rpc.session_history(json!(live.session_id), 60).await?;
         let messages = history["messages"].as_array().cloned().unwrap_or_default();
-        let response_at = messages.iter().position(|row| {
-            let text = row.to_string();
-            text.contains("Peer response from") && text.contains(S102_MEMBER)
-        });
+        let response_at = messages
+            .iter()
+            .position(|row| s102_is_member_response_terminal(row, &request_id));
         let reply = response_at.and_then(|at| {
             messages[at + 1..]
                 .iter()

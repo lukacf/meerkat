@@ -408,7 +408,6 @@ them.
   `meerkat_mob` build helpers. It travels as `declared_tool_restriction` and
   the factory conjoins it, so the effective gate is unchanged but code that
   read `tool_access_policy` off a built config no longer sees it.
-
 - Owned member retirement (OB3, see Added and Fixed). Exhaustive matches
   must handle the new `meerkat_mob::MobError` variants
   `MemberRetirementStuck { member_id, stage, cause }` and
@@ -1204,7 +1203,6 @@ them.
     closure (or a cloned handle fact), so no guard can be held across an
     `.await`. Every session-task round trip takes the task's command sender
     and sends and waits with the map released.
-    release on its next bind.
 - A member retirement whose stage outlived the caller's 30 s budget was
   dropped after its durable start: the member stayed `Retiring` with no
   owner, its session was never unregistered, and graceful Shutdown never
@@ -1230,7 +1228,6 @@ them.
   waiting on the actor's reply to a command it had sent could never finish
   (OB3's twin run: every runtime session unregistered within 10 s, then the
   actor answered nothing more until SIGKILL at about 330 s).
-
 - The machine TLA generator parenthesizes a field's pending value when a
   later expression in the same update block reads it. A conditionally
   updated field was spliced bare as `IF c THEN a ELSE b`, so TLA+ precedence

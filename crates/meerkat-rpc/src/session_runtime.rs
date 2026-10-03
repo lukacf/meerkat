@@ -14519,7 +14519,8 @@ mod tests {
     /// stopped run's rows never reach it. Only a run whose commit may still
     /// land is left alone (see the racing test below).
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_uncommitted_terminal_is_stale_from_either_position_and_the_next_turn_runs_on_durable_truth() {
+    async fn an_uncommitted_terminal_is_stale_from_either_position_and_the_next_turn_runs_on_durable_truth()
+     {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(AgentFactory::new(temp.path().join("sessions")), 4);
         let (build, calls, release) = block_after_first_build_config();

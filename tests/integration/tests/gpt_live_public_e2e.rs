@@ -6657,7 +6657,83 @@ async fn s102_member_round_trip(
              as a voiced session row"
         )),
     }
+    // No premature peer claim: before the reply exists in the provider
+    // conversation (the session-lane append carrying it, on the sideband),
+    // no response may attribute an answer to the peer (soak c43aa3db S102
+    // run 2: "Pemberton said it feels like it's around mid-afternoon" before
+    // the peer had replied).
+    let lines = evidence.provider_stream_lines()?;
+    let reply_sent = lines.iter().find_map(|line| match &line.entry {
+        provider_recording::Entry::ClientEvent { event }
+            if line.channel_ordinal == channel
+                && event["type"] == "session.commentary.append"
+                && event["content"]
+                    .as_str()
+                    .is_some_and(|content| commentary_carries(content, &probe)) =>
+        {
+            Some(line.elapsed_ms)
+        }
+        _ => None,
+    });
+    if let Some(reply_sent) = reply_sent {
+        let timeline = live.peer.timeline().await?;
+        let offset = sideband_clock_alignment(&timeline, &lines, channel)
+            .map_err(|reason| format!("S102 premature-claim check cannot align clocks: {reason}"))?
+            .offset_ms;
+        let readouts = live.peer.readouts().await?;
+        for claim in peer_claims_before(
+            &readouts.records,
+            reply_sent as i64 - offset,
+            S102_MEMBER_TOKEN,
+        ) {
+            failures.push(format!(
+                "the voice attributed an answer to {S102_MEMBER} before its reply existed: {claim:?}"
+            ));
+        }
+    }
     Ok(failures)
+}
+
+/// Words that attribute speech to someone: "<peer> said", "<peer> thinks".
+const PEER_ATTRIBUTION_VERBS: &[&str] = &[
+    "said",
+    "says",
+    "replied",
+    "replies",
+    "told",
+    "thinks",
+    "answered",
+    "reckons",
+    "estimates",
+];
+
+/// Responses that attribute an answer to the peer (`peer` followed by an
+/// attribution verb, or "according to <peer>") and opened before the peer's
+/// reply existed in the provider conversation (`reply_at_ms`, the peer
+/// clock). A response opened before the reply cannot be voicing it.
+fn peer_claims_before(
+    records: &[support::ReadoutRecord],
+    reply_at_ms: i64,
+    peer: &str,
+) -> Vec<String> {
+    records
+        .iter()
+        .filter(|record| {
+            record
+                .opened_ms
+                .is_none_or(|opened| (opened as i64) < reply_at_ms)
+        })
+        .filter(|record| {
+            let words = normalize_words(&record.text);
+            let words: Vec<&str> = words.split(' ').collect();
+            let attributed = words
+                .windows(2)
+                .any(|pair| pair[0] == peer && PEER_ATTRIBUTION_VERBS.contains(&pair[1]));
+            let according = words.windows(3).any(|w| w == ["according", "to", peer]);
+            attributed || according
+        })
+        .map(|record| record.text.clone())
+        .collect()
 }
 
 /// The text blocks of one `block_assistant` history row, joined.
@@ -11150,6 +11226,26 @@ mod config_tests {
         assert_eq!((alignment.offset_ms, alignment.pairs), (500, 1));
         assert_eq!(super::sideband_disconnect_elapsed(&lines, 1), Some(5000));
         assert_eq!(super::sideband_disconnect_elapsed(&lines, 2), None);
+    }
+
+    /// A response that attributes an answer to the peer before the peer's
+    /// reply existed is a premature claim (soak c43aa3db S102 run 2); asking
+    /// the peer, or attributing after the reply arrived, is not.
+    #[test]
+    fn a_peer_claim_before_the_reply_exists_is_flagged() {
+        let premature = readout(
+            2,
+            Some(3000),
+            "Yeah. On it, I'll ask and let you know. Pemberton said it feels like it's around mid-afternoon.",
+        );
+        let asking = readout(1, Some(1500), "Sure, I'm asking Analyst Pemberton now.");
+        let after = readout(5, Some(6000), "Analyst Pemberton said it's 10 UTC.");
+        let according = readout(3, Some(3500), "According to Pemberton it's mid-afternoon.");
+        let claims =
+            super::peer_claims_before(&[asking, premature, according, after], 4000, "pemberton");
+        assert_eq!(claims.len(), 2, "{claims:?}");
+        assert!(claims[0].contains("Pemberton said it feels like"));
+        assert!(claims[1].starts_with("According to Pemberton"));
     }
 
     /// Scheduler narration on the commentary lane is not a result; the

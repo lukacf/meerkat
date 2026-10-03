@@ -2256,6 +2256,84 @@ them.
 
 ### Changed
 
+- GPT Live Turbo S oracles assert typed contracts only. Tolerant, record-only
+  and advisory checks are gone; measurements are journaled as metrics, and
+  `make turbo-s-oracle-gate` (run in CI) rejects soft check shapes in the
+  scenario code.
+  - Talk-over: every barge-in that lands on assistant speech (S100's, and
+    S103's barge-in and correction) must leave the user's onset to the last
+    audible assistant frame within `TALK_OVER_BOUND_MS` (3000 ms). The ingest
+    segment (onset to the provider's first voiced input frame, taken at the
+    reflected input stream's cadence slot so sideband jitter is excluded,
+    500 ms) and the playout segment (the provider's last voiced output frame
+    to last audible, 900 ms) are bounded on their own, and the provider's
+    turn-taking segment is journaled on every yield. A reply already in
+    flight when the provider hears the user is measured as the yield.
+    Assistant speech that starts after the provider could react, while the
+    user is still speaking, fails unless it is a classified backchannel, and
+    a wordless burst there must end within the talk-over bound. The bounds are frozen: each is the maximum of a stated
+    healthy population (73 yields of the 0.8.51 soak) plus the browser's
+    100 ms energy window, and an exceedance is a finding to attribute, never
+    a reason to raise the number. The old rule, that the audio ends before
+    the user's utterance does, tied the bound to the fixture's length.
+  - Readouts: every delegation result is delivered into the provider
+    conversation exactly once and voiced inside one response, in every
+    scenario. A result delivered before the session's close request (the
+    user's sign-off or the close) must be followed by assistant speech; one
+    delivered after it is journaled. A repeat inside one response is a
+    stutter, journaled as a metric. The browser peer records responses; it no longer raises
+    `duplicate_readout` itself, and missing or malformed records fail the
+    scenario.
+  - S102 fails when the voice attributes an answer to the peer before the
+    peer's reply reached the provider conversation (a premature claim), by the
+    provider's transcript timing: the peer's name or a pronoun standing for it
+    with an attribution verb ("They said they don't know"), or "according to"
+    the peer. When the reply never arrives, the whole call counts as before
+    it.
+  - S98 asks for the code word after the background update with an
+    unambiguous question ("What is the code word now?"); the earlier recall
+    asked for the word the user asked to remember, which stays the old one.
+  - S99 tests the summary gate against the create-time seed: the vault phrase
+    is followed by enough text turns to fall outside the seed window of a
+    summary-pending open (derived from `LIVE_STARTUP_RECENT_TURNS` and
+    `LIVE_STARTUP_VERBATIM_ITEMS_MAX`), so it is unknown until the summary is
+    released, and a fact inside the window is recalled at once as a positive
+    control. The phrase used to sit inside the seed, so the old "unknown
+    before release" probe only passed while the model ignored history it had.
+  - S99's generated vault phrase never repeats a word back to back. The
+    recall is graded on the model's own transcript of its speech, where a
+    spoken "maple maple" is ambiguous; exact recall of all five words is
+    still required.
+  - S105 asks its recall, and S98 its updated-code-word recall, only after
+    the typed turn's rows (its prompt and the assistant's reply) are
+    acknowledged on the quiet lane (`session.thinking.append`, every fragment
+    of the row's token acknowledged); a typed row on the commentary lane
+    fails (#1614). Asked earlier, the recall raced the rows.
+  - S97 and S98 are recorded like every other GPT Live Turbo S scenario
+    (evidence journal, browser evidence, provider stream). The JSON-RPC host
+    opens channels on its own request tasks, so S97's open installs the
+    provider-stream recorder as a process-wide fallback (test-realtime-fixtures
+    only) around `live/open` and the answer.
+  - S97's result readout is anchored on the provider's acknowledgement of
+    the result append as the browser saw it: the peer journals every
+    `session.*.appended` with its media counters, and decoded speech plus an
+    output transcript delta must follow that row. The old baseline was taken
+    after the harness noticed the worker retire, so a prompt readout could
+    finish before it and fail a correct run.
+  - The browser peer attaches overlap facts to every fixture end, so a
+    barge-in that lands just after the assistant went quiet still gets its
+    talk-over-start check; S106 counts the reopen's append lanes from the old
+    channel's close; S97 keeps its scratch workspace alive for the whole run.
+  - Waiting for the assistant to finish follows its output to the end: each
+    assistant output event restarts the 3 s quiet window, with no ceiling
+    while output keeps arriving, so a long legitimate readout is not a
+    failure. The scenario's overall deadline still bounds the wait.
+  - A failed scenario (an error or a panic) closes its live channel through
+    the exact close before teardown, so the provider's `session.closed`
+    drains the sideband and the provider stream records every frame sent
+    before the failure. Before, the teardown aborted the server and could lose
+    frames the browser had already acted on (a delegation the sideband had
+    not yet read).
 - Model calls and shell rounds are attributable in debug logs. The agent loop
   logs each model call's session, turn, attempt, elapsed time and outcome
   ("model call settled"); shell tool calls log their tool call id at start and

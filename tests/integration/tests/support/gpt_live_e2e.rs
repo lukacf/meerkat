@@ -711,7 +711,18 @@ impl BrowserPeer {
         Ok(serde_json::from_value(result)?)
     }
 
-    /// Soft browser faults (overlap, duplicate readout) observed so far.
+    /// The peer's readout records (one per response) so far. Strict: a
+    /// snapshot without well-formed records is an error, never "no readouts".
+    pub async fn readouts(&mut self) -> Result<ReadoutSnapshot, Box<dyn std::error::Error>> {
+        let snapshot = self.snapshot().await?;
+        let readouts = snapshot
+            .get("readouts")
+            .cloned()
+            .ok_or("the peer snapshot carries no readout records")?;
+        Ok(serde_json::from_value(readouts)?)
+    }
+
+    /// Soft browser faults (overlap) observed so far.
     pub async fn faults(
         &mut self,
     ) -> Result<Vec<evidence::BrowserFault>, Box<dyn std::error::Error>> {
@@ -744,6 +755,37 @@ impl BrowserPeer {
             sleep(Duration::from_millis(100)).await;
         }
     }
+}
+
+/// One response's assistant output transcript, as the peer segmented it:
+/// the output between consecutive response boundaries (a user transcript
+/// delta, a commentary append, a delegation; output pauses do not split).
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadoutRecord {
+    pub index: u64,
+    /// The boundary event type that opened the response (`connect` for the
+    /// first one).
+    pub opened_by: String,
+    pub opened_ms: Option<u64>,
+    /// The boundary event type that closed it; `None` only for the response
+    /// still open at snapshot time.
+    pub closed_by: Option<String>,
+    pub closed_ms: Option<u64>,
+    /// Arrival of the response's latest non-empty output delta.
+    pub last_output_ms: Option<u64>,
+    pub text: String,
+    /// Sentences of 3 or more normalized words this response spoke more than
+    /// once (a measurement: a stutter inside one response).
+    pub stutters: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadoutSnapshot {
+    pub records: Vec<ReadoutRecord>,
+    /// The peer stopped recording responses at its bound.
+    pub overflow: bool,
 }
 
 /// Timeline anchor a scheduled fixture waits for.

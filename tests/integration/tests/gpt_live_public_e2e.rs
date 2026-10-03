@@ -19,7 +19,9 @@
 #[path = "support/gpt_live_e2e.rs"]
 mod support;
 
+use futures::FutureExt;
 use std::collections::BTreeMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -29,7 +31,7 @@ use meerkat::experimental_gpt_live::{
     ExperimentalLivePublicObservationDeliveryError, ExperimentalLivePublicObservationKind,
     ExperimentalLivePublicObservationPublisher, GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID,
     GPT_LIVE_PUBLIC_MODEL, LIVE_RUNTIME_WORK_PREFIX, PublicGptLiveOpenAuthorityConfig,
-    PublicGptLivePlaybackPolicy,
+    PublicGptLivePlaybackPolicy, provider_recording,
 };
 use meerkat::session_runtime::live_summary::{
     LiveContextBootstrapMode, LiveContextSummarizer, LiveContextSummaryError,
@@ -550,27 +552,24 @@ async fn silence_hold_greeting(
     Ok(greeted)
 }
 
-/// One tolerant check: journaled and printed; failures are summarized at
-/// the end of the scenario but do not fail it on their own.
-fn record_tolerant(
+/// One measurement: journaled and printed for diagnosis. It carries no
+/// verdict. A scenario's verdict comes only from its deterministic checks,
+/// each asserting a product contract (typed events, canonical rows,
+/// settlement signals); model wording and wall-clock latency are measured,
+/// never judged (scripts/turbo-s-oracle-gate rejects soft checks).
+fn record_metric(
     evidence: &Journal,
     channel: u32,
     scenario: &str,
-    check: &str,
-    passed: bool,
+    metric: &str,
     detail: String,
-    failures: &mut Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    evidence.record(EvidenceRecord::Tolerant {
+    evidence.record(EvidenceRecord::Metric {
         channel,
-        check: check.to_owned(),
-        passed,
+        metric: metric.to_owned(),
         detail: detail.clone(),
     })?;
-    println!("GPT_LIVE_{scenario}_TOLERANT check={check} passed={passed} detail={detail:?}");
-    if !passed {
-        failures.push(format!("{check}: {detail}"));
-    }
+    println!("GPT_LIVE_{scenario}_METRIC metric={metric} detail={detail:?}");
     Ok(())
 }
 
@@ -614,6 +613,10 @@ struct PublicLiveHarness {
     /// Utterances heard on channels the runtime closed on a media fault, in
     /// order: the scenario's canonical-row accounting includes them.
     media_fault_heard_utterances: Vec<String>,
+    /// Onset (current peer's clock) of the user's sign-off fixture, when
+    /// the scenario played one: the session's close request, for the
+    /// readout rule (`readout_contract`).
+    sign_off_onset_ms: Option<u64>,
     _temp: tempfile::TempDir,
 }
 
@@ -711,6 +714,35 @@ impl PublicLiveHarness {
         .await
         .map_err(|_| "S98 playback completion exceeded its 45-second observation bound")??;
         Ok(())
+    }
+
+    /// After a failed scenario body: close the active channel through the
+    /// product's exact close, which ends only at the provider's
+    /// `session.closed`, so the sideband drains and every server frame the
+    /// provider sent before the failure is in `provider-stream.jsonl`.
+    /// Combined5 S99 b R5: the browser saw a delegation the sideband had not
+    /// yet read, the failure aborted the server, and the stream ended at
+    /// `session.started`. Evidence only: the outcome is printed, never
+    /// asserted, and the journal keeps the failing stage.
+    async fn close_after_failure(&mut self) {
+        let Ok((shared, exact)) = self.shared() else {
+            return;
+        };
+        let outcome = timeout(
+            Duration::from_secs(5),
+            shared.member_host.close_experimental_live_active_channel(
+                shared.authority.as_ref(),
+                &exact.id,
+                &exact.activation_receipt,
+            ),
+        )
+        .await;
+        let outcome = match outcome {
+            Ok(Ok(status)) => format!("{status:?}"),
+            Ok(Err(error)) => format!("error: {error}"),
+            Err(_) => "exceeded the 5000 ms harness ceiling".to_owned(),
+        };
+        println!("GPT_LIVE_FAILURE_CLOSE outcome={outcome}");
     }
 
     async fn close_exact(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -854,11 +886,10 @@ impl PublicLiveHarness {
     }
 
     /// Journal the current channel's time-to-talk breakdown (see
-    /// `Record::TimeToTalk`) and the tolerant open -> connected bound.
+    /// `Record::TimeToTalk`) and its open -> connected measurement.
     async fn record_time_to_talk(
         &mut self,
         scenario: &str,
-        tolerant_failures: &mut Vec<String>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let evidence = self
             .evidence
@@ -920,14 +951,12 @@ impl PublicLiveHarness {
                 .map(|(delta, speech)| delta as i64 - speech as i64)
         );
         let open_to_connected = delta(webrtc_connected_ms);
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             scenario,
-            "open_request_to_webrtc_connected_under_5s",
-            open_to_connected.is_some_and(|ms| ms < 5000),
+            "open_request_to_webrtc_connected_ms",
             format!("open_request_to_connected_ms={open_to_connected:?}"),
-            tolerant_failures,
         )?;
         Ok(())
     }
@@ -999,16 +1028,10 @@ impl PublicLiveHarness {
         self.channel_id = json!(replacement.id);
         *exact = replacement;
         std::mem::replace(&mut self.peer, peer).close().await;
+        // The new peer has its own clock and has heard no sign-off.
+        self.sign_off_onset_ms = None;
         Ok(())
     }
-}
-
-async fn open_public_live(
-    temp_prefix: &str,
-    operator_principal: &'static str,
-    execution_policy: LiveDelegationExecutionPolicy,
-) -> Result<PublicLiveHarness, Box<dyn std::error::Error>> {
-    open_public_live_with_summary(temp_prefix, operator_principal, execution_policy, None).await
 }
 
 async fn open_public_live_with_summary(
@@ -1249,11 +1272,23 @@ async fn open_public_live_with(
             .as_str()
             .ok_or("spawned executor has no durable session")?,
     )?;
+    let followups = bootstrap
+        .as_ref()
+        .map(|bootstrap| bootstrap.seed_followups.clone())
+        .unwrap_or_default();
     if let Some(prompt) = bootstrap
         .as_ref()
         .map(|bootstrap| bootstrap.seed_prompt.as_str())
         .or(seed_prompt.as_deref())
     {
+        rpc.call(
+            "turn/start",
+            json!({"session_id":session_id,"prompt":prompt}),
+            120,
+        )
+        .await?;
+    }
+    for prompt in followups {
         rpc.call(
             "turn/start",
             json!({"session_id":session_id,"prompt":prompt}),
@@ -1482,9 +1517,21 @@ async fn open_public_live_with(
             unmeasured_publication_fault,
             media_health,
             media_fault_heard_utterances: Vec::new(),
+            sign_off_onset_ms: None,
             _temp: temp,
         });
     }
+    // The RPC host opens the channel on its own request tasks, outside any
+    // recorder scope: a recorded run installs the provider-stream recorder
+    // as the process fallback around the open and the answer, when the
+    // provider client is built.
+    let channel = evidence.as_ref().map(Journal::next_channel).transpose()?;
+    let fallback = match (&evidence, channel) {
+        (Some(evidence), Some(channel)) => {
+            Some(evidence.provider_recording(channel).install_fallback())
+        }
+        _ => None,
+    };
     let rejected = rpc
         .call_raw(
             "live/open",
@@ -1507,7 +1554,13 @@ async fn open_public_live_with(
         .await?;
     let channel_id = open["channel_id"].clone();
 
-    let mut peer = BrowserPeer::start(BrowserPeerProtocol::Public).await?;
+    let mut peer = match (&evidence, channel) {
+        (Some(evidence), Some(channel)) => {
+            BrowserPeer::start_recorded(BrowserPeerProtocol::Public, evidence.clone(), channel)
+                .await?
+        }
+        _ => BrowserPeer::start(BrowserPeerProtocol::Public).await?,
+    };
     let offer = peer.call(json!({"type":"prepare"})).await?;
     assert_eq!(offer["protocol"], "public");
     // The answer step is where the host creates the provider session. The
@@ -1532,9 +1585,13 @@ async fn open_public_live_with(
         })?;
     peer.call(json!({"type":"answer","answer_sdp":answer["answer_sdp"]}))
         .await?;
+    drop(fallback);
+    if let (Some(evidence), Some(channel)) = (&evidence, channel) {
+        evidence.channel(channel, evidence::ChannelAction::Connected)?;
+    }
 
     Ok(PublicLiveHarness {
-        evidence: None,
+        evidence,
         rpc,
         peer,
         channel_id,
@@ -1547,6 +1604,7 @@ async fn open_public_live_with(
         unmeasured_publication_fault: None,
         media_health: None,
         media_fault_heard_utterances: Vec::new(),
+        sign_off_onset_ms: None,
         _temp: temp,
     })
 }
@@ -1555,6 +1613,27 @@ async fn open_public_live_with(
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
 -> Result<(), Box<dyn std::error::Error>> {
+    // Recorded like every Turbo S scenario: the journal, the browser
+    // evidence and the provider stream, so a failure is attributable from
+    // transcripts (verdict 67bf6160 S97 run 3 had only tracing).
+    let evidence = Journal::create_for("S97", "S97".to_owned())?;
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let result = run_s97_client_context_vertical(evidence.clone()).await;
+    let finished = evidence.finish_classified(match &result {
+        Ok(()) => evidence::Outcome::Passed,
+        Err(_) => evidence::Outcome::Failed,
+    });
+    if let Ok(Some(degradation)) = &finished {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
+    result?;
+    finished?;
+    Ok(())
+}
+
+async fn run_s97_client_context_vertical(
+    evidence: Journal,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat::live_close=info,meerkat_live=debug,meerkat_rpc=debug,meerkat_runtime::meerkat_machine::runtime_control=debug,meerkat_mob_mcp::live_delegation=debug,meerkat_mob::runtime::delegation=debug",
@@ -1562,19 +1641,34 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
         .with_test_writer()
         .try_init();
     require_api_key()?;
+    evidence.stage(EvidenceStage::Opening)?;
     let PublicLiveHarness {
         mut rpc,
         mut peer,
         channel_id,
         mob_id,
         server_task,
+        // The scratch workspace lives as long as the scenario: dropped here,
+        // the executor's working directory vanished and every S97 result was
+        // "the working directory does not exist" (verdict 5e6cdc16).
+        _temp,
         ..
-    } = open_public_live(
-        "gpt-live-public-e2e-",
-        "scenario-97-operator",
-        LiveDelegationExecutionPolicy::DurableFork,
-    )
+    } = open_public_live_with(PublicLiveOpen {
+        temp_prefix: "gpt-live-public-e2e-",
+        operator_principal: "scenario-97-operator",
+        execution_policy: LiveDelegationExecutionPolicy::DurableFork,
+        bootstrap: None,
+        seed_prompt: None,
+        evidence: Some(evidence.clone()),
+        unmeasured_playback: false,
+        executor_instructions: None,
+        extra_members: Vec::new(),
+        instructions_preface: None,
+        summary_bootstrap: false,
+        shared_host: false,
+    })
     .await?;
+    evidence.stage(EvidenceStage::Connected)?;
 
     // Phase A: greeting with a provider-native barge-in. The public API has
     // no turn identifiers, so the boundary is the first assistant output
@@ -1740,14 +1834,69 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
         }
         sleep(Duration::from_millis(500)).await;
     };
-    let post_result_audio_baseline = peer.audio_evidence().await?;
+    // When the harness noticed the worker retire: evidence only. It lags the
+    // result by an output-driven amount (this loop also drains outputs), so
+    // it is never the readout's baseline (verdict 67bf6160 S97 run 3).
+    let channel = evidence.current_channel()?;
+    record_metric(
+        &evidence,
+        channel,
+        "S97",
+        "member_retired_observed",
+        format!(
+            "journal_ms={}",
+            evidence.elapsed_ms_at(std::time::Instant::now())
+        ),
+    )?;
+    // The readout is anchored on the provider's acknowledgement of this
+    // delegation's result append, as the peer saw it: decoded speech and an
+    // output transcript delta must both follow it. A readout that completes
+    // before the retirement poll still counts; a result that is never voiced
+    // still fails.
+    let (ack_index, ack_audio) =
+        s97_result_ack(&evidence, channel, &provider_delegation_ref).await?;
+    record_metric(
+        &evidence,
+        channel,
+        "S97",
+        "result_ack",
+        format!(
+            "peer_event_index={ack_index} journal_ms={} baseline={ack_audio:?}",
+            evidence.elapsed_ms_at(std::time::Instant::now())
+        ),
+    )?;
+    // The result states S97's one fact: the executor inspected the empty
+    // scratch workspace. Speech after the ack must voice that fact; speech
+    // that only finishes an earlier reply ("channel ready") is not the
+    // readout (check c009c3b8 S97 run 5 passed on exactly that).
+    let lines = evidence.provider_stream_lines()?;
+    let result = result_deliveries(&lines)
+        .into_iter()
+        .find(|delivery| delivery.delegation_id == provider_delegation_ref)
+        .ok_or("S97: the acknowledged result has no delivery on the provider stream")?;
+    assert!(
+        normalize_words(&result.text)
+            .split(' ')
+            .any(|word| word == S97_RESULT_FACT),
+        "S97: the executor's result does not state the workspace fact {S97_RESULT_FACT:?}: {:?}",
+        result.text
+    );
+    let after_ack = usize::try_from(ack_index)? + 1;
     let readout = wait_for_events(&mut peer, 120, |events| {
-        events[delegation_index + 1..]
-            .iter()
-            .any(|event| event["type"] == "session.output_transcript.delta")
+        events.get(after_ack..).is_some_and(|_| {
+            normalize_words(&output_transcript_text(events, after_ack))
+                .split(' ')
+                .any(|word| word == S97_RESULT_FACT)
+        })
     })
-    .await?;
-    wait_for_spoken_output(&mut peer, post_result_audio_baseline, 60).await?;
+    .await
+    .map_err(|error| {
+        format!(
+            "S97: the result ({:?}) was never voiced after its acknowledgement: {error}",
+            result.text
+        )
+    })?;
+    wait_for_spoken_output(&mut peer, ack_audio, 60).await?;
     while let Some(output) = rpc
         .poll_notification(OUTPUT_AVAILABLE, Duration::from_secs(5))
         .await?
@@ -1790,6 +1939,8 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
 
     rpc.call("live/close", json!({"channel_id":channel_id}), 30)
         .await?;
+    peer.stop_evidence().await?;
+    evidence.stage(EvidenceStage::Finished)?;
     peer.close().await;
     drop(rpc);
     server_task.abort();
@@ -1996,6 +2147,31 @@ fn s99_oracle_events(entries: &[(&str, f64, &str)]) -> Vec<Value> {
 
 /// An in-flight chain, then the answer after a quiet gap of at least the
 /// assistant-turn bound: the answer is kept, the in-flight chain is not.
+/// The vault phrase is recognized when the transcript glues a repeat, and
+/// a partial or reordered phrase is not.
+#[test]
+fn s99_recalls_a_glued_phrase_but_not_a_partial_one() {
+    let phrase = "maple otter badger willow amber";
+    assert!(s99_recalls_phrase(
+        "maple otter badger willow ambermaple otter badger willow amber",
+        phrase
+    ));
+    assert!(s99_recalls_phrase(
+        "Silver copperwillow willow silver.",
+        "silver copper willow willow silver"
+    ));
+    assert!(s99_recalls_phrase(
+        "Maple, otter, badger, willow, amber.",
+        phrase
+    ));
+    assert!(!s99_recalls_phrase("maple otter badger willow", phrase));
+    assert!(!s99_recalls_phrase(
+        "otter maple badger willow amber",
+        phrase
+    ));
+    assert!(!s99_recalls_phrase("I don't know yet.", phrase));
+}
+
 #[test]
 fn s99_answer_keeps_a_reply_after_the_in_flight_chain_goes_quiet() {
     let events = s99_oracle_events(&[
@@ -2119,12 +2295,69 @@ fn history_text(history: &Value) -> String {
     out.join("\n")
 }
 
+/// Text turns committed after the vault-phrase turn so the phrase is outside
+/// the create-time seed of a summary-pending open and reachable only through
+/// the summary. That seed is the newest `LIVE_STARTUP_RECENT_TURNS`
+/// conversation turns, trimmed to the newest `LIVE_STARTUP_VERBATIM_ITEMS_MAX`
+/// provider items from a user row (`with_pending_context_after_recent`); each
+/// text turn is at least one item, so this many follow-ups put the phrase
+/// outside whichever bound binds. The test follows the constants: it breaks
+/// if the window changes. The last follow-up carries the positive control
+/// (`S99_SEEDED_FACT`), inside the window.
+fn s99_seed_followups() -> Vec<String> {
+    let count = meerkat::experimental_gpt_live::LIVE_STARTUP_RECENT_TURNS
+        .max(meerkat::experimental_gpt_live::LIVE_STARTUP_VERBATIM_ITEMS_MAX);
+    let mut followups: Vec<String> = (1..count)
+        .map(|index| {
+            format!(
+                "Planning note {index} for later: shelf {index} in the studio holds spare cables. \
+                 Acknowledge briefly. Do not use tools or start a task."
+            )
+        })
+        .collect();
+    followups.push(format!(
+        "One more note: {S99_SEEDED_FACT}. Acknowledge briefly. Do not use tools or start a task."
+    ));
+    followups
+}
+
+/// A fact in the newest text turn, inside the create-time seed: the
+/// positive control recalled before the summary is released.
+const S99_SEEDED_FACT: &str = "today I parked on level nine of the garage";
+
+/// Commit the follow-up text turns while no call is open, so the next open's
+/// create-time seed is those turns: the first call's spoken vault phrase
+/// (its recall after the summary release, or a delegated lookup's readout)
+/// falls outside the window, and the replacement's history probe again tests
+/// the summary gate.
+async fn s99_commit_followups(
+    live: &mut PublicLiveHarness,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for prompt in s99_seed_followups() {
+        live.rpc
+            .call(
+                "turn/start",
+                json!({"session_id": live.session_id, "prompt": prompt}),
+                120,
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+fn s99_recalls_seeded_fact(text: &str) -> bool {
+    let words = normalize_words(text);
+    words.split(' ').any(|word| word == "nine" || word == "9")
+}
+
 const S99_MIN_SUMMARY_DELAY: Duration = Duration::from_secs(20);
 const S99_SUMMARY_LLM_TIMEOUT: Duration = Duration::from_secs(90);
 const S99_SUMMARY_MAX_TOKENS: u32 = 1024;
 
 struct ConcurrentContextBootstrap {
     seed_prompt: String,
+    /// Text turns committed after `seed_prompt`, before the channel opens.
+    seed_followups: Vec<String>,
     captures: mpsc::Sender<GatedSummaryCapture>,
     evidence: Journal,
 }
@@ -2305,6 +2538,58 @@ impl Drop for SummaryJobGuard {
             }) {
                 eprintln!("{fault}; journal={}", evidence.path().display());
             }
+        }
+    }
+}
+
+/// S97's executor result fact: it inspects the scenario's scratch workspace,
+/// which is empty.
+const S97_RESULT_FACT: &str = "empty";
+
+/// The peer's sighting of the provider's acknowledgement of the result
+/// append for `provider_delegation_id` (keyed by the result's recorded
+/// `client_event_id`): its index in the peer's event log and the media
+/// counters at that moment, from the journal's `appended` row.
+async fn s97_result_ack(
+    evidence: &Journal,
+    channel: u32,
+    provider_delegation_id: &str,
+) -> Result<(u64, support::AudioEvidence), Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        if let Some(client_event_id) =
+            meerkat::experimental_gpt_live::__released_result_client_event_id(
+                provider_delegation_id,
+            )
+            && let Some(ack) = evidence.appended_ack(channel, &client_event_id)?
+        {
+            return Ok(ack);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "S97: the peer saw no acknowledgement of the result append for delegation {provider_delegation_id} within 120 s"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// A scenario body's outcome, with a panic caught so that the failure close
+/// runs before the panic resumes. See [`PublicLiveHarness::close_after_failure`].
+async fn settle_scenario_body<T>(
+    live: &mut PublicLiveHarness,
+    outcome: std::thread::Result<Result<T, Box<dyn std::error::Error>>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    match outcome {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => {
+            live.close_after_failure().await;
+            Err(error)
+        }
+        Err(panic) => {
+            live.close_after_failure().await;
+            std::panic::resume_unwind(panic)
         }
     }
 }
@@ -2530,11 +2815,119 @@ fn s99_evidence(live: &PublicLiveHarness) -> Result<&Journal, Box<dyn std::error
 /// A fresh synthetic microphone-track request, matching native provider
 /// transcript AND >=100 ms decoded non-silent remote audio. Neither is a
 /// settlement signal; provider-managed bookkeeping remains the owner's job.
+/// How an S99 exchange ended: a native spoken answer, or (where allowed) a
+/// client delegation, by its provider delegation id.
+enum S99Exchange {
+    Answer(String),
+    Delegated {
+        delegation_id: String,
+        before: String,
+    },
+}
+
 async fn s99_native_exchange(
     live: &mut PublicLiveHarness,
     fixture: &str,
     matches_text: impl Fn(&str) -> bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    match s99_exchange(live, fixture, matches_text, false).await? {
+        S99Exchange::Answer(text) => Ok(text),
+        S99Exchange::Delegated { .. } => {
+            Err("S99 exchange delegated where only native voice is allowed".into())
+        }
+    }
+}
+
+/// The history probe before a summary is released. The voice model must not
+/// claim the vault phrase natively: it answers honestly that it does not
+/// know yet, or delegates a lookup to the executor, which owns the text
+/// history. A delegated lookup is a valid path whose result is ordered
+/// behind the session's bootstrap (summary) delivery barrier, so it cannot
+/// arrive while the summary is held: the probe returns the delegation, and
+/// `s99_verify_delegated_lookup` checks its result after the release. The
+/// path each probe took is journaled.
+async fn s99_history_probe(
+    live: &mut PublicLiveHarness,
+    phrase: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let evidence = s99_evidence(live)?.clone();
+    let channel = evidence.current_channel()?;
+    match s99_exchange(live, "history", s99_honest_unknown, true).await? {
+        S99Exchange::Answer(text) => {
+            assert!(s99_honest_unknown(&text.to_lowercase()));
+            assert!(
+                !s99_recalls_phrase(&text, phrase),
+                "the voice model claimed the vault phrase natively before the summary was released"
+            );
+            record_metric(
+                &evidence,
+                channel,
+                "S99",
+                "history_probe",
+                "path=native_unknown".to_owned(),
+            )?;
+            Ok(None)
+        }
+        S99Exchange::Delegated {
+            delegation_id,
+            before,
+        } => {
+            assert!(
+                !s99_recalls_phrase(&before, phrase),
+                "the voice model claimed the vault phrase natively before delegating the lookup"
+            );
+            record_metric(
+                &evidence,
+                channel,
+                "S99",
+                "history_probe",
+                format!("path=delegated delegation={delegation_id}"),
+            )?;
+            Ok(Some(delegation_id))
+        }
+    }
+}
+
+/// After the summary release: a delegated history lookup returns the exact
+/// vault phrase through the normal result path, under the readout rule.
+async fn s99_verify_delegated_lookup(
+    live: &mut PublicLiveHarness,
+    delegation_id: &str,
+    phrase: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let evidence = s99_evidence(live)?.clone();
+    let channel = evidence.current_channel()?;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let result = loop {
+        let lines = evidence.provider_stream_lines()?;
+        if let Some(delivery) = result_deliveries(&lines)
+            .into_iter()
+            .find(|delivery| delivery.delegation_id == delegation_id)
+        {
+            break delivery.text;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the delegated history lookup {delegation_id} delivered no result within 120 s of the summary release"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(200)).await;
+    };
+    assert!(
+        s99_recalls_phrase(&result, phrase),
+        "the delegated history lookup returned the wrong phrase: {result:?}"
+    );
+    s99_wait_for_assistant_quiet(live).await?;
+    readout_contract(&evidence, live, channel, "S99").await
+}
+
+async fn s99_exchange(
+    live: &mut PublicLiveHarness,
+    fixture: &str,
+    matches_text: impl Fn(&str) -> bool,
+    allow_delegation: bool,
+) -> Result<S99Exchange, Box<dyn std::error::Error>> {
     s99_assert_unmeasured(live)?;
     let start = live.peer.events().await?.len();
     let baseline = live.peer.audio_evidence().await?;
@@ -2553,10 +2946,33 @@ async fn s99_native_exchange(
             .iter()
             .position(is_user_input)
             .map(|i| start + i);
-        assert!(
-            !events[start..].iter().any(is_client_delegation),
-            "history and correction exchanges must use native voice, not delegated text or TTS"
-        );
+        if let Some(delegation) = events[start..]
+            .iter()
+            .find(|event| is_client_delegation(event))
+        {
+            assert!(
+                allow_delegation,
+                "history and correction exchanges must use native voice, not delegated text or TTS"
+            );
+            let delegation_id = delegation["delegation"]["id"]
+                .as_str()
+                .ok_or("client delegation without an id")?
+                .to_owned();
+            let audio = live.peer.audio_evidence().await?;
+            s99_evidence(live)?.record(EvidenceRecord::ExchangeEnd {
+                exchange,
+                matched: true,
+                audio,
+            })?;
+            println!("GPT_LIVE_S99_DELEGATED fixture={fixture} delegation={delegation_id}");
+            let before = user_start
+                .map(|_| s99_answer_text(&events, start))
+                .unwrap_or_default();
+            return Ok(S99Exchange::Delegated {
+                delegation_id,
+                before,
+            });
+        }
         // The answer is what the assistant says from the question's onset.
         // Every S99 question follows assistant quiet, and rows that waited
         // behind the summary while newer speech was heard go out as quiet
@@ -2584,10 +3000,10 @@ async fn s99_native_exchange(
                 println!("GPT_LIVE_S99_IN_FLIGHT_AT_ONSET fixture={fixture} speech={in_flight:?}");
             }
             let events = live.peer.events().await?;
-            return Ok(s99_answer_text(&events, start));
+            return Ok(S99Exchange::Answer(s99_answer_text(&events, start)));
         }
         if Instant::now() >= deadline {
-            // Tolerant evidence (cross-scenario rate): the user spoke and the
+            // Diagnosis only (cross-scenario rate): the user spoke and the
             // model produced no output at all for the whole window.
             let assistant_output = events[start..]
                 .iter()
@@ -2654,8 +3070,12 @@ async fn s99_wait_for_assistant_quiet(
 async fn wait_for_assistant_quiet(
     peer: &mut BrowserPeer,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Follows the assistant's output to its end: every assistant output
+    // event restarts the quiet window, and the wait ends after 3 s without
+    // one. There is no ceiling while output keeps arriving: a legitimate
+    // long readout (S99's spelled-out pwd, about 28 s in check run 6a779d8e
+    // R2) is not a fault. The scenario's overall deadline still bounds it.
     const QUIET_FOR: Duration = Duration::from_secs(3);
-    let deadline = Instant::now() + Duration::from_secs(30);
     let mut last_len = peer.events().await?.len();
     let mut quiet_since = Instant::now();
     loop {
@@ -2668,9 +3088,6 @@ async fn wait_for_assistant_quiet(
         }
         if quiet_since.elapsed() >= QUIET_FOR {
             return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err("assistant did not stop speaking before the next question".into());
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -2690,19 +3107,22 @@ fn s99_honest_unknown(text: &str) -> bool {
     .any(|unknown| text.contains(unknown))
 }
 
+/// Whether `text` says the vault phrase: its words in order, compared
+/// letters only, ignoring case, spacing and punctuation. The provider's
+/// transcript can glue a repeated phrase ("...willow ambermaple otter...",
+/// soak 3e8eb29a S99 runs 4 and 5), so a word-window match missed answers
+/// that said it; the same comparison makes the "never claimed natively"
+/// checks catch glued claims too.
 fn s99_recalls_phrase(text: &str, phrase: &str) -> bool {
-    let words: Vec<_> = text
-        .split(|c: char| !c.is_ascii_alphabetic())
-        .filter(|word| !word.is_empty())
-        .collect();
-    let phrase: Vec<_> = phrase.split_whitespace().collect();
-    !phrase.is_empty()
-        && words.windows(phrase.len()).any(|window| {
-            window
-                .iter()
-                .zip(&phrase)
-                .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
-        })
+    let letters = |value: &str| -> String {
+        value
+            .chars()
+            .filter(char::is_ascii_alphabetic)
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let phrase = letters(phrase);
+    !phrase.is_empty() && letters(text).contains(&phrase)
 }
 
 /// S99 measures the gated late summary on every channel it opens. A reopen
@@ -2738,14 +3158,7 @@ async fn e2e_scenario_99_gpt_live_public_concurrent_context()
     // runs so provider guesses and fixture memorization cannot pass recall.
     let nonce = meerkat_core::SessionId::new();
     let digest = Sha256::digest(nonce.to_string().as_bytes());
-    let words = [
-        "amber", "badger", "copper", "falcon", "maple", "otter", "silver", "willow",
-    ];
-    let phrase = digest[..5]
-        .iter()
-        .map(|byte| words[usize::from(*byte) % words.len()])
-        .collect::<Vec<_>>()
-        .join(" ");
+    let phrase = s99_vault_phrase(&digest[..5]);
     let evidence = Journal::create(phrase)?;
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let result = timeout(
@@ -2762,6 +3175,32 @@ async fn e2e_scenario_99_gpt_live_public_concurrent_context()
     }
     result
         .map_err(|_| "S99 overall deadline expired; concurrent-context acceptance not qualified")?
+}
+
+/// The S99 vault phrase: one word per digest byte from an eight-word list,
+/// never the same word twice in a row. The recall is graded on the model's
+/// own transcript of its speech, where an adjacent repeat ("maple maple") is
+/// ambiguous when spoken and measures the transcriber, not meerkat's
+/// delivery (verdict tree fb94711f S99 run 8). A repeat moves to another
+/// word, chosen from the same byte, so the phrase stays deterministic.
+fn s99_vault_phrase(bytes: &[u8]) -> String {
+    const WORDS: [&str; 8] = [
+        "amber", "badger", "copper", "falcon", "maple", "otter", "silver", "willow",
+    ];
+    let mut previous: Option<usize> = None;
+    bytes
+        .iter()
+        .map(|byte| {
+            let byte = usize::from(*byte);
+            let mut index = byte % WORDS.len();
+            if previous == Some(index) {
+                index = (index + 1 + (byte / WORDS.len()) % (WORDS.len() - 1)) % WORDS.len();
+            }
+            previous = Some(index);
+            WORDS[index]
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
@@ -2781,6 +3220,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
              The current code word is Tangerine. My current favorite flower is Daffodil. \
              Acknowledge briefly. Do not use tools or start a task."
             ),
+            seed_followups: s99_seed_followups(),
         }),
     )
     .await?;
@@ -2788,7 +3228,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // Declared after the owner: cancellation/panic flushes this guard before
     // the browser, runtime, or scenario TempDir can be dropped.
     let _failure_guard = evidence::FailureGuard(evidence.clone());
-    let result = async {
+    let result = AssertUnwindSafe(async {
     evidence.stage(EvidenceStage::Connected)?;
     let first_capture = next_summary_capture(&mut captured).await?;
     assert_eq!(first_capture.session_id, live.session_id);
@@ -2803,9 +3243,25 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     s99_assert_pending(&mut live, &first_capture).await?;
 
     evidence.stage(EvidenceStage::InitialUnknown)?;
-    let unknown = s99_native_exchange(&mut live, "history", s99_honest_unknown).await?;
-    assert!(s99_honest_unknown(&unknown.to_lowercase()));
-    assert!(!s99_recalls_phrase(&unknown, &phrase));
+    // Positive control first: a fact inside the create-time seed is known at
+    // once, before the summary is released, so the unknown answer below is
+    // the summary gate's and not a model that ignores its startup input. It
+    // is asked before the unknown probe so that probe's "I don't know yet"
+    // cannot prime it.
+    let control_start = live.peer.events().await?.len();
+    let seeded = s99_native_exchange(&mut live, "seeded_fact", s99_recalls_seeded_fact).await?;
+    assert!(s99_recalls_seeded_fact(&seeded));
+    // Strict: the fact is seeded, so delegating the question fails even when
+    // a native answer came first (soak c43aa3db S99 runs 1 and 5 answered
+    // "nine" and delegated anyway).
+    s99_wait_for_assistant_quiet(&mut live).await?;
+    let control_events = live.peer.events().await?;
+    assert!(
+        !control_events[control_start..].iter().any(is_client_delegation),
+        "the positive control was delegated: a seeded fact must be answered natively"
+    );
+    s99_assert_pending(&mut live, &first_capture).await?;
+    let first_lookup = s99_history_probe(&mut live, &phrase).await?;
     s99_assert_pending(&mut live, &first_capture).await?;
 
     // Commit newer ordinary context through the existing source session while
@@ -2849,6 +3305,9 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     let elapsed = first_capture.captured_at.elapsed();
     assert!(elapsed >= S99_MIN_SUMMARY_DELAY);
     s99_release_summary(&mut live, first_capture).await?;
+    if let Some(delegation_id) = first_lookup {
+        s99_verify_delegated_lookup(&mut live, &delegation_id, &phrase).await?;
+    }
     evidence.stage(EvidenceStage::HistoricalRecall)?;
     s99_wait_for_assistant_quiet(&mut live).await?;
     // The pre-acknowledgement question offers an honest-unknown escape; once
@@ -2881,7 +3340,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // rides the instructions lane; the summary is the first owned thinking
     // append on the channel, prefixed, delivered after the first user
     // utterance and acknowledged.
-    assert_late_summary_seed(&evidence, 1)?;
+    assert_late_summary_seed(&evidence, 1, &phrase)?;
     let owner = evidence.owner_appends()?;
     assert_eq!(
         owner.framed_summaries, 0,
@@ -2924,6 +3383,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     live.close_exact().await?;
     // S99 asserts a fresh summarizer capture on each reopen.
     s99_forget_retained_summary(&mut live)?;
+    s99_commit_followups(&mut live).await?;
     live.reopen().await?;
     let obsolete = next_summary_capture(&mut captured).await?;
     s99_assert_pending(&mut live, &obsolete).await?;
@@ -2944,16 +3404,19 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     }
     // S99 asserts a fresh summarizer capture on each reopen.
     s99_forget_retained_summary(&mut live)?;
+    s99_commit_followups(&mut live).await?;
     live.reopen().await?;
     let replacement = next_summary_capture(&mut captured).await?;
     s99_assert_pending(&mut live, &replacement).await?;
     evidence.stage(EvidenceStage::ObsoleteJobRelease)?;
     let obsolete_returned = obsolete.release().await?;
     evidence.stage(EvidenceStage::ReplacementUnknown)?;
-    let late_unknown = s99_native_exchange(&mut live, "history", s99_honest_unknown).await?;
-    assert!(!s99_recalls_phrase(&late_unknown, &phrase));
+    let replacement_lookup = s99_history_probe(&mut live, &phrase).await?;
     s99_assert_pending(&mut live, &replacement).await?;
     s99_release_summary(&mut live, replacement).await?;
+    if let Some(delegation_id) = replacement_lookup {
+        s99_verify_delegated_lookup(&mut live, &delegation_id, &phrase).await?;
+    }
     evidence.stage(EvidenceStage::ReplacementRecall)?;
     s99_wait_for_assistant_quiet(&mut live).await?;
     s99_native_exchange(&mut live, "recall_history", |text| {
@@ -2970,8 +3433,8 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // pending, never spoken to); the replacement is the journal's current
     // channel.
     let replacement_channel = evidence.current_channel()?;
-    assert_late_summary_seed(&evidence, 2)?;
-    assert_late_summary_seed(&evidence, replacement_channel)?;
+    assert_late_summary_seed(&evidence, 2, &phrase)?;
+    assert_late_summary_seed(&evidence, replacement_channel, &phrase)?;
     assert!(
         evidence.first_owned_thinking_append(2)?.is_none(),
         "the obsolete channel was closed before any utterance, so nothing may ride its thinking lane"
@@ -3010,7 +3473,10 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
         elapsed.as_millis()
     );
     Ok::<(), Box<dyn std::error::Error>>(())
-    }.await;
+    })
+    .catch_unwind()
+    .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -3660,7 +4126,8 @@ fn delegations_per_window(
         .collect()
 }
 
-/// The scenario's soft browser faults (journal and live peer), with overlap
+/// The scenario's readout rule (`readout_contract`, an error when violated)
+/// and its soft browser faults (journal and live peer), with overlap
 /// faults reconciled against the backchannel classifier
 /// (`evidence::classify_overlap`): an overlap made only of classified
 /// backchannels (short, no new content, no delegation, yielded to the user)
@@ -3672,6 +4139,7 @@ async fn scenario_browser_faults(
     channel: u32,
     scenario: &str,
 ) -> Result<Vec<evidence::BrowserFault>, Box<dyn std::error::Error>> {
+    readout_contract(evidence, live, channel, scenario).await?;
     let mut faults = evidence.faults()?;
     faults.extend(live.peer.faults().await?);
     let (faults, allowed) = evidence::reconcile_overlap_faults(faults);
@@ -3694,16 +4162,7 @@ fn record_allowed_backchannels(
             burst.text
         );
         println!("GPT_LIVE_{scenario}_BACKCHANNEL {detail}");
-        let mut never = Vec::new();
-        record_tolerant(
-            evidence,
-            channel,
-            scenario,
-            "allowed_backchannel",
-            true,
-            detail,
-            &mut never,
-        )?;
+        record_metric(evidence, channel, scenario, "allowed_backchannel", detail)?;
     }
     Ok(())
 }
@@ -3718,9 +4177,9 @@ fn record_allowed_backchannels(
 /// `response` index, which advances only when a new user utterance starts;
 /// a burst continues the previous burst's response when its index equals
 /// that burst's index at its start or at its end (a late user delta can
-/// advance the index while the assistant is still speaking). Repetition
-/// inside one response is the peer's own `duplicate_readout` fault on the
-/// output transcript text, which every scenario already fails on. The
+/// advance the index while the assistant is still speaking). A result voiced
+/// twice is the readout rule's (`readout_faults`), which every scenario
+/// applies through `scenario_browser_faults`. The
 /// prompt window opens at the previous burst's `last_active_ms`, the last
 /// audible window: the burst's `assistant_audio_end` entry is pushed only
 /// after the hysteresis, so an input final that closed inside it still
@@ -3745,12 +4204,17 @@ fn unprompted_assistant_response_starts(timeline: &[TimelineEntry], from_ms: u64
                     continue;
                 }
                 let window_start = last_audible_ms.min(entry.t_ms);
+                // A user utterance that started playing prompts the response
+                // even before its transcript arrives: the provider's input
+                // transcription lags the audio (soak aba8eb88 S103 run 4: an
+                // "Okay." to "Wait, stop" began 1.5 s before the final).
                 let prompted = timeline[..index].iter().any(|e| {
                     e.t_ms >= window_start
-                        && matches!(
+                        && (matches!(
                             e.kind,
                             TimelineKind::InputFinal | TimelineKind::CommentaryAppended
-                        )
+                        ) || (e.kind == TimelineKind::FixtureStart
+                            && e.detail_u64("speech_ms").is_some_and(|speech| speech > 0)))
                 });
                 if !prompted {
                     unprompted.push(entry.t_ms);
@@ -3762,42 +4226,910 @@ fn unprompted_assistant_response_starts(timeline: &[TimelineEntry], from_ms: u64
     unprompted
 }
 
-/// Readout lines an assistant turn spoke twice. The public protocol has no
-/// response lifecycle, so the peer's "response" can span several model turns
-/// (a readout, then a corrected readout after the executor's result arrives).
-/// The assistant transcript is therefore segmented at the provider events
-/// that start a new turn (a commentary append, a delegation, user speech), and
-/// a line repeated within one segment is a duplicate readout.
-fn repeated_readout_lines(events: &[Value]) -> Vec<String> {
-    fn check(segment: &str, repeated: &mut Vec<String>) {
-        let mut seen = std::collections::BTreeSet::new();
-        for line in segment
-            .split(['\n', '.', '!', '?'])
-            .map(normalize_words)
-            .filter(|line| line.split(' ').count() >= 3)
+// ---------------------------------------------------------------------------
+// Talk-over contract (barge-in yield)
+// ---------------------------------------------------------------------------
+
+// The talk-over bounds below are FROZEN. Each is derived from a stated
+// healthy population (73 barge-in yields of the 0.8.51 Turbo S soak,
+// 2026-10-02/03: rounds round2, round3, resoak, final, finalc and BuildBuddy
+// invocations 35728bf0 and aba8eb88; runs with provider input lag >= 10 s or
+// p90 > 2 s are void) as its maximum plus the peer's 100 ms energy window. An
+// exceedance in a healthy run is a finding to attribute (which segment
+// moved, and whose it is: the 2026-10-03 sideband stalls were attributed
+// upstream with poll_wait_ms/poll_gap_ms), never a reason to raise the
+// number. Re-deriving a bound needs a new stated population and sign-off.
+
+/// End-to-end talk-over bound: from the user's interrupting speech onset (the
+/// fixture start on the browser clock) to the assistant's last audible frame
+/// in the browser. Population above (n=73): p50 1295 ms, p90 1797 ms, p99
+/// 2389 ms, max 2902 ms. No part of it is meerkat's: media flows browser <->
+/// provider over WebRTC, and the public Live protocol has no cancel,
+/// truncate or output-clear client event, so meerkat has no cut path. Our
+/// only cost is the peer's 100 ms energy window: 2902 + 100, rounded up.
+const TALK_OVER_BOUND_MS: u64 = 3000;
+/// Ingest: onset to the provider reflecting our first voiced input frame
+/// (browser WebRTC uplink plus the provider's 200 ms input framing), taken at
+/// the frame's cadence slot, not its sideband arrival. The provider reflects
+/// a continuous input stream, so a frame's slot is the run's least-late
+/// anchor plus the audio before it: its arrival without the sideband's
+/// transport jitter (lateness over 155 runs: p99 323 ms, max 829 ms; the
+/// observation loop waited for every stall, so it is upstream of meerkat).
+/// Population above (n=73): p50 238 ms, p99 346 ms, max 366 ms; plus the
+/// 100 ms window, rounded up.
+const INGEST_BOUND_MS: u64 = 500;
+/// Playout: the provider's last voiced output frame on the sideband to the
+/// browser's last audible window (provider RTP pacing plus the browser's
+/// jitter buffer). Taken at the frame's arrival: sideband jitter only delays
+/// that arrival, which reads as less playout, never more. Population above
+/// (n=73): p50 455 ms, p90 572 ms, p99 643 ms, max 736 ms; plus the 100 ms
+/// window, rounded up.
+const PLAYOUT_BOUND_MS: u64 = 900;
+/// Sample rate of the provider's PCM16 audio frames.
+const PROVIDER_PCM_RATE_HZ: u64 = 24_000;
+/// PCM16 RMS above which a 200 ms provider audio frame carries speech, the
+/// threshold the derivation used: silent frames measured 0-10, speech
+/// frames 200-3000.
+const VOICED_FRAME_RMS: f64 = 300.0;
+
+/// One barge-in yield split at the points we can observe, on the browser
+/// clock. `turn_taking_ms` (onset to the provider's last voiced output frame
+/// on the sideband) is the provider's decision plus generation; it is
+/// recorded on every yield and bounded only through the end-to-end bound.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct YieldSegments {
+    onset_ms: u64,
+    last_audible_ms: u64,
+    ingest_ms: i64,
+    turn_taking_ms: i64,
+    playout_ms: i64,
+}
+
+impl YieldSegments {
+    fn total_ms(&self) -> i64 {
+        self.last_audible_ms as i64 - self.onset_ms as i64
+    }
+
+    fn violations(&self) -> Vec<String> {
+        let mut violations = Vec::new();
+        if self.total_ms() > TALK_OVER_BOUND_MS as i64 {
+            violations.push(format!(
+                "talked over the user for {} ms (onset to last audible; bound {TALK_OVER_BOUND_MS} ms)",
+                self.total_ms()
+            ));
+        }
+        if self.ingest_ms > INGEST_BOUND_MS as i64 {
+            violations.push(format!(
+                "ingest took {} ms (onset to the provider's first voiced input frame; bound {INGEST_BOUND_MS} ms)",
+                self.ingest_ms
+            ));
+        }
+        if self.playout_ms > PLAYOUT_BOUND_MS as i64 {
+            violations.push(format!(
+                "playout took {} ms (provider's last voiced output frame to last audible; bound {PLAYOUT_BOUND_MS} ms)",
+                self.playout_ms
+            ));
+        }
+        violations
+    }
+
+    fn detail(&self) -> String {
+        format!(
+            "onset_ms={} ingest_ms={} turn_taking_ms={} playout_ms={} total_ms={}",
+            self.onset_ms,
+            self.ingest_ms,
+            self.turn_taking_ms,
+            self.playout_ms,
+            self.total_ms()
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum YieldObservation {
+    /// The assistant was already quiet at the onset: nothing to yield.
+    NotSpeakingAtOnset {
+        onset_ms: u64,
+        heard_ms: i64,
+    },
+    Yield(YieldSegments),
+}
+
+fn sideband_server_frames<'a>(
+    lines: &'a [provider_recording::Line],
+    channel: u32,
+    frame_type: &'a str,
+) -> impl Iterator<Item = (u64, &'a Value)> + 'a {
+    lines.iter().filter_map(move |line| match &line.entry {
+        provider_recording::Entry::ServerFrame { raw }
+            if line.channel_ordinal == channel && raw["type"] == frame_type =>
         {
-            if !seen.insert(line.clone()) && !repeated.contains(&line) {
-                repeated.push(line);
+            Some((line.elapsed_ms, raw))
+        }
+        _ => None,
+    })
+}
+
+/// The sideband clock against the browser peer's clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClockAlignment {
+    /// Sideband elapsed_ms minus browser t_ms (median over the pairs).
+    offset_ms: i64,
+    /// Max minus min offset over the pairs: transport jitter of either
+    /// channel (a sideband frame is stamped when meerkat's observation loop
+    /// takes it), journaled, not judged.
+    spread_ms: i64,
+    pairs: usize,
+}
+
+/// Align the sideband with the browser clock through the commentary.appended
+/// events both saw: the provider sends each on both channels, in the same
+/// order. The k-th on one is the k-th on the other only when both saw the
+/// same number, so unequal counts are an error, never a guess; the median
+/// offset is robust to one late stamp.
+fn sideband_clock_alignment(
+    timeline: &[TimelineEntry],
+    lines: &[provider_recording::Line],
+    channel: u32,
+) -> Result<ClockAlignment, String> {
+    let browser: Vec<i64> = timeline
+        .iter()
+        .filter(|e| e.kind == TimelineKind::CommentaryAppended)
+        .map(|e| e.t_ms as i64)
+        .collect();
+    // The browser sees nothing after its peer disconnects; the sideband may
+    // still receive acks (soak c43aa3db S105 run 1: a result acknowledged
+    // 400 ms after the graceful disconnect). Pair only what both could see.
+    let disconnected = sideband_disconnect_elapsed(lines, channel);
+    let sideband: Vec<i64> = sideband_server_frames(lines, channel, "session.commentary.appended")
+        .map(|(elapsed_ms, _)| elapsed_ms)
+        .filter(|elapsed_ms| disconnected.is_none_or(|at| *elapsed_ms < at))
+        .map(|elapsed_ms| elapsed_ms as i64)
+        .collect();
+    if browser.is_empty() || browser.len() != sideband.len() {
+        return Err(format!(
+            "cannot pair commentary.appended events to align the clocks: the browser saw {} and the sideband {}",
+            browser.len(),
+            sideband.len()
+        ));
+    }
+    let mut offsets: Vec<i64> = sideband.iter().zip(&browser).map(|(s, b)| s - b).collect();
+    offsets.sort_unstable();
+    Ok(ClockAlignment {
+        offset_ms: offsets[offsets.len() / 2],
+        spread_ms: offsets[offsets.len() - 1] - offsets[0],
+        pairs: offsets.len(),
+    })
+}
+
+fn sideband_clock_offset(
+    timeline: &[TimelineEntry],
+    lines: &[provider_recording::Line],
+    channel: u32,
+) -> Result<i64, String> {
+    sideband_clock_alignment(timeline, lines, channel).map(|alignment| alignment.offset_ms)
+}
+
+/// When the test disconnected the browser peer of `channel`, on the sideband
+/// clock: the recorded `disconnect:*` marker (a test-driven step).
+fn sideband_disconnect_elapsed(lines: &[provider_recording::Line], channel: u32) -> Option<u64> {
+    lines.iter().find_map(|line| match &line.entry {
+        provider_recording::Entry::Marker { step }
+            if line.channel_ordinal == channel && step.starts_with("disconnect") =>
+        {
+            Some(line.elapsed_ms)
+        }
+        _ => None,
+    })
+}
+
+/// RMS of one base64 PCM16 little-endian provider audio payload.
+fn pcm16_rms(payload: &Value) -> Result<f64, String> {
+    pcm16_frame(payload).map(|(rms, _)| rms)
+}
+
+/// RMS and duration (ms) of one base64 PCM16 provider audio payload.
+fn pcm16_frame(payload: &Value) -> Result<(f64, i64), String> {
+    use base64::Engine as _;
+    let encoded = payload
+        .as_str()
+        .ok_or("audio frame without a base64 payload")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("audio frame payload is not base64: {error}"))?;
+    let samples: Vec<f64> = bytes
+        .chunks_exact(2)
+        .map(|pair| f64::from(i16::from_le_bytes([pair[0], pair[1]])))
+        .collect();
+    let duration_ms = samples.len() as i64 * 1000 / PROVIDER_PCM_RATE_HZ as i64;
+    if samples.is_empty() {
+        return Ok((0.0, 0));
+    }
+    Ok((
+        (samples.iter().map(|s| s * s).sum::<f64>() / samples.len() as f64).sqrt(),
+        duration_ms,
+    ))
+}
+
+/// The provider's input-to-output step on its model clock, not a tolerance:
+/// gpt-live-1 consumes and emits 200 ms frames, and its output frame for
+/// model time t is produced after the input frame of the same time (the
+/// sideband emission offset of output frames over input frames measured
+/// 168-277 ms, one frame, on the finalc yields). A burst that starts before
+/// the user's first voiced input slot plus this step cannot be a reaction to
+/// that utterance: it was already in flight, and it is the yield's.
+const PROVIDER_FRAME_MS: i64 = 200;
+
+/// When the provider heard the user: the cadence slot of the first voiced
+/// reflected input frame arriving at or after the onset (see
+/// INGEST_BOUND_MS), on the browser clock.
+fn provider_heard_ms(
+    lines: &[provider_recording::Line],
+    channel: u32,
+    offset: i64,
+    onset_ms: u64,
+) -> Result<i64, String> {
+    // (arrival, audio reflected before it, rms) for every reflected input
+    // frame; the cadence anchor is the least-late frame's arrival minus the
+    // audio before it.
+    let mut inputs = Vec::new();
+    let mut audio_before_ms = 0i64;
+    for (elapsed_ms, raw) in sideband_server_frames(lines, channel, "session.input_audio.append") {
+        let (rms, duration_ms) = pcm16_frame(&raw["audio"])?;
+        inputs.push((elapsed_ms as i64 - offset, audio_before_ms, rms));
+        audio_before_ms += duration_ms;
+    }
+    let anchor = inputs
+        .iter()
+        .map(|(arrival, before, _)| arrival - before)
+        .min()
+        .ok_or("the provider reflected no input frame")?;
+    inputs
+        .iter()
+        .find(|(arrival, _, rms)| *arrival >= onset_ms as i64 && *rms > VOICED_FRAME_RMS)
+        .map(|(_, before, _)| anchor + before)
+        .ok_or_else(|| {
+            "the provider never reflected a voiced input frame after the barge-in onset".to_owned()
+        })
+}
+
+/// One provider output audio frame on the sideband: arrival on the browser
+/// clock, span on the provider's model clock, and whether it carries speech.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OutputFrame {
+    arrival_ms: i64,
+    start_ms: i64,
+    end_ms: i64,
+    voiced: bool,
+}
+
+fn output_frames(
+    lines: &[provider_recording::Line],
+    channel: u32,
+    offset: i64,
+) -> Result<Vec<OutputFrame>, String> {
+    sideband_server_frames(lines, channel, "session.output_audio.delta")
+        .map(|(elapsed_ms, raw)| {
+            Ok(OutputFrame {
+                arrival_ms: elapsed_ms as i64 - offset,
+                start_ms: raw["start_ms"]
+                    .as_i64()
+                    .ok_or("output frame without start_ms")?,
+                end_ms: raw["end_ms"]
+                    .as_i64()
+                    .ok_or("output frame without end_ms")?,
+                voiced: pcm16_rms(&raw["delta"])? > VOICED_FRAME_RMS,
+            })
+        })
+        .collect()
+}
+
+/// When the provider emitted the burst that became audible at
+/// `audible_start_ms`: the sideband arrival of the first voiced frame of the
+/// voiced run holding the last voiced frame that arrived by then. A run
+/// continues across model-clock silences shorter than the peer's end
+/// hysteresis (`hysteresis_ms`, the silence that separates its bursts).
+/// Playout delays the audible start (p50 455 ms), so only the emission
+/// compares with when the provider heard the user. A burst with no voiced
+/// frame by its audible start emitted at that start.
+fn burst_emission_ms(frames: &[OutputFrame], audible_start_ms: u64, hysteresis_ms: u64) -> i64 {
+    let voiced: Vec<&OutputFrame> = frames.iter().filter(|frame| frame.voiced).collect();
+    let Some(last) = voiced
+        .iter()
+        .rposition(|frame| frame.arrival_ms <= audible_start_ms as i64)
+    else {
+        return audible_start_ms as i64;
+    };
+    let mut first = last;
+    while first > 0 && voiced[first].start_ms - voiced[first - 1].end_ms < hysteresis_ms as i64 {
+        first -= 1;
+    }
+    voiced[first].arrival_ms
+}
+
+/// Split the yield of the barge-in fixture `fixture` (see [`YieldSegments`]).
+/// The yield is the burst audible at or after the onset that started before
+/// the provider could react to the utterance (its first voiced input slot
+/// plus `PROVIDER_FRAME_MS`): one already playing, or one already in flight.
+fn yield_segments(
+    timeline: &[TimelineEntry],
+    lines: &[provider_recording::Line],
+    channel: u32,
+    fixture: u64,
+    hysteresis_ms: u64,
+) -> Result<YieldObservation, String> {
+    let onset_ms = fixture_start_entry(timeline, fixture)
+        .ok_or("the barge-in fixture never started")?
+        .t_ms;
+    let offset = sideband_clock_offset(timeline, lines, channel)?;
+    let heard_ms = provider_heard_ms(lines, channel, offset, onset_ms)?;
+    let Some(end) = timeline
+        .iter()
+        .filter(|e| e.kind == TimelineKind::AssistantAudioEnd)
+        .find(|e| {
+            e.detail_u64("last_active_ms")
+                .is_some_and(|last| last >= onset_ms)
+        })
+    else {
+        return Ok(YieldObservation::NotSpeakingAtOnset { onset_ms, heard_ms });
+    };
+    let started_ms = end
+        .detail_u64("started_ms")
+        .ok_or("assistant_audio_end without started_ms")?;
+    let last_audible_ms = end
+        .detail_u64("last_active_ms")
+        .ok_or("assistant_audio_end without last_active_ms")?;
+    let frames = output_frames(lines, channel, offset)?;
+    if started_ms > onset_ms
+        && burst_emission_ms(&frames, started_ms, hysteresis_ms) > heard_ms + PROVIDER_FRAME_MS
+    {
+        return Ok(YieldObservation::NotSpeakingAtOnset { onset_ms, heard_ms });
+    }
+    let mut last_voiced_output = None;
+    for (elapsed_ms, raw) in sideband_server_frames(lines, channel, "session.output_audio.delta") {
+        let t = elapsed_ms as i64 - offset;
+        if t > last_audible_ms as i64 {
+            break;
+        }
+        if pcm16_rms(&raw["delta"])? > VOICED_FRAME_RMS {
+            last_voiced_output = Some(t);
+        }
+    }
+    let last_voiced_output = last_voiced_output
+        .ok_or("no voiced provider output frame arrived before the last audible window")?;
+    Ok(YieldObservation::Yield(YieldSegments {
+        onset_ms,
+        last_audible_ms,
+        ingest_ms: heard_ms - onset_ms as i64,
+        turn_taking_ms: last_voiced_output - onset_ms as i64,
+        playout_ms: last_audible_ms as i64 - last_voiced_output,
+    }))
+}
+
+/// Assistant bursts that started while the user was still speaking (the
+/// fixture's speech window), after the provider could react to the
+/// utterance (`heard_ms` plus `PROVIDER_FRAME_MS`; earlier bursts are the
+/// yield's). One carrying words that is not a classified backchannel
+/// (`evidence::is_backchannel`, fail-closed) is talk-over the yield bounds
+/// cannot see. One with no words in its transcript window is journaled and
+/// owes the same yield as speech: it must end within `TALK_OVER_BOUND_MS` of
+/// its own start.
+#[derive(Debug, Default, PartialEq)]
+struct TalkOverStarts {
+    violations: Vec<String>,
+    wordless: Vec<String>,
+}
+
+fn talk_over_starts(
+    timeline: &[TimelineEntry],
+    fixture: u64,
+    heard_ms: i64,
+    emitted_ms: &dyn Fn(u64, u64) -> i64,
+) -> Result<TalkOverStarts, String> {
+    let start =
+        fixture_start_entry(timeline, fixture).ok_or("the barge-in fixture never started")?;
+    let speech_end_ms = start.t_ms
+        + start
+            .detail_u64("speech_ms")
+            .ok_or("the barge-in fixture has no speech_ms")?;
+    let end = fixture_end_entry(timeline, fixture).ok_or("the barge-in fixture never ended")?;
+    let facts: evidence::OverlapFacts = serde_json::from_value(end.detail["facts"].clone())
+        .map_err(|error| format!("the barge-in fixture's overlap facts are unreadable: {error}"))?;
+    let mut starts = TalkOverStarts::default();
+    for burst in evidence::overlap_bursts(&facts) {
+        if burst.started_ms <= start.t_ms
+            || burst.started_ms >= speech_end_ms
+            || emitted_ms(burst.started_ms, facts.hysteresis_ms) <= heard_ms + PROVIDER_FRAME_MS
+        {
+            continue;
+        }
+        let into_ms = burst.started_ms - start.t_ms;
+        let duration_ms = burst.last_active_ms.saturating_sub(burst.started_ms);
+        if !burst.window_text.chars().any(char::is_alphanumeric) {
+            starts
+                .wordless
+                .push(format!("into_ms={into_ms} duration_ms={duration_ms}"));
+            if !burst.ended || duration_ms > TALK_OVER_BOUND_MS {
+                starts.violations.push(format!(
+                    "a wordless assistant burst that started {into_ms} ms into the utterance lasted {duration_ms} ms{} (bound {TALK_OVER_BOUND_MS} ms)",
+                    if burst.ended { "" } else { " and had not ended" }
+                ));
+            }
+        } else if !evidence::is_backchannel(&burst) {
+            starts.violations.push(format!(
+                "the assistant started talking over the user {into_ms} ms into the utterance ({duration_ms} ms, said {:?})",
+                burst.window_text
+            ));
+        }
+    }
+    Ok(starts)
+}
+
+/// The talk-over contract for one barge-in: measure its segments, record
+/// them as evidence (so a failure says which segment moved), and return the
+/// violations of the end-to-end, ingest and playout bounds and any talk-over
+/// that started mid-utterance. An unmeasurable yield is a violation, never a
+/// pass.
+fn talk_over_violations(
+    evidence: &Journal,
+    channel: u32,
+    scenario: &str,
+    timeline: &[TimelineEntry],
+    fixture: u64,
+    label: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let lines = evidence.provider_stream_lines()?;
+    let hysteresis_ms = fixture_end_entry(timeline, fixture)
+        .and_then(|end| end.detail["facts"]["hysteresis_ms"].as_u64());
+    let Some(hysteresis_ms) = hysteresis_ms else {
+        return Ok(vec![format!(
+            "{label}: the barge-in fixture has no end facts (hysteresis), so its talk-over cannot be measured"
+        )]);
+    };
+    let (mut violations, heard_ms) = match yield_segments(
+        timeline,
+        &lines,
+        channel,
+        fixture,
+        hysteresis_ms,
+    ) {
+        Ok(YieldObservation::NotSpeakingAtOnset { onset_ms, heard_ms }) => {
+            record_metric(
+                evidence,
+                channel,
+                scenario,
+                "talk_over",
+                format!(
+                    "label={label} onset_ms={onset_ms} heard_ms={heard_ms} not_speaking_at_onset"
+                ),
+            )?;
+            (Vec::new(), Some(heard_ms))
+        }
+        Ok(YieldObservation::Yield(segments)) => {
+            record_metric(
+                evidence,
+                channel,
+                scenario,
+                "talk_over",
+                format!("label={label} {}", segments.detail()),
+            )?;
+            let heard_ms = segments.onset_ms as i64 + segments.ingest_ms;
+            (
+                segments
+                    .violations()
+                    .into_iter()
+                    .map(|violation| format!("{label}: {violation} [{}]", segments.detail()))
+                    .collect(),
+                Some(heard_ms),
+            )
+        }
+        Err(reason) => (
+            vec![format!(
+                "{label}: the yield could not be measured: {reason}"
+            )],
+            None,
+        ),
+    };
+    if let Some(heard_ms) = heard_ms {
+        let frames = sideband_clock_offset(timeline, &lines, channel)
+            .and_then(|offset| output_frames(&lines, channel, offset));
+        let frames = match frames {
+            Ok(frames) => frames,
+            Err(reason) => {
+                violations.push(format!("{label}: output frames unreadable: {reason}"));
+                return Ok(violations);
+            }
+        };
+        let emitted = |audible_start_ms: u64, hysteresis_ms: u64| {
+            burst_emission_ms(&frames, audible_start_ms, hysteresis_ms)
+        };
+        match talk_over_starts(timeline, fixture, heard_ms, &emitted) {
+            Ok(starts) => {
+                for wordless in starts.wordless {
+                    record_metric(
+                        evidence,
+                        channel,
+                        scenario,
+                        "wordless_burst_during_utterance",
+                        format!("label={label} {wordless}"),
+                    )?;
+                }
+                violations.extend(
+                    starts
+                        .violations
+                        .into_iter()
+                        .map(|v| format!("{label}: {v}")),
+                );
+            }
+            Err(reason) => violations.push(format!(
+                "{label}: talk-over starts could not be read: {reason}"
+            )),
+        }
+    }
+    Ok(violations)
+}
+
+// ---------------------------------------------------------------------------
+// Readout contract (delivery and voicing of delegation results)
+// ---------------------------------------------------------------------------
+
+/// Starts of the narration the delegation scheduler renders on the
+/// commentary lane (`narration_text` in meerkat-mob-mcp
+/// `live_delegation/schedule.rs`); every other delegation commentary append
+/// is the delegation's result. A template drift fails loudly: an
+/// unrecognized narration counts as a second result delivery, and a result
+/// that starts like a narration leaves its delegation without one.
+const NARRATION_STARTS: [&str; 4] = [
+    "Voice request queued: \"",
+    "Started voice request: \"",
+    "Finished voice request: \"",
+    "Voice request \"",
+];
+const READOUT_BOUNDARIES: [&str; 3] = [
+    "session.input_transcript.delta",
+    "session.commentary.appended",
+    "session.delegation.created",
+];
+
+/// One delegation result delivered into the provider conversation: a
+/// sideband commentary append carrying the delegation id, at its send time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResultDelivery {
+    delegation_id: String,
+    channel: u32,
+    elapsed_ms: u64,
+    text: String,
+}
+
+/// Every result delivery on the sideband, all channels, in send order.
+fn result_deliveries(lines: &[provider_recording::Line]) -> Vec<ResultDelivery> {
+    lines
+        .iter()
+        .filter_map(|line| match &line.entry {
+            provider_recording::Entry::ClientEvent { event }
+                if event["type"] == "session.commentary.append" =>
+            {
+                let delegation_id = event["delegation_id"].as_str()?;
+                let text = event["content"].as_str()?;
+                (!NARRATION_STARTS.iter().any(|start| text.starts_with(start))).then(|| {
+                    ResultDelivery {
+                        delegation_id: delegation_id.to_owned(),
+                        channel: line.channel_ordinal,
+                        elapsed_ms: line.elapsed_ms,
+                        text: text.to_owned(),
+                    }
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Sentences of 3 or more normalized words (the peer's stutter rule uses the
+/// same split).
+fn readout_sentences(text: &str) -> Vec<String> {
+    text.split(['\n', '.', '!', '?'])
+        .map(normalize_words)
+        .filter(|sentence| sentence.split(' ').count() >= 3)
+        .collect()
+}
+
+/// The peer's readout records are well formed: consecutive indexes, known
+/// boundaries, only the last one open, no overflow, and present whenever the
+/// provider spoke on the channel. Anything else fails closed.
+fn readout_records_malformed(
+    snapshot: &support::ReadoutSnapshot,
+    provider_spoke: bool,
+) -> Option<String> {
+    if snapshot.overflow {
+        return Some("the peer stopped recording responses at its bound".to_owned());
+    }
+    if provider_spoke && snapshot.records.is_empty() {
+        return Some("the provider spoke but the peer recorded no response".to_owned());
+    }
+    let last = snapshot.records.len().saturating_sub(1);
+    for (position, record) in snapshot.records.iter().enumerate() {
+        let opened_ok = (record.opened_by == "connect" && position == 0)
+            || (READOUT_BOUNDARIES.contains(&record.opened_by.as_str())
+                && record.opened_ms.is_some());
+        let closed_ok = match (&record.closed_by, record.closed_ms) {
+            (Some(kind), Some(_)) => READOUT_BOUNDARIES.contains(&kind.as_str()),
+            (None, None) => position == last,
+            _ => false,
+        };
+        if record.index != position as u64
+            || !opened_ok
+            || !closed_ok
+            || record.text.trim().is_empty()
+            || record.last_output_ms.is_none()
+        {
+            return Some(format!(
+                "malformed readout record at position {position}: {record:?}"
+            ));
+        }
+    }
+    None
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ReadoutFault {
+    /// One delegation's result was delivered into the conversation more
+    /// than once.
+    DuplicateDelivery {
+        delegation_id: String,
+        deliveries: usize,
+    },
+    /// A result sentence was voiced in a response with no delivery of it
+    /// left to account for the voicing: the same result voiced in two
+    /// responses.
+    DuplicateReadout {
+        sentence: String,
+        responses: Vec<u64>,
+    },
+    /// A result delivered on the peer's channel was followed by no
+    /// assistant speech: no non-empty response opened at or after its
+    /// delivery (a result delivered and never spoken).
+    MissedReadout { delegation_id: String },
+}
+
+/// The readout rule. Every delegation result is delivered exactly once, and
+/// every voicing of it falls inside one response: a sentence of 3 or more
+/// normalized words found verbatim in a delivered result voices that result,
+/// and each response that voices a sentence must be accounted for by its own
+/// delivery containing that sentence, sent before the response closed (two
+/// results may share a line, a brief and its corrected copy, and each may be
+/// read once). A sentence repeated inside one response is a stutter, a
+/// measurement (`ReadoutRecord::stutters`). Every result delivered on the
+/// peer's channel must be followed by assistant speech: a response opened at
+/// or after its delivery (the result's own commentary.appended opens one).
+/// Verbatim voicing is not required for that: the model paraphrases short
+/// results, and scripted fixtures may cut a readout off. A delivery sent at
+/// or after the session's close request (`close_request_ms`, the user's
+/// sign-off, the browser's disconnect or meerkat's session.close, on the
+/// peer's clock) is exempt and
+/// journaled as delivered after the close request. Deliveries are counted over
+/// every channel; voicing is checked for the deliveries on `channel`, the
+/// channel of the browser peer whose records these are (a reopen starts a
+/// fresh peer). `offset` maps sideband time to that peer's clock.
+fn readout_faults(
+    deliveries: &[ResultDelivery],
+    channel: u32,
+    records: &[support::ReadoutRecord],
+    offset: i64,
+    close_request_ms: Option<i64>,
+) -> Vec<ReadoutFault> {
+    let mut faults = Vec::new();
+    let mut per_delegation: std::collections::BTreeMap<&str, usize> = Default::default();
+    for delivery in deliveries {
+        *per_delegation
+            .entry(delivery.delegation_id.as_str())
+            .or_default() += 1;
+    }
+    for (delegation_id, count) in per_delegation {
+        if count != 1 {
+            faults.push(ReadoutFault::DuplicateDelivery {
+                delegation_id: delegation_id.to_owned(),
+                deliveries: count,
+            });
+        }
+    }
+    for delivery in deliveries_before_close_request(deliveries, channel, offset, close_request_ms) {
+        let sent = delivery.elapsed_ms as i64 - offset;
+        // Speech after the delivery, in any response: the response that
+        // voices a result may have opened just before it was sent (soak
+        // c43aa3db S102 run 2: " Here's" 1 ms before the send, " what they
+        // said:" after it).
+        let spoken_after = records.iter().any(|record| {
+            record
+                .last_output_ms
+                .is_some_and(|last| last as i64 >= sent)
+        });
+        if !spoken_after {
+            faults.push(ReadoutFault::MissedReadout {
+                delegation_id: delivery.delegation_id.clone(),
+            });
+        }
+    }
+    let delivered: Vec<(i64, String)> = deliveries
+        .iter()
+        .filter(|d| d.channel == channel)
+        .map(|d| {
+            (
+                d.elapsed_ms as i64 - offset,
+                format!(" {} ", normalize_words(&d.text)),
+            )
+        })
+        .collect();
+    let mut voicings: std::collections::BTreeMap<String, Vec<&support::ReadoutRecord>> =
+        Default::default();
+    for record in records {
+        let mut spoken: Vec<String> = readout_sentences(&record.text);
+        spoken.sort();
+        spoken.dedup();
+        for sentence in spoken {
+            let padded = format!(" {sentence} ");
+            if delivered.iter().any(|(_, text)| text.contains(&padded)) {
+                voicings.entry(sentence).or_default().push(record);
             }
         }
     }
-    let mut repeated = Vec::new();
-    let mut segment = String::new();
-    for event in events {
-        if event["type"] == "session.output_transcript.delta" {
-            if let Some(delta) = event["delta"].as_str().or_else(|| event["text"].as_str()) {
-                segment.push_str(delta);
+    for (sentence, responses) in voicings {
+        let padded = format!(" {sentence} ");
+        let mut sends: Vec<i64> = delivered
+            .iter()
+            .filter(|(_, text)| text.contains(&padded))
+            .map(|(t, _)| *t)
+            .collect();
+        sends.sort_unstable();
+        let mut used = 0usize;
+        let mut unaccounted = false;
+        for response in &responses {
+            let available = sends
+                .iter()
+                .filter(|t| response.closed_ms.is_none_or(|closed| **t <= closed as i64))
+                .count();
+            if available > used {
+                used += 1;
+            } else {
+                unaccounted = true;
             }
-        } else if event["type"] == "session.commentary.appended"
-            || event["type"] == "session.delegation.created"
-            || is_user_input(event)
-        {
-            check(&segment, &mut repeated);
-            segment.clear();
+        }
+        if unaccounted {
+            faults.push(ReadoutFault::DuplicateReadout {
+                sentence,
+                responses: responses.iter().map(|r| r.index).collect(),
+            });
         }
     }
-    check(&segment, &mut repeated);
-    repeated
+    faults
+}
+
+/// The result deliveries on `channel` sent before the close request (all of
+/// them when there is none), ordered on the peer's clock.
+fn deliveries_before_close_request(
+    deliveries: &[ResultDelivery],
+    channel: u32,
+    offset: i64,
+    close_request_ms: Option<i64>,
+) -> impl Iterator<Item = &ResultDelivery> {
+    deliveries.iter().filter(move |d| {
+        d.channel == channel
+            && close_request_ms.is_none_or(|close| d.elapsed_ms as i64 - offset < close)
+    })
+}
+
+/// Apply the readout rule to the scenario: sideband deliveries joined with
+/// the peer's readout records. Stutters are recorded as metrics; a fault, a
+/// malformed or missing record set, or an unalignable clock is an error.
+async fn readout_contract(
+    evidence: &Journal,
+    live: &mut PublicLiveHarness,
+    channel: u32,
+    scenario: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let lines = evidence.provider_stream_lines()?;
+    let snapshot = live.peer.readouts().await?;
+    let provider_spoke = sideband_server_frames(&lines, channel, "session.output_transcript.delta")
+        .any(|(_, raw)| raw["delta"].as_str().is_some_and(|d| !d.trim().is_empty()));
+    if let Some(malformed) = readout_records_malformed(&snapshot, provider_spoke) {
+        return Err(format!("{scenario}: readout records unusable: {malformed}").into());
+    }
+    for record in &snapshot.records {
+        for stutter in &record.stutters {
+            record_metric(
+                evidence,
+                channel,
+                scenario,
+                "readout_stutter",
+                format!("response={} sentence={stutter:?}", record.index),
+            )?;
+        }
+    }
+    let deliveries = result_deliveries(&lines);
+    if deliveries.is_empty() {
+        return Ok(());
+    }
+    let offset = if deliveries.iter().any(|d| d.channel == channel) {
+        let timeline = live.peer.timeline().await?;
+        let alignment = sideband_clock_alignment(&timeline, &lines, channel).map_err(|reason| {
+            format!("{scenario}: readout rule cannot order deliveries: {reason}")
+        })?;
+        record_metric(
+            evidence,
+            channel,
+            scenario,
+            "sideband_clock",
+            format!(
+                "pairs={} offset_ms={} spread_ms={}",
+                alignment.pairs, alignment.offset_ms, alignment.spread_ms
+            ),
+        )?;
+        alignment.offset_ms
+    } else {
+        0
+    };
+    // The close request: the earlier of the user's sign-off and meerkat's
+    // session.close on this channel.
+    let close_sent = lines.iter().find_map(|line| match &line.entry {
+        provider_recording::Entry::ClientEvent { event }
+            if line.channel_ordinal == channel && event["type"] == "session.close" =>
+        {
+            Some(line.elapsed_ms as i64 - offset)
+        }
+        _ => None,
+    });
+    // The user hanging up (the browser's disconnect) is a close request too.
+    let disconnect_sent =
+        sideband_disconnect_elapsed(&lines, channel).map(|elapsed_ms| elapsed_ms as i64 - offset);
+    let close_request_ms = [
+        close_sent,
+        disconnect_sent,
+        live.sign_off_onset_ms.map(|t| t as i64),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+    let before_close: Vec<&ResultDelivery> =
+        deliveries_before_close_request(&deliveries, channel, offset, close_request_ms).collect();
+    for delivery in deliveries.iter().filter(|d| d.channel == channel) {
+        if !before_close.iter().any(|b| std::ptr::eq(*b, delivery)) {
+            record_metric(
+                evidence,
+                channel,
+                scenario,
+                "delivered_after_close_request",
+                format!(
+                    "delegation={} sent_ms={} close_request_ms={close_request_ms:?}",
+                    delivery.delegation_id,
+                    delivery.elapsed_ms as i64 - offset
+                ),
+            )?;
+        }
+    }
+    let faults = readout_faults(
+        &deliveries,
+        channel,
+        &snapshot.records,
+        offset,
+        close_request_ms,
+    );
+    record_metric(
+        evidence,
+        channel,
+        scenario,
+        "readout_rule",
+        format!(
+            "deliveries={} responses={} faults={}",
+            deliveries.len(),
+            snapshot.records.len(),
+            faults.len()
+        ),
+    )?;
+    if faults.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{scenario}: readout rule violated: {faults:?}").into())
+    }
 }
 
 // ===========================================================================
@@ -3814,13 +5146,10 @@ const S100_HEADING_TOKEN: &str = "quokka";
 const S100_SILENCE_HOLD_MS: u64 = 4000;
 /// Follow-ups start this long after the assistant goes quiet.
 const S100_FOLLOW_UP_GAP_MS: u64 = 300;
-/// Overlap the barge-in may observe: server VAD onset detection plus the
-/// assistant audio already in flight. Live runs measured 800-2000 ms from
-/// user onset to the assistant going quiet; beyond this the assistant talked
-/// over the user. The measured value is always printed and journaled.
-const S100_BARGE_IN_OVERLAP_BOUND_MS: u64 = 2500;
-/// Tolerant bound on the median input_final -> first assistant audio.
-const S100_MEDIAN_LATENCY_BOUND_MS: i64 = 3000;
+/// The barge-in's overlap is measured (printed and journaled), not bounded:
+/// the browser must not fault it. The yield contract is the talk-over
+/// contract (`talk_over_violations`, `TALK_OVER_BOUND_MS`).
+const S100_BARGE_IN_OVERLAP_BOUND_MS: u64 = 60_000;
 /// Prefix the mob runtime renders in front of a delegated voice request
 /// (`meerkat_mob::runtime::delegation::render_live_delegation_execution_context`).
 const S100_DELEGATION_CONTEXT_PREFIX: &str = "Live delegation execution context: execute this already committed voice request (not a new user utterance).";
@@ -3921,10 +5250,9 @@ fn classify_summary_open(
         println!(
             "GPT_LIVE_{scenario}_SUMMARY_OPEN_CASE label={label} channel={channel} case={case:?}"
         );
-        evidence.record(EvidenceRecord::Tolerant {
+        evidence.record(EvidenceRecord::Metric {
             channel,
-            check: "summary_open_case".to_owned(),
-            passed: true,
+            metric: "summary_open_case".to_owned(),
             detail: format!("{label}: {case:?}"),
         })?;
     }
@@ -3963,20 +5291,47 @@ fn assert_late_summary_delivered(
 }
 
 /// Late-summary rule, host side: the summarizer missed the pre-open bound, so
-/// the create body carries no history items at all while the startup
-/// instructions still carry the history framing clause.
+/// the create body carries no summary (developer) item, only the newest
+/// conversation turns verbatim, bounded by `LIVE_STARTUP_VERBATIM_ITEMS_MAX`
+/// (`with_pending_context_after_recent`), and the startup instructions carry
+/// the history framing clause. The vault phrase is never among them: it is
+/// summary-only. Every open follows freshly committed follow-up turns
+/// (`s99_seed_followups`, `s99_commit_followups`), so its seed is those turns
+/// in full, with the positive-control fact.
 fn assert_late_summary_seed(
     evidence: &Journal,
     channel: u32,
+    phrase: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let window = meerkat::experimental_gpt_live::LIVE_STARTUP_VERBATIM_ITEMS_MAX;
     let seed = evidence.session_input_seed(channel)?;
-    println!("GPT_LIVE_S99_SESSION_INPUT_SEED channel={channel} seed={seed:?}");
+    let texts = evidence.session_input_texts(channel)?;
+    println!(
+        "GPT_LIVE_S99_SESSION_INPUT_SEED channel={channel} seed={seed:?} items={}",
+        texts.len()
+    );
     let seed =
         seed.ok_or_else(|| format!("no session.start seed was captured for channel {channel}"))?;
     assert_eq!(
-        (seed.input_items, seed.developer_items),
-        (0, 0),
-        "a late summary must leave session.input empty on channel {channel}"
+        seed.developer_items, 0,
+        "a late summary carries no summary item at open on channel {channel}"
+    );
+    assert!(
+        seed.input_items <= window,
+        "a late summary seeds at most {window} recent items on channel {channel}: {}",
+        seed.input_items
+    );
+    assert!(
+        texts.iter().all(|text| !s99_recalls_phrase(text, phrase)),
+        "the vault phrase is summary-only and never in the create-time seed on channel {channel}"
+    );
+    assert_eq!(
+        seed.input_items, window,
+        "each open seeds the newest {window} items of the follow-up turns (channel {channel})"
+    );
+    assert!(
+        texts.iter().any(|text| text.contains(S99_SEEDED_FACT)),
+        "the positive-control fact is in the seed of channel {channel}: {texts:?}"
     );
     assert!(
         seed.frames_history,
@@ -4734,9 +6089,8 @@ async fn answer_window(
 ///     to Closed within 20 s, and canonical transcript rows equal to the
 ///     exchange count.
 ///
-/// Tolerant (journaled, summarized, not gated): median input_final -> first
-/// audio under 3 s; the third answer window contains the planted heading
-/// token; the first answer names the file.
+/// Measured (journaled, never judged): median input_final -> first audio; the
+/// first and third answer windows.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_100_gpt_live_public_morning_standup() -> Result<(), Box<dyn std::error::Error>>
@@ -4803,9 +6157,8 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
         let history = live
@@ -4860,7 +6213,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
                     "request 1 left no markdown file inside a notes folder under the workspace; markdown files: {files_after_1:?}"
                 )
             })?;
-        live.record_time_to_talk("S100", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S100").await?;
         let answer1 = answer_window(&mut live, "request 1", &request1).await?;
         evidence.record(request1.timing.latency_record(channel, 1, Some(request1.delegation_created_ms)))?;
         let plan_stem = plan_file
@@ -4881,20 +6234,12 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             })
             .map(str::to_owned)
             .collect();
-        let normalized_answer1 = normalize_words(&answer1);
-        let token_spoken = |token: &str| {
-            normalized_answer1.contains(token)
-                || (token.chars().all(|c| c.is_ascii_digit())
-                    && normalized_answer1.contains(token.trim_start_matches('0')))
-        };
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S100",
-            "answer_1_names_the_file",
-            !stem_tokens.is_empty() && stem_tokens.iter().all(|token| token_spoken(token)),
+            "answer_1",
             format!("file={plan_stem:?} stem_tokens={stem_tokens:?} answer={:?}", answer1.trim()),
-            &mut tolerant_failures,
         )?;
 
         // Request 2 at assistant_quiet + 300 ms: "that file" resolves through
@@ -5003,11 +6348,15 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             barge_in_timing.input_text,
             reissued.trim()
         );
-        assert!(
-            overlap_ms <= S100_BARGE_IN_OVERLAP_BOUND_MS,
-            "assistant talked over the barge-in for {overlap_ms} ms (bound {S100_BARGE_IN_OVERLAP_BOUND_MS} ms); timeline:\n{}",
-            format_timeline(&timeline)
-        );
+        let talk_over = talk_over_violations(&evidence, channel, "S100", &timeline, barge_in, "barge-in")?;
+        if !talk_over.is_empty() {
+            return Err(format!(
+                "{} (overlap {overlap_ms} ms); timeline:\n{}",
+                talk_over.join("; "),
+                format_timeline(&timeline)
+            )
+            .into());
+        }
         assert!(
             !reissued.trim().is_empty(),
             "no assistant transcript followed the barge-in; timeline:\n{}",
@@ -5030,14 +6379,12 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         .await?;
         let answer3 = answer_window(&mut live, "request 3", &request3).await?;
         evidence.record(request3.timing.latency_record(channel, 4, Some(request3.delegation_created_ms)))?;
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S100",
-            "answer_3_contains_planted_second_heading_token",
-            answer3.to_lowercase().contains(S100_HEADING_TOKEN),
+            "answer_3",
             format!("token={S100_HEADING_TOKEN:?} headings={headings:?} answer={:?}", answer3.trim()),
-            &mut tolerant_failures,
         )?;
 
         // (d) Goodbye, graceful client disconnect, host close convergence.
@@ -5057,6 +6404,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
                 fixture_start_entry(t, goodbye).map(|e| e.t_ms)
             })
             .await?;
+        live.sign_off_onset_ms = Some(goodbye_start);
         // The spoken reply to the goodbye is evidence, not a claim: the model
         // may stay silent after a closing remark (seen live: the provider
         // streamed the goodbye's input and never finished the user turn).
@@ -5097,26 +6445,22 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             goodbye_start,
         )
         .is_some();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S100",
             "goodbye_input_final",
-            goodbye_input_final,
             format!("heard={goodbye_input:?}"),
-            &mut tolerant_failures,
         )?;
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S100",
             "goodbye_reply",
-            goodbye_timing.is_some(),
             format!(
                 "input_final_to_audio_ms={:?} heard={goodbye_input:?}",
                 goodbye_timing.as_ref().and_then(SpokenTurn::input_final_to_audio_ms)
             ),
-            &mut tolerant_failures,
         )?;
         if goodbye_timing.is_none() {
             // Same fields as S99's line, so one grep gives a cross-scenario
@@ -5143,6 +6487,16 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         evidence.stage(EvidenceStage::Closing)?;
         live.record_uplink("S100").await?;
         let mut deterministic_failures: Vec<String> = Vec::new();
+        // The sign-off ("Thanks, that is all. Close the call.") needs no spoken
+        // reply: a model may stay silent after a closing remark. The contract
+        // is that the provider transcribed it (typed input deltas carry its
+        // closing words); the host close below then ends the call.
+        let heard_goodbye = normalize_words(&goodbye_input);
+        if !(heard_goodbye.contains("close") && heard_goodbye.contains("call")) {
+            deterministic_failures.push(format!(
+                "the sign-off was not transcribed (no \"close\" and \"call\" in its input deltas): {goodbye_input:?}"
+            ));
+        }
         let close = close_or_record(&mut live, &evidence, channel, "S100", &mut deterministic_failures).await?;
         let close_ms = close.map(|c| c.ms);
 
@@ -5326,7 +6680,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             }
         }
 
-        // Tolerant latency: median input_final -> first assistant audio.
+        // Measured latency: median input_final -> first assistant audio.
         let mut latencies: Vec<i64> = [
             request1.timing.input_final_to_audio_ms(),
             request2.timing.input_final_to_audio_ms(),
@@ -5339,14 +6693,12 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         .collect();
         latencies.sort_unstable();
         let median = latencies.get(latencies.len() / 2).copied();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S100",
-            "median_input_final_to_first_audio_under_3s",
-            median.is_some_and(|m| m < S100_MEDIAN_LATENCY_BOUND_MS),
+            "input_final_to_first_audio_ms",
             format!("median_ms={median:?} all_ms={latencies:?}"),
-            &mut tolerant_failures,
         )?;
 
         // Evidence and soft faults.
@@ -5361,7 +6713,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         })?;
         let faults = scenario_browser_faults(&evidence, &mut live, channel, "S100").await?;
         println!(
-            "GPT_LIVE_S100_OK total_ms={} connected_ms={connected_ms} exchanges={exchanges} greeted={greeted} r1_ms={:?} r2_ms={:?} barge_in_ms={:?} r3_ms={:?} goodbye_ms={:?} median_ms={median:?} r1_commentary_ms={:?} r2_commentary_ms={:?} r3_commentary_ms={:?} executor_done_at_ms=[{}, {}, {}] overlap_ms={overlap_ms} close_ms={close_ms:?} tolerant_failures={tolerant_failures:?} faults={faults:?} history_messages={}",
+            "GPT_LIVE_S100_OK total_ms={} connected_ms={connected_ms} exchanges={exchanges} greeted={greeted} r1_ms={:?} r2_ms={:?} barge_in_ms={:?} r3_ms={:?} goodbye_ms={:?} median_ms={median:?} r1_commentary_ms={:?} r2_commentary_ms={:?} r3_commentary_ms={:?} executor_done_at_ms=[{}, {}, {}] overlap_ms={overlap_ms} close_ms={close_ms:?} faults={faults:?} history_messages={}",
             started.elapsed().as_millis(),
             request1.timing.input_final_to_audio_ms(),
             request2.timing.input_final_to_audio_ms(),
@@ -5388,8 +6740,10 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -5611,11 +6965,21 @@ async fn s102_member_round_trip(
         failures.push(format!(
             "{S102_MEMBER}'s reply never reached the executor as a peer response"
         ));
+        failures.extend(s102_premature_claims(
+            &evidence.provider_stream_lines()?,
+            channel,
+            None,
+        ));
         return Ok(failures);
     }
     let Some(reply) = reply else {
         failures.push(format!(
             "the executor never answered {S102_MEMBER}'s peer response"
+        ));
+        failures.extend(s102_premature_claims(
+            &evidence.provider_stream_lines()?,
+            channel,
+            None,
         ));
         return Ok(failures);
     };
@@ -5646,7 +7010,243 @@ async fn s102_member_round_trip(
              as a voiced session row"
         )),
     }
+    // No premature peer claim: before the reply exists in the provider
+    // conversation (the session-lane append carrying it, on the sideband),
+    // no response may attribute an answer to the peer (soak c43aa3db S102
+    // run 2: "Pemberton said it feels like it's around mid-afternoon" before
+    // the peer had replied).
+    let lines = evidence.provider_stream_lines()?;
+    let reply_sent = lines.iter().find_map(|line| match &line.entry {
+        provider_recording::Entry::ClientEvent { event }
+            if line.channel_ordinal == channel
+                && event["type"] == "session.commentary.append"
+                && event["content"]
+                    .as_str()
+                    .is_some_and(|content| commentary_carries(content, &probe)) =>
+        {
+            Some(line.elapsed_ms)
+        }
+        _ => None,
+    });
+    // A reply that never reached the provider conversation leaves the whole
+    // call before it: any attribution to the peer is invented.
+    failures.extend(s102_premature_claims(&lines, channel, reply_sent));
     Ok(failures)
+}
+
+/// Words that attribute speech to someone: "<peer> said", "<peer> thinks".
+const PEER_ATTRIBUTION_VERBS: &[&str] = &[
+    "said",
+    "says",
+    "replied",
+    "replies",
+    "told",
+    "thinks",
+    "answered",
+    "reckons",
+    "estimates",
+];
+
+/// Subjects whose attribution verb claims what the peer said: the peer's own
+/// name, or a pronoun standing for it ("They said they don't know").
+const PEER_ATTRIBUTION_PRONOUNS: &[&str] = &["they", "he", "she"];
+
+/// Sentences of assistant speech, as the provider transcribed it on the
+/// sideband, spoken before `reply_at_ms` (the sideband send of the append
+/// carrying the peer's reply; `None` when it never reached the provider
+/// conversation, so the whole call) that attribute an answer to the peer:
+/// the peer or a pronoun followed by an attribution verb, or "according to
+/// <peer>". Speech before the reply cannot be voicing it. Timing is per
+/// transcript delta, so a response that asks the peer and voices the real
+/// reply after it arrives is judged by what it said when.
+fn peer_claims_in_speech_before(
+    lines: &[provider_recording::Line],
+    channel: u32,
+    reply_at_ms: Option<u64>,
+    peer: &str,
+) -> Vec<String> {
+    let speech: String = lines
+        .iter()
+        .filter(|line| line.channel_ordinal == channel)
+        .filter(|line| reply_at_ms.is_none_or(|reply| line.elapsed_ms < reply))
+        .filter_map(|line| match &line.entry {
+            provider_recording::Entry::ServerFrame { raw }
+                if raw["type"] == "session.output_transcript.delta" =>
+            {
+                raw["delta"].as_str()
+            }
+            _ => None,
+        })
+        .collect();
+    speech
+        .split_inclusive(['.', '!', '?'])
+        .map(str::trim)
+        .filter(|sentence| {
+            let words = normalize_words(sentence);
+            let words: Vec<&str> = words.split(' ').collect();
+            let attributed = words.windows(2).any(|pair| {
+                (pair[0] == peer || PEER_ATTRIBUTION_PRONOUNS.contains(&pair[0]))
+                    && PEER_ATTRIBUTION_VERBS.contains(&pair[1])
+            });
+            let according = words.windows(3).any(|w| w == ["according", "to", peer]);
+            attributed || according
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// S102's premature-claim failures (soak c43aa3db run 2: "Pemberton said it
+/// feels like it's around mid-afternoon"; combined5 run 3: "They said they
+/// don't know" before the peer had answered).
+fn s102_premature_claims(
+    lines: &[provider_recording::Line],
+    channel: u32,
+    reply_at_ms: Option<u64>,
+) -> Vec<String> {
+    peer_claims_in_speech_before(lines, channel, reply_at_ms, S102_MEMBER_TOKEN)
+        .into_iter()
+        .map(|claim| {
+            format!("the voice attributed an answer to {S102_MEMBER} before its reply existed: {claim:?}")
+        })
+        .collect()
+}
+
+/// Waits until a typed turn's canonical rows (the user prompt and the
+/// assistant's final reply, read from `session/history`) are acknowledged in
+/// the provider conversation on the quiet lane (#1614). Each row rides one
+/// thinking append token (`meerkat-thinking-<token>-<i>`): the text-chat
+/// prefix and the row JSON, split into fragments of at most 500 bytes. A row
+/// is acknowledged when the joined fragments of a token carry it and every
+/// fragment of that token has its `session.thinking.appended`. A typed turn
+/// is text-chat context, never voiced: a `session.commentary.append`
+/// carrying either row fails. A question asked before the rows are
+/// acknowledged races them (verdict tree fb94711f S105 run 3).
+async fn wait_typed_turn_mirrored(
+    live: &mut PublicLiveHarness,
+    evidence: &Journal,
+    channel: u32,
+    prompt: &str,
+    scenario: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let history = live.rpc.session_history(json!(live.session_id), 60).await?;
+    let messages = history["messages"].as_array().cloned().unwrap_or_default();
+    let prompt_at = messages
+        .iter()
+        .rposition(|row| row.to_string().contains(prompt))
+        .ok_or_else(|| format!("{scenario}: the typed turn's prompt is not in session/history"))?;
+    let reply = messages[prompt_at + 1..]
+        .iter()
+        .rev()
+        .filter(|row| row["role"] == "block_assistant")
+        .map(assistant_row_text)
+        .find(|text| !text.trim().is_empty())
+        .ok_or_else(|| format!("{scenario}: the typed turn committed no assistant reply"))?;
+    let probes = [typed_row_probe(prompt), typed_row_probe(&reply)];
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let lines = evidence.provider_stream_lines()?;
+        let voiced: Vec<&String> = probes
+            .iter()
+            .filter(|probe| {
+                lines.iter().any(|line| {
+                    matches!(&line.entry, provider_recording::Entry::ClientEvent { event }
+                        if line.channel_ordinal == channel
+                            && event["type"] == "session.commentary.append"
+                            && event["content"]
+                                .as_str()
+                                .is_some_and(|content| carries_row(content, probe)))
+                })
+            })
+            .collect();
+        if !voiced.is_empty() {
+            return Err(format!(
+                "{scenario}: a typed turn's row was voiced on the commentary lane: {voiced:?}"
+            )
+            .into());
+        }
+        let tokens = thinking_tokens(&lines, channel);
+        let pending: Vec<&String> = probes
+            .iter()
+            .filter(|probe| {
+                !tokens
+                    .iter()
+                    .any(|token| token.acknowledged && carries_row(&token.text, probe))
+            })
+            .collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{scenario}: the typed turn's rows were not acknowledged on the quiet lane within 60 s: {pending:?}"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// The first 60 characters of a row's text: what a mirrored row's JSON
+/// carries verbatim (or JSON-escaped).
+fn typed_row_probe(text: &str) -> String {
+    text.trim().chars().take(60).collect()
+}
+
+/// Whether appended content carries a row starting with `probe`, either as
+/// the mirror's row JSON (parsed) or as text holding the probe verbatim or
+/// JSON-escaped (a framed thinking append: prefix, newline, row JSON).
+fn carries_row(content: &str, probe: &str) -> bool {
+    if commentary_carries(content, probe) || content.contains(probe) {
+        return true;
+    }
+    let escaped = serde_json::to_string(probe).unwrap_or_default();
+    let escaped = escaped.trim_matches('"');
+    !escaped.is_empty() && content.contains(escaped)
+}
+
+/// One thinking append token: its fragments' text joined in fragment order,
+/// and whether every fragment was acknowledged.
+#[derive(Debug, PartialEq)]
+struct ThinkingToken {
+    text: String,
+    acknowledged: bool,
+}
+
+/// The channel's thinking append tokens (`meerkat-thinking-<token>-<i>`).
+fn thinking_tokens(lines: &[provider_recording::Line], channel: u32) -> Vec<ThinkingToken> {
+    let mut fragments: BTreeMap<String, Vec<(u64, String, String)>> = BTreeMap::new();
+    for line in lines.iter().filter(|line| line.channel_ordinal == channel) {
+        if let provider_recording::Entry::ClientEvent { event } = &line.entry
+            && event["type"] == "session.thinking.append"
+            && let Some(id) = event["event_id"].as_str()
+            && let Some((token, index)) = id.rsplit_once('-')
+            && let Ok(index) = index.parse::<u64>()
+        {
+            fragments.entry(token.to_owned()).or_default().push((
+                index,
+                id.to_owned(),
+                event["content"].as_str().unwrap_or_default().to_owned(),
+            ));
+        }
+    }
+    let acked = |id: &str| {
+        lines.iter().any(|line| {
+            line.channel_ordinal == channel
+                && matches!(&line.entry, provider_recording::Entry::ServerFrame { raw }
+                    if raw["type"] == "session.thinking.appended"
+                        && raw["client_event_id"] == id)
+        })
+    };
+    fragments
+        .into_values()
+        .map(|mut parts| {
+            parts.sort_by_key(|(index, _, _)| *index);
+            ThinkingToken {
+                acknowledged: parts.iter().all(|(_, id, _)| acked(id)),
+                text: parts.iter().map(|(_, _, text)| text.as_str()).collect(),
+            }
+        })
+        .collect()
 }
 
 /// The text blocks of one `block_assistant` history row, joined.
@@ -5722,9 +7322,8 @@ impl meerkat::experimental_gpt_live::PublicGptLiveInstructionsPreface for Roster
 /// executor's canonical session, before the channel connects; the first two
 /// answers produce no delegation; the third produces exactly one, completed
 /// by the existing member with a commentary readout; the close converges.
-/// Tolerant: the second answer window names the planted member; the first
-/// answer window mentions files or the shell (the executor's tools from the
-/// preface); open request -> connected under 5 s.
+/// Measured (never judged): the first two answer windows; open request ->
+/// connected.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_102_gpt_live_public_who_are_you() -> Result<(), Box<dyn std::error::Error>> {
@@ -5804,9 +7403,8 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
 
@@ -5841,17 +7439,14 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
             PlayAt::new("whoareyou_capabilities", Anchor::Now, 0),
         )
         .await?;
-        live.record_time_to_talk("S102", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S102").await?;
         evidence.record(q1.latency_record(channel, 1, None))?;
-        let lower1 = answer1.to_lowercase();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S102",
-            "answer_1_mentions_executor_tools",
-            lower1.contains("file") || lower1.contains("shell") || lower1.contains("command"),
+            "answer_1",
             format!("answer={:?}", answer1.trim()),
-            &mut tolerant_failures,
         )?;
 
         // Q2: roster, native; the planted member token is the oracle.
@@ -5866,14 +7461,12 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
         )
         .await?;
         evidence.record(q2.latency_record(channel, 2, None))?;
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S102",
-            "answer_2_names_planted_member",
-            answer2.to_lowercase().contains(S102_MEMBER_TOKEN),
+            "answer_2",
             format!("token={S102_MEMBER_TOKEN:?} answer={:?}", answer2.trim()),
-            &mut tolerant_failures,
         )?;
 
         // Q3: ask them, delegated.
@@ -5940,7 +7533,7 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S102_OK total_ms={} connected_ms={connected_ms} q1_ms={:?} q2_ms={:?} q3_ms={:?} q3_commentary_ms={:?} executor_done_at_ms={} close_ms={:?} close_converged_before_host_close={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S102_OK total_ms={} connected_ms={connected_ms} q1_ms={:?} q2_ms={:?} q3_ms={:?} q3_commentary_ms={:?} executor_done_at_ms={} close_ms={:?} close_converged_before_host_close={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             q1.input_final_to_audio_ms(),
             q2.input_final_to_audio_ms(),
@@ -5959,8 +7552,10 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -5994,11 +7589,12 @@ const S103_TOKENS: [&str; 4] = ["marigold", "tuesday", "copenhagen", "pelican"];
 /// it ended in 2 of 5 runs, so the barge-in interrupted nothing. At the onset
 /// it always lands on assistant speech.
 const S103_BARGE_IN_OFFSET_MS: u64 = 0;
-/// Overlap bound for the two interruptions. gpt-live-1 owns interruption: the
-/// browser's media runs to the provider directly and Meerkat sends no cancel,
-/// so the assistant stops when the provider's turn detection yields (measured
-/// 1.2-1.5 s after onset).
-const S103_BARGE_IN_OVERLAP_BOUND_MS: u64 = 2500;
+/// The two interruptions' overlap is measured, not bounded (the browser must
+/// not fault it). gpt-live-1 owns interruption: the browser's media runs to
+/// the provider directly and Meerkat sends no cancel, so the assistant stops
+/// when the provider's turn detection yields. The yield contract is the
+/// talk-over contract (`talk_over_violations`, `TALK_OVER_BOUND_MS`).
+const S103_BARGE_IN_OVERLAP_BOUND_MS: u64 = 60_000;
 
 /// Wait until every delegated executor turn is terminal and the assistant
 /// has produced no new event for `quiet`; bounded.
@@ -6053,16 +7649,17 @@ async fn wait_for_settled(
 /// let the user finish, never a runtime heuristic.
 /// The remaining deterministic checks:
 /// after the barge-in every new assistant response starts after a new input
-/// final or a commentary append, and no assistant turn repeats a readout line
-/// (turns segmented at commentary, delegation and user-speech events; see
-/// `repeated_readout_lines`);
+/// final or a commentary append; every delegation result is delivered once
+/// and voiced inside one response (`readout_faults`, applied by
+/// `scenario_browser_faults`); the barge-in and the correction keep the
+/// talk-over bounds (`talk_over_violations`);
 /// overlap beyond the bound only inside the two interruption windows; close
 /// converges; the barge-in lands on assistant speech and is answered (the
 /// provider's next response or delegation closes its input, and an assistant
 /// row follows its canonical row); every input final commits as a canonical
 /// spoken row. The public protocol has no response lifecycle (no interrupted
 /// or cancelled event, no truncation signal), so there is no interruption
-/// event to assert against. Tolerant: open -> connected < 5 s.
+/// event to assert against. Measured (never judged): open -> connected.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_103_gpt_live_public_interrupt_and_recover()
@@ -6128,9 +7725,8 @@ async fn run_s103_interrupt_and_recover(
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
 
@@ -6189,7 +7785,7 @@ async fn run_s103_interrupt_and_recover(
                 timeline_find(t, TimelineKind::DelegationCreated, monologue_start_ms).map(|e| e.t_ms)
             })
             .await?;
-        live.record_time_to_talk("S103", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S103").await?;
         let executor_done_at_ms = wait_executor_turn(&mut live, &mut seen_executor_turns, started).await?;
         let commentary_ms = live
             .peer
@@ -6293,7 +7889,6 @@ async fn run_s103_interrupt_and_recover(
         // Readout integrity after the barge-in: every assistant response
         // starts after a new input final or a commentary append.
         let unprompted_starts = unprompted_assistant_response_starts(&timeline, barge_in_start_ms);
-        let provider_events = live.peer.events().await?;
 
         evidence.stage(EvidenceStage::Closing)?;
         live.record_uplink("S103").await?;
@@ -6363,12 +7958,12 @@ async fn run_s103_interrupt_and_recover(
         println!(
             "GPT_LIVE_S103_MONOLOGUE_TURNS delegations={monologue_delegations} assistant_overlap_ms={monologue_overlap_ms}"
         );
-        if barge_in_overlap_ms > S103_BARGE_IN_OVERLAP_BOUND_MS
-            || correction_overlap_ms > S103_BARGE_IN_OVERLAP_BOUND_MS
-        {
-            deterministic_failures.push(format!(
-                "interruption overlap beyond the bound: barge_in={barge_in_overlap_ms} correction={correction_overlap_ms} bound={S103_BARGE_IN_OVERLAP_BOUND_MS}"
-            ));
+        for (fixture, label) in [(barge_in, "barge-in"), (correction, "correction")] {
+            for violation in talk_over_violations(&evidence, channel, "S103", &timeline, fixture, label)? {
+                deterministic_failures.push(format!(
+                    "{violation} (overlap barge_in={barge_in_overlap_ms} correction={correction_overlap_ms})"
+                ));
+            }
         }
         if barge_in_overlap_ms == 0 {
             deterministic_failures.push(
@@ -6378,12 +7973,6 @@ async fn run_s103_interrupt_and_recover(
         if !unprompted_starts.is_empty() {
             deterministic_failures.push(format!(
                 "assistant audio started without a new input final or commentary at ms {unprompted_starts:?} (duplicate readout)"
-            ));
-        }
-        let repeated_lines = repeated_readout_lines(&provider_events);
-        if !repeated_lines.is_empty() {
-            deterministic_failures.push(format!(
-                "an assistant turn repeated readout lines (duplicate readout): {repeated_lines:?}"
             ));
         }
         // Barge-in contract. gpt-live-1's public protocol carries no response
@@ -6458,7 +8047,7 @@ async fn run_s103_interrupt_and_recover(
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S103_OK total_ms={} connected_ms={connected_ms} monologue_overlap_ms={monologue_overlap_ms} barge_in_overlap_ms={barge_in_overlap_ms} correction_overlap_ms={correction_overlap_ms} onset_to_quiet_ms={assistant_quiet_after_onset_ms:?} executor_done_at_ms={executor_done_at_ms} close_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S103_OK total_ms={} connected_ms={connected_ms} monologue_overlap_ms={monologue_overlap_ms} barge_in_overlap_ms={barge_in_overlap_ms} correction_overlap_ms={correction_overlap_ms} onset_to_quiet_ms={assistant_quiet_after_onset_ms:?} executor_done_at_ms={executor_done_at_ms} close_ms={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             close.map(|c| c.ms)
         );
@@ -6471,8 +8060,10 @@ async fn run_s103_interrupt_and_recover(
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -6514,8 +8105,8 @@ const S107_REOPEN_BOUND: Duration = Duration::from_secs(10);
 /// terminality and its executor input and answer are committed to the
 /// canonical session; a subsequent open on the same session connects within
 /// 10 s and answers a spoken question natively; the second channel closes
-/// gracefully. Tolerant: the committed answer names the poem's subject;
-/// open request -> connected under 5 s on both channels.
+/// gracefully. Measured (never judged): the committed answer; open request
+/// -> connected on both channels.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_107_gpt_live_public_stuck_close_convergence()
@@ -6580,10 +8171,9 @@ async fn run_s107_stuck_close_convergence(
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut deterministic_failures: Vec<String> = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
 
@@ -6605,7 +8195,7 @@ async fn run_s107_stuck_close_convergence(
                 timeline_find(t, TimelineKind::DelegationCreated, request_start_ms).map(|e| e.t_ms)
             })
             .await?;
-        live.record_time_to_talk("S107", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S107").await?;
         live.record_uplink("S107").await?;
         let timeline1 = live.peer.timeline().await?;
         let request_timing = SpokenTurn::from_timeline(&timeline1, request);
@@ -6719,14 +8309,12 @@ async fn run_s107_stuck_close_convergence(
         if assistant_text.trim().is_empty() {
             deterministic_failures.push("the job's final transcript (assistant rows after the executor input) was not committed".to_owned());
         }
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S107",
-            "committed_answer_names_the_poem_subject",
-            assistant_text.to_lowercase().contains("lighthouse"),
+            "committed_answer",
             format!("assistant_after_job={:?}", assistant_text.chars().take(300).collect::<String>()),
-            &mut tolerant_failures,
         )?;
 
         live.record_workgraph_mode("S107", 1, &mut deterministic_failures).await?;
@@ -6767,7 +8355,7 @@ async fn run_s107_stuck_close_convergence(
             PlayAt::new("stuckclose_back", Anchor::Now, 0).overlap_bound_ms(60_000),
         )
         .await?;
-        live.record_time_to_talk("S107", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S107").await?;
         evidence.record(back.latency_record(channel2, 1, None))?;
         if answer_back.trim().is_empty() {
             deterministic_failures.push("the reopened channel produced no spoken answer".to_owned());
@@ -6786,7 +8374,7 @@ async fn run_s107_stuck_close_convergence(
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S107_OK total_ms={} connected_ms={connected_ms} close_ms={close_ms} close_converged={converged} executor_done_at_ms={executor_done_at_ms:?} reopen_ms={reopen_ms} back_ms={:?} close2_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S107_OK total_ms={} connected_ms={connected_ms} close_ms={close_ms} close_converged={converged} executor_done_at_ms={executor_done_at_ms:?} reopen_ms={reopen_ms} back_ms={:?} close2_ms={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             back.input_final_to_audio_ms(),
             close2.map(|c| c.ms)
@@ -6801,8 +8389,10 @@ async fn run_s107_stuck_close_convergence(
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -6880,9 +8470,8 @@ fn s104_policy() -> LiveDelegationExecutionPolicy {
 /// answer is committed to the source (under ExistingMember also its executor
 /// input row); the typed turn commits its user and assistant rows; the reopen
 /// connects within 30 s and the first spoken question is answered natively
-/// (no delegation); the second channel closes gracefully. Tolerant: the
-/// post-reopen answer window carries the job's planted result token and the
-/// typed fact; open -> connected < 5 s per channel.
+/// (no delegation); the second channel closes gracefully. Measured (never
+/// judged): the post-reopen answer window; open -> connected per channel.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_104_gpt_live_public_handoff_voice_typed_voice()
@@ -6953,10 +8542,9 @@ async fn run_s104_handoff_voice_typed_voice(
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut deterministic_failures: Vec<String> = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
 
@@ -7000,7 +8588,7 @@ async fn run_s104_handoff_voice_typed_voice(
                 timeline_find(t, TimelineKind::DelegationCreated, request_start_ms).map(|e| e.t_ms)
             })
             .await?;
-        live.record_time_to_talk("S104", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S104").await?;
         live.record_uplink("S104").await?;
         let timeline1 = live.peer.timeline().await?;
         println!(
@@ -7142,7 +8730,7 @@ async fn run_s104_handoff_voice_typed_voice(
             PlayAt::new("handoff_back", Anchor::Now, 0).overlap_bound_ms(60_000),
         )
         .await?;
-        live.record_time_to_talk("S104", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S104").await?;
         evidence.record(back.latency_record(channel2, 1, None))?;
         // The reopen's summary (a late one rides the thinking lane at this
         // question's first delta) and the job-result commentary land in the
@@ -7219,12 +8807,11 @@ async fn run_s104_handoff_voice_typed_voice(
                 output_transcript_text(&events_settled, start)
             })
             .unwrap_or_default();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel2,
             "S104",
             "post_reopen_answer_window",
-            true,
             format!(
                 "fixture_start_ms={back_start} audio_end_answer={:?} settled_answer={:?} commentary_ms={:?} transcript_after_commentary={:?}",
                 answer_at_audio_end.trim(),
@@ -7232,17 +8819,14 @@ async fn run_s104_handoff_voice_typed_voice(
                 commentary.map(|entry| entry.t_ms),
                 transcript_after_commentary.trim()
             ),
-            &mut tolerant_failures,
         )?;
         let lower = answer_back.to_lowercase();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel2,
             "S104",
-            "post_reopen_answer_carries_job_result_token",
-            lower.contains(S104_RESULT_TOKEN),
+            "post_reopen_answer",
             format!("token={S104_RESULT_TOKEN:?} answer={:?}", answer_back.trim()),
-            &mut tolerant_failures,
         )?;
         // The typed note was committed while the call was closed, so by the
         // reopen contract it rides the reopen's startup input verbatim. That
@@ -7357,7 +8941,7 @@ async fn run_s104_handoff_voice_typed_voice(
             }
         }
         println!(
-            "GPT_LIVE_S104_OK total_ms={} connected_ms={connected_ms} close1_ms={:?} typed_ms={typed_ms} executor_done_at_ms={executor_done_at_ms:?} back_start_ms={back_start} back_ms={:?} close2_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S104_OK total_ms={} connected_ms={connected_ms} close1_ms={:?} typed_ms={typed_ms} executor_done_at_ms={executor_done_at_ms:?} back_start_ms={back_start} back_ms={:?} close2_ms={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             close1.map(|c| c.ms),
             back.input_final_to_audio_ms(),
@@ -7373,8 +8957,10 @@ async fn run_s104_handoff_voice_typed_voice(
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -7462,10 +9048,7 @@ async fn s106_reopen_cycle(
     typed_prompt: Option<&str>,
     user_text: &mut Vec<String>,
     deterministic_failures: &mut Vec<String>,
-    tolerant_failures: &mut Vec<String>,
 ) -> Result<(S106Cycle, u32, Option<SeedCase>), Box<dyn std::error::Error>> {
-    let before = evidence.owner_appends()?;
-    let texts_before = evidence.instructions_append_attempt_texts()?.len();
     evidence.stage(EvidenceStage::HaulReopen)?;
     // Let every executor turn and its result delivery settle before the
     // close: a result still in flight at close hits the runtime's
@@ -7489,6 +9072,12 @@ async fn s106_reopen_cycle(
     );
     live.record_uplink("S106").await?;
     let close = close_or_record(live, evidence, channel, "S106", deterministic_failures).await?;
+    // The reopen's append accounting starts once the old channel is closed:
+    // anything the old channel still sent before its close (a result cue
+    // deferred to its response end, #1615) is not the reopen's (verdict
+    // 5e6cdc16 S106, 10/10: "instructions 3 -> 4" was channel 2's cue).
+    let before = evidence.owner_appends()?;
+    let texts_before = evidence.instructions_append_attempt_texts()?.len();
     if let Some(prompt) = typed_prompt {
         user_text.push(normalize_words(prompt));
         let typed = live
@@ -7559,7 +9148,7 @@ async fn s106_reopen_cycle(
         acknowledged: cycle.acknowledged,
         greeted: cycle.greeted,
     })?;
-    live.record_time_to_talk("S106", tolerant_failures).await?;
+    live.record_time_to_talk("S106").await?;
     if greeted {
         deterministic_failures.push(format!(
             "the assistant greeted on its own after the reopen (channel {new_channel})"
@@ -7606,9 +9195,8 @@ async fn s106_reopen_cycle(
 /// and are all acknowledged; exactly one delegation per delegated exchange
 /// and none for the native ones; canonical user rows carry exactly the words
 /// of the typed turns and of every user utterance across all channels, in
-/// order; every close converges; WorkGraph parallel mode. Tolerant: the final summary
-/// window carries the three planted tokens; median input_final -> first
-/// audio under 3 s; open -> connected under 5 s per channel.
+/// order; every close converges; WorkGraph parallel mode. Measured (never
+/// judged): median input_final -> first audio; open -> connected per channel.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_106_gpt_live_public_long_haul() -> Result<(), Box<dyn std::error::Error>> {
@@ -7670,7 +9258,6 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let mut channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut deterministic_failures: Vec<String> = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
     let mut latencies: Vec<i64> = Vec::new();
@@ -7680,7 +9267,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
     let mut user_text = vec![normalize_words(&s106_seed_prompt())];
     let mut delegation_windows: Vec<(String, usize)> = Vec::new();
     let mut stage_ms: Vec<(String, u128)> = vec![("connected".to_owned(), connected_ms)];
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
         if silence_hold_greeting(&mut live, &evidence, channel, "S106", S106_REOPEN_HOLD_MS).await? {
@@ -7755,7 +9342,6 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             Some(S106_TYPED_PROMPT),
             &mut user_text,
             &mut deterministic_failures,
-            &mut tolerant_failures,
         )
         .await?;
         channel = channel2;
@@ -7792,7 +9378,6 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             None,
             &mut user_text,
             &mut deterministic_failures,
-            &mut tolerant_failures,
         )
         .await?;
         channel = channel3;
@@ -7947,17 +9532,15 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         );
         // The row count is evidence, not a verdict: the browser and the
         // runtime close utterances on separately ordered event streams.
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S106",
-            "canonical_row_count_matches_browser_utterances",
-            rows.spoken.len() == typed_turns + utterances,
+            "canonical_row_count",
             format!(
                 "spoken_rows={} typed={typed_turns} browser_utterances={utterances}",
                 rows.spoken.len()
             ),
-            &mut tolerant_failures,
         )?;
         if !words_match {
             deterministic_failures.push(format!(
@@ -7966,14 +9549,12 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         }
         latencies.sort_unstable();
         let median = latencies.get(latencies.len() / 2).copied();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S106",
-            "median_input_final_to_first_audio_under_3s",
-            median.is_some_and(|m| m < 3000),
+            "input_final_to_first_audio_ms",
             format!("median_ms={median:?} all_ms={latencies:?}"),
-            &mut tolerant_failures,
         )?;
         evidence.record(EvidenceRecord::Timeline { channel, entries: timeline3.clone() })?;
         let faults = scenario_browser_faults(&evidence, &mut live, channel, "S106").await?;
@@ -7986,7 +9567,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             }
         }
         println!(
-            "GPT_LIVE_S106_OK total_ms={} stages={stage_ms:?} cycle1={cycle1:?} cycle2={cycle2:?} close3_ms={:?} notes_md_bytes={notes_bytes} utterances={utterances} median_ms={median:?} delegations={delegation_windows:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S106_OK total_ms={} stages={stage_ms:?} cycle1={cycle1:?} cycle2={cycle2:?} close3_ms={:?} notes_md_bytes={notes_bytes} utterances={utterances} median_ms={median:?} delegations={delegation_windows:?} faults={faults:?}",
             started.elapsed().as_millis(),
             close3.map(|c| c.ms)
         );
@@ -7999,8 +9580,10 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -8104,9 +9687,8 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut deterministic_failures: Vec<String> = Vec::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
 
         // Job 1, then the quick question and job 2 anchored on job 1's
@@ -8188,7 +9770,7 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
                 &PlayAt::new("busy_job2", Anchor::Now, S101_JOB2_OFFSET_MS).overlap_bound_ms(60_000),
             )
             .await?;
-        live.record_time_to_talk("S101", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S101").await?;
 
         // Three delegations, then every executor turn terminal; the peak
         // number of simultaneously non-terminal turns is the parallelism.
@@ -8391,7 +9973,7 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S101_OK total_ms={} connected_ms={connected_ms} max_concurrent={max_concurrent} jobs_done_at_ms={jobs_done_ms} commentaries={} close_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S101_OK total_ms={} connected_ms={connected_ms} max_concurrent={max_concurrent} jobs_done_at_ms={jobs_done_ms} commentaries={} close_ms={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             commentary_times.len(),
             close.map(|c| c.ms)
@@ -8405,8 +9987,10 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -8491,9 +10075,9 @@ fn s105_first_int(text: &str) -> Option<i64> {
 /// (found by content: spoken file names are rendered loosely by the
 /// recognizer);
 /// the typed turn commits; the recall is answered natively; graceful close;
-/// WorkGraph parallel mode. Tolerant: the recall window carries the corrected
-/// numbers; cache_read on the second fork is not observable over RPC here
-/// (skipped, as the design allows).
+/// WorkGraph parallel mode; the typed correction updates both files.
+/// Measured (never judged): the recall answer; cache_read on the second fork is
+/// not observable over RPC here.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_105_gpt_live_public_fork_and_merge_parallel()
@@ -8557,9 +10141,8 @@ async fn run_s105_fork_and_merge_parallel(
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut deterministic_failures: Vec<String> = Vec::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
 
         // A, then B 4 s after A's delegation.
@@ -8584,7 +10167,7 @@ async fn run_s105_fork_and_merge_parallel(
             .peer
             .play_at(&PlayAt::new("fork_b", Anchor::Now, S105_B_OFFSET_MS).overlap_bound_ms(60_000))
             .await?;
-        live.record_time_to_talk("S105", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S105").await?;
         let timeline = live
             .peer
             .wait_for_timeline(Duration::from_secs(90), "two delegation_created entries", |t| {
@@ -8727,6 +10310,12 @@ async fn run_s105_fork_and_merge_parallel(
         // recall into several finals. Proceed only once every result is
         // acknowledged delivered and its commentary reached the peer.
         wait_all_result_commentaries(&mut live, "S105").await?;
+        // Contract before the typed correction: both forks' results reached
+        // the source's live channel (each delegation's typed result delivery
+        // is Delivered; wait_all_result_commentaries above fails the run
+        // otherwise). A live-delivered result is provider context, not yet a
+        // canonical row (that comes from the spoken readout's commit, or from
+        // the post-close merge), so the typed delivery is what holds here.
         // Typed correction while live, then the voice recall.
         evidence.stage(EvidenceStage::ForkCorrection)?;
         wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(60)).await?;
@@ -8750,22 +10339,35 @@ async fn run_s105_fork_and_merge_parallel(
             .as_ref()
             .and_then(|name| std::fs::read_to_string(workspace.join(name)).ok());
         println!("GPT_LIVE_S105_ARTIFACTS_AFTER number={number_after:?} doubled={doubled_after:?}");
-        record_tolerant(
-            &evidence,
-            channel,
-            "S105",
-            "typed_correction_updated_the_files",
-            number_after.as_deref().and_then(s105_first_int) == Some(21)
-                && doubled_after.as_deref().and_then(s105_first_int) == Some(42),
-            format!("number={number_after:?} doubled={doubled_after:?}"),
-            &mut tolerant_failures,
-        )?;
+        // The typed correction is executed: both files carry the corrected
+        // numbers. This is the only check that the source member acted on
+        // the merged fork state (the typed turn can succeed while the edit
+        // lands nowhere), the same contract the pre-correction check holds.
+        if number_after.as_deref().and_then(s105_first_int) != Some(21)
+            || doubled_after.as_deref().and_then(s105_first_int) != Some(42)
+        {
+            deterministic_failures.push(format!(
+                "the typed correction did not update both files: number={number_after:?} doubled={doubled_after:?}"
+            ));
+        }
         // The correction's own executor result is delivered on the same
         // serialized result channel. The recall asks about the corrected
         // numbers, so it waits for every result, the correction's included,
         // to reach the model; otherwise delegating the recall is a correct
         // answer to a model that has not heard the result yet.
         wait_all_result_commentaries(&mut live, "S105 after the typed correction").await?;
+        // The typed turn's rows reach the model as mirrored session rows on
+        // their own schedule. A recall asked before they land races them:
+        // the model starts speaking on the rows mid-question and the recall
+        // is talked over (verdict tree fb94711f S105 run 3).
+        wait_typed_turn_mirrored(
+            &mut live,
+            &evidence,
+            channel,
+            &s105_typed_prompt(doubled_file.as_deref().unwrap_or("the doubled-number file")),
+            "S105",
+        )
+        .await?;
         let events_before_recall = live.peer.events().await?.len();
         let (recall, answer, _, _) = native_question(
             &mut live,
@@ -8778,29 +10380,23 @@ async fn run_s105_fork_and_merge_parallel(
         )
         .await?;
         evidence.record(recall.latency_record(channel, 3, None))?;
-        let lower = normalize_words(&answer);
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S105",
-            "recall_reflects_typed_correction",
-            (lower.contains("42") || lower.contains("forty two"))
-                && (lower.contains("21") || lower.contains("twenty one")),
+            "recall_answer",
             format!("answer={:?}", answer.trim()),
-            &mut tolerant_failures,
         )?;
         let events = live.peer.events().await?;
         if events[events_before_recall..].iter().any(is_client_delegation) {
             deterministic_failures.push("the voice recall must be answered natively, not delegated".to_owned());
         }
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S105",
-            "second_fork_cache_read_skipped",
-            true,
+            "second_fork_cache_read",
             "provider usage rows are not observable over RPC in this harness; skipped as designed".to_owned(),
-            &mut tolerant_failures,
         )?;
 
         evidence.stage(EvidenceStage::Closing)?;
@@ -8821,7 +10417,7 @@ async fn run_s105_fork_and_merge_parallel(
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S105_OK total_ms={} connected_ms={connected_ms} max_concurrent={max_concurrent} number={n:?} doubled={d:?} forks_spawned={} forks_retired={} close_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S105_OK total_ms={} connected_ms={connected_ms} max_concurrent={max_concurrent} number={n:?} doubled={d:?} forks_spawned={} forks_retired={} close_ms={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             lifecycle.spawned.len(),
             lifecycle.retired.len(),
@@ -8836,8 +10432,10 @@ async fn run_s105_fork_and_merge_parallel(
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -8856,6 +10454,9 @@ async fn run_s105_fork_and_merge_parallel(
     browser_flush?;
     Ok(())
 }
+
+/// S98's delayed typed update, committed during the call.
+const S98_TYPED_UPDATE: &str = "A delayed background update changes the code word you must remember from Tangerine to Violet. Acknowledge the new code word Violet briefly. Do not use tools or start another task.";
 
 /// Scenario 98: the public Live lifecycle facts that no provider event
 /// establishes on its own, driven against the real API.
@@ -8877,12 +10478,31 @@ async fn run_s105_fork_and_merge_parallel(
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen()
 -> Result<(), Box<dyn std::error::Error>> {
-    timeout(Duration::from_secs(480), run_s98_real_audio_and_context())
-        .await
-        .map_err(|_| "S98 overall deadline expired; no completed real-audio qualification")?
+    // Recorded like every Turbo S scenario (journal, browser evidence,
+    // provider stream on both channels).
+    let evidence = Journal::create_for("S98", "Violet".to_owned())?;
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let result = timeout(
+        Duration::from_secs(480),
+        run_s98_real_audio_and_context(evidence.clone()),
+    )
+    .await;
+    let finished = evidence.finish_classified(match &result {
+        Ok(Ok(())) => evidence::Outcome::Passed,
+        Ok(Err(_)) => evidence::Outcome::Failed,
+        Err(_) => evidence::Outcome::TimedOut,
+    });
+    if let Ok(Some(degradation)) = &finished {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
+    result.map_err(|_| "S98 overall deadline expired; no completed real-audio qualification")??;
+    finished?;
+    Ok(())
 }
 
-async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Error>> {
+async fn run_s98_real_audio_and_context(
+    evidence: Journal,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat::live_close=info,meerkat_live=debug,meerkat_rpc=debug",
@@ -8890,12 +10510,23 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
         .with_test_writer()
         .try_init();
     require_api_key()?;
-    let mut live = open_public_live(
-        "gpt-live-public-reopen-e2e-",
-        "scenario-98-operator",
-        LiveDelegationExecutionPolicy::ExistingMember,
-    )
+    evidence.stage(EvidenceStage::Opening)?;
+    let mut live = open_public_live_with(PublicLiveOpen {
+        temp_prefix: "gpt-live-public-reopen-e2e-",
+        operator_principal: "scenario-98-operator",
+        execution_policy: LiveDelegationExecutionPolicy::ExistingMember,
+        bootstrap: None,
+        seed_prompt: None,
+        evidence: Some(evidence.clone()),
+        unmeasured_playback: false,
+        executor_instructions: None,
+        extra_members: Vec::new(),
+        instructions_preface: None,
+        summary_bootstrap: false,
+        shared_host: false,
+    })
     .await?;
+    evidence.stage(EvidenceStage::Connected)?;
     let session_id = live.session_id.clone();
     live.assert_existing_text_identity().await?;
 
@@ -9151,26 +10782,34 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
     // A later ordinary background turn is a new canonical context update,
     // not another result for the already completed voice delegation.
     let before_update = live.peer.events().await?.len();
-    live.rpc.call(
-        "turn/start",
-        json!({
-            "session_id":session_id,
-            "prompt":"A delayed background update changes the code word you must remember from Tangerine to Violet. Acknowledge the new code word Violet briefly. Do not use tools or start another task."
-        }),
-        120,
-    ).await?;
+    live.rpc
+        .call(
+            "turn/start",
+            json!({
+                "session_id":session_id,
+                "prompt":S98_TYPED_UPDATE
+            }),
+            120,
+        )
+        .await?;
     live.assert_existing_text_identity().await?;
     let updated = live.rpc.session_history(json!(session_id), 30).await?;
     assert!(
         updated["messages"].to_string().contains("Violet"),
         "delayed update must first commit to the unchanged background session"
     );
-    // The typed update is voiced as owner commentary; do not speak into it.
+    // The typed update reaches the voice as quiet text-chat context (#1614):
+    // ask the recall only once both rows are acknowledged on the quiet lane,
+    // then after any speech has ended.
+    let channel = evidence.current_channel()?;
+    wait_typed_turn_mirrored(&mut live, &evidence, channel, S98_TYPED_UPDATE, "S98").await?;
     wait_for_assistant_quiet(&mut live.peer).await?;
     let before_updated_recall = live.peer.events().await?.len();
     let audio_baseline = live.peer.audio_evidence().await?;
+    // `recall` asks for the word the user asked to remember, which stays
+    // Tangerine after the update; `recall_now` asks for the current word.
     live.peer
-        .call(json!({"type":"play","name":"recall"}))
+        .call(json!({"type":"play","name":"recall_now"}))
         .await?;
     let recalled_update = wait_for_events(&mut live.peer, 90, |events| {
         output_transcript_text(events, before_updated_recall)
@@ -9194,6 +10833,8 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
     }
     live.close_exact().await?;
     live.assert_existing_text_identity().await?;
+    live.peer.stop_evidence().await?;
+    evidence.stage(EvidenceStage::Finished)?;
     live.peer.close().await;
     live.server_task.abort();
     println!(
@@ -9730,53 +11371,896 @@ mod config_tests {
         assert!(super::unprompted_assistant_response_starts(&entries, 53787).is_empty());
     }
 
-    fn output_deltas(text: &str) -> Vec<serde_json::Value> {
-        text.split_inclusive(['\n', ' '])
-            .map(|delta| serde_json::json!({"type": "session.output_transcript.delta", "delta": delta}))
-            .collect()
+    // ---- readout rule -------------------------------------------------------
+
+    const BRIEF: &str = "Saved as kickoff_brief.md.\n# Kickoff brief\nThe client is the Marigold account.\nThe kickoff is Tuesday afternoon.\nThe deck code name is Pelican.\n";
+    const CORRECTED_BRIEF: &str = "Updated kickoff_brief.md.\n# Kickoff brief\nThe client is the Marigold account.\nThe kickoff is Friday afternoon.\nThe deck code name is Pelican.\n";
+
+    fn result_delivery(delegation_id: &str, elapsed_ms: u64, text: &str) -> super::ResultDelivery {
+        super::ResultDelivery {
+            delegation_id: delegation_id.to_owned(),
+            channel: 1,
+            elapsed_ms,
+            text: text.to_owned(),
+        }
     }
 
-    /// The brief read once, line by line, then read again from its first line
-    /// with no provider event in between (no commentary, delegation or user
-    /// speech): one model turn whose short lines repeat, a duplicate readout.
+    fn readout(index: u64, closed_ms: Option<u64>, text: &str) -> super::support::ReadoutRecord {
+        super::support::ReadoutRecord {
+            index,
+            opened_by: if index == 0 {
+                "connect"
+            } else {
+                "session.commentary.appended"
+            }
+            .to_owned(),
+            opened_ms: Some(index * 1000),
+            closed_by: closed_ms.map(|_| "session.input_transcript.delta".to_owned()),
+            closed_ms,
+            last_output_ms: Some(closed_ms.unwrap_or(index * 1000 + 500)),
+            text: text.to_owned(),
+            stutters: Vec::new(),
+        }
+    }
+
+    /// One delegation's result delivered into the conversation twice is a
+    /// duplicate delivery even when the model voices it only once.
     #[test]
-    fn s103_second_unprompted_readout_of_short_brief_lines_is_flagged() {
-        let brief = "Client: Marigold account.\nKickoff: Tuesday afternoon.\nVenue: Copenhagen office downstairs.\nDeck codename: Pelican.\n";
-        let events = output_deltas(&format!("{brief}{brief}"));
+    fn a_result_delivered_twice_is_a_duplicate_delivery() {
+        let deliveries = [
+            result_delivery("item_a", 1000, BRIEF),
+            result_delivery("item_a", 4000, BRIEF),
+        ];
+        let records = [readout(
+            5,
+            Some(9000),
+            "Here it is. The client is the Marigold account.",
+        )];
         assert_eq!(
-            super::repeated_readout_lines(&events),
+            super::readout_faults(&deliveries, 1, &records, 0, None),
+            vec![super::ReadoutFault::DuplicateDelivery {
+                delegation_id: "item_a".to_owned(),
+                deliveries: 2,
+            }]
+        );
+    }
+
+    /// A result delivered once, read in one response and read again in a
+    /// later response (after user speech) is a duplicate readout.
+    #[test]
+    fn a_result_voiced_in_two_responses_is_a_duplicate_readout() {
+        let deliveries = [result_delivery("item_a", 1000, BRIEF)];
+        let records = [
+            readout(0, Some(900), "Okay, I am on it."),
+            readout(
+                1,
+                Some(6000),
+                "The client is the Marigold account. The kickoff is Tuesday afternoon.",
+            ),
+            readout(2, Some(9000), "Sure. The kickoff is Tuesday afternoon."),
+        ];
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &records, 0, None),
+            vec![super::ReadoutFault::DuplicateReadout {
+                sentence: "the kickoff is tuesday afternoon".to_owned(),
+                responses: vec![1, 2],
+            }]
+        );
+    }
+
+    /// A line repeated back to back inside one response, with one delivery,
+    /// is a model stutter: a measurement, no fault (finalc S103 run 4).
+    #[test]
+    fn a_repeat_inside_one_response_is_a_stutter_not_a_fault() {
+        let deliveries = [result_delivery("item_a", 1000, BRIEF)];
+        let records = [readout(
+            1,
+            None,
+            "Line five. The deck code name is Pelican. Line five. The deck code name is Pelican.",
+        )];
+        assert!(super::readout_faults(&deliveries, 1, &records, 0, None).is_empty());
+    }
+
+    /// The brief and its corrected copy share lines; each delivery accounts
+    /// for one reading of them (soak round 2, S103 run 5). Reading the
+    /// shared lines again before the corrected copy was delivered is a
+    /// re-voice of the first result.
+    #[test]
+    fn a_corrected_copy_accounts_for_one_more_reading_of_shared_lines() {
+        let deliveries = [
+            result_delivery("item_a", 1000, BRIEF),
+            result_delivery("item_b", 7500, CORRECTED_BRIEF),
+        ];
+        let first = readout(
+            1,
+            Some(6000),
+            "The client is the Marigold account. The kickoff is Tuesday afternoon.",
+        );
+        let corrected = readout(
+            8,
+            Some(12000),
+            "The client is the Marigold account. The kickoff is Friday afternoon.",
+        );
+        assert!(
+            super::readout_faults(&deliveries, 1, &[first.clone(), corrected], 0, None).is_empty()
+        );
+        let early = readout(2, Some(7000), "The client is the Marigold account.");
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &[first, early], 0, None),
             vec![
-                "client marigold account",
-                "kickoff tuesday afternoon",
-                "venue copenhagen office downstairs",
-                "deck codename pelican"
+                super::ReadoutFault::MissedReadout {
+                    delegation_id: "item_b".to_owned()
+                },
+                super::ReadoutFault::DuplicateReadout {
+                    sentence: "the client is the marigold account".to_owned(),
+                    responses: vec![1, 2],
+                },
             ]
         );
     }
 
-    /// One readout of the brief, and a confirmation after it, repeat nothing.
+    /// A result delivered and followed by no assistant speech is a missed
+    /// readout, even when an earlier response spoke; speech after the
+    /// delivery, paraphrased or cut off, satisfies it.
     #[test]
-    fn s103_single_readout_repeats_no_lines() {
-        let events = output_deltas(
-            "Client: Marigold account.\nKickoff: Friday afternoon.\nVenue: Copenhagen office downstairs.\nGot it. I updated the brief.",
+    fn a_result_never_followed_by_speech_is_a_missed_readout() {
+        let deliveries = [result_delivery(
+            "item_a",
+            5000,
+            "Updated the kickoff to Thursday, October 8, 2026.",
+        )];
+        let before_only = [readout(4, Some(4900), "Okay, changing the day.")];
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &before_only, 0, None),
+            vec![super::ReadoutFault::MissedReadout {
+                delegation_id: "item_a".to_owned()
+            }]
         );
-        assert!(super::repeated_readout_lines(&events).is_empty());
+        let paraphrased = [
+            readout(4, Some(4900), "Okay, changing the day."),
+            readout(6, None, "Thursday afternoon."),
+        ];
+        assert!(super::readout_faults(&deliveries, 1, &paraphrased, 0, None).is_empty());
     }
 
-    /// The saved brief read, then the corrected brief read after the
-    /// executor's result arrives (a commentary append): two model turns the
-    /// peer cannot tell apart as responses (the public protocol has no
-    /// response lifecycle). Shared lines across the two turns are not a
-    /// duplicate readout (soak round 2, S103 run 5).
+    /// Ordered against the close request: a result delivered before it and
+    /// never followed by speech is a missed readout; one delivered at or
+    /// after it is exempt (journaled as delivered after the close request).
     #[test]
-    fn s103_corrected_readout_after_a_commentary_is_not_a_duplicate() {
-        let mut events = output_deltas(
-            "Here's the brief I saved.\nMarigold kickoff brief.\nThe client is the Marigold account.\nKickoff: Tuesday afternoon.\n",
+    fn a_result_delivered_after_the_close_request_is_exempt() {
+        let records = [readout(4, Some(4900), "Okay, changing the day.")];
+        let before = [result_delivery(
+            "item_a",
+            5000,
+            "Updated the kickoff to Friday.",
+        )];
+        assert_eq!(
+            super::readout_faults(&before, 1, &records, 0, Some(9000)),
+            vec![super::ReadoutFault::MissedReadout {
+                delegation_id: "item_a".to_owned()
+            }]
         );
-        events.push(serde_json::json!({"type": "session.commentary.appended"}));
-        events.extend(output_deltas(
-            "Here is the corrected brief.\nMarigold kickoff brief.\nThe client is the Marigold account.\nKickoff: Friday afternoon.\n",
+        let after = [result_delivery(
+            "item_a",
+            9500,
+            "Updated the kickoff to Friday.",
+        )];
+        assert!(super::readout_faults(&after, 1, &records, 0, Some(9000)).is_empty());
+        assert_eq!(
+            super::deliveries_before_close_request(&after, 1, 0, Some(9000)).count(),
+            0
+        );
+        assert_eq!(
+            super::deliveries_before_close_request(&before, 1, 0, Some(9000)).count(),
+            1
+        );
+    }
+
+    fn barge_in_with_bursts(
+        bursts: serde_json::Value,
+        output: serde_json::Value,
+        inputs: serde_json::Value,
+    ) -> Vec<super::TimelineEntry> {
+        timeline(&[
+            (
+                10_000,
+                "fixture_start",
+                serde_json::json!({"id": 7, "speech_ms": 3000}),
+            ),
+            (
+                14_000,
+                "fixture_end",
+                serde_json::json!({"id": 7, "facts": {
+                    "now_ms": 14_000, "hysteresis_ms": 600, "bursts": bursts,
+                    "output": output, "inputs": inputs, "delegations": []
+                }}),
+            ),
+        ])
+    }
+
+    /// Talk-over that starts after the onset, while the user is still
+    /// speaking, fails unless it is a classified backchannel; the burst that
+    /// was already playing at onset is the yield's, not a start.
+    #[test]
+    fn talk_over_that_starts_during_the_utterance_fails() {
+        let started_over = barge_in_with_bursts(
+            serde_json::json!([
+                {"started_ms": 9000, "last_active_ms": 10_400, "ended": true, "overlap_ms": 400},
+                {"started_ms": 11_000, "last_active_ms": 12_500, "ended": true, "overlap_ms": 1500}
+            ]),
+            serde_json::json!([{"t_ms": 11_600, "text": " Let me walk you through the whole plan."}]),
+            serde_json::json!([12_800]),
+        );
+        // The provider heard the user at 10_250: a reaction can start after
+        // 10_450.
+        let starts =
+            super::talk_over_starts(&started_over, 7, 10_250, &|audible, _| audible as i64)
+                .unwrap();
+        assert!(
+            matches!(starts.violations.as_slice(), [s] if s.starts_with("the assistant started talking over the user 1000 ms")),
+            "{starts:?}"
+        );
+        let backchannel = barge_in_with_bursts(
+            serde_json::json!([
+                {"started_ms": 11_000, "last_active_ms": 11_300, "ended": true, "overlap_ms": 300}
+            ]),
+            serde_json::json!([{"t_ms": 11_500, "text": " Okay."}]),
+            serde_json::json!([11_900]),
+        );
+        assert_eq!(
+            super::talk_over_starts(&backchannel, 7, 10_250, &|audible, _| audible as i64).unwrap(),
+            super::TalkOverStarts::default()
+        );
+        // A reply already in flight when the provider heard the user is the
+        // yield's, not a start.
+        let in_flight = barge_in_with_bursts(
+            serde_json::json!([
+                {"started_ms": 10_300, "last_active_ms": 11_500, "ended": true, "overlap_ms": 1200}
+            ]),
+            serde_json::json!([{"t_ms": 10_900, "text": " Sure, I'll switch it to Thursday."}]),
+            serde_json::json!([12_000]),
+        );
+        assert_eq!(
+            super::talk_over_starts(&in_flight, 7, 10_250, &|audible, _| audible as i64).unwrap(),
+            super::TalkOverStarts::default()
+        );
+        // A burst with no words in its window is journaled, not judged.
+        let wordless = barge_in_with_bursts(
+            serde_json::json!([
+                {"started_ms": 12_500, "last_active_ms": 12_700, "ended": true, "overlap_ms": 200}
+            ]),
+            serde_json::json!([]),
+            serde_json::json!([]),
+        );
+        let starts =
+            super::talk_over_starts(&wordless, 7, 10_250, &|audible, _| audible as i64).unwrap();
+        assert!(starts.violations.is_empty());
+        assert_eq!(
+            starts.wordless,
+            vec!["into_ms=2500 duration_ms=200".to_owned()]
+        );
+        // A wordless burst owes the same yield as speech: one outlasting
+        // TALK_OVER_BOUND_MS from its own start fails.
+        let long_wordless = barge_in_with_bursts(
+            serde_json::json!([
+                {"started_ms": 11_000, "last_active_ms": 14_100, "ended": true, "overlap_ms": 2000}
+            ]),
+            serde_json::json!([]),
+            serde_json::json!([]),
+        );
+        let starts =
+            super::talk_over_starts(&long_wordless, 7, 10_250, &|audible, _| audible as i64)
+                .unwrap();
+        assert!(
+            matches!(starts.violations.as_slice(), [v] if v.starts_with("a wordless assistant burst that started 1000 ms into the utterance lasted 3100 ms")),
+            "{starts:?}"
+        );
+    }
+
+    fn output_frame(arrival_ms: i64, start_ms: i64, voiced: bool) -> super::OutputFrame {
+        super::OutputFrame {
+            arrival_ms,
+            start_ms,
+            end_ms: start_ms + 200,
+            voiced,
+        }
+    }
+
+    /// A burst's emission is the sideband arrival of the first voiced frame
+    /// of its run (model-time silences shorter than the hysteresis do not
+    /// break it), not its audible start, which trails by the playout.
+    #[test]
+    fn a_burst_is_emitted_where_its_voiced_run_starts() {
+        let frames = [
+            // The previous burst, 1 s of model time earlier.
+            output_frame(9000, 38_000, true),
+            output_frame(9200, 38_200, false),
+            // This burst: voiced from model 39_200, with a 200 ms word gap.
+            output_frame(10_150, 39_200, true),
+            output_frame(10_350, 39_400, false),
+            output_frame(10_550, 39_600, true),
+            output_frame(10_750, 39_800, true),
+        ];
+        assert_eq!(super::burst_emission_ms(&frames, 10_602, 600), 10_150);
+        // A gap as long as the hysteresis separates bursts.
+        assert_eq!(super::burst_emission_ms(&frames, 9100, 600), 9000);
+        // Nothing voiced had arrived by the audible start.
+        assert_eq!(super::burst_emission_ms(&frames, 8000, 600), 8000);
+    }
+
+    /// The soak b52680b4 S103 run 5 shape: a reply to the earlier barge-in
+    /// becomes audible 602 ms into the correction, after the provider heard
+    /// it, but was emitted before the provider could react: it is the
+    /// yield's, not a talk-over start.
+    #[test]
+    fn an_in_flight_reply_audible_after_the_onset_is_not_a_start() {
+        let late_audible = barge_in_with_bursts(
+            serde_json::json!([
+                {"started_ms": 10_602, "last_active_ms": 12_300, "ended": true, "overlap_ms": 1700}
+            ]),
+            serde_json::json!([{"t_ms": 11_200, "text": " Got it, switching it to Thursday."}]),
+            serde_json::json!([12_800]),
+        );
+        let emitted_early =
+            super::talk_over_starts(&late_audible, 7, 10_250, &|_, _| 10_150).unwrap();
+        assert_eq!(emitted_early, super::TalkOverStarts::default());
+        let emitted_late =
+            super::talk_over_starts(&late_audible, 7, 10_250, &|audible, _| audible as i64)
+                .unwrap();
+        assert!(
+            matches!(emitted_late.violations.as_slice(), [v] if v.starts_with("the assistant started talking over the user 602 ms"))
+        );
+    }
+
+    /// A response that starts while a user utterance plays is prompted by it,
+    /// though its transcript arrives later (soak aba8eb88 S103 run 4); with
+    /// no utterance, commentary or final since the assistant was last
+    /// audible it is still unprompted.
+    #[test]
+    fn a_response_during_a_playing_utterance_is_prompted() {
+        let during = timeline(&[
+            (
+                1000,
+                "assistant_audio_end",
+                serde_json::json!({"last_active_ms": 900, "response": 0}),
+            ),
+            (
+                1200,
+                "fixture_start",
+                serde_json::json!({"id": 2, "speech_ms": 2870}),
+            ),
+            (
+                2000,
+                "assistant_audio_start",
+                serde_json::json!({"response": 1}),
+            ),
+        ]);
+        assert!(super::unprompted_assistant_response_starts(&during, 0).is_empty());
+        let silent_fixture = timeline(&[
+            (
+                1000,
+                "assistant_audio_end",
+                serde_json::json!({"last_active_ms": 900, "response": 0}),
+            ),
+            (
+                1200,
+                "fixture_start",
+                serde_json::json!({"id": "silence-1", "speech_ms": 0}),
+            ),
+            (
+                2000,
+                "assistant_audio_start",
+                serde_json::json!({"response": 1}),
+            ),
+        ]);
+        assert_eq!(
+            super::unprompted_assistant_response_starts(&silent_fixture, 0),
+            vec![2000]
+        );
+    }
+
+    /// Speech that follows a delivery inside a response opened just before it
+    /// voices the result: soak c43aa3db S102 run 2 (" Here's" 1 ms before
+    /// the send, " what they said:" after it).
+    #[test]
+    fn speech_after_the_delivery_in_an_earlier_opened_response_is_not_missed() {
+        let deliveries = [result_delivery(
+            "item_a",
+            1000,
+            "I asked Analyst Pemberton.",
+        )];
+        let mut spanning = readout(0, Some(1400), "Here's what they said:");
+        spanning.opened_ms = Some(999);
+        spanning.last_output_ms = Some(1300);
+        assert!(super::readout_faults(&deliveries, 1, &[spanning.clone()], 0, None).is_empty());
+        spanning.last_output_ms = Some(999);
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &[spanning], 0, None),
+            vec![super::ReadoutFault::MissedReadout {
+                delegation_id: "item_a".to_owned()
+            }]
+        );
+    }
+
+    /// Acks the sideband receives after the browser disconnected are not
+    /// paired (soak c43aa3db S105 run 1), and the disconnect is a close
+    /// request.
+    #[test]
+    fn sideband_acks_after_the_disconnect_are_not_paired() {
+        let entries = timeline(&[(1000, "commentary_appended", serde_json::json!({}))]);
+        let mut lines = vec![server_frame(
+            1,
+            1500,
+            serde_json::json!({"type": "session.commentary.appended"}),
+        )];
+        lines.push(super::provider_recording::Line {
+            seq: 2,
+            channel_ordinal: 1,
+            elapsed_ms: 5000,
+            entry: super::provider_recording::Entry::Marker {
+                step: "disconnect:graceful".to_owned(),
+            },
+        });
+        lines.push(server_frame(
+            3,
+            5400,
+            serde_json::json!({"type": "session.commentary.appended"}),
         ));
-        assert!(super::repeated_readout_lines(&events).is_empty());
+        let alignment = super::sideband_clock_alignment(&entries, &lines, 1).unwrap();
+        assert_eq!((alignment.offset_ms, alignment.pairs), (500, 1));
+        assert_eq!(super::sideband_disconnect_elapsed(&lines, 1), Some(5000));
+        assert_eq!(super::sideband_disconnect_elapsed(&lines, 2), None);
+    }
+
+    /// A typed row split across thinking fragments under one token is
+    /// carried when the token's joined text holds it (escaped or verbatim),
+    /// and acknowledged only when every fragment was (#1614).
+    #[test]
+    fn a_typed_row_is_matched_across_the_fragments_of_one_thinking_token() {
+        let line =
+            |seq: u64, entry: super::provider_recording::Entry| super::provider_recording::Line {
+                seq,
+                channel_ordinal: 1,
+                elapsed_ms: seq * 100,
+                entry,
+            };
+        let append = |seq: u64, id: &str, content: &str| {
+            line(
+                seq,
+                super::provider_recording::Entry::ClientEvent {
+                    event: serde_json::json!({"type": "session.thinking.append", "event_id": id, "content": content}),
+                },
+            )
+        };
+        let ack = |seq: u64, id: &str| {
+            line(
+                seq,
+                super::provider_recording::Entry::ServerFrame {
+                    raw: serde_json::json!({"type": "session.thinking.appended", "client_event_id": id}),
+                },
+            )
+        };
+        let row = "Correction: the number in number.txt must be 21 and \"number2.txt\" must be 42.";
+        let mut lines = vec![
+            append(
+                1,
+                "meerkat-thinking-7-0",
+                "From the text chat during this call: ...\n{\"role\":\"user\",\"text\":\"Correction: the number in number.txt",
+            ),
+            append(
+                2,
+                "meerkat-thinking-7-1",
+                " must be 21 and \\\"number2.txt\\\" must be 42.\"}",
+            ),
+            ack(3, "meerkat-thinking-7-0"),
+        ];
+        let probe = super::typed_row_probe(row);
+        let tokens = super::thinking_tokens(&lines, 1);
+        assert_eq!(tokens.len(), 1);
+        assert!(
+            super::carries_row(&tokens[0].text, &probe),
+            "{:?}",
+            tokens[0].text
+        );
+        assert!(
+            !tokens[0].acknowledged,
+            "one fragment is still unacknowledged"
+        );
+        lines.push(ack(4, "meerkat-thinking-7-1"));
+        assert!(super::thinking_tokens(&lines, 1)[0].acknowledged);
+        assert!(super::thinking_tokens(&lines, 2).is_empty());
+    }
+
+    /// The vault phrase has five words and never repeats a word back to
+    /// back, over every byte pair that would have (fb94711f S99 run 8).
+    #[test]
+    fn the_vault_phrase_never_repeats_a_word_back_to_back() {
+        for first in 0..=u8::MAX {
+            for second in (first % 8..=u8::MAX).step_by(8) {
+                let phrase = super::s99_vault_phrase(&[first, second, second, first, first]);
+                let words: Vec<&str> = phrase.split(' ').collect();
+                assert_eq!(words.len(), 5, "{phrase}");
+                assert!(words.windows(2).all(|pair| pair[0] != pair[1]), "{phrase}");
+            }
+        }
+        assert_eq!(
+            super::s99_vault_phrase(&[4, 6, 4, 4, 2]),
+            super::s99_vault_phrase(&[4, 6, 4, 4, 2]),
+            "the phrase is a function of the digest"
+        );
+    }
+
+    /// Speech that attributes an answer to the peer before the peer's reply
+    /// existed is a premature claim (soak c43aa3db S102 run 2; combined5 run
+    /// 3, where a pronoun stood for the peer). Asking the peer, and voicing
+    /// the real reply after it arrived in the same response, are not.
+    #[test]
+    fn a_peer_claim_spoken_before_the_reply_exists_is_flagged() {
+        let delta = |seq: u64, elapsed_ms: u64, text: &str| super::provider_recording::Line {
+            seq,
+            channel_ordinal: 1,
+            elapsed_ms,
+            entry: super::provider_recording::Entry::ServerFrame {
+                raw: serde_json::json!({"type": "session.output_transcript.delta", "delta": text}),
+            },
+        };
+        let lines = vec![
+            delta(1, 1000, " Sure, I'm asking Analyst Pemberton now."),
+            delta(2, 2000, " They said they don't know,"),
+            delta(3, 2200, " but I've asked Analyst Pemberton."),
+            delta(4, 3000, " According to Pemberton it's mid-afternoon."),
+            delta(5, 3500, " Pemberton said it feels like mid-afternoon."),
+            delta(6, 5000, " Analyst Pemberton replied, 13 UTC."),
+        ];
+        let claims = super::peer_claims_in_speech_before(&lines, 1, Some(4000), "pemberton");
+        assert_eq!(claims.len(), 3, "{claims:?}");
+        assert!(claims[0].starts_with("They said they don't know"));
+        assert!(claims[1].starts_with("According to Pemberton"));
+        assert!(claims[2].starts_with("Pemberton said"));
+        assert!(
+            super::peer_claims_in_speech_before(&lines, 2, None, "pemberton").is_empty(),
+            "another channel's speech is not this call's"
+        );
+        assert_eq!(
+            super::peer_claims_in_speech_before(&lines, 1, None, "pemberton").len(),
+            4,
+            "with no reply ever sent, the voiced reply is invented too"
+        );
+    }
+
+    /// Scheduler narration on the commentary lane is not a result; the
+    /// delegation's other commentary append is.
+    #[test]
+    fn narration_appends_are_not_result_deliveries() {
+        let append = |seq: u64, content: &str| super::provider_recording::Line {
+            seq,
+            channel_ordinal: 1,
+            elapsed_ms: seq * 100,
+            entry: super::provider_recording::Entry::ClientEvent {
+                event: serde_json::json!({
+                    "type": "session.commentary.append",
+                    "delegation_id": "item_a",
+                    "content": content,
+                }),
+            },
+        };
+        let lines = [
+            append(
+                1,
+                "Voice request queued: \"x\". 1 request(s) are running ahead of it; it starts when a slot frees.",
+            ),
+            append(2, "Started voice request: \"x\"."),
+            append(
+                3,
+                "Voice request \"x\" is waiting for the assistant to finish its current turn before it starts.",
+            ),
+            append(4, "Finished voice request: \"x\". The result follows."),
+            append(5, BRIEF),
+        ];
+        let deliveries = super::result_deliveries(&lines);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].text, BRIEF);
+    }
+
+    /// Missing or malformed readout records fail closed.
+    #[test]
+    fn readout_records_fail_closed() {
+        assert!(
+            serde_json::from_value::<super::support::ReadoutSnapshot>(serde_json::Value::Null)
+                .is_err()
+        );
+        let snapshot = |records: Vec<super::support::ReadoutRecord>, overflow: bool| {
+            super::support::ReadoutSnapshot { records, overflow }
+        };
+        let well_formed = vec![
+            readout(0, Some(900), "Okay."),
+            readout(1, None, "The client is the Marigold account."),
+        ];
+        assert_eq!(
+            super::readout_records_malformed(&snapshot(well_formed.clone(), false), true),
+            None
+        );
+        assert!(super::readout_records_malformed(&snapshot(Vec::new(), false), true).is_some());
+        assert_eq!(
+            super::readout_records_malformed(&snapshot(Vec::new(), false), false),
+            None
+        );
+        assert!(
+            super::readout_records_malformed(&snapshot(well_formed.clone(), true), true).is_some()
+        );
+        let mut gap = well_formed.clone();
+        gap[1].index = 2;
+        assert!(super::readout_records_malformed(&snapshot(gap, false), true).is_some());
+        let mut open_first = well_formed.clone();
+        open_first[0].closed_by = None;
+        open_first[0].closed_ms = None;
+        assert!(super::readout_records_malformed(&snapshot(open_first, false), true).is_some());
+        let mut unknown_boundary = well_formed;
+        unknown_boundary[1].opened_by = "session.usage.updated".to_owned();
+        assert!(
+            super::readout_records_malformed(&snapshot(unknown_boundary, false), true).is_some()
+        );
+    }
+
+    // ---- talk-over contract -------------------------------------------------
+
+    fn pcm(amplitude: i16) -> String {
+        use base64::Engine as _;
+        let bytes: Vec<u8> = std::iter::repeat_n(amplitude.to_le_bytes(), 4800)
+            .flatten()
+            .collect();
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn server_frame(
+        seq: u64,
+        elapsed_ms: u64,
+        raw: serde_json::Value,
+    ) -> super::provider_recording::Line {
+        super::provider_recording::Line {
+            seq,
+            channel_ordinal: 1,
+            elapsed_ms,
+            entry: super::provider_recording::Entry::ServerFrame { raw },
+        }
+    }
+
+    /// Sideband clock = browser clock + 500 ms (one commentary.appended seen
+    /// at browser 1000 and sideband 1500). Barge-in onset at 10_000; the
+    /// assistant burst started at 9000 and was last audible at 11_400.
+    fn yield_fixture(
+        input_voiced_at: u64,
+        last_output_at: u64,
+    ) -> (
+        Vec<super::TimelineEntry>,
+        Vec<super::provider_recording::Line>,
+    ) {
+        let entries = timeline(&[
+            (
+                1000,
+                "commentary_appended",
+                serde_json::json!({"event_index": 3}),
+            ),
+            (
+                10_000,
+                "fixture_start",
+                serde_json::json!({"id": 7, "speech_ms": 1500}),
+            ),
+            (
+                12_000,
+                "assistant_audio_end",
+                serde_json::json!({"started_ms": 9000, "last_active_ms": 11_400}),
+            ),
+        ]);
+        let lines = vec![
+            server_frame(
+                1,
+                1500,
+                serde_json::json!({"type": "session.commentary.appended"}),
+            ),
+            server_frame(
+                2,
+                10_550,
+                serde_json::json!({"type": "session.input_audio.append", "audio": pcm(4)}),
+            ),
+            server_frame(
+                3,
+                input_voiced_at,
+                serde_json::json!({"type": "session.input_audio.append", "audio": pcm(2000)}),
+            ),
+            server_frame(
+                4,
+                last_output_at,
+                serde_json::json!({"type": "session.output_audio.delta", "delta": pcm(1500), "start_ms": 40_000, "end_ms": 40_200}),
+            ),
+            server_frame(
+                5,
+                last_output_at + 200,
+                serde_json::json!({"type": "session.output_audio.delta", "delta": pcm(5), "start_ms": 40_200, "end_ms": 40_400}),
+            ),
+            // The next response, after the last audible window: not the yield.
+            server_frame(
+                6,
+                13_000,
+                serde_json::json!({"type": "session.output_audio.delta", "delta": pcm(1500), "start_ms": 43_000, "end_ms": 43_200}),
+            ),
+        ];
+        (entries, lines)
+    }
+
+    #[test]
+    fn a_yield_splits_into_ingest_turn_taking_and_playout() {
+        let (entries, lines) = yield_fixture(10_750, 11_200);
+        let observation = super::yield_segments(&entries, &lines, 1, 7, 600).unwrap();
+        let super::YieldObservation::Yield(segments) = observation else {
+            panic!("expected a yield, got {observation:?}");
+        };
+        assert_eq!(
+            segments,
+            super::YieldSegments {
+                onset_ms: 10_000,
+                last_audible_ms: 11_400,
+                ingest_ms: 250,
+                turn_taking_ms: 700,
+                playout_ms: 700,
+            }
+        );
+        assert!(segments.violations().is_empty());
+    }
+
+    /// Each bound fails on its own segment: slow ingest, slow playout, and
+    /// an end-to-end talk-over past the bound.
+    #[test]
+    fn each_talk_over_bound_fails_its_segment() {
+        // A voiced frame stalled on the sideband (arriving 300 ms after its
+        // slot) is not slow ingest: ingest is taken at the cadence slot.
+        let (entries, lines) = yield_fixture(11_050, 11_200);
+        let super::YieldObservation::Yield(stalled) =
+            super::yield_segments(&entries, &lines, 1, 7, 600).unwrap()
+        else {
+            panic!("expected a yield");
+        };
+        assert_eq!(stalled.ingest_ms, 250);
+        assert!(stalled.violations().is_empty());
+        // Speech reflected three frames late on the cadence is slow ingest.
+        let (entries, mut lines) = yield_fixture(11_150, 11_200);
+        for (seq, at) in [(10, 10_750), (11, 10_950)] {
+            lines.insert(
+                2,
+                server_frame(
+                    seq,
+                    at,
+                    serde_json::json!({"type": "session.input_audio.append", "audio": pcm(4)}),
+                ),
+            );
+        }
+        lines.sort_by_key(|line| line.elapsed_ms);
+        let super::YieldObservation::Yield(slow_ingest) =
+            super::yield_segments(&entries, &lines, 1, 7, 600).unwrap()
+        else {
+            panic!("expected a yield");
+        };
+        assert_eq!(slow_ingest.ingest_ms, 650);
+        assert!(
+            matches!(slow_ingest.violations().as_slice(), [v] if v.starts_with("ingest took 650 ms"))
+        );
+        let (entries, lines) = yield_fixture(10_750, 10_800);
+        let super::YieldObservation::Yield(slow_playout) =
+            super::yield_segments(&entries, &lines, 1, 7, 600).unwrap()
+        else {
+            panic!("expected a yield");
+        };
+        assert_eq!(slow_playout.playout_ms, 1100);
+        assert!(
+            matches!(slow_playout.violations().as_slice(), [v] if v.starts_with("playout took 1100 ms"))
+        );
+        let talk_over = super::YieldSegments {
+            onset_ms: 10_000,
+            last_audible_ms: 13_001,
+            ingest_ms: 250,
+            turn_taking_ms: 2400,
+            playout_ms: 600,
+        };
+        assert!(
+            matches!(talk_over.violations().as_slice(), [v] if v.starts_with("talked over the user for 3001 ms"))
+        );
+    }
+
+    /// An unmeasurable yield is an error (never a pass); a quiet assistant
+    /// at onset has nothing to yield.
+    #[test]
+    fn an_unmeasurable_yield_is_an_error() {
+        let (entries, mut lines) = yield_fixture(10_750, 11_200);
+        lines.retain(|line| !matches!(&line.entry, super::provider_recording::Entry::ServerFrame { raw } if raw["type"] == "session.input_audio.append"));
+        assert!(super::yield_segments(&entries, &lines, 1, 7, 600).is_err());
+        let (entries, mut lines) = yield_fixture(10_750, 11_200);
+        // The sideband saw a commentary.appended the browser did not: the
+        // pairs cannot be matched, so nothing is measured.
+        lines.push(server_frame(
+            7,
+            2900,
+            serde_json::json!({"type": "session.commentary.appended"}),
+        ));
+        assert!(super::yield_segments(&entries, &lines, 1, 7, 600).is_err());
+        // One late sideband stamp (a 127 ms outlier, soak 35728bf0 S100 run
+        // 3) leaves the median offset, so the yield is still measured.
+        let (mut entries, mut lines) = yield_fixture(10_750, 11_200);
+        entries.insert(
+            1,
+            timeline(&[(2000, "commentary_appended", serde_json::json!({}))]).remove(0),
+        );
+        lines.insert(
+            1,
+            server_frame(
+                7,
+                2627,
+                serde_json::json!({"type": "session.commentary.appended"}),
+            ),
+        );
+        entries.insert(
+            2,
+            timeline(&[(3000, "commentary_appended", serde_json::json!({}))]).remove(0),
+        );
+        lines.insert(
+            2,
+            server_frame(
+                8,
+                3500,
+                serde_json::json!({"type": "session.commentary.appended"}),
+            ),
+        );
+        let alignment = super::sideband_clock_alignment(&entries, &lines, 1).unwrap();
+        assert_eq!(
+            (alignment.offset_ms, alignment.spread_ms, alignment.pairs),
+            (500, 127, 3)
+        );
+        assert!(matches!(
+            super::yield_segments(&entries, &lines, 1, 7, 600),
+            Ok(super::YieldObservation::Yield(_))
+        ));
+        // Fresh, alignable recordings: the provider heard the user at the
+        // 10_250 slot, so a burst starting after 10_450 could react to it.
+        let (_, lines) = yield_fixture(10_750, 11_200);
+        let burst = |started_ms: u64, last_active_ms: u64| {
+            timeline(&[
+                (1000, "commentary_appended", serde_json::json!({})),
+                (
+                    10_000,
+                    "fixture_start",
+                    serde_json::json!({"id": 7, "speech_ms": 1500}),
+                ),
+                (
+                    last_active_ms + 600,
+                    "assistant_audio_end",
+                    serde_json::json!({"started_ms": started_ms, "last_active_ms": last_active_ms}),
+                ),
+            ])
+        };
+        // Started after the provider could react: not the yield's.
+        assert_eq!(
+            super::yield_segments(&burst(10_700, 11_400), &lines, 1, 7, 600),
+            Ok(super::YieldObservation::NotSpeakingAtOnset {
+                onset_ms: 10_000,
+                heard_ms: 10_250
+            })
+        );
+        // Last audible before the onset (its end entry trails by the
+        // hysteresis): quiet at onset.
+        assert_eq!(
+            super::yield_segments(&burst(9000, 9800), &lines, 1, 7, 600),
+            Ok(super::YieldObservation::NotSpeakingAtOnset {
+                onset_ms: 10_000,
+                heard_ms: 10_250
+            })
+        );
+        // Started after the onset but before the provider could react to the
+        // utterance: a reply already in flight, measured as the yield.
+        assert!(matches!(
+            super::yield_segments(&burst(10_300, 11_400), &lines, 1, 7, 600),
+            Ok(super::YieldObservation::Yield(super::YieldSegments {
+                ingest_ms: 250,
+                ..
+            }))
+        ));
     }
 }

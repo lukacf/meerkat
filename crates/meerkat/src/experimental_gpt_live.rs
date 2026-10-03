@@ -614,6 +614,12 @@ pub use meerkat_openai::public_live::thinking_capture;
 #[doc(hidden)]
 pub use meerkat_openai::public_live::provider_recording;
 
+/// The provider startup-item bound of a summary-pending seed, for scenario
+/// tests that place history deliberately inside or outside the seed window.
+#[cfg(feature = "test-realtime-fixtures")]
+#[doc(hidden)]
+pub use meerkat_openai::public_live::LIVE_STARTUP_VERBATIM_ITEMS_MAX;
+
 /// How long a close waits for the provider's confirmation when a quiet
 /// context append is still pending injection. Such an append settles only at
 /// an input frame stall, so waiting longer buys nothing while media flows.

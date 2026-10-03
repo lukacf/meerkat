@@ -388,6 +388,25 @@ pub mod provider_recording {
         static CURRENT: Recorder;
     }
 
+    /// The recorder a client constructed outside any recorder scope captures,
+    /// while a [`FallbackGuard`] lives. A host that opens channels on its own
+    /// spawned tasks (the JSON-RPC server dispatches each request on one)
+    /// never sees the test's task-local scope. Process-wide: one guard at a
+    /// time, held only around the open whose client should record.
+    static FALLBACK: Mutex<Option<Recorder>> = Mutex::new(None);
+
+    /// Clears the fallback recorder when dropped.
+    #[must_use = "the fallback recorder is cleared when the guard drops"]
+    pub struct FallbackGuard(());
+
+    impl Drop for FallbackGuard {
+        fn drop(&mut self) {
+            if let Ok(mut fallback) = FALLBACK.lock() {
+                *fallback = None;
+            }
+        }
+    }
+
     impl Recorder {
         /// Create the recording file (it must not exist; owner-only mode).
         pub fn create(path: &Path) -> std::io::Result<Self> {
@@ -422,7 +441,19 @@ pub mod provider_recording {
         }
 
         pub(super) fn current() -> Option<Self> {
-            CURRENT.try_with(Clone::clone).ok()
+            CURRENT
+                .try_with(Clone::clone)
+                .ok()
+                .or_else(|| FALLBACK.lock().ok().and_then(|fallback| fallback.clone()))
+        }
+
+        /// Record clients constructed outside any recorder scope into this
+        /// recorder until the guard drops (see [`FALLBACK`]).
+        pub fn install_fallback(&self) -> FallbackGuard {
+            if let Ok(mut fallback) = FALLBACK.lock() {
+                *fallback = Some(self.clone());
+            }
+            FallbackGuard(())
         }
 
         /// The first write failure, if any: a recording that lost a line is
@@ -540,6 +571,22 @@ pub mod provider_recording {
             assert!(
                 Recorder::create(&path).is_err(),
                 "never overwrites a recording"
+            );
+
+            // A client constructed on a spawned task (an RPC host's request
+            // handler) records into the fallback while its guard lives, and
+            // nowhere once it drops. One test owns the process-wide fallback,
+            // so this stays sequential with the scope checks above.
+            let guard = recorder.install_fallback();
+            let captured = tokio::spawn(async { Recorder::current().map(|r| r.channel_ordinal) })
+                .await
+                .unwrap();
+            assert_eq!(captured, Some(3));
+            drop(guard);
+            assert!(
+                tokio::spawn(async { Recorder::current().is_none() })
+                    .await
+                    .unwrap()
             );
         }
     }

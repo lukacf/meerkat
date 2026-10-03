@@ -1240,6 +1240,21 @@ them.
   model cannot end a call, and the instructions route work it cannot do to
   the executor, so "Close the call" was delegated.
 
+- GPT Live no longer replays its own "let me check" speech after a late
+  summary as if it were a fact (Turbo S S99 r1: after the summary had
+  answered the vault-phrase question, the quiet replay re-showed the model
+  its earlier "I'll confirm once I can retrieve that earlier text", and it
+  delegated the same question again). Assistant speech opened between a
+  user turn's client delegation and that delegation's result acknowledgement
+  (or the user speaking again) gets no reassertion ordinal; the result is
+  recognised by its own append attempt. A readout after the result, and all
+  speech outside a delegation, still reassert.
+- A GPT Live open whose summary is still pending but whose newest turns are
+  seeded verbatim no longer says the older part of the conversation "is being
+  prepared and is not yet available" (Turbo S S99 control: asked about the
+  newest seeded turn first, the model answered "I don't know" or delegated).
+  The notice claims the seeded turns as known; the late summary arrives with
+  its own framing.
 - `MobHandle::force_cancel_member` and `MobHandle::cancel_all_work` no longer
   fail with `Internal("... Runtime not ready: attached")` on a member whose
   runtime is attached but has no run. Both now cancel the member's current

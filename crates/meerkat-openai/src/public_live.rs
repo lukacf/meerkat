@@ -613,10 +613,17 @@ pub const LIVE_STARTUP_VERBATIM_ITEMS_MAX: usize = 4;
 pub const LIVE_STARTUP_INPUT_TOKEN_BUDGET: usize = 8192;
 const LIVE_STARTUP_INPUT_BYTES_PER_TOKEN: usize = 3;
 
-/// Startup notice of a summary-pending seed that carries the newest turns
-/// verbatim ([`PublicLiveOpenConfig::with_pending_context_after_recent`]).
+/// Startup notice of a summary-pending seed with no verbatim turns: the
+/// history is being prepared.
 const LIVE_PENDING_CONTEXT_NOTICE: &str = "Voice-channel context availability (factual state, not a new user request):\nHistorical session context is being prepared and is not yet available.";
-const LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE: &str = "Voice-channel context availability (factual state, not a new user request):\nThe most recent turns of the earlier text conversation are in the session input. They are part of that text conversation and you know them: answer questions about them yourself, directly. Only the older part of the text conversation is summarized, and that summary is being prepared and is not yet available.";
+/// Startup notice of a summary-pending seed that carries the newest turns
+/// verbatim ([`PublicLiveOpenConfig::with_pending_context_after_recent`]): it
+/// claims those turns as known and says nothing about the pending summary.
+/// With the answer in the seeded turns, a pending-summary sentence was the
+/// one claim that mapped a "text chat" question onto something unavailable
+/// (Turbo S S99 control: "I don't know" or a delegation as the first
+/// exchange); the late summary arrives with its own framing.
+const LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE: &str = "Voice-channel context availability (factual state, not a new user request):\nThe most recent turns of the earlier text conversation are in the session input. They are part of that text conversation and you know them: answer questions about them yourself, directly.";
 
 /// What the startup input budget dropped to fit the provider limits. Recent
 /// turns are dropped oldest first; the summary is never dropped.
@@ -4249,7 +4256,7 @@ mod tests {
             encoded["instructions"]
                 .as_str()
                 .unwrap()
-                .contains("Only the older part of the text conversation is summarized")
+                .contains("you know them: answer questions about them yourself, directly")
         );
         // No recent turns: the original pending notice and no input.
         let empty = PublicLiveOpenConfig::new("v=0", "marin")
@@ -4257,6 +4264,43 @@ mod tests {
             .with_pending_context_after_recent(&[]);
         let encoded = serde_json::to_value(factory.session_config(&empty)).unwrap();
         assert!(encoded.get("input").is_none());
+        assert!(
+            encoded["instructions"]
+                .as_str()
+                .unwrap()
+                .contains(LIVE_PENDING_CONTEXT_NOTICE)
+        );
+    }
+
+    /// Both pending notices claim only what the seed carries, so the model
+    /// never claims facts older than the seeded turns before the summary
+    /// lands: without verbatim turns, the history is still being prepared;
+    /// with them, only those turns are claimed as known, and nothing about
+    /// older history is.
+    #[test]
+    fn pending_notices_claim_only_what_the_seed_carries() {
+        assert!(
+            LIVE_PENDING_CONTEXT_NOTICE
+                .contains("Historical session context is being prepared and is not yet available.")
+        );
+        let after_recent = LIVE_PENDING_CONTEXT_AFTER_RECENT_NOTICE;
+        assert!(after_recent.contains(
+            "The most recent turns of the earlier text conversation are in the session input."
+        ));
+        assert!(after_recent.contains("you know them: answer questions about them yourself"));
+        for over_claim in [
+            "everything",
+            "whole conversation",
+            "all of",
+            "older",
+            "earlier facts",
+            "summary",
+        ] {
+            assert!(
+                !after_recent.contains(over_claim),
+                "the seeded-turns notice claims {over_claim:?}"
+            );
+        }
     }
 
     /// A summary-pending seed with recent turns tells the model those turns
@@ -4286,7 +4330,16 @@ mod tests {
             "The most recent turns of the earlier text conversation are in the session input"
         ));
         assert!(notice.contains("you know them: answer questions about them yourself, directly"));
-        assert!(notice.contains("Only the older part of the text conversation is summarized"));
+        // Turbo S S99 (combined3 r2, chk R2): the control question about the
+        // newest seeded turn got "I don't know" or a delegation, its first
+        // exchange, with nothing before it but the seed and this notice. The
+        // notice's pending-summary sentence ("only the older part ... is
+        // being prepared and is not yet available") is the one claim that
+        // can map a "text chat" question onto something unavailable, so a
+        // notice for seeded answer-bearing turns makes no pending claim; the
+        // late summary arrives with its own framing.
+        assert!(!notice.contains("not yet available"));
+        assert!(!notice.contains("summary"));
         assert_eq!(
             encoded["input"][0]["content"][0]["text"],
             "today I parked on level nine"

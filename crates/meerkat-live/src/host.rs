@@ -1407,6 +1407,7 @@ fn generated_test_machine_for_registered_session(
         MeerkatMachineInput::RegisterSession {
             session_id: DslSessionId(session_id.to_string()),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("register session in generated MeerkatMachine authority");

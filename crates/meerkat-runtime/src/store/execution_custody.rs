@@ -77,6 +77,7 @@ impl RuntimeStoreExecutionCustody {
     pub fn try_acquire_shared(
         &self,
     ) -> Result<RuntimeStoreExecutionClaim, RuntimeStoreExecutionCustodyError> {
+        #[cfg(feature = "sqlite-store")]
         let inner = match &self.inner {
             ExecutionCustodyOwner::Memory(inner) => inner,
             #[cfg(feature = "sqlite-store")]
@@ -88,6 +89,8 @@ impl RuntimeStoreExecutionCustody {
                     });
             }
         };
+        #[cfg(not(feature = "sqlite-store"))]
+        let ExecutionCustodyOwner::Memory(inner) = &self.inner;
         let mut current = inner.try_lock().map_err(custody_lock_error)?;
         if current.governed {
             return Err(RuntimeStoreExecutionCustodyError::Busy);
@@ -109,6 +112,7 @@ impl RuntimeStoreExecutionCustody {
     pub fn try_acquire_governed(
         &self,
     ) -> Result<RuntimeStoreExecutionClaim, RuntimeStoreExecutionCustodyError> {
+        #[cfg(feature = "sqlite-store")]
         let inner = match &self.inner {
             ExecutionCustodyOwner::Memory(inner) => inner,
             #[cfg(feature = "sqlite-store")]
@@ -120,6 +124,8 @@ impl RuntimeStoreExecutionCustody {
                     });
             }
         };
+        #[cfg(not(feature = "sqlite-store"))]
+        let ExecutionCustodyOwner::Memory(inner) = &self.inner;
         let mut current = inner.try_lock().map_err(custody_lock_error)?;
         if current.governed || current.shared != 0 {
             return Err(RuntimeStoreExecutionCustodyError::Busy);

@@ -87,6 +87,14 @@ quiet clearance. No accepted overhead result or green native
 implementation PR CI exists yet. Publication-only repairs continue; additional
 runtime integration remains held.
 
+The GCP normal push of `0576b5c6a` failed after 43.5 minutes before
+publication. Its WASM lint lane omits `sqlite-store`, leaving two acquisition
+matches with one infallible arm. The narrow repair keeps the existing SQLite
+match and directly destructures the memory owner in the other configuration.
+Locking, counters, claims and refusal behavior are unchanged. This is a Rust
+source delta and needs the normal gates and optimized-binary reconciliation;
+earlier runtime test passes remain qualified by their original checkpoint.
+
 ## Current local shell and hook checkpoint, 2026-10-03
 
 The native shell continuation is committed locally through

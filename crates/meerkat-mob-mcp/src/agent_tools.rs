@@ -1235,6 +1235,12 @@ impl AgentMobToolSurface {
             .map(crate::agent_input::decode_agent_content_input)
             .transpose()
             .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
+        let tooling = args
+            .tooling
+            .clone()
+            .map(SpawnToolingInput::decode)
+            .transpose()
+            .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
 
         self.ensure_spawn_member_scope_boxed(call.name, &mob_id, &args)
             .await?;
@@ -1260,10 +1266,7 @@ impl AgentMobToolSurface {
         if let Some(auto_wire) = args.auto_wire_parent {
             spec.auto_wire_parent = auto_wire;
         }
-        if let Some(tooling) = args.tooling {
-            let tooling = tooling
-                .decode()
-                .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
+        if let Some(tooling) = tooling {
             let resolved = self.resolve_spawn_tooling_boxed(&tooling).await?;
             spec.inherited_tool_filter = resolved.inherited_tool_filter;
             spec.override_profile = resolved.override_profile;
@@ -2022,7 +2025,7 @@ impl AgentMobToolSurface {
         let args: ProfileCreateArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-        let profile = crate::decode_public_profile(args.profile)
+        let profile = crate::agent_input::decode_agent_profile(args.profile)
             .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
         let stored = self
             .state
@@ -2093,7 +2096,7 @@ impl AgentMobToolSurface {
         let args: ProfileUpdateArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-        let profile = crate::decode_public_profile(args.profile)
+        let profile = crate::agent_input::decode_agent_profile(args.profile)
             .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
         let stored = self
             .state
@@ -2849,7 +2852,7 @@ struct DelegateArgs {
 /// is the public [`MobProfileInput`], so host-only profile fields (MCP server
 /// configs, Rust bundles) cannot come from model arguments; naming one is an
 /// argument error.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 enum SpawnToolingInput {
     InheritParent {
@@ -2868,7 +2871,7 @@ enum SpawnToolingInput {
     },
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ProfileSourceInput {
     RealmProfile { name: String },
@@ -2896,7 +2899,7 @@ impl SpawnToolingInput {
                         meerkat_mob::ProfileSource::RealmProfile { name }
                     }
                     ProfileSourceInput::Inline(profile) => meerkat_mob::ProfileSource::Inline(
-                        Box::new(crate::decode_public_profile(*profile)?),
+                        Box::new(crate::agent_input::decode_agent_profile(*profile)?),
                     ),
                 }),
                 allow_overlay,
@@ -7210,6 +7213,34 @@ mod tests {
         )
         .await;
         assert_refused_as_argument_error(&error, "host's credentials");
+    }
+
+    /// Only the agent mob_create names bundles (child-available ones); a spawn
+    /// tooling profile could reach a host mob whose builder carries host-only
+    /// bundles, so it may not name any.
+    #[tokio::test]
+    async fn spawn_member_tooling_may_not_name_tool_bundles() {
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(Arc::clone(&state));
+        let error = dispatch_err(
+            &surface,
+            "mob_spawn_member",
+            json!({
+                "mob_id": "any",
+                "profile": "worker",
+                "member_id": "w1",
+                "tooling": {
+                    "mode": "profile",
+                    "source": {
+                        "type": "inline",
+                        "model": "claude-sonnet-4-5",
+                        "tools": { "rust_bundles": ["host-only"] }
+                    }
+                },
+            }),
+        )
+        .await;
+        assert_refused_as_argument_error(&error, "rust_bundles");
     }
 
     #[tokio::test]

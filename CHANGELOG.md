@@ -953,6 +953,10 @@ them.
   unregistered ids read identically. Child mob builders receive only the
   child-available bundles, so a bundle the host later withdraws fails the
   member build on resume through meerkat-mob's missing-bundle refusal.
+  Agent profiles outside `mob_create` (`mob_profile_create`,
+  `mob_profile_update`, and the `mob_spawn_member` and `delegate` tooling
+  profiles) may not name bundles at all, since they can reach a host mob
+  whose builder carries host-only bundles; naming one is `InvalidArguments`.
 - A profile's `tools.deny` may name the tools of its own registered
   `rust_bundles`: each resolved bundle is a `ToolVocabularySource::Bundle`
   vocabulary on the declared restriction, so a bundle tool the member does not

@@ -1857,6 +1857,9 @@ impl MockCommsRuntime {
 struct TestRuntimeControlBarrier {
     boundary_calls: AtomicU64,
     hard_calls: AtomicU64,
+    /// Signalled (with a stored permit) each time a hard call enters the
+    /// barrier.
+    hard_entered: tokio::sync::Notify,
     released: AtomicBool,
     release: tokio::sync::Notify,
 }
@@ -1866,6 +1869,7 @@ impl TestRuntimeControlBarrier {
         Self {
             boundary_calls: AtomicU64::new(0),
             hard_calls: AtomicU64::new(0),
+            hard_entered: tokio::sync::Notify::new(),
             released: AtomicBool::new(false),
             release: tokio::sync::Notify::new(),
         }
@@ -1886,6 +1890,11 @@ impl TestRuntimeControlBarrier {
     fn release_all(&self) {
         self.released.store(true, Ordering::Release);
         self.release.notify_waiters();
+    }
+
+    /// Resolves once a hard call has entered the barrier.
+    async fn wait_hard_call_entered(&self) {
+        self.hard_entered.notified().await;
     }
 }
 
@@ -4026,8 +4035,10 @@ impl SessionService for MockSessionService {
             });
             match interrupt_rx.as_mut() {
                 Some(interrupt_rx) => {
+                    // A hard interrupt also wakes the keep-alive notifier;
+                    // it cancels the turn, as the agent loop does.
                     tokio::select! {
-                        () = notifier.notified() => {}
+                        biased;
                         changed = interrupt_rx.changed() => {
                             if changed.is_ok() {
                                 return Err(SessionError::Agent(
@@ -4035,6 +4046,7 @@ impl SessionService for MockSessionService {
                                 ));
                             }
                         }
+                        () = notifier.notified() => {}
                     }
                 }
                 None => notifier.notified().await,
@@ -5123,6 +5135,7 @@ impl MobSessionService for MockSessionService {
         };
         if let Some(barrier) = barrier {
             barrier.hard_calls.fetch_add(1, Ordering::Relaxed);
+            barrier.hard_entered.notify_one();
             barrier.wait_for_release().await;
         }
         self.pending_runtime_interrupts

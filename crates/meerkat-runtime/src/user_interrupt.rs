@@ -405,14 +405,14 @@ impl MeerkatMachine {
 
     /// This machine's user-interrupt acknowledgement bound.
     fn user_interrupt_ack_timeout(&self) -> std::time::Duration {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             *self
                 .test_user_interrupt_ack_timeout
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             crate::meerkat_machine::USER_INTERRUPT_ACK_TIMEOUT
         }
@@ -420,8 +420,8 @@ impl MeerkatMachine {
 
     /// Shorten this machine's user-interrupt acknowledgement bound for a test
     /// that exercises a wedged executor callback.
-    #[cfg(test)]
-    pub(crate) fn set_user_interrupt_ack_timeout_for_test(&self, timeout: std::time::Duration) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_user_interrupt_ack_timeout_for_test(&self, timeout: std::time::Duration) {
         *self
             .test_user_interrupt_ack_timeout
             .lock()

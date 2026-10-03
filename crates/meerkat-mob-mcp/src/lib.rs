@@ -2435,7 +2435,24 @@ impl MobMcpState {
                 bridge_session_id: bridge_session_id.to_string(),
             });
         };
-        self.mob_retire(&mob_id, identity).await
+        // Archiving a member's session is an explicit retry of the member's
+        // retirement. A retirement an earlier attempt left stuck stays owned
+        // by the mob and a plain retire only reports it (meerkat 0.8.51), so
+        // the archive re-drives it once, then retires the rest of the tree if
+        // the stuck one was a descendant.
+        let retired = self.mob_retire(&mob_id, identity.clone()).await;
+        let Err(MobError::MemberRetirementStuck { member_id, .. }) = retired else {
+            return retired;
+        };
+        self.admitted_handle_for(&mob_id, ControlScope::Retire)
+            .await?
+            .redrive_retirement(member_id.clone())
+            .await?;
+        if member_id == identity {
+            Ok(())
+        } else {
+            self.mob_retire(&mob_id, identity).await
+        }
     }
 
     #[doc(hidden)]
@@ -12395,6 +12412,89 @@ mod tests {
         assert!(
             !svc.session_exists(&bridge_session_id).await,
             "successful archive helper retry must archive the worker bridge session"
+        );
+    }
+
+    /// Archiving a member's session retries the member's retirement. A
+    /// retirement the first attempt left stuck is re-driven once per archive
+    /// request; while its cause still fails, the archive surfaces the typed
+    /// stuck retirement with that cause (never masked, never looped), and once
+    /// the cause clears the next archive completes it.
+    #[tokio::test]
+    async fn test_archive_of_a_member_session_redrives_its_stuck_retirement_and_surfaces_a_still_failing_cause()
+     {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(
+            svc.clone(),
+            meerkat_mob::MobControlPrincipal::Owner,
+        ));
+        let mob_id = state
+            .mob_create_definition(explicit_definition("archive-redrive"))
+            .await
+            .expect("create mob");
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("worker"),
+                AgentIdentity::from("worker-1"),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+                None,
+            )
+            .await
+            .expect("spawn worker");
+        let bridge_session_id = state
+            .handle_for(&mob_id)
+            .await
+            .expect("mob handle")
+            .resolve_bridge_session_id(&AgentIdentity::from("worker-1"))
+            .await
+            .expect("worker bridge session");
+        svc.fail_archive(bridge_session_id.clone(), "forced member archive failure")
+            .await;
+
+        let first = crate::agent_tools::archive_session_with_mob_cleanup(
+            svc.clone(),
+            state.clone(),
+            &bridge_session_id,
+        )
+        .await
+        .expect_err("the member archive fails");
+        assert!(
+            first.to_string().contains("forced member archive failure"),
+            "the first archive surfaces the failure: {first}"
+        );
+
+        // The cause still fails: the archive re-drives the stuck retirement
+        // once and surfaces it, typed, with its cause.
+        let still_failing = crate::agent_tools::archive_session_with_mob_cleanup(
+            svc.clone(),
+            state.clone(),
+            &bridge_session_id,
+        )
+        .await
+        .expect_err("a re-driven retirement whose cause still fails surfaces it");
+        let text = still_failing.to_string();
+        assert!(
+            text.contains("is stuck at") && text.contains("forced member archive failure"),
+            "the archive surfaces the stuck retirement and its cause: {text}"
+        );
+        assert!(
+            svc.session_exists(&bridge_session_id).await,
+            "a failed re-drive keeps the member session for the next retry"
+        );
+
+        svc.clear_archive_failure(&bridge_session_id).await;
+        crate::agent_tools::archive_session_with_mob_cleanup(
+            svc.clone(),
+            state.clone(),
+            &bridge_session_id,
+        )
+        .await
+        .expect("the archive re-drives the stuck retirement to completion");
+        assert!(
+            !svc.session_exists(&bridge_session_id).await,
+            "the re-driven retirement archives the member session"
         );
     }
 

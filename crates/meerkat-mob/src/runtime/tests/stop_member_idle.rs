@@ -405,6 +405,86 @@ async fn stop_resolves_once_the_runtime_records_the_run_end_and_resume_follows()
     handle.shutdown().await.expect("shutdown");
 }
 
+/// Shutdown's immediate cancel can leave its outcome to the runtime: here the
+/// executor's interrupt callback outlasts the acknowledgement bound, so the
+/// dispatch reports `InterruptDispatchOutcomeUnknown` while the run is still
+/// current, and the run then ends on its own. The Shutdown does not fail on
+/// the pending outcome: it waits for the run's recorded end and reports the
+/// run from its recorded terminal, here the run's own end before the cancel.
+#[tokio::test]
+async fn shutdown_reports_a_run_that_ended_before_its_cancel_from_the_recorded_terminal() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("ended-before-cancel");
+    let mut spec = SpawnMemberSpec::new("worker", identity.as_str());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn autonomous member");
+    let session = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("session-backed autonomous member");
+    tokio::time::timeout(STEP, service.wait_keep_alive_turn_entered(&session))
+        .await
+        .expect("the kickoff turn starts");
+    let adapter = MobSessionService::runtime_adapter(service.as_ref())
+        .expect("the test mob is runtime-backed");
+    let run = adapter
+        .current_run(&session)
+        .await
+        .expect("the kickoff turn's run is current");
+
+    // The executor's interrupt callback wedges until the test releases it,
+    // so the Shutdown's hard cancel reports its outcome unknown once this
+    // machine's acknowledgement bound passes.
+    adapter.set_user_interrupt_ack_timeout_for_test(Duration::from_millis(50));
+    let control = service.install_runtime_control_barrier().await;
+    struct ReleaseControl(Arc<TestRuntimeControlBarrier>);
+    impl Drop for ReleaseControl {
+        fn drop(&mut self) {
+            self.0.release_all();
+        }
+    }
+    let release_control = ReleaseControl(Arc::clone(&control));
+
+    let shutdown = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .shutdown_with_report(crate::runtime::ShutdownOptions::default())
+                .await
+        }
+    });
+    tokio::time::timeout(STEP, control.wait_hard_call_entered())
+        .await
+        .expect("the Shutdown's hard cancel reaches the member's executor");
+    assert_eq!(
+        adapter.current_run(&session).await,
+        Some(run.clone()),
+        "the cancel was dispatched while the run was current"
+    );
+
+    // The turn returns on its own before the wedged cancel lands; its run
+    // ends completed.
+    service.release_keep_alive_turn(&session).await;
+    let report = tokio::time::timeout(STEP, shutdown)
+        .await
+        .expect("the Shutdown completes once the run's end is recorded")
+        .expect("shutdown task")
+        .expect("the Shutdown does not fail on the cancel's pending outcome");
+    assert_eq!(
+        report.runs.get(&identity),
+        Some(&crate::runtime::stop_report::MemberStopRun::RunEndedBeforeCancel { run_id: run }),
+        "the run is reported from its recorded terminal: {:?}",
+        report.runs
+    );
+    assert_eq!(adapter.current_run(&session).await, None);
+    assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+    drop(release_control);
+    service.clear_runtime_control_barrier().await;
+}
+
 #[tokio::test]
 async fn the_hang_guard_reports_the_member_still_winding_down() {
     let identity = AgentIdentity::from("never-winds-down");

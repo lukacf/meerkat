@@ -390,6 +390,12 @@ them.
   cover the retained occurrences only, and `materialize_revision` of a retired
   revision returns `TranscriptRevisionRetired`. `commits()`, `commit_count()`,
   `commit(i)`, `rewrite_prefix()` and `graph_prefix()` are unchanged.
+  Code that walks `commits()` and projects a commit's parent
+  (`Session::with_validated_transcript_rewrite_parent_projection`) now gets
+  `TranscriptRevisionRetired` for every commit before the cut, where it used
+  to get the parent: it must skip such a commit (it has no body to prove
+  against) rather than fail. MobKit's durable-behind admission failed its
+  store write here until it skipped them.
 - The SQLite session store's schema domain moves to v5 (table
   `session_transcript_retirements`). Opening a store migrates it forward.
   Binaries from before this release refuse a v5 file, as they refuse any
@@ -573,6 +579,10 @@ them.
     ends through its typed cancelled terminal, and
     `MobShutdownReport::runs` reports it as
     `MemberStopRun::CancelledByShutdown`.
+    The report reads the run's recorded terminal: a run that ended on its own
+    before the cancel landed is `RunEndedBeforeCancel`, and a dispatched
+    cancel whose run has no recorded terminal by the deadline is the new
+    `MemberStopRun::CancelDispatched`.
   - Shutdown holds the run starts of the members the mob hosts before its
     interrupts, as Stop does (#1500), so an input admitted before the
     Shutdown cannot start a run afterwards. MobMachine's `ShutdownRunning`,
@@ -1168,6 +1178,14 @@ them.
 
 ### Fixed
 
+- A GPT Live open whose summary is still being prepared tells the model that
+  the newest turns of the earlier text conversation it carries are known and
+  only the older part of that conversation is summarized and still pending.
+  The startup notice used to say just that a summary "is being prepared and is
+  not yet available", and gpt-live-1 answered "I don't know that yet" about a
+  fact in those very turns, including when asked about "our text chat" (Turbo
+  S S99's positive control).
+
 - GPT Live: the narration and other spoken context that follow a client
   delegation no longer arrive about 8 s late. Spoken context waits while the
   provider reports an open user turn, so the assistant does not talk over the
@@ -1185,6 +1203,22 @@ them.
     provider never closes.
   - The observation pump now follows the user turn in provider order, before
     adapter fan-out.
+- `meerkat` builds without a dead-code warning when `live` is on but
+  `openai-live` is off (for example default features with clippy
+  `-D warnings`): `meerkat::surface::live_media_health_rms_micros` is now
+  compiled only with its users, under `live-webrtc` and `openai-live`.
+
+- `MobHandle::shutdown` no longer fails when its immediate cancel of a
+  member's run reports `InterruptDispatchOutcomeUnknown` (the executor saw
+  the run end while machine authority still bound it, or its callback
+  outlasted the acknowledgement bound). The runtime owns that cancel's
+  outcome: the Shutdown waits for the run's recorded end, as for any
+  cancelled run, and reports the run from its recorded terminal.
+- Archiving a mob member's session (RPC `session/archive`, REST
+  `DELETE /sessions/{id}`, MCP `meerkat_archive`) whose retirement is stuck
+  re-drives that retirement once per archive request, as the archive
+  re-drove it before owned retirement. A cause that still fails is
+  surfaced as `MemberRetirementStuck`, never looped and never masked.
 - The release semver gate (`make semver-breaks`) fails closed on any
   cargo-semver-checks finding whose message shape it cannot read in full.
   Such a finding is now an error naming the lint, not a NOTE. Before, it fell
@@ -1290,6 +1324,55 @@ them.
   own boxed frame, and its fallback-origin resume check runs out of line.
   Before, both recovery paths sat inline in one poll frame. The deepest
   debug path now fits in about 1.5 MiB.
+- Public GPT Live holds delegation commentary (a result or a narration)
+  that arrives while the user's latest utterance is unanswered. A held
+  narration that a close leaves unsent is dropped, since it is ephemeral
+  progress speech.
+- Public GPT Live releases held delegation commentary once the user stops
+  holding the floor, even if the model never answers. Before, only the model's
+  next output or a delegation released it, so a user who kept talking past
+  the delegation to a silent model left the result unsent for good (Turbo S
+  S103).
+  - The floor is a real user turn: an input transcript delta whose speech
+    began after the model's last output ended and after the last delegation.
+    A backchannel over the model's speech takes no floor, and audio energy
+    alone (noise) never opens one.
+  - The floor ends after `USER_FLOOR_SILENCE_RELEASE_MS` (1600 ms) of
+    reflected-input silence on the provider's audio clock, below
+    `USER_FLOOR_SPEECH_DBFS` (-50 dBFS). There is no wall-clock timer, and
+    both constants document their derivation from Turbo S provider streams
+    and fixtures.
+- Public GPT Live logs each broker-owned append's receipt under its own
+  name: "in-progress notice acknowledged" and "result cue acknowledged" (and
+  the matching rejection). Before, the in-progress notice's receipts were
+  logged as a result cue's.
+- Public GPT Live no longer lets the model claim a delegated request is done
+  before its result exists (S103: "I've updated it to Friday afternoon"
+  3.6 s early, then silence once the result arrived).
+  - Every client delegation now gets a broker-owned in-progress notice on the
+    instructions lane, bound to it. It says not to describe the request as done
+    or state its outcome until the result arrives.
+  - The result cue now says that anything said about the request before the
+    result arrived came before it was done. If the user's latest request is
+    still unanswered, the model answers it first, then confirms the actual
+    outcome.
+- Public GPT Live holds a delegation result that arrives while the user's
+  latest utterance is unanswered. Appending it then diverted the model into
+  answering the result instead of the user, and the request was never
+  delegated (S100, S101). The result is released in order when provider
+  ordering answers the utterance: the model's next output, or the
+  utterance's `session.delegation.created`. A close or teardown first leaves
+  it unsent, and it settles as interrupted by close. Utterance positions come
+  from the session timeline, so a transcription tail that arrives late is
+  not a new utterance.
+- A result's speak cue is no longer sent while the model speaks past the
+  result's insertion point (output observed ending after the result's
+  acknowledgement position). An instructions append during output could
+  stop the answer mid-sentence: 5 of 44 such cues did in the final soak.
+- A live delegation result interrupted by its channel's close (held,
+  in flight, or refused) is merged into the source member as runtime work.
+  Before, it was retired without the post-close merge and lost.
+
 - Public GPT Live no longer drops a delegation result's speak cue when the
   result lands soon after the model's last word. Previously a cue was
   suppressed when the gap was under 1000 ms. A result that landed 400 ms
@@ -1298,6 +1381,10 @@ them.
   Every acknowledged result now gets one instructions-lane cue, bound to the
   result's `delegation_id`. It is phrased to be safe either way: tell the
   user the result unless it was already told.
+  user the outcome unless it was already reported since the result arrived.
+  Speech before the delivery (an intention such as "I'll use Friday") does
+  not count as a report.
+
 - Opening or refreshing a live channel on a member whose turn is in flight no
   longer waits for the turn to end.
   - The realtime open and refresh projections took the session's turn

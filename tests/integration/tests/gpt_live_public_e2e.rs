@@ -2764,14 +2764,17 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     s99_assert_pending(&mut live, &first_capture).await?;
 
     evidence.stage(EvidenceStage::InitialUnknown)?;
+    // Positive control first: a fact inside the create-time seed is known at
+    // once, before the summary is released, so the unknown answer below is
+    // the summary gate's and not a model that ignores its startup input. It
+    // is asked before the unknown probe so that probe's "I don't know yet"
+    // cannot prime it.
+    let seeded = s99_native_exchange(&mut live, "seeded_fact", s99_recalls_seeded_fact).await?;
+    assert!(s99_recalls_seeded_fact(&seeded));
+    s99_assert_pending(&mut live, &first_capture).await?;
     let unknown = s99_native_exchange(&mut live, "history", s99_honest_unknown).await?;
     assert!(s99_honest_unknown(&unknown.to_lowercase()));
     assert!(!s99_recalls_phrase(&unknown, &phrase));
-    s99_assert_pending(&mut live, &first_capture).await?;
-    // Positive control: a fact inside the create-time seed is known at once,
-    // before the summary is released, so the gate above is the summary's.
-    let seeded = s99_native_exchange(&mut live, "seeded_fact", s99_recalls_seeded_fact).await?;
-    assert!(s99_recalls_seeded_fact(&seeded));
     s99_assert_pending(&mut live, &first_capture).await?;
 
     // Commit newer ordinary context through the existing source session while
@@ -2847,7 +2850,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // rides the instructions lane; the summary is the first owned thinking
     // append on the channel, prefixed, delivered after the first user
     // utterance and acknowledged.
-    assert_late_summary_seed(&evidence, 1)?;
+    assert_late_summary_seed(&evidence, 1, &phrase, true)?;
     let owner = evidence.owner_appends()?;
     assert_eq!(
         owner.framed_summaries, 0,
@@ -2936,8 +2939,8 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // pending, never spoken to); the replacement is the journal's current
     // channel.
     let replacement_channel = evidence.current_channel()?;
-    assert_late_summary_seed(&evidence, 2)?;
-    assert_late_summary_seed(&evidence, replacement_channel)?;
+    assert_late_summary_seed(&evidence, 2, &phrase, false)?;
+    assert_late_summary_seed(&evidence, replacement_channel, &phrase, false)?;
     assert!(
         evidence.first_owned_thinking_append(2)?.is_none(),
         "the obsolete channel was closed before any utterance, so nothing may ride its thinking lane"
@@ -4757,21 +4760,50 @@ fn assert_late_summary_delivered(
 }
 
 /// Late-summary rule, host side: the summarizer missed the pre-open bound, so
-/// the create body carries no history items at all while the startup
-/// instructions still carry the history framing clause.
+/// the create body carries no summary (developer) item, only the newest
+/// conversation turns verbatim, bounded by `LIVE_STARTUP_VERBATIM_ITEMS_MAX`
+/// (`with_pending_context_after_recent`), and the startup instructions carry
+/// the history framing clause. The vault phrase is never among them: it is
+/// summary-only. On the first channel the seed is the last follow-up turns
+/// in full, with the positive-control fact (`s99_seed_followups`).
 fn assert_late_summary_seed(
     evidence: &Journal,
     channel: u32,
+    phrase: &str,
+    first_channel: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let window = meerkat::experimental_gpt_live::LIVE_STARTUP_VERBATIM_ITEMS_MAX;
     let seed = evidence.session_input_seed(channel)?;
-    println!("GPT_LIVE_S99_SESSION_INPUT_SEED channel={channel} seed={seed:?}");
+    let texts = evidence.session_input_texts(channel)?;
+    println!(
+        "GPT_LIVE_S99_SESSION_INPUT_SEED channel={channel} seed={seed:?} items={}",
+        texts.len()
+    );
     let seed =
         seed.ok_or_else(|| format!("no session.start seed was captured for channel {channel}"))?;
     assert_eq!(
-        (seed.input_items, seed.developer_items),
-        (0, 0),
-        "a late summary must leave session.input empty on channel {channel}"
+        seed.developer_items, 0,
+        "a late summary carries no summary item at open on channel {channel}"
     );
+    assert!(
+        seed.input_items <= window,
+        "a late summary seeds at most {window} recent items on channel {channel}: {}",
+        seed.input_items
+    );
+    assert!(
+        texts.iter().all(|text| !s99_recalls_phrase(text, phrase)),
+        "the vault phrase is summary-only and never in the create-time seed on channel {channel}"
+    );
+    if first_channel {
+        assert_eq!(
+            seed.input_items, window,
+            "the first open seeds the newest {window} items of the follow-up turns"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains(S99_SEEDED_FACT)),
+            "the positive-control fact is in the first open's seed: {texts:?}"
+        );
+    }
     assert!(
         seed.frames_history,
         "the startup instructions must carry the history framing clause on channel {channel}"

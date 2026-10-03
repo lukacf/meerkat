@@ -722,17 +722,23 @@ async function main() {
         const inThisTurn = new Set();
         for (const message of newUsers) {
           assert.equal(typeof message.content, "string");
-          const notices = [...message.content.matchAll(/Intent: (mob\.kickoff_(?:started|cancelled))\nParams: ([\s\S]+?)\nRequest ID: ([0-9a-f-]+)/g)];
+          // Kickoff status arrives as a one-way lifecycle notice, never a
+          // peer request: no request id, no reply owed (#1608).
+          assert(!/Request ID|Intent: mob\.kickoff_/.test(message.content),
+            `${role} kickoff notice must not arrive as a peer request: ${JSON.stringify(message.content)}`);
+          const notices = [...message.content.matchAll(/Kind: (mob\.kickoff_(?:started|cancelled))\nParams: ([\s\S]+?)\n\nThis is a one-way status notice, not a request\./g)];
           assert(notices.length > 0, `${role} has unexpected non-kickoff work: ${JSON.stringify(message.content)}`);
-          for (const [, intent, params, requestId] of notices) {
-            if (inThisTurn.has(requestId)) continue; // The rendered notice repeats its request identity.
-            inThisTurn.add(requestId);
+          for (const [, intent, params] of notices) {
             const sender = JSON.parse(params).peer;
+            const edge = `${sender}|${role}`;
+            // The rendered notice repeats in the admitted row; a different
+            // terminal kickoff on the same edge is a real second delivery.
+            if (inThisTurn.has(`${edge}|${intent}`)) continue;
+            inThisTurn.add(`${edge}|${intent}`);
             assert(officeAgents.WIRING_PAIRS.some(([a, b]) =>
               (a === role && b === sender) || (b === role && a === sender)), "notice must follow an actual edge");
-            const edge = `${sender}|${role}`;
             assert(!noticeDeliveries.has(edge), `${edge} must not repeat a terminal kickoff delivery`);
-            noticeDeliveries.set(edge, { requestId, intent });
+            noticeDeliveries.set(edge, { intent });
           }
         }
         workload.push({ role, phase: workloadPhase, kind: "kickoff", inputs: inThisTurn.size });

@@ -8,6 +8,7 @@ printf '%s\n' \
   meerkat-machine-dsl-core \
   meerkat-agent-build-authority \
   meerkat-core \
+  meerkat-sandbox \
   meerkat-authorization-contracts \
   meerkat-atif \
   meerkat-store-conformance \

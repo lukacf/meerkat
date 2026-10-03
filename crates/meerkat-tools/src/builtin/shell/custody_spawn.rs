@@ -8,14 +8,37 @@
 //! so a custody recovery in this process never mistakes it for an earlier
 //! incarnation's tool.
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::path::Path;
+use std::process::Stdio;
 use std::sync::Arc;
 
-use tokio::process::{Child, Command};
+use meerkat_sandbox::{CompiledConfinement, ConfinementRefusal, ProcessChild};
+use tokio::process::Command;
+
+use super::config::{ShellConfig, ShellConfinement};
 
 use super::custody_types::ToolProcessSpawner;
 use super::process_lifecycle::OwnedProcessGroup;
+
+/// Compiled once from the manager's immutable host configuration.
+#[derive(Debug, Clone)]
+pub(super) enum ConfinementBinding {
+    TrustedHost,
+    Required(Result<Arc<CompiledConfinement>, ConfinementRefusal>),
+}
+
+impl ConfinementBinding {
+    pub(super) fn new(config: &ShellConfinement) -> Self {
+        match config {
+            ShellConfinement::TrustedHost => Self::TrustedHost,
+            ShellConfinement::Required { requirement } => {
+                Self::Required(CompiledConfinement::compile(requirement).map(Arc::new))
+            }
+        }
+    }
+}
 
 /// Durable custody available to a spawner, if any.
 #[derive(Debug, Clone, Default)]
@@ -39,16 +62,8 @@ pub(super) struct CustodyHold {
 }
 
 impl CustodyHold {
-    /// The owner proved the whole group exited: remove the record.
-    pub(super) async fn settle(self) {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if let Some(guard) = self.guard {
-            guard.settle().await;
-        }
-    }
-
-    /// Containment is not proven: keep the record until kernel exit
-    /// notification proves the group exited.
+    /// Keep the record until kernel exit notification proves the group exited.
+    /// An accepted kill is an execution fence, not an observed exit.
     pub(super) fn retain(self) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(guard) = self.guard {
@@ -66,72 +81,162 @@ pub(super) struct SpawnIdentity<'a> {
 
 /// A process spawned in custody, with its group guard.
 pub(super) struct SpawnedInCustody {
-    pub(super) child: Child,
+    pub(super) child: ProcessChild,
     pub(super) process_group: OwnedProcessGroup,
     pub(super) hold: CustodyHold,
 }
 
-/// Spawn `program args...` in a fresh process group under `binding`.
-///
-/// `configure` sets the working directory, environment and stdio, and must
-/// keep the process in its own group; `make_group` builds the group guard,
-/// which exists before the command may run. A custody failure is reported
-/// as an I/O error before the command ever runs.
-#[cfg_attr(
-    not(any(target_os = "linux", target_os = "macos")),
-    allow(unused_variables)
-)]
+/// Resolve the existing shell environment precedence without reading ambient values.
+/// Trusted-host spawning still inherits ambient values; required spawning does not.
+pub(super) fn environment(config: &ShellConfig, directory: &Path) -> BTreeMap<OsString, OsString> {
+    let mut environment =
+        BTreeMap::from([(OsString::from("PWD"), directory.as_os_str().to_owned())]);
+    environment.extend(
+        config
+            .env_vars
+            .iter()
+            .map(|(key, value)| (OsString::from(key.as_str()), OsString::from(value.as_str()))),
+    );
+    environment
+}
+
+/// Exact launch data assembled from the host configuration and this invocation.
+pub(super) struct ShellLaunch<'a> {
+    pub(super) program: &'a OsStr,
+    pub(super) args: &'a [OsString],
+    pub(super) directory: &'a Path,
+    pub(super) environment: &'a BTreeMap<OsString, OsString>,
+}
+
+/// Spawn one exact shell launch and establish its group before releasing custody.
+/// Required confinement never passes through a mutable command builder.
 pub(super) async fn spawn_in_custody(
     binding: &CustodyBinding,
     identity: SpawnIdentity<'_>,
-    program: &OsStr,
-    args: &[OsString],
-    configure: impl FnOnce(&mut Command),
-    make_group: impl FnOnce(&Child) -> OwnedProcessGroup,
+    confinement: &ConfinementBinding,
+    launch: ShellLaunch<'_>,
+    make_group: impl FnOnce(&ProcessChild) -> OwnedProcessGroup,
 ) -> std::io::Result<SpawnedInCustody> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if let Some(custody) = binding.custody.as_ref() {
-        let (prepared, mut command) = custody
-            .prepare_spawn(
-                identity.spawner,
-                identity.tool_call_id,
-                identity.run_id,
-                program,
-                args,
+    let ShellLaunch {
+        program,
+        args,
+        directory,
+        environment,
+    } = launch;
+    match confinement {
+        ConfinementBinding::Required(compiled) => {
+            let compiled = compiled
+                .as_ref()
+                .map_err(|error| std::io::Error::other(*error))?;
+            let launch = meerkat_sandbox::ProcessLaunchSpec::new(
+                program.into(),
+                args.to_vec(),
+                directory.to_owned(),
+                environment.clone(),
             )
-            .await
             .map_err(std::io::Error::other)?;
-        configure(&mut command);
-        // A spawn failure drops the preparation, which removes the
-        // reservation: nothing was released.
-        let mut child = command.spawn()?;
-        let mut process_group = make_group(&child);
-        return match prepared.spawned(&child).await {
-            Ok(guard) => Ok(SpawnedInCustody {
-                child,
-                process_group,
-                hold: CustodyHold { guard: Some(guard) },
-            }),
-            Err(error) => {
-                // The gate stayed closed, so the command never ran; reap the
-                // gated prologue.
-                let _ = process_group.terminate(&mut child).await;
-                Err(std::io::Error::other(error))
+            let prepared = compiled
+                .bind_launch(launch)
+                .map_err(std::io::Error::other)?;
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(custody) = binding.custody.as_ref() {
+                    let gate = custody
+                        .prepare_gated_spawn(
+                            identity.spawner,
+                            identity.tool_call_id,
+                            identity.run_id,
+                        )
+                        .await
+                        .map_err(std::io::Error::other)?;
+                    let child = gate.spawn_confined(prepared)?;
+                    return finish_gated_spawn(gate, child, make_group).await;
+                }
+                let child = prepared.spawn()?.into();
+                Ok(finish_ungated_spawn(child, make_group))
             }
-        };
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (prepared, binding, identity, make_group);
+                Err(std::io::Error::other(
+                    meerkat_core::confinement::ConfinementRefusal::UnsupportedRequirement,
+                ))
+            }
+        }
+        ConfinementBinding::TrustedHost => {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if let Some(custody) = binding.custody.as_ref() {
+                let (gate, mut command) = custody
+                    .prepare_spawn(
+                        identity.spawner,
+                        identity.tool_call_id,
+                        identity.run_id,
+                        program,
+                        args,
+                    )
+                    .await
+                    .map_err(std::io::Error::other)?;
+                configure_trusted(&mut command, directory, environment);
+                let child = command.spawn()?.into();
+                return finish_gated_spawn(gate, child, make_group).await;
+            }
+            let mut command = Command::new(program);
+            command.args(args);
+            configure_trusted(&mut command, directory, environment);
+            let child = command.spawn()?.into();
+            Ok(finish_ungated_spawn(child, make_group))
+        }
     }
-    let mut command = Command::new(program);
-    command.args(args);
-    configure(&mut command);
-    let child = command.spawn()?;
+}
+
+fn configure_trusted(
+    command: &mut Command,
+    directory: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+) {
+    command
+        .current_dir(directory)
+        .envs(environment)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn finish_gated_spawn(
+    prepared: super::custody::PreparedCustodySpawn,
+    mut child: ProcessChild,
+    make_group: impl FnOnce(&ProcessChild) -> OwnedProcessGroup,
+) -> std::io::Result<SpawnedInCustody> {
+    let mut process_group = make_group(&child);
+    match prepared.spawned_pid(child.id()).await {
+        Ok(guard) => Ok(SpawnedInCustody {
+            child,
+            process_group,
+            hold: CustodyHold { guard: Some(guard) },
+        }),
+        Err(error) => {
+            // The gate stayed closed; reap the prologue without running the command.
+            let _ = process_group.terminate(&mut child).await;
+            Err(std::io::Error::other(error))
+        }
+    }
+}
+
+fn finish_ungated_spawn(
+    child: ProcessChild,
+    make_group: impl FnOnce(&ProcessChild) -> OwnedProcessGroup,
+) -> SpawnedInCustody {
     let process_group = make_group(&child);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
         super::custody::track_owned_process_group(pid);
     }
-    Ok(SpawnedInCustody {
+    SpawnedInCustody {
         child,
         process_group,
         hold: CustodyHold::default(),
-    })
+    }
 }

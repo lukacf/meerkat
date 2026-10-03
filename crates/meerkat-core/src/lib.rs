@@ -46,6 +46,7 @@ pub mod config;
 pub mod config_runtime;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config_store;
+pub mod confinement;
 pub mod connection;
 pub mod context_budget;
 mod digest_observability;

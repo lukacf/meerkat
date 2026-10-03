@@ -1,0 +1,320 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
+
+load("//tools/bazel:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
+
+
+filegroup(
+
+    name = "cargo_manifest",
+
+    srcs = ["Cargo.toml"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+filegroup(
+
+    name = "package_runfiles",
+
+    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.
+
+filegroup(
+
+    name = "build_file",
+
+    srcs = ["BUILD.bazel"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+rust_library(
+    name = "meerkat_sandbox",
+    aliases = aliases(package_name = "crates/meerkat-sandbox"),
+    crate_name = "meerkat_sandbox",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-sandbox",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-sandbox",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-sandbox",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_sandbox_agent_factory_build",
+    aliases = aliases(package_name = "crates/meerkat-sandbox"),
+    crate_name = "meerkat_sandbox",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//crates/meerkat:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-sandbox",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-sandbox",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-sandbox",
+        normal = True,
+    ),
+)
+
+rust_test(
+    name = "meerkat_sandbox_unit_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-sandbox",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "meerkat_sandbox",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-sandbox",
+    },
+    tags = [
+        "fast",
+        "unit",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-sandbox",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-sandbox",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "bootstrap_integrity_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-sandbox",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "bootstrap_integrity",
+    crate_root = "tests/bootstrap_integrity.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/bootstrap_integrity.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_BIN_NAME": "bootstrap_integrity",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-sandbox",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-sandbox",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-sandbox:meerkat_sandbox",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-sandbox",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "compiled_confinement_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-sandbox",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "compiled_confinement",
+    crate_root = "tests/compiled_confinement.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/compiled_confinement.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_BIN_NAME": "compiled_confinement",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-sandbox",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-sandbox",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-sandbox:meerkat_sandbox",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-sandbox",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "process_confinement_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-sandbox",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "process_confinement",
+    crate_root = "tests/process_confinement.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/process_confinement.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_BIN_NAME": "process_confinement",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-sandbox",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-sandbox",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-sandbox:meerkat_sandbox",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-sandbox",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+test_suite(
+    name = "fast_tests",
+    tests = [
+        ":bootstrap_integrity_test",
+        ":compiled_confinement_test",
+        ":meerkat_sandbox_unit_test",
+        ":process_confinement_test",
+    ],
+)

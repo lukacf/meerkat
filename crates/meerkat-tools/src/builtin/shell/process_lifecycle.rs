@@ -1,9 +1,9 @@
+use meerkat_sandbox::ProcessChild;
 #[cfg(unix)]
 use std::sync::Arc;
 use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
-use tokio::process::Child;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
@@ -18,7 +18,7 @@ const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 /// Ownership guard for the process group created for one shell invocation.
 ///
 /// The group identity is captured before the leader can be reaped because
-/// `Child::id()` becomes unavailable after completion. Keeping the guard armed
+/// `ProcessChild::id()` becomes unavailable after completion. Keeping the guard armed
 /// across every await ensures task cancellation force-kills the complete group.
 pub(super) struct OwnedProcessGroup {
     #[cfg(unix)]
@@ -36,7 +36,7 @@ pub(super) struct OwnedProcessGroup {
 }
 
 impl OwnedProcessGroup {
-    pub(super) fn new(child: &Child) -> Self {
+    pub(super) fn new(child: &ProcessChild) -> Self {
         Self {
             #[cfg(unix)]
             pgid: child.id().map(|pid| pid as i32),
@@ -55,7 +55,7 @@ impl OwnedProcessGroup {
 
     #[cfg(all(unix, test))]
     pub(super) fn with_control(
-        child: &Child,
+        child: &ProcessChild,
         control: Arc<dyn ProcessGroupControl>,
         term_grace: Duration,
         kill_settle_timeout: Duration,
@@ -74,7 +74,7 @@ impl OwnedProcessGroup {
     /// survivors. The leader may already have exited; group ownership remains
     /// valid while descendants retain the process-group id.
     #[cfg(unix)]
-    pub(super) async fn terminate(&mut self, child: &mut Child) -> std::io::Result<()> {
+    pub(super) async fn terminate(&mut self, child: &mut ProcessChild) -> std::io::Result<()> {
         let Some(pgid) = self.pgid else {
             return Ok(());
         };
@@ -146,7 +146,7 @@ impl OwnedProcessGroup {
     }
 
     #[cfg(not(unix))]
-    pub(super) async fn terminate(&mut self, child: &mut Child) -> std::io::Result<()> {
+    pub(super) async fn terminate(&mut self, child: &mut ProcessChild) -> std::io::Result<()> {
         child.kill().await
     }
 
@@ -368,10 +368,11 @@ mod tests {
         }
     }
 
-    async fn short_lived_child() -> Child {
+    async fn short_lived_child() -> ProcessChild {
         Command::new("/usr/bin/true")
             .spawn()
             .expect("spawn short-lived child")
+            .into()
     }
 
     #[cfg(target_os = "macos")]
@@ -400,9 +401,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn terminate_reaps_exited_leader_before_group_probe() {
-        let mut child = Command::new("/usr/bin/true")
+        let mut child: ProcessChild = Command::new("/usr/bin/true")
             .spawn()
-            .expect("spawn short-lived child");
+            .expect("spawn short-lived child")
+            .into();
         let leader_pid = child.id().expect("child pid") as i32;
         wait_until_zombie(leader_pid).await;
         let control = Arc::new(LeaderReapObservingControl {

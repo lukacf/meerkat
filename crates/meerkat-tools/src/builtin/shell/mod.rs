@@ -39,7 +39,7 @@ mod tool;
 mod tool_set;
 mod types;
 
-pub use config::{ShellConfig, ShellError};
+pub use config::{ShellConfig, ShellConfinement, ShellError};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use custody::{
     CustodyGuard, PROCESS_CUSTODY_DIR, PreparedCustodySpawn, ProcessCustody, ProcessCustodyScope,
@@ -65,3 +65,6 @@ pub use security::{CommandInvocation, SecurityEngine, SecurityMode};
 pub use tool::{ShellOutput, ShellTool};
 pub use tool_set::ShellToolSet;
 pub use types::{BackgroundJob, JobId, JobStatus, JobSummary, JobSummaryStatus};
+
+#[cfg(all(test, unix))]
+mod confinement_tests;

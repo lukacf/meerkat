@@ -695,6 +695,7 @@ rust_test(
         "//crates/meerkat-rpc:package_runfiles",
         "//crates/meerkat-runtime:cargo_manifest",
         "//crates/meerkat-runtime:package_runfiles",
+        "//crates/meerkat-sandbox:package_runfiles",
         "//crates/meerkat-schedule:package_runfiles",
         "//crates/meerkat-session:cargo_manifest",
         "//crates/meerkat-session:package_runfiles",

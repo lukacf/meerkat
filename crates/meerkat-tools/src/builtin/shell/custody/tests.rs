@@ -1055,7 +1055,13 @@ async fn custody_bound_shell_call_records_then_settles() {
         listing.contains(".json"),
         "the record must exist while the tool runs: {listing:?}"
     );
-    assert!(record_files(&dir).is_empty(), "settled after containment");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !record_files(&dir).is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("observed group exit must release custody");
 }
 
 /// Child "gateway" role for

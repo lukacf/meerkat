@@ -76,6 +76,8 @@ impl ChildMobScope {
         Self(Arc::new(AtomicBool::new(child)))
     }
 
+    /// Restoring persisted mobs is native-only.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn mark_child(&self) {
         self.0.store(true, Ordering::Release);
     }

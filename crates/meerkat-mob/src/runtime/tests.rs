@@ -68895,47 +68895,56 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
     shutdown_result.unwrap().expect("shutdown should succeed");
 }
 
-#[tokio::test]
+/// #1494: two typed `LifecycleOperationPending` refusals of Shutdown are
+/// answered without a retry cadence. The first is re-issued at once; the
+/// repeat waits for the machine's next commit, and that commit (not a timer)
+/// re-issues the Shutdown that then succeeds.
+#[tokio::test(start_paused = true)]
 async fn test_shutdown_level_triggers_owned_runtime_unregister_pending() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let (command_tx, mut command_rx) =
         tokio::sync::mpsc::channel::<super::scope_gate::RoutedMobCommand>(4);
+    let state = handle.machine_state_watch_rx.borrow().clone();
+    let (state_tx, state_rx) = tokio::sync::watch::channel(state.clone());
     let retrying_handle = MobHandle {
         command_tx,
+        machine_state_watch_rx: state_rx,
         ..handle.clone()
     };
-    let attempts = Arc::new(AtomicUsize::new(0));
-    let responder_attempts = Arc::clone(&attempts);
-    let responder = tokio::spawn(async move {
-        while let Some(routed) = command_rx.recv().await {
-            let super::state::MobCommand::Shutdown { reply_tx, .. } = routed.cmd else {
-                panic!("shutdown retry fixture received a non-shutdown command");
-            };
-            let attempt = responder_attempts.fetch_add(1, Ordering::SeqCst) + 1;
-            let result = if attempt < 3 {
-                Err(MobError::LifecycleOperationPending {
-                    intent: "shutdown_runtime_unregister".to_string(),
-                })
-            } else {
-                Ok(())
-            };
-            let _ = reply_tx.send(result);
-            if attempt == 3 {
-                break;
-            }
-        }
-    });
-
-    tokio::time::timeout(Duration::from_secs(1), retrying_handle.shutdown())
+    let shutdown = tokio::spawn(async move { retrying_handle.shutdown().await });
+    let mut attempts = 0;
+    let mut answer = |routed: Option<super::scope_gate::RoutedMobCommand>,
+                      result: Result<(), MobError>| {
+        let routed = routed.expect("shutdown command");
+        let super::state::MobCommand::Shutdown { reply_tx, .. } = routed.cmd else {
+            panic!("shutdown fixture received a non-shutdown command");
+        };
+        attempts += 1;
+        let _ = reply_tx.send(result);
+    };
+    let pending = || {
+        Err(MobError::LifecycleOperationPending {
+            intent: "shutdown_runtime_unregister".to_string(),
+        })
+    };
+    answer(command_rx.recv().await, pending());
+    answer(command_rx.recv().await, pending());
+    // Run until idle: the repeated refusal parks on the state watch.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        command_rx.try_recv().is_err(),
+        "the repeated refusal is not re-sent before the machine commits"
+    );
+    state_tx.send_replace(state);
+    answer(command_rx.recv().await, Ok(()));
+    shutdown
         .await
-        .expect("shutdown retries remain bounded")
+        .expect("shutdown task joins")
         .expect("shutdown joins retained unregister authority");
     assert_eq!(
-        attempts.load(Ordering::SeqCst),
-        3,
-        "two typed pending observations must be level-triggered before terminal success"
+        attempts, 3,
+        "two typed pending observations, then the committed transition, then success"
     );
-    responder.await.expect("shutdown retry responder joins");
     handle.shutdown().await.expect("clean up real mob actor");
 }
 

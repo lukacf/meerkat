@@ -1255,6 +1255,17 @@ them.
   re-drives that retirement once per archive request, as the archive
   re-drove it before owned retirement. A cause that still fails is
   surfaced as `MemberRetirementStuck`, never looped and never masked.
+
+- `MobHandle::stop`, `shutdown` and `shutdown_with_report` no longer poll
+  a refused Stop or Shutdown with sleep-and-resend (25 ms doubling to
+  250 ms) (#1494). Each refusal now waits on the mob machine-state watch:
+  - placed completion or kickoff cleanup still settling: until those
+    custody sets drain;
+  - another lifecycle operation: one immediate re-evaluation, then the next
+    committed transition.
+  Each wait then re-issues the command once. The existing 600 s bound (or
+  the caller's shutdown deadline) is only a hang guard; past it the
+  refusal is returned.
 - The release semver gate (`make semver-breaks`) fails closed on any
   cargo-semver-checks finding whose message shape it cannot read in full.
   Such a finding is now an error naming the lint, not a NOTE. Before, it fell

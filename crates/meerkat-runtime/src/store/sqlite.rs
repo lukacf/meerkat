@@ -3932,6 +3932,9 @@ END";
                     path: path.display().to_string(),
                 }
             }
+            unsafe_file @ meerkat_sqlite::SqliteStoreError::UnsupportedDatabaseFile { .. } => {
+                RuntimeStoreError::Unsupported(unsafe_file.to_string())
+            }
             other => RuntimeStoreError::WriteFailed(other.to_string()),
         }
     }
@@ -9822,6 +9825,9 @@ ORDER BY runtime_id";
         fn preflight_existing_runtime_schema_read_only(
             path: &Path,
         ) -> Result<(), RuntimeStoreError> {
+            // #1551: even a read-only connection names sidecars after this
+            // path; refuse an unsafe database file before opening it.
+            meerkat_sqlite::validate_database_file(path).map_err(map_shared_sqlite_error)?;
             let conn = Connection::open_with_flags(
                 path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -16167,6 +16173,70 @@ ORDER BY runtime_id";
         use tempfile::TempDir;
 
         use super::*;
+
+        /// #1551: SQLite derives journal, WAL and SHM names from the path it
+        /// opened, so two hard-linked names for one database break
+        /// coordinated access and crash recovery. Every runtime constructor
+        /// must refuse a multiply linked database typed, through either name,
+        /// before any SQLite open or profile mutation touches either name.
+        #[cfg(unix)]
+        #[test]
+        fn hard_linked_database_is_refused_before_open_mutates_either_name() {
+            let dir = TempDir::new().unwrap();
+            let first_dir = dir.path().join("first");
+            let second_dir = dir.path().join("second");
+            std::fs::create_dir_all(&first_dir).unwrap();
+            std::fs::create_dir_all(&second_dir).unwrap();
+            let original = first_dir.join("runtime.sqlite3");
+            drop(SqliteRuntimeStore::new(&original).expect("create runtime database"));
+            {
+                // Canary: a refused open must not convert the journal to WAL.
+                let conn = rusqlite::Connection::open(&original).unwrap();
+                let mode: String = conn
+                    .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(mode, "delete");
+            }
+            let linked = second_dir.join("runtime.sqlite3");
+            std::fs::hard_link(&original, &linked).unwrap();
+
+            let unrelated = dir.path().join("unrelated.sqlite3");
+            drop(SqliteRuntimeStore::new(&unrelated).expect("a single-link database still opens"));
+
+            let capture = |name: &Path| -> Vec<Option<Vec<u8>>> {
+                ["", "-wal", "-shm", "-journal"]
+                    .iter()
+                    .map(|suffix| std::fs::read(format!("{}{suffix}", name.display())).ok())
+                    .collect()
+            };
+            let before = (capture(&original), capture(&linked));
+            for name in [&original, &linked] {
+                let attempts = [
+                    ("new", SqliteRuntimeStore::new(name).map(drop)),
+                    (
+                        "new_head_canonical",
+                        SqliteRuntimeStore::new_head_canonical(name).map(drop),
+                    ),
+                    (
+                        "open_existing_whole_blob",
+                        SqliteRuntimeStore::open_existing_whole_blob(name).map(drop),
+                    ),
+                ];
+                for (constructor, result) in attempts {
+                    assert!(
+                        matches!(result, Err(RuntimeStoreError::Unsupported(_))),
+                        "{constructor} through {}: expected a typed Unsupported refusal, got {result:?}",
+                        name.display()
+                    );
+                    assert_eq!(
+                        (capture(&original), capture(&linked)),
+                        before,
+                        "{constructor} through {} changed a database, WAL, SHM or journal file",
+                        name.display()
+                    );
+                }
+            }
+        }
 
         #[tokio::test]
         async fn external_activation_advances_only_representation_side_predecessor() {

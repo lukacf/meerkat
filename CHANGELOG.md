@@ -37,6 +37,11 @@ them.
 
 ### Breaking
 
+- `meerkat_sqlite::SqliteStoreError` and `meerkat_store::StoreError` gain
+  `UnsupportedDatabaseFile { path, detail }`, the typed refusal for a
+  database path SQLite cannot safely address by one name (#1551, see Fixed).
+  Exhaustive matches must handle it.
+
 - `meerkat_mob_mcp::detached_delivery::OwnerRevivalDeferral::LifecycleOperationPending`
   gains `member: meerkat_mob::AgentIdentity`, the member whose
   explicit-resume work defers the revival, so the wait can observe that
@@ -637,6 +642,23 @@ them.
   the turn is still held. The late-kickoff test joins the retirement saga to
   its terminal reply instead of failing when `retire` runs out of its wait
   budget.
+- SQLite stores refuse a database path that SQLite cannot safely address by
+  one name, instead of opening and mutating it (#1551). SQLite names a
+  database's journal, WAL and SHM files after the path it opened, so a hard
+  link to another store's file gave the same database a second set of
+  sidecars and broke coordinated access and crash recovery.
+  - Every open goes through `meerkat_sqlite::open_with`, which validates the
+    file before any connection: it must be a regular file with exactly one
+    hard link where the platform reports link counts.
+  - The file is checked again once the connection holds it, before any
+    pragma or schema work, so a file replaced in between is refused.
+  - The maintenance-fence guard and the runtime repair constructor's
+    read-only preflight run the same check.
+  - The runtime store maps the refusal to `RuntimeStoreError::Unsupported`,
+    and the session store to `StoreError::UnsupportedDatabaseFile`. Refused
+    opens leave every database, WAL, SHM and journal file byte-identical.
+  - The check keeps a cooperating owner's namespace honest. It is not a
+    defense against an adversary replacing paths concurrently.
 
 - Three meerkat-mob-mcp tests no longer fail on a loaded host (#1509). They
   now assert ordering with events instead of wall-clock margins.

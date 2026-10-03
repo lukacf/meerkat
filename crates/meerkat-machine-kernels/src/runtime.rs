@@ -3770,6 +3770,10 @@ mod tests {
                             named_string("SessionId", "session-1"),
                         ),
                         (field_id("runtime_epoch_id"), KernelValue::None),
+                        (
+                            field_id("initial_run_start_holds"),
+                            KernelValue::Set(BTreeSet::new()),
+                        ),
                     ]),
                 },
             )
@@ -3821,6 +3825,10 @@ mod tests {
                             named_string("SessionId", "session-1"),
                         ),
                         (field_id("runtime_epoch_id"), KernelValue::None),
+                        (
+                            field_id("initial_run_start_holds"),
+                            KernelValue::Set(BTreeSet::new()),
+                        ),
                     ]),
                 },
             )
@@ -4293,6 +4301,10 @@ mod tests {
                             named_string("SessionId", "session-a"),
                         ),
                         (field_id("runtime_epoch_id"), KernelValue::None),
+                        (
+                            field_id("initial_run_start_holds"),
+                            KernelValue::Set(BTreeSet::new()),
+                        ),
                     ]),
                 },
             )

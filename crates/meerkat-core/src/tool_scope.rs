@@ -968,6 +968,10 @@ mod generated_visibility_test_owner {
                             // epochlessly (no runtime binding is involved in
                             // tool visibility).
                             ("runtime_epoch_id", KernelValue::None),
+                            (
+                                "initial_run_start_holds",
+                                KernelValue::Set(std::collections::BTreeSet::new()),
+                            ),
                         ],
                     ),
                 )

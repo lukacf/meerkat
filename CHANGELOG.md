@@ -412,6 +412,54 @@ them.
   result's `delegation_id`. It is phrased to be safe either way: tell the
   user the result unless it was already told.
 
+- **A short shell timeout is no longer consumed by one-time setup.** A foreground shell call's dispatch deadline was exactly its `timeout_secs`, measured from dispatch, so first-call setup (resolving the shell, which falls back from an absent `nu`, plus the first custodied spawn) could use up a model-chosen 1 s timeout before the command ran (Turbo S S101: a quick `ls` was cut off and retried). The shell path is now resolved when the tool is built, the command's timeout runs from its spawn as before, and the declared dispatch deadline is that timeout plus `SHELL_SETUP_FAILURE_BOUND` (30 s), a failure bound for a hanging setup.
+
+- Reading a session whose turn is in flight no longer waits for the turn to
+  end.
+  - `PersistentSessionService::read` and `has_live_session` checked the live
+    actor's transcript authority by sending its session task a command. A
+    session task serves no commands while a turn runs, so a session read (for
+    example REST `GET /sessions/{id}`, mob run accounting, or a host status
+    check) waited for the whole turn.
+  - The session task now publishes its transcript authority between commands
+    and turns. Observation-only reads use the new
+    `EphemeralSessionService::observe_published_session_transcript_authority`
+    and never wait on the task. Callers that need an observation ordered after
+    their own commands keep `observe_session_transcript_authority`.
+  - A REST test also pins that stopping an in-flight run
+    (`POST /sessions/{id}/runs/{run_id}/stop`) reaches the interrupt without
+    waiting for the run to end on its own.
+  - A spawn that completes into a Stopped mob leaves it Stopped and holds
+    its members, the new one included. Before, MobMachine's spawn completion
+    moved a Stopped mob back to Running. Only Resume leaves Stopped.
+- A mob Stop no longer lets input that was admitted to a member before the
+  stop start a run while the mob is Stopped (#1500). The stop's cancel had no
+  run to reach, the stop saw the member idle and completed, and the queued
+  input then started a run anyway; the cancel was silently dropped. Stop now
+  pauses each member:
+  - MeerkatMachine owns a run-start hold. While it is set, no transition
+    establishes a new run (Prepare, the retired drain, or a direct turn
+    start): each takes a no-op Held arm, the runtime loop parks with the input
+    still queued, and releasing the hold wakes it. The current run, its turn,
+    cancels and terminals are unaffected.
+  - Stop holds every member before any stop interrupt, and cancels exactly the
+    run an autonomous member had (`CancelAfterBoundaryForRun`). Resume
+    releases the holds; a resume that fails re-holds them.
+  - Remote members are held through their host when it advertises
+    `run_start_hold`; an older host is interrupted as before and reported as
+    not holdable.
+  - Stop no longer sends the orchestrator a "Mob is stopping." lifecycle
+    notice, which a held orchestrator could only read after Resume; the
+    existing resume notice tells it the mob resumed.
+  - A remote member that was not bound when Resume released holds gets its
+    release on its next bind, and one that was not bound when Stop held them
+    gets the hold on its next bind. A placed member whose host carrier is
+    dormant (for example after a cleanup-backed host revoke) is reported
+    `NotBound` instead of failing the Stop; MobMachine re-activates a placed
+    carrier only while Running.
+  - A spawn that completes into a Stopped mob leaves it Stopped and holds
+    its members, the new one included. Before, MobMachine's spawn completion
+    moved a Stopped mob back to Running. Only Resume leaves Stopped.
 - The runtime store test `contended_unregister_finalization_does_not_starve_runtime_worker`
   no longer fails on a loaded host. Its two 1 s wall-clock waits are replaced
   by typed handoffs. The heartbeat now fires on a test-only signal sent when

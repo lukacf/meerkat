@@ -6297,6 +6297,14 @@ impl MeerkatMachine {
             .map(|state| !state.run_start_holds.is_empty())
     }
 
+    /// Boundary cancels dispatched to an executor's boundary handle (#1471).
+    /// Test support: wait for the dispatch as a positive event.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn boundary_cancel_dispatches(&self) -> crate::tokio::sync::watch::Receiver<u64> {
+        self.test_boundary_cancel_dispatches.subscribe()
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn note_run_start_held_park(&self) {
         self.test_run_start_held_parks
@@ -6327,6 +6335,57 @@ impl MeerkatMachine {
         );
         *hook = Some((session_id, entered_tx, release_rx));
         (entered_rx, release_tx)
+    }
+
+    /// Deterministically pause the runtime loop after it staged a run and
+    /// signalled its turn start, immediately before the executor's `apply`
+    /// (#1471). Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_runtime_loop_before_executor_apply_test_hook(
+        &self,
+        session_id: SessionId,
+    ) -> (
+        crate::tokio::sync::oneshot::Receiver<()>,
+        crate::tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = crate::tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
+        let mut hook = self
+            .test_runtime_loop_before_executor_apply
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            hook.is_none(),
+            "runtime-loop executor-apply test hook already armed"
+        );
+        *hook = Some((session_id, entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn run_runtime_loop_before_executor_apply_test_hook(
+        &self,
+        session_id: &SessionId,
+    ) {
+        let armed = {
+            let mut hook = self
+                .test_runtime_loop_before_executor_apply
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if hook
+                .as_ref()
+                .is_some_and(|(armed_session_id, _, _)| armed_session_id == session_id)
+            {
+                hook.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, entered_tx, release_rx)) = armed {
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -7069,6 +7128,11 @@ impl MeerkatMachine {
                 context,
             )
             .await;
+        #[cfg(any(test, feature = "test-support"))]
+        if live_dispatch_result.is_ok() {
+            self.test_boundary_cancel_dispatches
+                .send_modify(|dispatches| *dispatches = dispatches.wrapping_add(1));
+        }
 
         // Reserve bounded-channel capacity without M. A wedged executor may
         // delay this process-owned transaction, but it cannot retain the
@@ -9021,11 +9085,27 @@ pub struct MeerkatMachineShared {
     /// wait for the park as a positive event.
     #[cfg(any(test, feature = "test-support"))]
     test_run_start_held_parks: crate::tokio::sync::watch::Sender<u64>,
+    /// Boundary cancels dispatched to an executor's boundary handle (#1471),
+    /// counted so tests can wait for the dispatch as a positive event.
+    #[cfg(any(test, feature = "test-support"))]
+    test_boundary_cancel_dispatches: crate::tokio::sync::watch::Sender<u64>,
     /// One-shot deterministic gate after the runtime loop's first ready-effect
     /// drain but before it acquires queue authority. Tests publish an executor
     /// effect in this exact gap and prove the consumed wake is retained.
     #[cfg(any(test, feature = "test-support"))]
     test_runtime_loop_before_queue_authority: StdMutex<
+        Option<(
+            SessionId,
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+    /// One-shot deterministic gate after the runtime loop staged a run and
+    /// signalled its turn start but before it calls the executor's `apply`
+    /// (#1471): the run is current in the machine and the session has not
+    /// claimed the turn yet.
+    #[cfg(any(test, feature = "test-support"))]
+    test_runtime_loop_before_executor_apply: StdMutex<
         Option<(
             SessionId,
             crate::tokio::sync::oneshot::Sender<()>,
@@ -10582,7 +10662,11 @@ impl MeerkatMachine {
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 registration_run_start_holds: std::sync::Mutex::new(HashMap::new()),
                 #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_before_executor_apply: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
                 test_run_start_held_parks: crate::tokio::sync::watch::Sender::new(0),
+                #[cfg(any(test, feature = "test-support"))]
+                test_boundary_cancel_dispatches: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(any(test, feature = "test-support"))]
                 test_reload_required_discard_after_successor_publication: StdMutex::new(None),
                 #[cfg(test)]
@@ -10688,7 +10772,11 @@ impl MeerkatMachine {
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 registration_run_start_holds: std::sync::Mutex::new(HashMap::new()),
                 #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_before_executor_apply: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
                 test_run_start_held_parks: crate::tokio::sync::watch::Sender::new(0),
+                #[cfg(any(test, feature = "test-support"))]
+                test_boundary_cancel_dispatches: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(any(test, feature = "test-support"))]
                 test_reload_required_discard_after_successor_publication: StdMutex::new(None),
                 #[cfg(test)]
@@ -10794,7 +10882,11 @@ impl MeerkatMachine {
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 registration_run_start_holds: std::sync::Mutex::new(HashMap::new()),
                 #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_before_executor_apply: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
                 test_run_start_held_parks: crate::tokio::sync::watch::Sender::new(0),
+                #[cfg(any(test, feature = "test-support"))]
+                test_boundary_cancel_dispatches: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(any(test, feature = "test-support"))]
                 test_reload_required_discard_after_successor_publication: StdMutex::new(None),
                 #[cfg(test)]

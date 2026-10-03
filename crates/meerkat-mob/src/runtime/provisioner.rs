@@ -10885,6 +10885,14 @@ impl CoreExecutorBoundaryHandle for MobSessionRuntimeBoundaryHandle {
             )
             .await
             .or_else(|err| match err {
+                // The runtime dispatches this only for its exact current run,
+                // after marking that run's turn `cancel_after_boundary` in the
+                // machine-owned turn state the agent reads at its boundary
+                // (#1471). A session that has not claimed the turn yet answers
+                // NotRunning, but the cancel is already recorded and ends the
+                // turn at its first boundary: Ok is the truth, not a cancel
+                // that went nowhere. A run that ended first is refused by the
+                // runtime's exact-run check before this handle is called.
                 SessionError::NotRunning { .. } => Ok(()),
                 err => Err(err),
             })

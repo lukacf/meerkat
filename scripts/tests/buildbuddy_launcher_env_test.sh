@@ -252,6 +252,32 @@ else
   bad "buildbuddy-dev e2e-live: launcher exited non-zero"
 fi
 
+# The Live gate (.github/workflows/live-gate.yml) shape: BUILDBUDDY_API_KEY is
+# job env, the provider key is unset and passed only as an explicit
+# secret-env override, and the turbo-s cohort runs through the facade.
+echo "buildbuddy-dev, turbo-s with explicit overrides only (Live gate shape):"
+reset_out
+if run_launcher env -u OPENAI_API_KEY \
+  MEERKAT_CLEAN_E2E_SCENARIO_TARGETS=1 \
+  MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES="OPENAI_API_KEY=${fake_openai}" \
+  scripts/buildbuddy-dev e2e-smoke-turbo-s //:e2e_smoke_turbo_s_s97 >"${work}/run.log" 2>&1; then
+  check_client_env "live gate turbo-s" 1
+  check_secret_rc "live gate turbo-s" 1 1
+  if grep -qxF -- "//:e2e_smoke_turbo_s_s97" "${work}/out/argv.1"; then
+    ok "live gate turbo-s: the caller's shard label reaches the client"
+  else
+    bad "live gate turbo-s: the caller's shard label is missing from argv"
+  fi
+  if grep -qxF -- "MEERKAT_CLEAN_E2E_SCENARIO_TARGETS=1" "${work}/out/env.1" \
+    && grep -qxF -- "--test_env=MEERKAT_CLEAN_E2E_SCENARIO_TARGETS" "${work}/out/argv.1"; then
+    ok "live gate turbo-s: MEERKAT_CLEAN_E2E_SCENARIO_TARGETS reaches the client for --test_env"
+  else
+    bad "live gate turbo-s: MEERKAT_CLEAN_E2E_SCENARIO_TARGETS did not reach the client"
+  fi
+else
+  bad "live gate turbo-s: launcher exited non-zero"
+fi
+
 echo
 echo "buildbuddy launcher env: ${pass} passed, ${fail} failed"
 [[ "${fail}" -eq 0 ]]

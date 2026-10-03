@@ -5376,6 +5376,88 @@ fn tool_results_named(history: &Value, name: &str) -> Vec<(String, bool, String)
         .collect()
 }
 
+/// `session/history` page size for the round-trip dump: the RPC maximum, so
+/// the dump never hides a row (an S102 session has about 20).
+const S102_HISTORY_LIMIT: usize = 1000;
+
+/// Characters kept per row in [`s102_dump_comms_rows`].
+const S102_DUMP_ROW_CHARS: usize = 600;
+
+/// Round-trip evidence, printed on every run: the executor's rows from its
+/// `send_request` on, and the member's own rows. Which comms tool the member
+/// answered with (`send_response`, a new `send_request`, `send_message`) and
+/// how the executor received it are not in the journal otherwise.
+async fn s102_dump_comms_rows(live: &mut PublicLiveHarness) {
+    fn clip(row: &Value) -> String {
+        row.to_string().chars().take(S102_DUMP_ROW_CHARS).collect()
+    }
+    let executor = live
+        .rpc
+        .call(
+            "session/history",
+            json!({"session_id": live.session_id, "limit": S102_HISTORY_LIMIT}),
+            60,
+        )
+        .await;
+    match executor {
+        Ok(history) => {
+            let messages = history["messages"].as_array().cloned().unwrap_or_default();
+            let from = messages
+                .iter()
+                .position(|row| row.to_string().contains("\"send_request\""))
+                .unwrap_or(0);
+            println!(
+                "GPT_LIVE_S102_EXECUTOR_ROWS total={} from={from}",
+                messages.len()
+            );
+            for (index, row) in messages.iter().enumerate().skip(from) {
+                println!("GPT_LIVE_S102_EXECUTOR_ROW index={index} row={}", clip(row));
+            }
+        }
+        Err(error) => println!("GPT_LIVE_S102_EXECUTOR_ROWS read_failed={error}"),
+    }
+    let member_session = match live
+        .rpc
+        .call(
+            "mob/member_status",
+            json!({"mob_id": live.mob_id, "agent_identity": S102_MEMBER}),
+            60,
+        )
+        .await
+    {
+        Ok(status) => status["current_session_id"].as_str().map(str::to_owned),
+        Err(error) => {
+            println!("GPT_LIVE_S102_MEMBER_ROWS status_failed={error}");
+            return;
+        }
+    };
+    let Some(member_session) = member_session else {
+        println!("GPT_LIVE_S102_MEMBER_ROWS no_current_session");
+        return;
+    };
+    match live
+        .rpc
+        .call(
+            "session/history",
+            json!({"session_id": member_session, "limit": S102_HISTORY_LIMIT}),
+            60,
+        )
+        .await
+    {
+        Ok(history) => {
+            let messages = history["messages"].as_array().cloned().unwrap_or_default();
+            println!("GPT_LIVE_S102_MEMBER_ROWS total={}", messages.len());
+            for (index, row) in messages.iter().enumerate() {
+                if row["role"] == "system" {
+                    continue;
+                }
+                println!("GPT_LIVE_S102_MEMBER_ROW index={index} row={}", clip(row));
+            }
+        }
+        Err(error) => println!("GPT_LIVE_S102_MEMBER_ROWS read_failed={error}"),
+    }
+}
+
 /// S102's typed round trip, each step awaited on its own typed state (the
 /// harness's executor-turn wait reads the same way): exactly one successful
 /// executor `send_request`; the member's reply arriving at the executor as an
@@ -5425,7 +5507,7 @@ async fn s102_member_round_trip(
     // the contract, which a reopen seed and a replay carry, not only the
     // transport append below.
     let deadline = Instant::now() + Duration::from_secs(180);
-    let (peer_response_seen, reply) = loop {
+    let (peer_response_at, rows, reply) = loop {
         let history = live
             .rpc
             .call(
@@ -5447,11 +5529,13 @@ async fn s102_member_round_trip(
                 .find(|text| !text.trim().is_empty())
         });
         if reply.is_some() || Instant::now() >= deadline {
-            break (response_at.is_some(), reply);
+            break (response_at, messages.len(), reply);
         }
         sleep(Duration::from_millis(250)).await;
     };
-    if !peer_response_seen {
+    println!("GPT_LIVE_S102_PEER_RESPONSE rows={rows} response_at={peer_response_at:?}");
+    s102_dump_comms_rows(live).await;
+    if peer_response_at.is_none() {
         failures.push(format!(
             "{S102_MEMBER}'s reply never reached the executor as a peer response"
         ));

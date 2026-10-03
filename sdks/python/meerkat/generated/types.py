@@ -3277,7 +3277,6 @@ class MobToolConfigInput:
     memory: Optional[bool] = None
     mob: Optional[bool] = None
     read_only: Optional[bool] = None
-    rust_bundles: Optional[list[str]] = None
     schedule: Optional[bool] = None
     shell: Optional[bool] = None
     workgraph: Optional[bool] = None

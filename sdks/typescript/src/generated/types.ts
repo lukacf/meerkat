@@ -2458,7 +2458,6 @@ export interface MobToolConfigInput {
   memory?: boolean;
   mob?: boolean;
   read_only?: boolean;
-  rust_bundles?: string[];
   schedule?: boolean;
   shell?: boolean;
   workgraph?: boolean;

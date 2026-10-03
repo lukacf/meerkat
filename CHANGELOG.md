@@ -258,10 +258,11 @@ them.
     temporary councils keep their own member bindings. The classification
     comes from the mob's persisted owner bridge authority, so it survives
     restore.
-- `meerkat_contracts::wire::MobToolConfigInput` gains `rust_bundles:
-  Vec<String>` (ids only, omitted when empty); struct literals must set it,
-  usually through `..Default::default()`.
 
+- `meerkat_mob::MobError` gains `ToolBundleUnavailable { bundle }`, the typed
+  refusal for a member whose profile names a tool bundle its mob's builder
+  does not register (previously an untyped `MobError::Internal`). Exhaustive
+  matches must handle it.
 - `meerkat_runtime::EphemeralRuntimeDriver` is no longer `UnwindSafe` or
   `RefUnwindSafe`: it now holds the runtime admission signal added with the
   typed admission wait (#1431). Callers that relied on these auto traits (for
@@ -946,17 +947,18 @@ them.
 - Host tool bundles for child mobs: `MobMcpState::with_child_tool_bundles`
   takes a `ChildToolBundles` set in which each host bundle is
   `ChildToolBundleAvailability::HostOnly` (the default) or `ChildAvailable`.
-  A child profile from `mob_create` or `meerkat_mob_create` may name bundle
-  ids in `tools.rust_bundles`, but only child-available ones; it never
-  supplies an implementation. Any other id is refused with
-  `ChildToolBundleRefused` before anything is created, and host-only and
-  unregistered ids read identically. Child mob builders receive only the
-  child-available bundles, so a bundle the host later withdraws fails the
-  member build on resume through meerkat-mob's missing-bundle refusal.
-  Agent profiles outside `mob_create` (`mob_profile_create`,
-  `mob_profile_update`, and the `mob_spawn_member` and `delegate` tooling
-  profiles) may not name bundles at all, since they can reach a host mob
-  whose builder carries host-only bundles; naming one is `InvalidArguments`.
+  The host alone decides what child members get: when a child mob is created
+  (agent `mob_create`, or the implicit mob `delegate` helpers run in), every
+  child-available bundle id is supplied to each inline profile of its
+  definition and persisted with it. Callers never name bundles: the public
+  profile input has no `rust_bundles` field, so naming one is refused, and
+  host-only bundles never reach child mobs. Mobs the host creates are
+  untouched. An agent can still narrow per profile with the profile's deny
+  list, which reads the resolved bundles. The supplied ids persist with the
+  definition, like the child application tool policy persists with its
+  members, so a bundle the host later withdraws is neither silently dropped
+  nor granted: resuming the member refuses with
+  `MobError::ToolBundleUnavailable { bundle }`.
 - A profile's `tools.deny` may name the tools of its own registered
   `rust_bundles`: each resolved bundle is a `ToolVocabularySource::Bundle`
   vocabulary on the declared restriction, so a bundle tool the member does not

@@ -1127,15 +1127,12 @@ impl AgentMobToolSurface {
         // not name a host path as a skill source.
         let definition = crate::agent_input::decode_agent_mob_definition(args.definition)
             .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
-        // A child mob's members run under the host's child policy and may name
-        // only child-available bundles. Both refusals return to the model as
-        // typed tool errors before anything is created.
+        // A child mob's members run under the host's child policy; the refusal
+        // returns to the model as a typed tool error before anything is
+        // created. Host tool bundles reach them only through the host.
         self.state
             .admit_child_tool_policy()
             .map_err(Self::child_policy_denial)?;
-        self.state
-            .admit_child_tool_bundles(&definition)
-            .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
         // Compute the operator grant from the *intended* mob id (the definition
         // carries the id) BEFORE the durable create mutation lands, so the
@@ -2025,7 +2022,7 @@ impl AgentMobToolSurface {
         let args: ProfileCreateArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-        let profile = crate::agent_input::decode_agent_profile(args.profile)
+        let profile = crate::decode_public_profile(args.profile)
             .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
         let stored = self
             .state
@@ -2096,7 +2093,7 @@ impl AgentMobToolSurface {
         let args: ProfileUpdateArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-        let profile = crate::agent_input::decode_agent_profile(args.profile)
+        let profile = crate::decode_public_profile(args.profile)
             .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
         let stored = self
             .state
@@ -2899,7 +2896,7 @@ impl SpawnToolingInput {
                         meerkat_mob::ProfileSource::RealmProfile { name }
                     }
                     ProfileSourceInput::Inline(profile) => meerkat_mob::ProfileSource::Inline(
-                        Box::new(crate::agent_input::decode_agent_profile(*profile)?),
+                        Box::new(crate::decode_public_profile(*profile)?),
                     ),
                 }),
                 allow_overlay,

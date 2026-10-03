@@ -114,9 +114,8 @@ fn decode_resume_override_field(
 
 /// Decode the canonical public profile input into the internal profile.
 ///
-/// Host-only `mcp_servers` have no public input and stay empty;
-/// `rust_bundles` carries bundle ids only, which each caller-facing path
-/// admits or refuses.
+/// Host-only fields (`mcp_servers`, `rust_bundles`) have no public input and
+/// stay empty.
 pub fn decode_public_profile(input: MobProfileInput) -> Result<Profile, String> {
     decode_profile(input)
 }
@@ -148,9 +147,7 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
             deny: input.tools.deny,
             mcp: input.tools.mcp,
             mcp_servers: vec![],
-            // Ids only; MobMcpState::admit_child_tool_bundles refuses any the
-            // host has not made available to child mobs.
-            rust_bundles: input.tools.rust_bundles,
+            rust_bundles: Vec::new(),
         },
         peer_description: input.peer_description,
         external_addressable: input.external_addressable,

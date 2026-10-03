@@ -25,9 +25,7 @@ mod workgraph_flow;
 pub use agent_tools::{
     AgentMobToolSurface, AgentMobToolSurfaceFactory, archive_session_with_mob_cleanup,
 };
-pub use child_tool_bundles::{
-    ChildToolBundleAvailability, ChildToolBundleRefused, ChildToolBundles,
-};
+pub use child_tool_bundles::{ChildToolBundleAvailability, ChildToolBundles};
 pub use child_tool_policy::ChildToolPolicyRefused;
 pub use detached_delivery::{
     DetachedCompletionDelivered, DetachedCompletionError, DetachedDeliveryUnavailable,
@@ -1331,15 +1329,6 @@ impl MobMcpState {
         )
     }
 
-    /// Refuse a caller-supplied definition that names a tool bundle the host
-    /// has not made available to child mobs.
-    pub fn admit_child_tool_bundles(
-        &self,
-        definition: &MobDefinition,
-    ) -> Result<(), ChildToolBundleRefused> {
-        self.child_tool_bundles.admit(definition)
-    }
-
     /// Seed skill source definitions available to realm-referenced profiles.
     pub fn with_realm_skill_sources(mut self, sources: BTreeMap<String, SkillSource>) -> Self {
         self.realm_skill_sources = sources;
@@ -1859,13 +1848,16 @@ impl MobMcpState {
             return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
         }
         let (storage, storage_path) = self.storage_for_new_mob(&mob_id).await?;
-        let scope = child_tool_policy::ChildMobScope::new(
-            owner_bridge_session_authority.as_ref().is_some_and(
-                |(_, destroy_on_owner_archive, _)| {
-                    child_tool_policy::is_child_mob(*destroy_on_owner_archive)
-                },
-            ),
+        let child = owner_bridge_session_authority.as_ref().is_some_and(
+            |(_, destroy_on_owner_archive, _)| {
+                child_tool_policy::is_child_mob(*destroy_on_owner_archive)
+            },
         );
+        if child {
+            // Host tool bundles reach a child mob only through the host.
+            self.child_tool_bundles.supply(&mut definition);
+        }
+        let scope = child_tool_policy::ChildMobScope::new(child);
         let mut builder =
             self.configure_builder(MobBuilder::new(definition.clone(), storage), scope);
         if let Some((owner_bridge_session_id, destroy_on_owner_archive, implicit_delegation_mob)) =
@@ -6150,9 +6142,6 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 let definition = agent_input::decode_agent_mob_definition(args.definition)
                     .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
-                self.state
-                    .admit_child_tool_bundles(&definition)
-                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 let mob_id = self
                     .state
                     .mob_create_definition(definition)

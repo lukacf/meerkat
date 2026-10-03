@@ -1,11 +1,17 @@
-//! Host-registered Rust tool bundles for mobs that callers of the mob tools
-//! create (agent `mob_create` and public `meerkat_mob_create`).
+//! Host-registered Rust tool bundles for child mobs: mobs a member creates
+//! with the agent `mob_create` tool, and the implicit mob `delegate` helpers
+//! run in.
 //!
-//! The host registers each bundle with an availability. A caller's profile
-//! may name only bundles the host marked [`ChildToolBundleAvailability::ChildAvailable`];
-//! it supplies ids, never implementations. Child mob builders receive only
-//! those bundles, so a bundle the host later unregisters or marks host-only
-//! fails the member build through meerkat-mob's missing-bundle refusal.
+//! The host registers each bundle with an availability, and the host alone
+//! decides what child members get: every bundle it marks
+//! [`ChildToolBundleAvailability::ChildAvailable`] is supplied to each inline
+//! profile of a child mob when the mob is created. Callers never name
+//! bundles; the public profile input has no `rust_bundles` field, but a
+//! profile's deny list can still narrow what its members may call, since it
+//! reads the resolved bundles. The supplied ids persist with the definition,
+//! like the child application tool policy persists with its members, so a
+//! bundle the host later withdraws is neither dropped nor substituted: the
+//! member build refuses with `MobError::ToolBundleUnavailable` naming it.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -13,13 +19,13 @@ use std::sync::Arc;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_mob::{MobBuilder, MobDefinition};
 
-/// Whether a host bundle may be named by child mob profiles.
+/// Whether the host supplies a bundle to child mob members.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChildToolBundleAvailability {
     /// Registered for the host only; never offered to child mobs.
     #[default]
     HostOnly,
-    /// Child mob profiles may name it.
+    /// Supplied to every inline profile of a child mob.
     ChildAvailable,
 }
 
@@ -42,15 +48,6 @@ impl std::fmt::Debug for ChildToolBundles {
     }
 }
 
-/// Why a caller's child profile was refused. Whether the bundle is missing or
-/// host-only is not disclosed to the caller: both read as not available.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("tool bundle '{bundle}' named by profile '{profile}' is not available to child mobs")]
-pub struct ChildToolBundleRefused {
-    pub profile: String,
-    pub bundle: String,
-}
-
 impl ChildToolBundles {
     pub fn new() -> Self {
         Self::default()
@@ -68,28 +65,31 @@ impl ChildToolBundles {
         self
     }
 
-    /// Refuse a caller-supplied definition naming any bundle that is not
-    /// registered as child-available.
-    pub fn admit(&self, definition: &MobDefinition) -> Result<(), ChildToolBundleRefused> {
-        for (profile, binding) in &definition.profiles {
-            // Realm references resolve to host-stored profiles; the caller
-            // cannot write bundle ids into those (decoding empties them).
-            let Some(profile_definition) = binding.as_inline() else {
-                continue;
-            };
-            for bundle in &profile_definition.tools.rust_bundles {
-                if !matches!(
-                    self.bundles.get(bundle),
-                    Some((_, ChildToolBundleAvailability::ChildAvailable))
-                ) {
-                    return Err(ChildToolBundleRefused {
-                        profile: profile.to_string(),
-                        bundle: bundle.clone(),
-                    });
+    /// Supply every child-available bundle id to each inline profile of a
+    /// child mob's definition. The ids persist with the definition, so a
+    /// resumed member composes the same bundles. Realm-referenced profiles
+    /// are host-stored and keep what the host named.
+    pub(crate) fn supply(&self, definition: &mut MobDefinition) {
+        let ids = self
+            .bundles
+            .iter()
+            .filter(|(_, (_, availability))| {
+                *availability == ChildToolBundleAvailability::ChildAvailable
+            })
+            .map(|(name, _)| name);
+        let ids: Vec<&String> = ids.collect();
+        if ids.is_empty() {
+            return;
+        }
+        for binding in definition.profiles.values_mut() {
+            if let Some(profile) = binding.as_inline_mut() {
+                for id in &ids {
+                    if !profile.tools.rust_bundles.contains(id) {
+                        profile.tools.rust_bundles.push((*id).clone());
+                    }
                 }
             }
         }
-        Ok(())
     }
 
     /// Register the child-available bundles on a child mob builder.

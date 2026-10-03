@@ -31,24 +31,6 @@ pub(crate) fn decode_agent_mob_definition(
     crate::decode_public_mob_definition(input)
 }
 
-/// Decode a model-supplied profile outside a child mob definition (a realm
-/// profile write, or a spawn or delegate tooling profile): the public
-/// contract, without tool bundle ids. Only the agent `mob_create` names
-/// bundles, and only child-available ones; a profile here would reach a
-/// host mob whose builder may carry host-only bundles.
-pub(crate) fn decode_agent_profile(
-    input: meerkat_contracts::wire::MobProfileInput,
-) -> Result<meerkat_mob::Profile, String> {
-    if !input.tools.rust_bundles.is_empty() {
-        return Err(
-            "a model-supplied profile outside mob_create may not name tool bundles \
-             (rust_bundles)"
-                .to_string(),
-        );
-    }
-    crate::decode_public_profile(input)
-}
-
 /// Decode model-supplied content: the public contract, without stored-blob
 /// or provider-fetched references.
 pub(crate) fn decode_agent_content_input(input: WireContentInput) -> Result<ContentInput, String> {

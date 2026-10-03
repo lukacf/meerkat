@@ -490,11 +490,13 @@ pub(super) fn compose_external_tools_for_profile(
     }
 
     for name in &profile.tools.rust_bundles {
-        let dispatcher = tool_bundles.get(name).cloned().ok_or_else(|| {
-            MobError::Internal(format!(
-                "tool bundle '{name}' is not registered on this mob builder"
-            ))
-        })?;
+        let dispatcher =
+            tool_bundles
+                .get(name)
+                .cloned()
+                .ok_or_else(|| MobError::ToolBundleUnavailable {
+                    bundle: name.clone(),
+                })?;
         dispatchers.push(dispatcher);
     }
 

@@ -649,17 +649,11 @@ pub struct MobToolConfigInput {
     pub read_only: bool,
     /// Tool names members of the profile may not execute although their
     /// families are enabled. Enforcement like `read_only`; each name must
-    /// belong to the profile's composed tool families or to one of its own
-    /// `rust_bundles`.
+    /// belong to the profile's composed tool families.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<String>,
-    /// Ids of host-registered Rust tool bundles the profile uses. The host
-    /// must have made each one available to child mobs; callers name bundles,
-    /// they never supply them. Omitted when empty.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rust_bundles: Vec<String>,
 }
 
 /// Profile binding input: either an inline profile or a realm profile reference.

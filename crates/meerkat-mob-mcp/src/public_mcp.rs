@@ -678,11 +678,6 @@ pub async fn handle_public_tools_call(
             let definition = decode_public_mob_definition(input.definition).map_err(|error| {
                 McpToolError::invalid_params(format!("invalid mob definition: {error}"))
             })?;
-            state
-                .admit_child_tool_bundles(&definition)
-                .map_err(|error| {
-                    McpToolError::invalid_params(format!("invalid mob definition: {error}"))
-                })?;
             let mob_id = state
                 .mob_create_definition(definition)
                 .await

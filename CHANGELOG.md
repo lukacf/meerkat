@@ -797,6 +797,14 @@ them.
   own boxed frame, and its fallback-origin resume check runs out of line.
   Before, both recovery paths sat inline in one poll frame. The deepest
   debug path now fits in about 1.5 MiB.
+- Public GPT Live no longer drops a delegation result's speak cue when the
+  result lands soon after the model's last word. Previously a cue was
+  suppressed when the gap was under 1000 ms. A result that landed 400 ms
+  after the last word was never read out (S106), while voiced results land
+  from -200 to +400 ms after it, so no gap can separate the two cases.
+  Every acknowledged result now gets one instructions-lane cue, bound to the
+  result's `delegation_id`. It is phrased to be safe either way: tell the
+  user the result unless it was already told.
 
 - The runtime store test `contended_unregister_finalization_does_not_starve_runtime_worker`
   no longer fails on a loaded host. Its two 1 s wall-clock waits are replaced

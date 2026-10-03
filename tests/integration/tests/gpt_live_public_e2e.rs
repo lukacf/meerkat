@@ -5024,6 +5024,16 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         evidence.stage(EvidenceStage::Closing)?;
         live.record_uplink("S100").await?;
         let mut deterministic_failures: Vec<String> = Vec::new();
+        // The sign-off ("Thanks, that is all. Close the call.") needs no spoken
+        // reply: a model may stay silent after a closing remark. The contract
+        // is that the provider transcribed it (typed input deltas carry its
+        // closing words); the host close below then ends the call.
+        let heard_goodbye = normalize_words(&goodbye_input);
+        if !(heard_goodbye.contains("close") && heard_goodbye.contains("call")) {
+            deterministic_failures.push(format!(
+                "the sign-off was not transcribed (no \"close\" and \"call\" in its input deltas): {goodbye_input:?}"
+            ));
+        }
         let close = close_or_record(&mut live, &evidence, channel, "S100", &mut deterministic_failures).await?;
         let close_ms = close.map(|c| c.ms);
 
@@ -8541,6 +8551,33 @@ async fn run_s105_fork_and_merge_parallel(
         // recall into several finals. Proceed only once every result is
         // acknowledged delivered and its commentary reached the peer.
         wait_all_result_commentaries(&mut live, "S105").await?;
+        // Both forks' results are merged into the source before the typed
+        // correction acts on them: the canonical (voice) session carries an
+        // assistant row with each fork's result (the picked number and its
+        // double), so the correction below edits state the source holds.
+        let history_before_correction = live
+            .rpc
+            .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":400}), 30)
+            .await?;
+        let merged_rows: Vec<String> = history_before_correction["messages"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter(|m| m["role"].as_str().is_some_and(|role| role.contains("assistant")))
+            .map(|m| history_text(&json!({"messages":[m]})))
+            .collect();
+        for (label, value) in [("picked number", n), ("doubled number", d)] {
+            let carried = value.is_some_and(|value| {
+                let value = value.to_string();
+                merged_rows.iter().any(|row| row.contains(&value))
+            });
+            if !carried {
+                deterministic_failures.push(format!(
+                    "the {label} ({value:?}) is not in a merged assistant row of the source history before the correction"
+                ));
+            }
+        }
         // Typed correction while live, then the voice recall.
         evidence.stage(EvidenceStage::ForkCorrection)?;
         wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(60)).await?;

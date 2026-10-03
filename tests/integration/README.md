@@ -18,9 +18,17 @@ kinds:
 
 Not allowed:
 
-- "Tolerant", soft-fail or record-only checks: anything evaluated that cannot
-  fail the run. `scripts/turbo-s-oracle-gate` (`make turbo-s-oracle-gate`,
-  run in CI) rejects them, including any function taking a `passed: bool`.
+- "Tolerant", soft-fail, advisory or record-only checks: anything evaluated
+  that cannot fail the run. `scripts/turbo-s-oracle-gate`
+  (`make turbo-s-oracle-gate`, run in CI) rejects the known shapes: that
+  vocabulary, a `passed: bool` parameter or any bool parameter on a
+  `record_*`/`note_*`/`check_*`/`observe_*` function, and any `let mut
+  *_failures` list besides `deterministic_failures`. The gate is lexical: it
+  stops the old shapes from returning, not a determined workaround (a
+  computed predicate that is only printed, `let _ = condition`, a macro).
+  Review is the backstop: every new check either pushes onto
+  `deterministic_failures` (which the scenario turns into its error) or is a
+  plain `record_metric` with no pass/fail field.
 - Wall-clock margins as pass criteria, and waits that pace on timers. Wait
   on typed events; a hang guard is a failure bound, not a pass condition.
 - Retries. Each scenario runs once (`--flaky_test_attempts=1`). A failure is

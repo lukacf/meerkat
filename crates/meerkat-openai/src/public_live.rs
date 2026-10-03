@@ -1560,14 +1560,17 @@ impl PublicLiveBrokerSession {
     /// result unless it was already told. The cue is broker-owned: its
     /// receipt is consumed here and never surfaced.
     ///
-    /// A result appended while the user holds the floor with an unanswered
-    /// utterance (input transcribed after the model's last output, and no
-    /// delegation for it yet) would divert the model from that request, so
-    /// it is held: reserved and owned, not yet sent. Provider ordering
-    /// releases it when the utterance is answered, by the model's next
-    /// output transcript or by the utterance's `session.delegation.created`.
-    /// A close or teardown first leaves it unsent, and the owner's close
-    /// settlement resolves it as interrupted by close.
+    /// Delegation commentary (this result, or a narration through
+    /// [`Self::append_delegation_context`]) appended while the user holds
+    /// the floor with an unanswered utterance (input whose speech began
+    /// after the model's last output and the last delegation) would divert
+    /// the model from that request, so it is held: reserved and owned, not
+    /// yet sent. Provider ordering releases it when the utterance is
+    /// answered, by the model's next output transcript or by the utterance's
+    /// `session.delegation.created`. A close or teardown first leaves it
+    /// unsent, and the owner's close settlement resolves it as interrupted by
+    /// close: a result then merges into the source member, while a narration
+    /// (ephemeral progress speech) is dropped.
     pub async fn append_delegation_result(
         &self,
         delegation: &GptLiveDelegationRef,
@@ -1584,19 +1587,14 @@ impl PublicLiveBrokerSession {
         result_of: Option<&GptLiveDelegationRef>,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
         let text = require_context(text)?;
-        let is_result = result_of.is_some();
         let (token, event) = {
             let mut state = self.state.lock().await;
             let token = state
                 .reserve_delegation_commentary(result_of.map(|delegation| delegation.0.clone()))?;
             let event = Self::commentary_event(token, text, Nullable(Some(delegation.0.clone())));
-            if is_result {
-                match state.hold_or_send_result(token, event) {
-                    Some(event) => (token, event),
-                    None => return Ok(token),
-                }
-            } else {
-                (token, event)
+            match state.hold_or_send_commentary(token, event) {
+                Some(event) => (token, event),
+                None => return Ok(token),
             }
         };
         self.deliver_append(token, event).await
@@ -1851,19 +1849,22 @@ impl PublicLiveBrokerSession {
                 });
             }
             applied?;
-            // Results held behind an unanswered utterance go out, in order,
+            // Commentary held behind an unanswered utterance goes out, in order,
             // as soon as provider ordering answers it. The state lock stays
             // held while they are sent, so a result appended concurrently
             // cannot overtake them.
-            for (token, event) in state.take_releasable_held_results() {
+            for (token, event) in state.take_releasable_held_commentary() {
                 if self.sender.send(event).await.is_err() {
                     state.append_delivery_ambiguous = true;
                     tracing::warn!(
                         token = token.0,
-                        "a released public Live result could not be sent; the transport is gone and its close settles the delivery"
+                        "released public Live delegation commentary could not be sent; the transport is gone and its close settles the delivery"
                     );
                 } else {
-                    tracing::info!(token = token.0, "public Live held result released");
+                    tracing::info!(
+                        token = token.0,
+                        "public Live held delegation commentary released"
+                    );
                 }
             }
             if cues_due {
@@ -1907,7 +1908,7 @@ impl PublicLiveBrokerSession {
         self.record_client_event(&close);
         self.sender.send(close).await.map_err(map_live_error)?;
         state.close_requested = true;
-        state.drop_held_results_for_close();
+        state.drop_held_commentary_for_close();
         Ok(())
     }
 }
@@ -2122,9 +2123,9 @@ struct SessionState {
     last_output_start_ms: Option<f64>,
     /// Session-timeline offset of the last `session.delegation.created`.
     last_delegation_offset_ms: Option<f64>,
-    /// Result appends held behind an unanswered utterance, reserved but not
-    /// yet sent, in append order.
-    held_results: VecDeque<(GptLiveAppendToken, ClientEvent)>,
+    /// Delegation commentary appends (narrations and results) held behind an
+    /// unanswered utterance, reserved but not yet sent, in append order.
+    held_commentary: VecDeque<(GptLiveAppendToken, ClientEvent)>,
     close_requested: bool,
     closed_observed: bool,
 }
@@ -2157,7 +2158,7 @@ impl Default for SessionState {
             unanswered_user_input: false,
             last_output_start_ms: None,
             last_delegation_offset_ms: None,
-            held_results: VecDeque::new(),
+            held_commentary: VecDeque::new(),
             close_requested: false,
             closed_observed: false,
         }
@@ -2222,10 +2223,11 @@ impl SessionState {
         Ok(Some((token, delegation_id)))
     }
 
-    /// Hold a reserved result append behind an unanswered utterance, or hand
-    /// it back to be sent now. A result is also held while earlier ones are,
-    /// so results reach the provider in append order.
-    fn hold_or_send_result(
+    /// Hold a reserved delegation commentary append (a narration or a
+    /// result) behind an unanswered utterance, or hand it back to be sent
+    /// now. An append is also held while earlier ones are, so commentary
+    /// reaches the provider in append order.
+    fn hold_or_send_commentary(
         &mut self,
         token: GptLiveAppendToken,
         event: ClientEvent,
@@ -2235,34 +2237,36 @@ impl SessionState {
             // by the close like any in-flight append.
             return Some(event);
         }
-        if self.unanswered_user_input || !self.held_results.is_empty() {
+        if self.unanswered_user_input || !self.held_commentary.is_empty() {
             tracing::info!(
                 token = token.0,
-                "public Live result held: the user's latest utterance is unanswered"
+                "public Live delegation commentary held: the user's latest utterance is unanswered"
             );
-            self.held_results.push_back((token, event));
+            self.held_commentary.push_back((token, event));
             return None;
         }
         Some(event)
     }
 
-    /// The held results provider ordering has released: all of them, in
+    /// The held commentary provider ordering has released: all of it, in
     /// order, once the latest utterance is answered.
-    fn take_releasable_held_results(&mut self) -> Vec<(GptLiveAppendToken, ClientEvent)> {
+    fn take_releasable_held_commentary(&mut self) -> Vec<(GptLiveAppendToken, ClientEvent)> {
         if self.unanswered_user_input || self.close_requested || self.closed_observed {
             return Vec::new();
         }
-        self.held_results.drain(..).collect()
+        self.held_commentary.drain(..).collect()
     }
 
-    /// A close leaves held results unsent. Their reservations stay pending,
-    /// so the owner's close settlement resolves each one as interrupted by
-    /// close, the terminal an in-flight result gets.
-    fn drop_held_results_for_close(&mut self) {
-        for (token, _) in self.held_results.drain(..) {
+    /// A close leaves held commentary unsent. Each reservation stays
+    /// pending, so the owner's close settlement resolves it as interrupted by
+    /// close: a held result merges into the source member as runtime work,
+    /// and a held narration is dropped (it is ephemeral progress speech for a
+    /// channel that no longer exists).
+    fn drop_held_commentary_for_close(&mut self) {
+        for (token, _) in self.held_commentary.drain(..) {
             tracing::info!(
                 token = token.0,
-                "public Live held result left unsent by the close; settled as interrupted by close"
+                "public Live held delegation commentary left unsent by the close; settled as interrupted by close"
             );
         }
     }
@@ -2323,7 +2327,7 @@ impl SessionState {
                 // The SDK ends the stream after the terminal event; flush the
                 // open turn so its final transcript is not lost.
                 self.closed_observed = true;
-                self.drop_held_results_for_close();
+                self.drop_held_commentary_for_close();
                 self.finish_open_turn();
                 let observations = &mut self.queued_observations;
                 self.pending_appends.retain(|pending| {
@@ -4830,7 +4834,7 @@ mod tests {
 
     fn released_tokens(state: &mut SessionState) -> Vec<GptLiveAppendToken> {
         state
-            .take_releasable_held_results()
+            .take_releasable_held_commentary()
             .into_iter()
             .map(|(token, _)| token)
             .collect()
@@ -4846,7 +4850,7 @@ mod tests {
             .unwrap();
         let (token, event) = result_append(&mut state, "dlg_cue");
         assert!(
-            state.hold_or_send_result(token, event).is_none(),
+            state.hold_or_send_commentary(token, event).is_none(),
             "held behind the unanswered utterance"
         );
         assert!(
@@ -4857,7 +4861,7 @@ mod tests {
             .apply_frame(frame(delegation_created("dlg_taxi", "client")))
             .unwrap();
         assert_eq!(released_tokens(&mut state), [token]);
-        assert!(state.held_results.is_empty());
+        assert!(state.held_commentary.is_empty());
     }
 
     #[test]
@@ -4867,7 +4871,7 @@ mod tests {
             .apply_frame(frame(input_delta_at("what time is it", 2500.0)))
             .unwrap();
         let (token, event) = result_append(&mut state, "dlg_cue");
-        assert!(state.hold_or_send_result(token, event).is_none());
+        assert!(state.hold_or_send_commentary(token, event).is_none());
         state
             .apply_frame(frame(output_delta_span("it is noon", 4000.0, 4600.0)))
             .unwrap();
@@ -4881,7 +4885,7 @@ mod tests {
             .apply_frame(frame(input_delta_at("thanks", 2500.0)))
             .unwrap();
         let (token, event) = result_append(&mut state, "dlg_cue");
-        assert!(state.hold_or_send_result(token, event).is_none());
+        assert!(state.hold_or_send_commentary(token, event).is_none());
         // The model stays silent; the user speaks again.
         state
             .apply_frame(frame(input_delta("are you there")))
@@ -4906,9 +4910,12 @@ mod tests {
             .apply_frame(frame(input_delta_at("bye", 2500.0)))
             .unwrap();
         let (token, event) = result_append(&mut state, "dlg_cue");
-        assert!(state.hold_or_send_result(token, event).is_none());
+        assert!(state.hold_or_send_commentary(token, event).is_none());
         state.apply_frame(frame(session_closed())).unwrap();
-        assert!(state.held_results.is_empty(), "never sent after the close");
+        assert!(
+            state.held_commentary.is_empty(),
+            "never sent after the close"
+        );
         assert!(released_tokens(&mut state).is_empty());
         assert!(
             state
@@ -4919,20 +4926,20 @@ mod tests {
         );
         // A result appended after the close is never held.
         let (late, event) = result_append(&mut state, "dlg_late");
-        assert!(state.hold_or_send_result(late, event).is_some());
+        assert!(state.hold_or_send_commentary(late, event).is_some());
     }
 
     #[test]
-    fn a_close_request_drops_held_results_unsent() {
+    fn a_close_request_drops_held_commentary_unsent() {
         let mut state = state_with_spoken_delegation();
         state
             .apply_frame(frame(input_delta_at("bye", 2500.0)))
             .unwrap();
         let (token, event) = result_append(&mut state, "dlg_cue");
-        assert!(state.hold_or_send_result(token, event).is_none());
+        assert!(state.hold_or_send_commentary(token, event).is_none());
         state.close_requested = true;
-        state.drop_held_results_for_close();
-        assert!(state.held_results.is_empty());
+        state.drop_held_commentary_for_close();
+        assert!(state.held_commentary.is_empty());
         assert!(released_tokens(&mut state).is_empty());
     }
 
@@ -4941,7 +4948,7 @@ mod tests {
         // Answered by output.
         let mut state = state_with_spoken_delegation();
         let (token, event) = result_append(&mut state, "dlg_cue");
-        assert!(state.hold_or_send_result(token, event).is_some());
+        assert!(state.hold_or_send_commentary(token, event).is_some());
         // Answered by its delegation before the result arrives.
         let mut state = SessionState::default();
         state
@@ -4951,7 +4958,40 @@ mod tests {
             .apply_frame(frame(delegation_created("dlg_book", "client")))
             .unwrap();
         let (token, event) = result_append(&mut state, "dlg_prev");
-        assert!(state.hold_or_send_result(token, event).is_some());
+        assert!(state.hold_or_send_commentary(token, event).is_some());
+    }
+
+    /// S101: a narration ("Finished voice request") appended while the user
+    /// is still speaking the next request diverted the model ("Okay.") and
+    /// the request was never delegated. Narration is held like a result, and
+    /// the request's own delegation releases it.
+    #[test]
+    fn a_narration_mid_utterance_is_held_then_released_by_delegation_created() {
+        let mut state = state_with_spoken_delegation();
+        state
+            .apply_frame(frame(input_delta_at(
+                "and then the second slow job",
+                2500.0,
+            )))
+            .unwrap();
+        let narration = state.reserve_delegation_commentary(None).unwrap();
+        let event = PublicLiveBrokerSession::commentary_event(
+            narration,
+            "Finished voice request".to_owned(),
+            Nullable(Some("dlg_cue".to_owned())),
+        );
+        assert!(
+            state.hold_or_send_commentary(narration, event).is_none(),
+            "narration is held behind the unanswered utterance"
+        );
+        // A result appended after it queues behind it.
+        let (result, event) = result_append(&mut state, "dlg_cue");
+        assert!(state.hold_or_send_commentary(result, event).is_none());
+        assert!(released_tokens(&mut state).is_empty());
+        state
+            .apply_frame(frame(delegation_created("dlg_job2", "client")))
+            .unwrap();
+        assert_eq!(released_tokens(&mut state), [narration, result]);
     }
 
     /// A transcription tail delivered after the model's response, but whose
@@ -4973,21 +5013,21 @@ mod tests {
             .unwrap();
         let (token, event) = result_append(&mut state, "dlg_prev");
         assert!(
-            state.hold_or_send_result(token, event).is_some(),
+            state.hold_or_send_commentary(token, event).is_some(),
             "the late tail is part of the answered utterance"
         );
     }
 
     #[test]
-    fn held_results_release_in_append_order() {
+    fn held_commentary_release_in_append_order() {
         let mut state = state_with_spoken_delegation();
         state
             .apply_frame(frame(input_delta_at("one more thing", 2500.0)))
             .unwrap();
         let (first, event) = result_append(&mut state, "dlg_a");
-        assert!(state.hold_or_send_result(first, event).is_none());
+        assert!(state.hold_or_send_commentary(first, event).is_none());
         let (second, event) = result_append(&mut state, "dlg_b");
-        assert!(state.hold_or_send_result(second, event).is_none());
+        assert!(state.hold_or_send_commentary(second, event).is_none());
         state
             .apply_frame(frame(output_delta_span("sure", 5000.0, 5200.0)))
             .unwrap();

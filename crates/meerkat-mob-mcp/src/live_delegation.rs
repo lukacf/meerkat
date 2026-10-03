@@ -4088,14 +4088,18 @@ impl ExperimentalLiveDelegationCoordinator {
         {
             tracing::warn!(%error, %operation_id, "unstartable voice work item could not be closed");
         }
-        self.narrate(
+        // Spawned, not awaited: this runs from the channel's schedule pump,
+        // which can sit on the observation loop, and the broker may hold the
+        // narration behind an unanswered user utterance until the loop reads
+        // the output or delegation that releases it. The lane still orders
+        // it against the channel's other commentary.
+        self.spawn_narration(
             NarrationSubject::from_pending(pending, lane),
             LiveDelegationNarrationKind::Failed,
             0,
             Vec::new(),
             false,
-        )
-        .await;
+        );
     }
 
     fn spawn_narration(

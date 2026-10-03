@@ -883,6 +883,10 @@ them.
   commit signal and re-checks after each committed transition. The release
   guards change only through committed transitions, so no timer is needed.
   New: `meerkat_runtime::MeerkatMachine::subscribe_session_machine_commits`.
+- Public GPT Live holds delegation commentary (a result or a narration)
+  that arrives while the user's latest utterance is unanswered. A held
+  narration that a close leaves unsent is dropped, since it is ephemeral
+  progress speech.
 - Public GPT Live holds a delegation result that arrives while the user's
   latest utterance is unanswered. Appending it then diverted the model into
   answering the result instead of the user, and the request was never

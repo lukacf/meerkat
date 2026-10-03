@@ -9352,8 +9352,24 @@ mod tests {
             "The client executor does the work you cannot do yourself: hand it requests that need tools, files, current information, or extended reasoning."
         ));
         assert!(instructions.contains(
-            "Everything said in this conversation, on this call or in the earlier text chat and its summary, is something you already know: answer questions about it yourself."
+            "Everything said in this conversation, on this call or in the text chat before or during it and its summary, is something you already know: answer questions about it yourself."
         ));
+    }
+
+    /// S105 r5 (combined3): after a typed correction committed mid-call
+    /// ("21 and 42" as session-context rows), "So what are the two numbers
+    /// now" was delegated: the claim covered only "the earlier text chat".
+    /// Text chat turns that arrive during the call are claimed too. Nothing
+    /// singles out the assistant's replies there: combined5 measured that
+    /// wording copying the seeded "Noted." replies, and the framing and
+    /// pending notice keep their pre-#1604 text (S99 control 9/9 without it,
+    /// 6/10 with it).
+    #[test]
+    fn session_instructions_claim_text_chat_turns_that_arrive_during_the_call() {
+        let instructions = crate::gpt_live_client_context_session_instructions();
+        assert!(instructions.contains("in the text chat before or during it"));
+        assert!(!instructions.contains("in the earlier text chat and its summary"));
+        assert!(!instructions.contains("what the assistant replied"));
     }
 
     #[test]

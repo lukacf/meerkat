@@ -11,9 +11,16 @@
 #
 # Scans the Turbo S scenario sources (tests/integration) and fails on:
 #   - any "tolerant" identifier, record, label or doc ("Tolerant:")
-#   - soft-fail / record-only / warn-only check vocabulary
-#   - a function taking a `passed: bool` parameter: the shape of a check that
+#   - soft-fail / record-only / warn-only / advisory check vocabulary
+#   - a function taking a `passed: bool` parameter, or any bool parameter on a
+#     record_*/note_*/check_*/observe_* function: the shape of a check that
 #     records its outcome instead of asserting it
+#   - a mutable `let mut *_failures` list other than `deterministic_failures`:
+#     a second list of failures that only gets printed is a soft check
+#
+# The gate is lexical: it stops the old vocabulary and shapes from coming
+# back, not deliberate evasion. The oracle rule in tests/integration/README.md
+# and review remain the real backstop.
 set -euo pipefail
 
 root="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -26,10 +33,21 @@ fi
 violations="$(
   grep -rnE --include='*.rs' \
     -e '[Tt]olerant|TOLERANT' \
-    -e '[Ss]oft[-_ ]?fail|[Rr]ecord[-_ ]only|[Ww]arn[-_ ]only' \
+    -e '[Ss]oft[-_ ]?fail|[Rr]ecord[-_ ]only|[Ww]arn[-_ ]only|[Aa]dvisory' \
     -e '\bpassed: bool\b' \
+    -e 'fn (record|note|check|observe)_[a-z0-9_]*\([^)]*: bool' \
     "$scan_dir" || true
 )"
+
+# Any failure collection other than the verdict-bearing one.
+other_failures="$(
+  grep -rnoE --include='*.rs' 'let mut [a-z0-9_]*_failures\b' "$scan_dir" \
+    | grep -vE ':let mut deterministic_failures$' || true
+)"
+if [[ -n "$other_failures" ]]; then
+  violations="${violations:+${violations}
+}${other_failures}"
+fi
 
 if [[ -n "$violations" ]]; then
   echo "turbo-s-oracle-gate: soft checks found in Turbo S scenario sources." >&2

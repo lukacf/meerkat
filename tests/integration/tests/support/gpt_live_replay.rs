@@ -325,6 +325,30 @@ impl Cassette {
         Ok(())
     }
 
+    /// Wait until Meerkat has sent `key` on channel `ordinal` (the replay
+    /// orders a scripted answer after a client event the recorded run sent
+    /// before that answer existed).
+    pub async fn received(&self, ordinal: u32, key: &ClientKey) -> Result<(), String> {
+        let reached = timeout(
+            STEP_BOUND,
+            self.shared.wait_until(|state| {
+                state
+                    .received
+                    .get(&ordinal)
+                    .is_some_and(|received| received.contains(key))
+                    || !state.divergences.is_empty()
+            }),
+        )
+        .await;
+        self.diverged()?;
+        reached.map_err(|_| {
+            format!(
+                "channel {ordinal} never received {key}; the replay is parked at {:?}",
+                self.parked(ordinal)
+            )
+        })
+    }
+
     /// Wait until channel `ordinal`'s tape has ended (the provider closed).
     pub async fn ended(&self, ordinal: u32) -> Result<(), String> {
         let reached = timeout(

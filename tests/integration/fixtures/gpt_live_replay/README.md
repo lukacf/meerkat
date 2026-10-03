@@ -114,17 +114,24 @@ this directory or the harness changes.
   into 500-byte fragments, and the fragment index is in the `event_id`) are
   taken from the fixture itself. The summary is a fixed stub.
 - **Ordering the product leaves open:** the test fixes it with typed gates,
-  matching what the recorded run did. For S104, the job's worker turn is
-  released after channel 1 is closed, and the merge reply after channel 2 is
-  connected. Each browser step is taken only once the host reached the state
-  the live run had reached; for example, the disconnect waits until the job's
-  worker has started.
+  matching what the recorded run did:
+  - S104: the job's worker turn is released after channel 1 is closed, and
+    the merge reply after channel 2 is connected. The disconnect is stepped
+    only once the job's worker has started, the state the live run had
+    reached by then.
+  - S106: each delegated job is released once its channel carried the
+    job's "Started voice request" narration. The product emits that
+    narration only for a job that runs about 8 s, and spaces the next one
+    the same way, so each S106 delegation takes about 16 s of real time.
+    Ordering still never rides a clock in the replay: the cassette waits
+    on the narration event itself.
 - **Assertions:**
   - the replay records its own provider stream through the same journal hook,
     and its client events per channel must equal the fixture's;
-  - each open's seed shape must match;
-  - the scenario's own contract holds (S104: the merged job's reply reaches the
-    reopened channel as runtime work carrying the result token).
+  - S104's opens must match the recorded seed shapes (item roles);
+  - the scenario's own contract holds. S104: the merged job's reply reaches
+    the reopened channel as runtime work carrying the result token. S106:
+    every open is seeded with the summary first.
 
 A divergence fails with where the tape is parked (the marker or client event
 it waits for). `REPLAY_DUMP_REQUESTS=1` prints every scripted LLM request with

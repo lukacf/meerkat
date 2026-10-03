@@ -83,9 +83,19 @@ const OFFER_SDP: &str = "v=0\r\nREPLAY_OFFER_SDP";
 /// LLM's gates order every step.
 const CONVERGENCE_BOUND: Duration = Duration::from_secs(60);
 
+const S106_FIXTURE: &str = include_str!("../fixtures/gpt_live_replay/s106.provider-stream.jsonl");
+const S106_SEED_PROMPT: &str =
+    "For the record: the sponsor's name is Marlow. Just acknowledge in one short sentence.";
+const S106_TYPED_PROMPT: &str = "Typed while the voice call is down: the budget code is Kestrel. Reply with one short sentence.";
+const S106_EXECUTOR_INSTRUCTIONS: &str = "You are the executor behind a voice assistant. Your current working directory is the \
+     scratch workspace; do every file operation there with the shell tool. When asked for a \
+     note of at least two hundred words, write at least two hundred words into the requested \
+     file, then answer with the word count in one short sentence. When asked to add a sentence \
+     to a file, append it, run `wc -w` on the file and answer with the new number in one short \
+     sentence.";
 const S104_FIXTURE: &str = include_str!("../fixtures/gpt_live_replay/s104.provider-stream.jsonl");
 /// Every committed fixture, for the scrub check.
-const FIXTURES: &[(&str, &str)] = &[("s104", S104_FIXTURE)];
+const FIXTURES: &[(&str, &str)] = &[("s104", S104_FIXTURE), ("s106", S106_FIXTURE)];
 const S104_SEED_PROMPT: &str = "For the record: the team mascot is a heron named Bartleby. Just acknowledge in one short sentence.";
 const S104_TYPED_PROMPT: &str = "Typed while the voice call is down: remember that the meeting room is called Osprey. Reply with one short sentence.";
 const S104_EXECUTOR_INSTRUCTIONS: &str = "You are the executor behind a voice assistant. Your current working directory is the \
@@ -103,7 +113,8 @@ const S104_RESULT_TOKEN: &str = "lantern";
 /// the executor's next conversational turn (by ordinal).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Purpose {
-    DelegatedJob,
+    /// The live delegation worker's turn of the session's n-th job.
+    DelegatedJob(usize),
     MergeReply,
     Conversation(usize),
 }
@@ -120,6 +131,7 @@ struct Script {
 struct ScriptedLlm {
     scripts: BTreeMap<Purpose, Script>,
     conversations: AtomicUsize,
+    jobs: AtomicUsize,
     calls: std::sync::Mutex<Vec<(Purpose, String)>>,
 }
 
@@ -136,14 +148,21 @@ impl ScriptedLlm {
         if newest.contains(S104_MERGE_MARKER) {
             return Purpose::MergeReply;
         }
-        // A live delegation's worker receives the voice request framed as a
-        // speech transcript; the source member never does.
-        let delegated = request.messages.iter().any(|message| {
-            matches!(message, Message::User(user)
-                if user.text_content().starts_with(LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE))
-        });
+        // A live delegation's worker (a fork, or the existing member under
+        // its execution-context row) gets the voice request framed as a
+        // speech transcript as its newest user row; a conversational turn
+        // never does (an earlier job's row may sit in the history).
+        let delegated = request
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::User(user) => Some(user.text_content()),
+                _ => None,
+            })
+            .is_some_and(|text| text.contains(LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE));
         if delegated {
-            return Purpose::DelegatedJob;
+            return Purpose::DelegatedJob(self.jobs.fetch_add(1, Ordering::SeqCst));
         }
         Purpose::Conversation(self.conversations.fetch_add(1, Ordering::SeqCst))
     }
@@ -738,6 +757,12 @@ fn runtime_work_reply(fixture: &Fixture, channel: u32) -> Option<String> {
 
 // --- tests ------------------------------------------------------------------
 
+/// One replay per process at a time: every live open reserves the whole
+/// process realtime-projection budget, so concurrent replays in one test
+/// binary (`cargo test` threads; nextest already isolates) would refuse
+/// each other's opens.
+static REPLAY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Committed fixtures carry no credential, SDP, host path or voice audio
 /// (the same rules as `scripts/gpt-live-scrub-provider-stream check`).
 #[test]
@@ -762,6 +787,7 @@ async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
         .try_init();
+    let _replay = REPLAY_LOCK.lock().await;
     let fixture = Fixture::parse(S104_FIXTURE)?;
     let merge_reply = runtime_work_reply(&fixture, 2)
         .ok_or("the S104 fixture carries no runtime-work append on channel 2")?;
@@ -789,7 +815,7 @@ async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
                 },
             ),
             (
-                Purpose::DelegatedJob,
+                Purpose::DelegatedJob(0),
                 Script {
                     text: format!("Wrote coffee.md. {merge_reply}"),
                     gate: Some(job_gate_rx),
@@ -804,6 +830,7 @@ async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
             ),
         ]),
         conversations: AtomicUsize::new(0),
+        jobs: AtomicUsize::new(0),
         calls: std::sync::Mutex::new(Vec::new()),
     });
     let mut host = open_replay_host(HostOptions {
@@ -918,5 +945,180 @@ async fn s104_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn st
             .any(|text| text.contains(S104_RESULT_TOKEN)),
         "the merged job's reply must reach channel 2 as runtime work: {runtime_work:?}"
     );
+    Ok(())
+}
+
+/// The recorded delegation-lane commentary results of `channel`, in order:
+/// the third commentary of each delegation is its result text.
+fn delegation_results(fixture: &Fixture, channel: u32) -> Vec<String> {
+    fixture
+        .client_contents(channel, "session.commentary.append")
+        .into_iter()
+        .filter(|text| {
+            !text.starts_with("Started voice request")
+                && !text.starts_with("Finished voice request")
+        })
+        .collect()
+}
+
+/// S106 replayed: three channels over one ExistingMember executor. Native
+/// exchanges, a delegated job per channel (e3, e6, e9) narrated Started,
+/// Finished and its result on the delegation lane, a typed turn during the
+/// first closure, and reopens seeded from the retained summary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s106_replay_sends_the_recorded_client_events() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+    let _replay = REPLAY_LOCK.lock().await;
+    let fixture = Fixture::parse(S106_FIXTURE)?;
+    let cassette = Cassette::start(fixture.clone()).await?;
+    let evidence = Journal::create_for("S106-replay", "Saffron".to_owned())?;
+
+    // One delegated job per channel, each released once the channel carried
+    // its "Started" narration (the recorded run's job ran for seconds).
+    let mut gates = Vec::new();
+    let mut scripts = BTreeMap::from([
+        (
+            Purpose::Conversation(0),
+            Script {
+                text: "Acknowledged: the sponsor's name is Marlow.".into(),
+                gate: None,
+            },
+        ),
+        (
+            Purpose::Conversation(1),
+            Script {
+                text: "Acknowledged: the budget code is Kestrel.".into(),
+                gate: None,
+            },
+        ),
+    ]);
+    for (job, channel) in [(0_usize, 1_u32), (1, 2), (2, 3)] {
+        let result = delegation_results(&fixture, channel)
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                format!("the S106 fixture has no delegation result on channel {channel}")
+            })?;
+        let (gate, gate_rx) = watch::channel(false);
+        gates.push(gate);
+        scripts.insert(
+            Purpose::DelegatedJob(job),
+            Script {
+                text: result,
+                gate: Some(gate_rx),
+            },
+        );
+    }
+    let llm = Arc::new(ScriptedLlm {
+        scripts,
+        conversations: AtomicUsize::new(0),
+        jobs: AtomicUsize::new(0),
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut host = open_replay_host(HostOptions {
+        base_url: cassette.base_url(),
+        llm: llm.clone(),
+        policy: LiveDelegationExecutionPolicy::ExistingMember,
+        executor_instructions: S106_EXECUTOR_INSTRUCTIONS,
+        seed_prompt: Some(S106_SEED_PROMPT),
+        summary: "The sponsor's name is Marlow. The project codename is Saffron. The launch venue is Lisbon. The budget code is Kestrel.",
+    })
+    .await?;
+    let started = ClientKey {
+        kind: "session.commentary.append".into(),
+        event_id: Some("meerkat-append-1".into()),
+    };
+
+    let result = async {
+        // Channel 1: e1, e2 native; e3 delegated; e4 native; drop.
+        let (channel1, open1) = host.connect(&evidence).await?;
+        for step in ["play_at:haul_e1", "play_at:haul_e2", "play_at:haul_e3"] {
+            cassette.release(channel1, step).await?;
+        }
+        cassette.received(channel1, &started).await?;
+        gates[0].send_replace(true);
+        cassette.release(channel1, "play_at:haul_e4").await?;
+        cassette.release(channel1, "disconnect:graceful").await?;
+        cassette.ended(channel1).await?;
+        host.closed(&open1).await?;
+
+        // Typed turn during the first closure.
+        let typed = host
+            .rpc
+            .call_raw(
+                "turn/start",
+                json!({"session_id":host.session_id,"prompt":S106_TYPED_PROMPT}),
+                120,
+            )
+            .await?;
+        if !typed["error"].is_null() {
+            return Err(format!("the typed turn failed: {}", typed["error"]).into());
+        }
+
+        // Channel 2: e5 native; e6 delegated; drop.
+        let (channel2, open2) = host.connect(&evidence).await?;
+        for step in ["play_at:haul_e5", "play_at:haul_e6"] {
+            cassette.release(channel2, step).await?;
+        }
+        cassette.received(channel2, &started).await?;
+        gates[1].send_replace(true);
+        cassette.release(channel2, "disconnect:graceful").await?;
+        cassette.ended(channel2).await?;
+        host.closed(&open2).await?;
+
+        // Channel 3: e7, e8 native; e9 delegated; e10 native; drop.
+        let (channel3, open3) = host.connect(&evidence).await?;
+        for step in ["play_at:haul_e7", "play_at:haul_e8", "play_at:haul_e9"] {
+            cassette.release(channel3, step).await?;
+        }
+        cassette.received(channel3, &started).await?;
+        gates[2].send_replace(true);
+        cassette.release(channel3, "play_at:haul_e10").await?;
+        cassette.release(channel3, "disconnect:graceful").await?;
+        cassette.ended(channel3).await?;
+        host.closed(&open3).await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    }
+    .await;
+    let finished = evidence.finish(match &result {
+        Ok(_) => evidence::Outcome::Passed,
+        Err(_) => evidence::Outcome::Failed,
+    });
+    cassette.diverged()?;
+    result.map_err(|error| {
+        format!(
+            "{error}; scripted LLM calls so far: {:?}",
+            llm.calls.lock().expect("calls")
+        )
+    })?;
+    finished?;
+
+    // Every reopen is seeded with the summary first (a developer item).
+    for body in cassette.create_bodies() {
+        assert_eq!(
+            body["session"]["input"][0]["role"], "developer",
+            "each S106 open is seeded with the summary first: {body}"
+        );
+    }
+    let replayed = provider_recording::read(
+        &evidence
+            .path()
+            .with_file_name(support::evidence::PROVIDER_STREAM_FILE),
+    )?;
+    let recorded: BTreeMap<u32, Vec<ClientKey>> = fixture
+        .channels
+        .iter()
+        .map(|tape| (tape.ordinal, tape.client_events.clone()))
+        .collect();
+    assert_eq!(
+        client_events_by_channel(&replayed),
+        recorded,
+        "the replay's client events (type, event_id) differ from the recording; LLM calls: {:?}",
+        llm.calls.lock().expect("calls")
+    );
+    let _ = &mut host;
     Ok(())
 }

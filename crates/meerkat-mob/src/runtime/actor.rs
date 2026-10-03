@@ -10879,7 +10879,26 @@ impl MobActor {
     /// a forwarder and health-monitor reconcile (#1250). A roster-only change
     /// (for example a projected backend-peer binding) still wakes watchers,
     /// because list projections combine both.
+    /// The member run-start posture MobMachine state implies (#1500): Held
+    /// from a Stop's quiesce until the mob leaves Stopped, Released
+    /// otherwise. Every member bind delivers it.
+    fn member_run_start_posture(&self) -> super::supervisor_bridge::MemberRunStartPosture {
+        let state = self.dsl_authority.state();
+        let stopping = state.placed_completion_lifecycle_quiescing
+            && state.placed_completion_lifecycle_intent
+                == Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Stop);
+        if state.lifecycle_phase == mob_dsl::MobPhase::Stopped || stopping {
+            super::supervisor_bridge::MemberRunStartPosture::Held
+        } else {
+            super::supervisor_bridge::MemberRunStartPosture::Released
+        }
+    }
+
     fn publish_machine_state_projection(&self) {
+        // The single post-apply seam (#1500): every member bind delivers the
+        // run-start posture of the state just published.
+        self.supervisor_bridge
+            .set_member_run_start_posture(self.member_run_start_posture());
         let state = self.dsl_authority.state();
         self.dsl_topology_epoch
             .store(state.topology_epoch, std::sync::atomic::Ordering::Release);
@@ -13343,7 +13362,52 @@ impl MobActor {
                 expected.agent_identity, host_binding_generation
             )));
         }
+        self.deliver_run_start_posture_to_placed_member(
+            &domain_identity,
+            &promoted_expected_member,
+        )
+        .await;
         Ok(())
+    }
+
+    /// Deliver the mob's run-start posture to a placed member whose carrier
+    /// was just re-activated (#1500). No Stop or Resume could reach it while
+    /// the carrier was dormant, and a re-materialized runtime starts unheld.
+    /// Both commands are idempotent on the host; a failure is logged, and the
+    /// next Stop or Resume reaches the member again.
+    async fn deliver_run_start_posture_to_placed_member(
+        &self,
+        identity: &AgentIdentity,
+        expected_member: &super::bridge_protocol::BridgeMemberIncarnation,
+    ) {
+        let Some(member_ref) = self
+            .roster
+            .read()
+            .await
+            .get(identity)
+            .map(|entry| entry.member_ref.clone())
+        else {
+            return;
+        };
+        let delivered = match self.supervisor_bridge.member_run_start_posture() {
+            super::supervisor_bridge::MemberRunStartPosture::Held => self
+                .provisioner
+                .stop_member_runtime(&member_ref, Some(expected_member), false)
+                .await
+                .map(|_| ()),
+            super::supervisor_bridge::MemberRunStartPosture::Released => {
+                self.provisioner
+                    .release_member_run_starts(&member_ref, Some(expected_member))
+                    .await
+            }
+        };
+        if let Err(error) = delivered {
+            tracing::warn!(
+                agent_identity = %identity,
+                error = %error,
+                "delivering the run-start posture to a re-activated placed member failed"
+            );
+        }
     }
 
     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -21278,6 +21342,10 @@ impl MobActor {
         };
         let mut first_error = None;
         for entry in &entries {
+            // A dormant placed carrier is released when it is re-activated.
+            if self.placed_member_carrier_dormant(&entry.agent_identity) {
+                continue;
+            }
             let incarnation = match self.autonomous_stop_interrupt_incarnation(entry) {
                 Ok(incarnation) => incarnation,
                 Err(error) => {
@@ -27876,6 +27944,11 @@ impl MobActor {
     pub(super) async fn run(mut self, mut command_rx: mpsc::Receiver<RoutedMobCommand>) {
         self.inline_step_watchdog
             .start_checker(self.definition.id.clone());
+        // Every actor incarnation, a restored one included, starts from its
+        // durable MobMachine state (#1500): a member that binds before the
+        // next lifecycle transition gets the run-start posture it implies.
+        self.supervisor_bridge
+            .set_member_run_start_posture(self.member_run_start_posture());
         if !boxed_arm_future(|| self.prepare_actor_run()).await {
             self.inline_step_watchdog.stop();
             return;

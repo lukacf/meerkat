@@ -7814,6 +7814,9 @@ struct LiveExternalPeerHarness {
     /// `cancel_current_run` of every HoldRunStarts received.
     run_start_holds: Arc<RwLock<Vec<bool>>>,
     run_start_releases: Arc<AtomicUsize>,
+    /// Reject HoldRunStarts and ReleaseRunStarts as Unsupported while still
+    /// advertising the capability: a host that predates the commands (#1500).
+    reject_run_start_hold_as_unsupported: Arc<AtomicBool>,
     reject_held_rotation_observes: Arc<AtomicBool>,
     held_rotation_observes: Arc<AtomicUsize>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
@@ -7949,6 +7952,11 @@ impl LiveExternalPeerHarness {
 
     async fn run_start_holds(&self) -> Vec<bool> {
         self.run_start_holds.read().await.clone()
+    }
+
+    fn reject_run_start_hold_as_unsupported(&self, reject: bool) {
+        self.reject_run_start_hold_as_unsupported
+            .store(reject, Ordering::Relaxed);
     }
 
     fn run_start_releases(&self) -> usize {
@@ -8296,6 +8304,9 @@ async fn spawn_live_external_peer_with_transport(
     let responder_run_start_holds = run_start_holds.clone();
     let run_start_releases = Arc::new(AtomicUsize::new(0));
     let responder_run_start_releases = run_start_releases.clone();
+    let reject_run_start_hold_as_unsupported = Arc::new(AtomicBool::new(false));
+    let responder_reject_run_start_hold_as_unsupported =
+        reject_run_start_hold_as_unsupported.clone();
     let reject_held_rotation_observes = Arc::new(AtomicBool::new(false));
     let responder_reject_held_rotation_observes = reject_held_rotation_observes.clone();
     let held_rotation_observes = Arc::new(AtomicUsize::new(0));
@@ -8980,6 +8991,18 @@ async fn spawn_live_external_peer_with_transport(
                                         .expect("revoke ack")
                                     }
                                 }
+                                super::bridge_protocol::BridgeCommand::HoldRunStarts(_)
+                                    if responder_reject_run_start_hold_as_unsupported
+                                        .load(Ordering::Relaxed) =>
+                                {
+                                    serde_json::to_value(
+                                        super::bridge_protocol::BridgeReply::Rejected {
+                                            cause: super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                                            reason: "unknown bridge command".to_string(),
+                                        },
+                                    )
+                                    .expect("hold rejection")
+                                }
                                 super::bridge_protocol::BridgeCommand::HoldRunStarts(payload) => {
                                     responder_run_start_holds
                                         .write()
@@ -8993,6 +9016,18 @@ async fn spawn_live_external_peer_with_transport(
                                         ),
                                     )
                                     .expect("run starts held")
+                                }
+                                super::bridge_protocol::BridgeCommand::ReleaseRunStarts(_)
+                                    if responder_reject_run_start_hold_as_unsupported
+                                        .load(Ordering::Relaxed) =>
+                                {
+                                    serde_json::to_value(
+                                        super::bridge_protocol::BridgeReply::Rejected {
+                                            cause: super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                                            reason: "unknown bridge command".to_string(),
+                                        },
+                                    )
+                                    .expect("release rejection")
                                 }
                                 super::bridge_protocol::BridgeCommand::ReleaseRunStarts(_) => {
                                     // Like a real host: an unbound member refuses.
@@ -9561,6 +9596,7 @@ async fn spawn_live_external_peer_with_transport(
         advertise_run_start_hold,
         run_start_holds,
         run_start_releases,
+        reject_run_start_hold_as_unsupported,
         reject_held_rotation_observes,
         held_rotation_observes,
         supervisor_state,
@@ -19417,6 +19453,72 @@ async fn test_stop_reports_a_remote_member_without_the_hold_as_not_holdable() {
     assert!(
         external.run_start_holds().await.is_empty(),
         "a host without the capability is never sent the hold"
+    );
+}
+
+/// #1500: a host that advertises the run-start hold but predates the commands
+/// rejects them as Unsupported. Stop reports the member as not holdable, never
+/// silently held, on every Stop, and Resume is not failed by the rejected
+/// release.
+#[tokio::test]
+async fn test_stop_reports_a_stale_capability_remote_member_as_not_holdable() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "stop-reports-stale-capability-remote-member",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    external.advertise_run_start_hold(true);
+    external.reject_run_start_hold_as_unsupported(true);
+    let identity = AgentIdentity::from("w-ext");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+
+    let report = handle.stop().await.expect("stop the mob");
+    assert_eq!(
+        report.not_holdable().collect::<Vec<_>>(),
+        vec![(&identity, &crate::NotHoldableReason::PeerLacksCapability)],
+        "{report:?}"
+    );
+    assert!(
+        external.run_start_holds().await.is_empty(),
+        "the host accepted no hold"
+    );
+
+    handle
+        .resume()
+        .await
+        .expect("a release the host rejects as Unsupported does not fail resume");
+    assert_eq!(
+        external.run_start_releases(),
+        0,
+        "the host accepted no release"
+    );
+    let report = handle.stop().await.expect("stop the mob again");
+    assert_eq!(
+        report.not_holdable().collect::<Vec<_>>(),
+        vec![(&identity, &crate::NotHoldableReason::PeerLacksCapability)],
+        "{report:?}"
+    );
+    assert!(
+        external.run_start_holds().await.is_empty(),
+        "the host accepted no hold on the second Stop either"
     );
 }
 
@@ -34714,6 +34816,7 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
     );
     handle.stop().await.expect("stop");
     let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    external.advertise_run_start_hold(true);
     let crate::RuntimeBinding::External {
         peer_id,
         address,
@@ -34793,6 +34896,24 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
         resumed.status().await.expect("resumed mob status"),
         MobState::Running
     );
+    // #1500: the peer is not bound yet, so the Resume could not release it.
+    // A supervisor restart before the peer binds must not lose that release:
+    // the restored actor starts from the durable Running phase, and the
+    // peer's bind delivers the release.
+    crash_stop_and_release_routes(resumed).await;
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata.clone(),
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("restore the running peer-only mob");
+    assert_eq!(
+        resumed.status().await.expect("restored mob status"),
+        MobState::Running,
+        "a running mob is restored running"
+    );
     assert_eq!(
         resumed
             .owner_bridge_session_lifecycle_authority()
@@ -34813,12 +34934,12 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
         1,
         "peer-only direct turn should use request/ack delivery with one logical input admission"
     );
-    // The peer was not bound at resume commit, so the run-start release the
-    // Resume owed it (#1500) was sent when it bound again, exactly once.
-    assert_eq!(
-        external.run_start_releases(),
-        1,
-        "the release owed to the unbound peer is sent on its rebind"
+    // The peer was not bound at resume commit, and the supervisor restarted
+    // before it bound: its bind delivered the release (#1500). Every bind
+    // delivers the posture, and the release is idempotent on the host.
+    assert!(
+        external.run_start_releases() >= 1,
+        "the unbound peer's bind delivers the release across a restart"
     );
 
     let peer_member = resumed

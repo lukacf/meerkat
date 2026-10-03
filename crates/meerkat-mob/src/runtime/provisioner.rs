@@ -13678,13 +13678,12 @@ impl MultiBackendProvisioner {
         )
     }
 
-    /// Send a run-start release owed from a Resume to a peer that has just
-    /// bound again (#1500). A failure leaves the release owed to its next bind.
+    /// Release a peer that has just bound while the mob's run-start posture is
+    /// Released (#1500). A failure is retried by the peer's next bind.
     async fn release_run_starts_on_bound_peer(
         &self,
         peer: &TrustedPeerDescriptor,
         peer_id: &str,
-        expected_member: Option<super::bridge_protocol::BridgeMemberIncarnation>,
         timeout: Duration,
     ) {
         let released = async {
@@ -13694,7 +13693,7 @@ impl MultiBackendProvisioner {
                     supervisor: supervisor.supervisor,
                     epoch: supervisor.epoch,
                     protocol_version: supervisor.protocol_version,
-                    expected_member: expected_member.clone(),
+                    expected_member: None,
                 },
             );
             self.send_bridge_command_typed::<super::bridge_protocol::BridgeAck>(
@@ -13708,20 +13707,17 @@ impl MultiBackendProvisioner {
             tracing::warn!(
                 peer_id,
                 error = %error,
-                "releasing a rebound member's run-start hold failed; still owed"
+                "releasing a rebound member's run-start hold failed; its next bind retries"
             );
-            self.supervisor_bridge
-                .mark_run_start_release_pending(peer_id, expected_member);
         }
     }
 
-    /// Send a run-start hold owed from a Stop to a peer that has just bound
-    /// again (#1500). A failure keeps the hold owed.
+    /// Hold a peer that has just bound while the mob's run-start posture is
+    /// Held (#1500). A failure is retried by the peer's next bind.
     async fn hold_run_starts_on_bound_peer(
         &self,
         peer: &TrustedPeerDescriptor,
         peer_id: &str,
-        expected_member: Option<super::bridge_protocol::BridgeMemberIncarnation>,
         timeout: Duration,
     ) {
         let held = async {
@@ -13731,7 +13727,7 @@ impl MultiBackendProvisioner {
                     supervisor: supervisor.supervisor,
                     epoch: supervisor.epoch,
                     protocol_version: supervisor.protocol_version,
-                    expected_member: expected_member.clone(),
+                    expected_member: None,
                     cancel_current_run: false,
                 },
             );
@@ -13746,10 +13742,8 @@ impl MultiBackendProvisioner {
             tracing::warn!(
                 peer_id,
                 error = %error,
-                "holding a rebound member's run starts failed; still owed"
+                "holding a rebound member's run starts failed; its next bind retries"
             );
-            self.supervisor_bridge
-                .mark_run_start_hold_pending(peer_id, expected_member);
         }
     }
 
@@ -14775,31 +14769,20 @@ impl MultiBackendProvisioner {
                     &payload.peer_id,
                     payload.capabilities.run_start_hold,
                 );
-                // A Stop or Resume that could not reach this peer while it
-                // was unbound owes it a run-start hold or release (#1500):
-                // send it now that the peer is bound again.
-                if let Some(owed) = self
-                    .supervisor_bridge
-                    .take_run_start_release_pending(&payload.peer_id)
-                {
-                    match owed.command {
-                        super::supervisor_bridge::OwedRunStartCommand::Release => {
-                            self.release_run_starts_on_bound_peer(
-                                peer,
-                                &payload.peer_id,
-                                owed.expected_member,
-                                timeout,
-                            )
-                            .await;
+                // Every bind delivers the mob's run-start posture (#1500), so
+                // a peer that was unbound when a Stop held or a Resume
+                // released gets it now, and a supervisor restart (which
+                // restores the posture from the durable mob phase) loses
+                // nothing. Both commands are idempotent on the host.
+                if payload.capabilities.run_start_hold {
+                    match self.supervisor_bridge.member_run_start_posture() {
+                        super::supervisor_bridge::MemberRunStartPosture::Held => {
+                            self.hold_run_starts_on_bound_peer(peer, &payload.peer_id, timeout)
+                                .await;
                         }
-                        super::supervisor_bridge::OwedRunStartCommand::Hold => {
-                            self.hold_run_starts_on_bound_peer(
-                                peer,
-                                &payload.peer_id,
-                                owed.expected_member,
-                                timeout,
-                            )
-                            .await;
+                        super::supervisor_bridge::MemberRunStartPosture::Released => {
+                            self.release_run_starts_on_bound_peer(peer, &payload.peer_id, timeout)
+                                .await;
                         }
                     }
                 }
@@ -16306,16 +16289,10 @@ impl MobProvisioner for MultiBackendProvisioner {
             } if expected_member.is_some() || session_id.is_none() => {
                 // A remote member is held through its host when the host
                 // supports it (#1500); otherwise it is interrupted as before
-                // and reported as not holdable. A new hold supersedes a
-                // release still owed from an earlier Resume.
-                let _ = self
-                    .supervisor_bridge
-                    .take_run_start_release_pending(peer_id);
-                // A peer that is not bound to this supervisor cannot be held
-                // now: its next bind sends the hold first.
-                let owe_hold_on_bind = || {
-                    self.supervisor_bridge
-                        .mark_run_start_hold_pending(peer_id, expected_member.cloned());
+                // and reported as not holdable. A peer that is not bound to
+                // this supervisor cannot be held now: its next bind delivers
+                // the mob's Held posture.
+                let not_bound_outcome = || {
                     Ok(MemberStopOutcome {
                         run: MemberStopRun::NoRun,
                         starts: MemberRunStarts::NotBound,
@@ -16333,7 +16310,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                         .await
                     {
                         Ok(authorized) => authorized,
-                        Err(error) if Self::peer_not_bound(&error) => return owe_hold_on_bind(),
+                        Err(error) if Self::peer_not_bound(&error) => return not_bound_outcome(),
                         Err(error) => return Err(error),
                     };
                     let command = super::bridge_protocol::BridgeCommand::HoldRunStarts(
@@ -16384,7 +16361,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                             self.supervisor_bridge
                                 .record_peer_run_start_hold(peer_id, false);
                         }
-                        Err(error) if Self::peer_not_bound(&error) => return owe_hold_on_bind(),
+                        Err(error) if Self::peer_not_bound(&error) => return not_bound_outcome(),
                         Err(error) => return Err(error),
                     }
                 }
@@ -16463,9 +16440,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                     Ok(authorized) => authorized,
                     Err(error) if Self::peer_not_bound(&error) => {
                         // The peer is not bound to this supervisor right now:
-                        // its next bind sends the release.
-                        self.supervisor_bridge
-                            .mark_run_start_release_pending(peer_id, expected_member.cloned());
+                        // its next bind delivers the Released posture.
                         return Ok(());
                     }
                     Err(error) => return Err(error),
@@ -16495,11 +16470,8 @@ impl MobProvisioner for MultiBackendProvisioner {
                             .record_peer_run_start_hold(peer_id, false);
                         Ok(())
                     }
-                    Err(error) if Self::peer_not_bound(&error) => {
-                        self.supervisor_bridge
-                            .mark_run_start_release_pending(peer_id, expected_member.cloned());
-                        Ok(())
-                    }
+                    // Its next bind delivers the Released posture.
+                    Err(error) if Self::peer_not_bound(&error) => Ok(()),
                     Err(error) => Err(error),
                 }
             }

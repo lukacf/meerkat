@@ -3093,7 +3093,7 @@ const USER_FLOOR_SPEECH_DBFS: f64 = -50.0;
 /// [`SessionState::user_holds_floor`]).
 ///
 /// Derived from the 39 scripted Turbo S utterance fixtures
-/// (tests/live_smoke/browser/fixtures/gpt_live_client, 20 ms windows against
+/// (the live-smoke browser `gpt_live_client` fixture set, 20 ms windows against
 /// [`USER_FLOOR_SPEECH_DBFS`]): the longest pause inside one utterance is
 /// 1020 ms (S103 `interrupt_monologue`, deliberately paused mid-clause), then
 /// 880 ms (`remember`), 760 ms (`recall`) and 720 ms (`current`). 1600 ms

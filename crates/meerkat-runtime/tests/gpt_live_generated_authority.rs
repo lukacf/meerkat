@@ -1651,7 +1651,11 @@ fn observation_admission_rejects_wrong_namespace_fence_and_closed_scope() {
 }
 
 #[test]
-fn bootstrap_causal_live_tail_is_reasserted_and_results_wait_for_ordered_tail() {
+/// The causal live tail heard while the summary was pending is reasserted
+/// after it in canonical order, and a delegation result follows the summary's
+/// acknowledgement, not the tail: results are not held behind replays of the
+/// user's own speech.
+fn bootstrap_causal_live_tail_is_reasserted_and_results_follow_the_summary_ack() {
     let mut authority = opened_authority();
     stage_bootstrap(&mut authority, 3);
     activate_bootstrap(&mut authority);
@@ -1681,27 +1685,46 @@ fn bootstrap_causal_live_tail_is_reasserted_and_results_wait_for_ordered_tail() 
         mm::LiveContextRowDisposition::ReassertCausalTail
     );
     authorize_bootstrap(&mut authority, 3);
+    let readiness = |authority: &mut mm::MeerkatMachineAuthority| {
+        apply(
+            authority,
+            mm::MeerkatMachineInput::ObserveLiveContextDeliveryReadiness {
+                session_id: SESSION.into(),
+                channel_id: CHANNEL.into(),
+            },
+        )
+        .expect("result barrier")
+        .into_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            mm::MeerkatMachineEffect::LiveContextDeliveryReadinessObserved {
+                readiness, ..
+            } => Some(readiness),
+            _ => None,
+        })
+        .expect("readiness observation")
+    };
+    assert_eq!(
+        readiness(&mut authority),
+        mm::LiveContextDeliveryReadiness::Pending,
+        "results wait for the summary's acknowledgement"
+    );
     resolve_bootstrap(
         &mut authority,
         3,
         mm::LiveContextAppendObservation::Delivered,
     )
     .expect("exact ACK");
-    let observed = apply(
-        &mut authority,
-        mm::MeerkatMachineInput::ObserveLiveContextDeliveryReadiness {
-            session_id: SESSION.into(),
-            channel_id: CHANNEL.into(),
-        },
-    )
-    .expect("result barrier");
-    assert!(observed.into_effects().iter().any(|effect| matches!(
-        effect,
-        mm::MeerkatMachineEffect::LiveContextDeliveryReadinessObserved {
-            readiness: mm::LiveContextDeliveryReadiness::Pending,
-            ..
-        }
-    )));
+    assert_eq!(
+        authority.state().live_context_queued_append_by_cursor.len(),
+        2,
+        "the causal tail is still queued"
+    );
+    assert_eq!(
+        readiness(&mut authority),
+        mm::LiveContextDeliveryReadiness::Ready,
+        "results follow the summary's acknowledgement, not the queued tail"
+    );
     assert!(
         apply(
             &mut authority,

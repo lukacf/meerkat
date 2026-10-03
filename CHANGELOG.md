@@ -1251,6 +1251,30 @@ them.
     delegation-as-avoidance wording.
   - The public protocol offers no structural lever: client delegation has no
     configurable description and carries no task text or kind.
+- A delegation result on a GPT Live channel is no longer held for as long as
+  the user keeps speaking (S99).
+  - The result waited behind the channel's bootstrap barrier, which required
+    the late summary's acknowledgement and an empty context outbox. Under
+    continuous speech new replay rows kept arriving and each waited for a
+    provider turn boundary, and the wait also joined the outbox drain, so the
+    result was never released before close.
+  - Results now follow the summary's provider acknowledgement only.
+    `ObserveLiveContextDeliveryReadiness` and the
+    `AuthorizeLiveDelegationResultDelivery` and
+    `AuthorizeLiveBridgeSubmission` guards state that one rule, so readiness
+    and authorization cannot disagree. Queued context rows (the user's own
+    speech the provider already heard, replayed with earlier-speech framing,
+    plus typed and runtime-work rows) still drain in order after the summary
+    on the channel's owned drain worker, which close joins; the result wait
+    requests that drain and never joins it.
+  - A barrier revoked by a channel close now returns the typed
+    `RuntimeDriverError::LiveContextBarrierRevoked` instead of a validation
+    error, so close paths can match on it.
+  - A new bounded TLC audit
+    (`specs/machines/meerkat_machine/live_context_result_barrier_audit.sh`)
+    runs in the machine-verify lane: a result is authorized only after the
+    summary acknowledgement, and is authorized while a replay is still
+    queued.
 - A GPT Live open whose summary is still being prepared tells the model that
   the newest turns of the earlier text conversation it carries are known and
   only the older part of that conversation is summarized and still pending.

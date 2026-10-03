@@ -205,6 +205,11 @@ mod live_context_mirror_tests {
         >,
         first_read_barrier: Option<Arc<MirrorAppendBarrier>>,
         reads: std::sync::atomic::AtomicUsize,
+        /// Holds every ordinary context append (a pause-gated replay the
+        /// provider never acknowledges while the user keeps speaking).
+        context_append_barrier: Option<Arc<MirrorAppendBarrier>>,
+        /// Ordered host and test events, to pin summary-before-result order.
+        events: Arc<std::sync::Mutex<Vec<&'static str>>>,
     }
 
     struct MirrorAppendBarrier {
@@ -268,6 +273,10 @@ mod live_context_mirror_tests {
                     .record_live_context_bootstrap_ack_cut(&authority)
                     .await
                     .map_err(|error| error.to_string())?;
+                self.events
+                    .lock()
+                    .expect("events")
+                    .push("summary acknowledged");
             }
             Ok((
                 authority,
@@ -328,6 +337,15 @@ mod live_context_mirror_tests {
                 appends.len() == 1
             };
             if first && let Some(barrier) = &self.first_append_barrier {
+                barrier.entered.notify_one();
+                barrier
+                    .release
+                    .acquire()
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .forget();
+            }
+            if let Some(barrier) = &self.context_append_barrier {
                 barrier.entered.notify_one();
                 barrier
                     .release
@@ -508,6 +526,96 @@ mod live_context_mirror_tests {
             .expect("user provider turn starts");
     }
 
+    /// Start the user turn `"first-user-turn"` through the public
+    /// observation API (unlike [`user_speaks_on`], it registers the
+    /// interaction the public finish completes).
+    async fn user_turn_starts_on(
+        machine: &crate::MeerkatMachine,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) {
+        let state = machine
+            .session_dsl_state(session_id)
+            .await
+            .expect("read bound channel state");
+        let channel = channel_id.to_string();
+        let fence_token = *state
+            .live_execution_fence_by_channel
+            .get(&channel)
+            .expect("bound execution fence");
+        let generation = *state
+            .live_execution_generation_by_channel
+            .get(&channel)
+            .expect("bound execution generation");
+        let provider_binding = meerkat_live::ProviderWebrtcBinding::new(
+            channel_id.clone(),
+            session_id.clone(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(generation.0),
+            meerkat_live::LiveRuntimeBindingFence::new(fence_token.0),
+        );
+        let turn = meerkat_live::LiveSidebandTurnRef::__from_provider_observation(
+            channel_id,
+            "first-user-turn".into(),
+            "provider-first-user-turn".into(),
+        )
+        .expect("turn");
+        machine
+            .observe_live_provider_turn_started(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding,
+                meerkat_live::LiveSidebandObservationKind::TurnStarted {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ))
+            .await
+            .expect("the user's turn starts");
+    }
+
+    /// The end of the user turn [`user_turn_starts_on`] opened, through the
+    /// public observation API.
+    async fn user_turn_finishes_on(
+        machine: &crate::MeerkatMachine,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) {
+        let state = machine
+            .session_dsl_state(session_id)
+            .await
+            .expect("read bound channel state");
+        let channel = channel_id.to_string();
+        let fence_token = *state
+            .live_execution_fence_by_channel
+            .get(&channel)
+            .expect("bound execution fence");
+        let generation = *state
+            .live_execution_generation_by_channel
+            .get(&channel)
+            .expect("bound execution generation");
+        let provider_binding = meerkat_live::ProviderWebrtcBinding::new(
+            channel_id.clone(),
+            session_id.clone(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(generation.0),
+            meerkat_live::LiveRuntimeBindingFence::new(fence_token.0),
+        );
+        let turn = meerkat_live::LiveSidebandTurnRef::__from_provider_observation(
+            channel_id,
+            "first-user-turn".into(),
+            "provider-first-user-turn".into(),
+        )
+        .expect("turn");
+        machine
+            .observe_live_provider_turn_finished(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding,
+                meerkat_live::LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: "first spoken input".into(),
+                },
+            ))
+            .await
+            .expect("the user's turn finishes");
+    }
+
     /// A whole user turn (start and finish) through the public observation
     /// API, for tests that later drive their own provider turns.
     async fn user_turn_completes_on(
@@ -656,6 +764,191 @@ mod live_context_mirror_tests {
                 .is_err()
         );
         assert_eq!(host.appends.lock().expect("records").len(), 1);
+    }
+
+    /// A bootstrap summary in flight while the user keeps speaking (the
+    /// user's provider turn stays open), with every ordinary context append
+    /// held like a pause-gated replay. The summary is acknowledged when the
+    /// test releases `summary`.
+    #[allow(clippy::type_complexity)]
+    async fn summary_in_flight_during_continuous_speech() -> (
+        crate::MeerkatMachine,
+        SessionId,
+        meerkat_live::LiveChannelId,
+        Arc<MirrorAppendBarrier>,
+        Arc<MirrorAppendBarrier>,
+        Arc<RecordingMirrorHost>,
+        tokio::task::JoinHandle<Result<(), crate::RuntimeDriverError>>,
+        crate::live_execution::LiveContextPreparationLease,
+    ) {
+        let (machine, session_id, channel_id) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        let lease = machine
+            .begin_live_context_preparation(&session_id, &channel_id, 1)
+            .await
+            .expect("reserve");
+        machine
+            .mark_live_context_preparation_generating(&lease)
+            .await
+            .expect("generate");
+        let summary = Arc::new(MirrorAppendBarrier {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let replays = Arc::new(MirrorAppendBarrier {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let host = Arc::new(RecordingMirrorHost {
+            runtime: Some(machine.clone()),
+            bootstrap_barrier: Some(summary.clone()),
+            context_append_barrier: Some(replays.clone()),
+            ..Default::default()
+        });
+        machine.set_live_context_mirror_host(host.clone());
+        let delivery = tokio::spawn({
+            let machine = machine.clone();
+            let lease = lease.clone();
+            async move {
+                machine
+                    .deliver_live_context_preparation(&lease, "held historical prefix".into())
+                    .await
+            }
+        });
+        bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        // The user starts speaking and does not stop: the turn stays open.
+        user_turn_starts_on(&machine, &session_id, &channel_id).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            summary.entered.notified(),
+        )
+        .await
+        .expect("the summary append is in flight");
+        (
+            machine, session_id, channel_id, summary, replays, host, delivery, lease,
+        )
+    }
+
+    fn spawn_result_waiting_behind_barrier(
+        machine: &crate::MeerkatMachine,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+        events: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    ) -> tokio::task::JoinHandle<Result<(), crate::RuntimeDriverError>> {
+        let machine = machine.clone();
+        let session_id = session_id.clone();
+        let channel_id = channel_id.clone();
+        tokio::spawn(async move {
+            let ready = machine
+                .wait_live_context_ready_for_results(&session_id, &channel_id)
+                .await;
+            if ready.is_ok() {
+                events.lock().expect("events").push("result released");
+            }
+            ready
+        })
+    }
+
+    /// The S99 r1 shape. The user keeps speaking, a heard-speech replay is
+    /// queued behind the summary, and a delegation result waits. The result
+    /// waits for the summary's acknowledgement and is released by it, while
+    /// the replay is still queued for the turn boundary. The replay then goes
+    /// out after the summary when the turn ends.
+    #[tokio::test]
+    async fn a_result_is_released_on_the_summary_ack_while_speech_replays_still_wait() {
+        let (machine, session_id, channel_id, summary, replays, host, delivery, lease) =
+            summary_in_flight_during_continuous_speech().await;
+        // The user kept speaking while the summary was in flight: one heard
+        // utterance after the summary's reserved prefix.
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("covered by the summary"),
+        ));
+        let mut spoken = meerkat_core::UserMessage::text("spoken while the summary was pending");
+        let observation = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("pre-ACK spoken admission")
+            .observation_id()
+            .clone();
+        spoken.identity.realtime_origin = Some(
+            serde_json::from_value(serde_json::json!({
+                "session_id": session_id,
+                "channel_id": channel_id,
+                "canonical_row_sequence": 2,
+                "context_observation_id": observation
+            }))
+            .expect("heard speech origin"),
+        );
+        session.push(meerkat_core::Message::User(spoken));
+        let committed =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("committed session");
+        machine
+            .enqueue_committed_parent_session_boundary(&session_id, &committed, "store-tail")
+            .await
+            .expect("queue the replay");
+        let mut result = spawn_result_waiting_behind_barrier(
+            &machine,
+            &session_id,
+            &channel_id,
+            host.events.clone(),
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), &mut result)
+                .await
+                .is_err(),
+            "the result waits for the summary's acknowledgement"
+        );
+        summary.release.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(10), delivery)
+            .await
+            .expect("delivery completes")
+            .expect("delivery task")
+            .expect("summary ACK");
+        tokio::time::timeout(std::time::Duration::from_secs(10), result)
+            .await
+            .expect("the result is not held by the queued replay")
+            .expect("result task")
+            .expect("barrier ready");
+        assert_eq!(
+            *host.events.lock().expect("events"),
+            vec!["summary acknowledged", "result released"],
+            "the summary precedes the result"
+        );
+        // The user is still speaking, so the replay is held for the turn
+        // boundary: nothing was waiting on it.
+        {
+            let state = machine.session_dsl_state(&session_id).await.expect("state");
+            assert!(
+                state
+                    .live_provider_turn_by_channel
+                    .contains_key(channel_id.as_str()),
+                "the user's turn is still open"
+            );
+            assert_eq!(
+                state.live_context_queued_append_by_cursor.len(),
+                1,
+                "the replay is still queued when the result is released"
+            );
+        }
+        // When the turn ends, the replay goes out after the summary on the
+        // channel's owned drain.
+        user_turn_finishes_on(&machine, &session_id, &channel_id).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            replays.entered.notified(),
+        )
+        .await
+        .expect("the replay append starts at the turn boundary");
+        let appends = host.appends.lock().expect("records");
+        assert_eq!(appends[0].1, "held historical prefix");
+        assert!(
+            appends
+                .last()
+                .is_some_and(|record| record.1.contains("spoken while the summary was pending")),
+            "{appends:?}"
+        );
     }
 
     #[tokio::test]
@@ -899,7 +1192,13 @@ mod live_context_mirror_tests {
         machine
             .wait_live_context_ready_for_results(&session_id, &channel_id)
             .await
-            .expect("summary + tail");
+            .expect("summary acknowledged");
+        // Results no longer wait for the tail; join the channel's owned drain
+        // to observe the exact tail.
+        machine
+            .drain_live_context_outbox(&session_id)
+            .await
+            .expect("tail drained");
         {
             let records = host.appends.lock().expect("records");
             assert_eq!(records.len(), 5);
@@ -969,7 +1268,7 @@ mod live_context_mirror_tests {
             .await
             .expect("queue follow-up");
         machine
-            .wait_live_context_ready_for_results(&session_id, &channel_id)
+            .drain_live_context_outbox(&session_id)
             .await
             .expect("follow-up delivered");
         assert_eq!(
@@ -1087,7 +1386,13 @@ mod live_context_mirror_tests {
         machine
             .wait_live_context_ready_for_results(&session_id, &channel_id)
             .await
-            .expect("summary + tail");
+            .expect("summary acknowledged");
+        // Results no longer wait for the tail; join the channel's owned drain
+        // to observe the exact tail.
+        machine
+            .drain_live_context_outbox(&session_id)
+            .await
+            .expect("tail drained");
         let kinds = host.append_kinds.lock().expect("append kinds").clone();
         let texts: Vec<String> = host
             .appends
@@ -11682,6 +11987,30 @@ impl MeerkatMachine {
         };
         self.drain_live_context_outbox_for_channel(session_id, &channel)
             .await
+    }
+
+    /// [`Self::drain_live_context_outbox`] without joining the drain: the
+    /// committed projection is awaited, then the active channel's drain is
+    /// requested and runs on its own task.
+    #[cfg(feature = "live")]
+    pub(crate) async fn request_live_context_outbox_drain(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        let projection = self
+            .shared
+            .live_context_projection_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned();
+        if let Some(projection) = projection {
+            projection.wait().await?;
+        }
+        if let Some(channel) = self.live_active_channel_for_session(session_id).await {
+            drop(self.request_live_context_drain(session_id, &channel));
+        }
+        Ok(())
     }
 
     #[cfg(feature = "live")]

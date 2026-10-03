@@ -3919,6 +3919,60 @@ fn provider_heard_ms(
         })
 }
 
+/// One provider output audio frame on the sideband: arrival on the browser
+/// clock, span on the provider's model clock, and whether it carries speech.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OutputFrame {
+    arrival_ms: i64,
+    start_ms: i64,
+    end_ms: i64,
+    voiced: bool,
+}
+
+fn output_frames(
+    lines: &[provider_recording::Line],
+    channel: u32,
+    offset: i64,
+) -> Result<Vec<OutputFrame>, String> {
+    sideband_server_frames(lines, channel, "session.output_audio.delta")
+        .map(|(elapsed_ms, raw)| {
+            Ok(OutputFrame {
+                arrival_ms: elapsed_ms as i64 - offset,
+                start_ms: raw["start_ms"]
+                    .as_i64()
+                    .ok_or("output frame without start_ms")?,
+                end_ms: raw["end_ms"]
+                    .as_i64()
+                    .ok_or("output frame without end_ms")?,
+                voiced: pcm16_rms(&raw["delta"])? > VOICED_FRAME_RMS,
+            })
+        })
+        .collect()
+}
+
+/// When the provider emitted the burst that became audible at
+/// `audible_start_ms`: the sideband arrival of the first voiced frame of the
+/// voiced run holding the last voiced frame that arrived by then. A run
+/// continues across model-clock silences shorter than the peer's end
+/// hysteresis (`hysteresis_ms`, the silence that separates its bursts).
+/// Playout delays the audible start (p50 455 ms), so only the emission
+/// compares with when the provider heard the user. A burst with no voiced
+/// frame by its audible start emitted at that start.
+fn burst_emission_ms(frames: &[OutputFrame], audible_start_ms: u64, hysteresis_ms: u64) -> i64 {
+    let voiced: Vec<&OutputFrame> = frames.iter().filter(|frame| frame.voiced).collect();
+    let Some(last) = voiced
+        .iter()
+        .rposition(|frame| frame.arrival_ms <= audible_start_ms as i64)
+    else {
+        return audible_start_ms as i64;
+    };
+    let mut first = last;
+    while first > 0 && voiced[first].start_ms - voiced[first - 1].end_ms < hysteresis_ms as i64 {
+        first -= 1;
+    }
+    voiced[first].arrival_ms
+}
+
 /// Split the yield of the barge-in fixture `fixture` (see [`YieldSegments`]).
 /// The yield is the burst audible at or after the onset that started before
 /// the provider could react to the utterance (its first voiced input slot
@@ -3928,6 +3982,7 @@ fn yield_segments(
     lines: &[provider_recording::Line],
     channel: u32,
     fixture: u64,
+    hysteresis_ms: u64,
 ) -> Result<YieldObservation, String> {
     let onset_ms = fixture_start_entry(timeline, fixture)
         .ok_or("the barge-in fixture never started")?
@@ -3950,7 +4005,10 @@ fn yield_segments(
     let last_audible_ms = end
         .detail_u64("last_active_ms")
         .ok_or("assistant_audio_end without last_active_ms")?;
-    if started_ms as i64 > heard_ms + PROVIDER_FRAME_MS {
+    let frames = output_frames(lines, channel, offset)?;
+    if started_ms > onset_ms
+        && burst_emission_ms(&frames, started_ms, hysteresis_ms) > heard_ms + PROVIDER_FRAME_MS
+    {
         return Ok(YieldObservation::NotSpeakingAtOnset { onset_ms, heard_ms });
     }
     let mut last_voiced_output = None;
@@ -3992,6 +4050,7 @@ fn talk_over_starts(
     timeline: &[TimelineEntry],
     fixture: u64,
     heard_ms: i64,
+    emitted_ms: &dyn Fn(u64, u64) -> i64,
 ) -> Result<TalkOverStarts, String> {
     let start =
         fixture_start_entry(timeline, fixture).ok_or("the barge-in fixture never started")?;
@@ -4004,8 +4063,9 @@ fn talk_over_starts(
         .map_err(|error| format!("the barge-in fixture's overlap facts are unreadable: {error}"))?;
     let mut starts = TalkOverStarts::default();
     for burst in evidence::overlap_bursts(&facts) {
-        if burst.started_ms as i64 <= heard_ms + PROVIDER_FRAME_MS
+        if burst.started_ms <= start.t_ms
             || burst.started_ms >= speech_end_ms
+            || emitted_ms(burst.started_ms, facts.hysteresis_ms) <= heard_ms + PROVIDER_FRAME_MS
         {
             continue;
         }
@@ -4045,7 +4105,20 @@ fn talk_over_violations(
     label: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let lines = evidence.provider_stream_lines()?;
-    let (mut violations, heard_ms) = match yield_segments(timeline, &lines, channel, fixture) {
+    let hysteresis_ms = fixture_end_entry(timeline, fixture)
+        .and_then(|end| end.detail["facts"]["hysteresis_ms"].as_u64());
+    let Some(hysteresis_ms) = hysteresis_ms else {
+        return Ok(vec![format!(
+            "{label}: the barge-in fixture has no end facts (hysteresis), so its talk-over cannot be measured"
+        )]);
+    };
+    let (mut violations, heard_ms) = match yield_segments(
+        timeline,
+        &lines,
+        channel,
+        fixture,
+        hysteresis_ms,
+    ) {
         Ok(YieldObservation::NotSpeakingAtOnset { onset_ms, heard_ms }) => {
             record_metric(
                 evidence,
@@ -4084,7 +4157,19 @@ fn talk_over_violations(
         ),
     };
     if let Some(heard_ms) = heard_ms {
-        match talk_over_starts(timeline, fixture, heard_ms) {
+        let frames = sideband_clock_offset(timeline, &lines, channel)
+            .and_then(|offset| output_frames(&lines, channel, offset));
+        let frames = match frames {
+            Ok(frames) => frames,
+            Err(reason) => {
+                violations.push(format!("{label}: output frames unreadable: {reason}"));
+                return Ok(violations);
+            }
+        };
+        let emitted = |audible_start_ms: u64, hysteresis_ms: u64| {
+            burst_emission_ms(&frames, audible_start_ms, hysteresis_ms)
+        };
+        match talk_over_starts(timeline, fixture, heard_ms, &emitted) {
             Ok(starts) => {
                 for wordless in starts.wordless {
                     record_metric(
@@ -10532,7 +10617,9 @@ mod config_tests {
         );
         // The provider heard the user at 10_250: a reaction can start after
         // 10_450.
-        let starts = super::talk_over_starts(&started_over, 7, 10_250).unwrap();
+        let starts =
+            super::talk_over_starts(&started_over, 7, 10_250, &|audible, _| audible as i64)
+                .unwrap();
         assert!(
             matches!(starts.violations.as_slice(), [s] if s.starts_with("the assistant started talking over the user 1000 ms")),
             "{starts:?}"
@@ -10545,7 +10632,7 @@ mod config_tests {
             serde_json::json!([11_900]),
         );
         assert_eq!(
-            super::talk_over_starts(&backchannel, 7, 10_250).unwrap(),
+            super::talk_over_starts(&backchannel, 7, 10_250, &|audible, _| audible as i64).unwrap(),
             super::TalkOverStarts::default()
         );
         // A reply already in flight when the provider heard the user is the
@@ -10558,7 +10645,7 @@ mod config_tests {
             serde_json::json!([12_000]),
         );
         assert_eq!(
-            super::talk_over_starts(&in_flight, 7, 10_250).unwrap(),
+            super::talk_over_starts(&in_flight, 7, 10_250, &|audible, _| audible as i64).unwrap(),
             super::TalkOverStarts::default()
         );
         // A burst with no words in its window is journaled, not judged.
@@ -10569,7 +10656,8 @@ mod config_tests {
             serde_json::json!([]),
             serde_json::json!([]),
         );
-        let starts = super::talk_over_starts(&wordless, 7, 10_250).unwrap();
+        let starts =
+            super::talk_over_starts(&wordless, 7, 10_250, &|audible, _| audible as i64).unwrap();
         assert!(starts.violations.is_empty());
         assert_eq!(
             starts.wordless,
@@ -10584,10 +10672,67 @@ mod config_tests {
             serde_json::json!([]),
             serde_json::json!([]),
         );
-        let starts = super::talk_over_starts(&long_wordless, 7, 10_250).unwrap();
+        let starts =
+            super::talk_over_starts(&long_wordless, 7, 10_250, &|audible, _| audible as i64)
+                .unwrap();
         assert!(
             matches!(starts.violations.as_slice(), [v] if v.starts_with("a wordless assistant burst that started 1000 ms into the utterance lasted 3100 ms")),
             "{starts:?}"
+        );
+    }
+
+    fn output_frame(arrival_ms: i64, start_ms: i64, voiced: bool) -> super::OutputFrame {
+        super::OutputFrame {
+            arrival_ms,
+            start_ms,
+            end_ms: start_ms + 200,
+            voiced,
+        }
+    }
+
+    /// A burst's emission is the sideband arrival of the first voiced frame
+    /// of its run (model-time silences shorter than the hysteresis do not
+    /// break it), not its audible start, which trails by the playout.
+    #[test]
+    fn a_burst_is_emitted_where_its_voiced_run_starts() {
+        let frames = [
+            // The previous burst, 1 s of model time earlier.
+            output_frame(9000, 38_000, true),
+            output_frame(9200, 38_200, false),
+            // This burst: voiced from model 39_200, with a 200 ms word gap.
+            output_frame(10_150, 39_200, true),
+            output_frame(10_350, 39_400, false),
+            output_frame(10_550, 39_600, true),
+            output_frame(10_750, 39_800, true),
+        ];
+        assert_eq!(super::burst_emission_ms(&frames, 10_602, 600), 10_150);
+        // A gap as long as the hysteresis separates bursts.
+        assert_eq!(super::burst_emission_ms(&frames, 9100, 600), 9000);
+        // Nothing voiced had arrived by the audible start.
+        assert_eq!(super::burst_emission_ms(&frames, 8000, 600), 8000);
+    }
+
+    /// The soak b52680b4 S103 run 5 shape: a reply to the earlier barge-in
+    /// becomes audible 602 ms into the correction, after the provider heard
+    /// it, but was emitted before the provider could react: it is the
+    /// yield's, not a talk-over start.
+    #[test]
+    fn an_in_flight_reply_audible_after_the_onset_is_not_a_start() {
+        let late_audible = barge_in_with_bursts(
+            serde_json::json!([
+                {"started_ms": 10_602, "last_active_ms": 12_300, "ended": true, "overlap_ms": 1700}
+            ]),
+            serde_json::json!([{"t_ms": 11_200, "text": " Got it, switching it to Thursday."}]),
+            serde_json::json!([12_800]),
+        );
+        let emitted_early =
+            super::talk_over_starts(&late_audible, 7, 10_250, &|_, _| 10_150).unwrap();
+        assert_eq!(emitted_early, super::TalkOverStarts::default());
+        let emitted_late =
+            super::talk_over_starts(&late_audible, 7, 10_250, &|audible, _| audible as i64)
+                .unwrap();
+        assert!(
+            matches!(emitted_late.violations.as_slice(), [v] if v.starts_with("the assistant started talking over the user 602 ms"))
         );
     }
 
@@ -10781,18 +10926,18 @@ mod config_tests {
             server_frame(
                 4,
                 last_output_at,
-                serde_json::json!({"type": "session.output_audio.delta", "delta": pcm(1500)}),
+                serde_json::json!({"type": "session.output_audio.delta", "delta": pcm(1500), "start_ms": 40_000, "end_ms": 40_200}),
             ),
             server_frame(
                 5,
                 last_output_at + 200,
-                serde_json::json!({"type": "session.output_audio.delta", "delta": pcm(5)}),
+                serde_json::json!({"type": "session.output_audio.delta", "delta": pcm(5), "start_ms": 40_200, "end_ms": 40_400}),
             ),
             // The next response, after the last audible window: not the yield.
             server_frame(
                 6,
                 13_000,
-                serde_json::json!({"type": "session.output_audio.delta", "delta": pcm(1500)}),
+                serde_json::json!({"type": "session.output_audio.delta", "delta": pcm(1500), "start_ms": 43_000, "end_ms": 43_200}),
             ),
         ];
         (entries, lines)
@@ -10801,7 +10946,7 @@ mod config_tests {
     #[test]
     fn a_yield_splits_into_ingest_turn_taking_and_playout() {
         let (entries, lines) = yield_fixture(10_750, 11_200);
-        let observation = super::yield_segments(&entries, &lines, 1, 7).unwrap();
+        let observation = super::yield_segments(&entries, &lines, 1, 7, 600).unwrap();
         let super::YieldObservation::Yield(segments) = observation else {
             panic!("expected a yield, got {observation:?}");
         };
@@ -10826,7 +10971,7 @@ mod config_tests {
         // slot) is not slow ingest: ingest is taken at the cadence slot.
         let (entries, lines) = yield_fixture(11_050, 11_200);
         let super::YieldObservation::Yield(stalled) =
-            super::yield_segments(&entries, &lines, 1, 7).unwrap()
+            super::yield_segments(&entries, &lines, 1, 7, 600).unwrap()
         else {
             panic!("expected a yield");
         };
@@ -10846,7 +10991,7 @@ mod config_tests {
         }
         lines.sort_by_key(|line| line.elapsed_ms);
         let super::YieldObservation::Yield(slow_ingest) =
-            super::yield_segments(&entries, &lines, 1, 7).unwrap()
+            super::yield_segments(&entries, &lines, 1, 7, 600).unwrap()
         else {
             panic!("expected a yield");
         };
@@ -10856,7 +11001,7 @@ mod config_tests {
         );
         let (entries, lines) = yield_fixture(10_750, 10_800);
         let super::YieldObservation::Yield(slow_playout) =
-            super::yield_segments(&entries, &lines, 1, 7).unwrap()
+            super::yield_segments(&entries, &lines, 1, 7, 600).unwrap()
         else {
             panic!("expected a yield");
         };
@@ -10882,7 +11027,7 @@ mod config_tests {
     fn an_unmeasurable_yield_is_an_error() {
         let (entries, mut lines) = yield_fixture(10_750, 11_200);
         lines.retain(|line| !matches!(&line.entry, super::provider_recording::Entry::ServerFrame { raw } if raw["type"] == "session.input_audio.append"));
-        assert!(super::yield_segments(&entries, &lines, 1, 7).is_err());
+        assert!(super::yield_segments(&entries, &lines, 1, 7, 600).is_err());
         let (entries, mut lines) = yield_fixture(10_750, 11_200);
         // The sideband saw a commentary.appended the browser did not: the
         // pairs cannot be matched, so nothing is measured.
@@ -10891,7 +11036,7 @@ mod config_tests {
             2900,
             serde_json::json!({"type": "session.commentary.appended"}),
         ));
-        assert!(super::yield_segments(&entries, &lines, 1, 7).is_err());
+        assert!(super::yield_segments(&entries, &lines, 1, 7, 600).is_err());
         // One late sideband stamp (a 127 ms outlier, soak 35728bf0 S100 run
         // 3) leaves the median offset, so the yield is still measured.
         let (mut entries, mut lines) = yield_fixture(10_750, 11_200);
@@ -10925,7 +11070,7 @@ mod config_tests {
             (500, 127, 3)
         );
         assert!(matches!(
-            super::yield_segments(&entries, &lines, 1, 7),
+            super::yield_segments(&entries, &lines, 1, 7, 600),
             Ok(super::YieldObservation::Yield(_))
         ));
         // Fresh, alignable recordings: the provider heard the user at the
@@ -10948,7 +11093,7 @@ mod config_tests {
         };
         // Started after the provider could react: not the yield's.
         assert_eq!(
-            super::yield_segments(&burst(10_700, 11_400), &lines, 1, 7),
+            super::yield_segments(&burst(10_700, 11_400), &lines, 1, 7, 600),
             Ok(super::YieldObservation::NotSpeakingAtOnset {
                 onset_ms: 10_000,
                 heard_ms: 10_250
@@ -10957,7 +11102,7 @@ mod config_tests {
         // Last audible before the onset (its end entry trails by the
         // hysteresis): quiet at onset.
         assert_eq!(
-            super::yield_segments(&burst(9000, 9800), &lines, 1, 7),
+            super::yield_segments(&burst(9000, 9800), &lines, 1, 7, 600),
             Ok(super::YieldObservation::NotSpeakingAtOnset {
                 onset_ms: 10_000,
                 heard_ms: 10_250
@@ -10966,7 +11111,7 @@ mod config_tests {
         // Started after the onset but before the provider could react to the
         // utterance: a reply already in flight, measured as the yield.
         assert!(matches!(
-            super::yield_segments(&burst(10_300, 11_400), &lines, 1, 7),
+            super::yield_segments(&burst(10_300, 11_400), &lines, 1, 7, 600),
             Ok(super::YieldObservation::Yield(super::YieldSegments {
                 ingest_ms: 250,
                 ..

@@ -1271,19 +1271,8 @@ pub enum BuildAgentError {
 
     /// The build's declared tool restriction denies a tool the build neither
     /// composed nor finds in any tool vocabulary.
-    #[error(
-        "{declared_by} denies tool '{tool}', which is in none of its tool vocabularies \
-         ({}; enabled families: {})",
-        vocabulary.join(", "),
-        enabled_families.join(", ")
-    )]
-    DeclaredToolUnknown {
-        declared_by: String,
-        tool: String,
-        enabled_families: Vec<String>,
-        /// The vocabulary sources checked, by display name.
-        vocabulary: Vec<String>,
-    },
+    #[error(transparent)]
+    DeclaredToolUnknown(Box<meerkat_core::error::DeclaredToolUnknown>),
 
     /// An explicit tool-category `Enable` could not be satisfied.
     ///
@@ -7854,17 +7843,19 @@ impl AgentFactory {
                 }
             }
             if let Some(tool) = unknown.first() {
-                return Err(BuildAgentError::DeclaredToolUnknown {
-                    declared_by: restriction.declared_by.clone(),
-                    tool: (*tool).to_string(),
-                    enabled_families: restriction.enabled_families.clone(),
-                    vocabulary: builtin_vocabulary
-                        .iter()
-                        .map(|(source, _)| source)
-                        .chain(restriction.vocabulary.keys())
-                        .map(ToString::to_string)
-                        .collect(),
-                });
+                return Err(BuildAgentError::DeclaredToolUnknown(Box::new(
+                    meerkat_core::error::DeclaredToolUnknown {
+                        declared_by: restriction.declared_by.clone(),
+                        tool: (*tool).to_string(),
+                        enabled_families: restriction.enabled_families.clone(),
+                        vocabulary: builtin_vocabulary
+                            .iter()
+                            .map(|(source, _)| source)
+                            .chain(restriction.vocabulary.keys())
+                            .map(ToString::to_string)
+                            .collect(),
+                    },
+                )));
             }
         }
 

@@ -507,7 +507,7 @@ impl From<&AgentError> for AgentErrorClass {
             | AgentError::SessionDurableProjectionAuthorityUnknown { .. } => Self::Internal,
             AgentError::BuildError(_)
             | AgentError::SessionIdentityInUse(_)
-            | AgentError::DeclaredToolUnknown { .. } => Self::Build,
+            | AgentError::DeclaredToolUnknown(_) => Self::Build,
             AgentError::AuthReauthRequired { .. } => Self::Auth,
             AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. } => {
                 Self::CallbackPending

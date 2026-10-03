@@ -220,7 +220,7 @@ impl TurnFailureSourceKind {
             | AgentError::SessionDurableProjectionAuthorityUnknown { .. } => Self::InternalError,
             AgentError::BuildError(_)
             | AgentError::SessionIdentityInUse(_)
-            | AgentError::DeclaredToolUnknown { .. } => Self::BuildError,
+            | AgentError::DeclaredToolUnknown(_) => Self::BuildError,
             AgentError::AuthReauthRequired { .. } => Self::AuthReauthRequired,
             AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. } => {
                 Self::CallbackPending

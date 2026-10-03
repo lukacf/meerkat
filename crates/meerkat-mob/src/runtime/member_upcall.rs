@@ -1150,6 +1150,20 @@ mod tests {
 
     /// T-1: closed-surface pin — `remote_operator_tool_defs()` names and
     /// `MemberOperatorOp` variants map 1:1 in both directions.
+    /// Profile deny lists name operator tools through the local flavor's
+    /// vocabulary; the remote flavor must never advertise a name outside it.
+    #[test]
+    fn remote_operator_tools_stay_within_the_operator_vocabulary() {
+        let vocabulary = crate::runtime::mob_operator_tool_names();
+        for def in remote_operator_tool_defs() {
+            assert!(
+                vocabulary.contains(def.name.as_str()),
+                "remote operator tool '{}' is outside the deny vocabulary",
+                def.name
+            );
+        }
+    }
+
     #[test]
     fn tool_names_mirror_the_twelve_ops_both_directions() {
         let defs = remote_operator_tool_defs();

@@ -350,6 +350,26 @@ impl From<&str> for ToolError {
     }
 }
 
+/// A declared tool restriction denies a tool that the build neither composed
+/// nor finds in any tool vocabulary (a stale or mistyped name).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{declared_by} denies tool '{tool}', which is in none of its tool vocabularies \
+     ({}; enabled families: {})",
+    vocabulary.join(", "),
+    enabled_families.join(", ")
+)]
+pub struct DeclaredToolUnknown {
+    /// Who declared the restriction (for example the mob profile).
+    pub declared_by: String,
+    /// The denied name no vocabulary knows.
+    pub tool: String,
+    /// The tool families the declaring configuration enabled.
+    pub enabled_families: Vec<String>,
+    /// The vocabulary sources checked, by display name.
+    pub vocabulary: Vec<String>,
+}
+
 /// Errors that can occur during agent execution
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -439,20 +459,10 @@ pub enum AgentError {
 
     /// A configuration's declared tool restriction denies a tool that the
     /// build neither composed nor finds in any tool vocabulary (a stale or
-    /// mistyped name).
-    #[error(
-        "{declared_by} denies tool '{tool}', which is in none of its tool vocabularies \
-         ({}; enabled families: {})",
-        vocabulary.join(", "),
-        enabled_families.join(", ")
-    )]
-    DeclaredToolUnknown {
-        declared_by: String,
-        tool: String,
-        enabled_families: Vec<String>,
-        /// The vocabulary sources checked, by display name.
-        vocabulary: Vec<String>,
-    },
+    /// mistyped name). Boxed to keep `AgentError` (and every `Result` carrying
+    /// it) small.
+    #[error(transparent)]
+    DeclaredToolUnknown(Box<DeclaredToolUnknown>),
 
     /// MeerkatMachine DSL observed an auth lease in `reauth_required`
     /// state at a CallingLlm boundary; the lease cannot proceed

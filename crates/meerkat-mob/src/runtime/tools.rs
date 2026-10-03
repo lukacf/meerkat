@@ -847,10 +847,12 @@ impl MobOperatorToolDispatcher {
 
 /// Names of the mob operator tools a `mob` profile's members mount as external
 /// tools, for the profile's declared tool restriction.
+/// The mob operator tool names, on every target. The remote flavor a placed
+/// member reaches through the upcall surface (native only) names the same
+/// tools; `member_upcall` pins that it stays within this set.
 pub(crate) fn mob_operator_tool_names() -> meerkat_core::ToolNameSet {
     local_operator_tool_defs()
         .iter()
-        .chain(super::member_upcall::remote_operator_tool_defs().iter())
         .map(|tool| meerkat_core::ToolName::new(tool.name.to_string()))
         .collect()
 }

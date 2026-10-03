@@ -387,9 +387,13 @@ them.
   - `meerkat_contracts::PortableToolConfig`, `WireMobToolConfig` and
     `MobToolConfigInput` gain `deny: Vec<String>` (omitted when empty).
   - `meerkat_mob::DiagnosticCode` gains `MalformedToolDeny`.
-  - `meerkat::BuildAgentError` gains `DeclaredToolUnknown { declared_by,
-    tool, enabled_families, vocabulary }`. (`meerkat_core::error::AgentError` gains the
-    matching variant too; it is `#[non_exhaustive]`, so that is additive.)
+  - `meerkat::BuildAgentError` gains
+    `DeclaredToolUnknown(Box<meerkat_core::error::DeclaredToolUnknown>)`, where
+    the new `DeclaredToolUnknown` struct carries `declared_by`, `tool`,
+    `enabled_families` and `vocabulary`. (`meerkat_core::error::AgentError`
+    gains the same boxed variant; it is `#[non_exhaustive]`, so that is
+    additive. The payload is boxed so `AgentError` and `SessionError` stay
+    small.)
   - `meerkat::AgentBuildConfig` and `meerkat_core::service::SessionBuildOptions`
     gain `declared_tool_restriction: Option<DeclaredToolRestriction>`; the new
     `meerkat_core::ops::DeclaredToolRestriction` carries it, including its

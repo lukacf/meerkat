@@ -4571,19 +4571,18 @@ async fn declared_deny_validates_against_the_composed_tool_surface() {
         .err()
         .expect("an unknown deny name must fail the build");
     match &err {
-        BuildAgentError::DeclaredToolUnknown {
-            declared_by,
-            tool,
-            enabled_families,
-            vocabulary,
-        } => {
+        BuildAgentError::DeclaredToolUnknown(unknown) => {
             assert!(
-                vocabulary.iter().any(|source| source == "shell tools"),
-                "the built-in family vocabularies are named: {vocabulary:?}"
+                unknown
+                    .vocabulary
+                    .iter()
+                    .any(|source| source == "shell tools"),
+                "the built-in family vocabularies are named: {:?}",
+                unknown.vocabulary
             );
-            assert_eq!(declared_by, "profile 'worker'");
-            assert_eq!(tool, "gamma");
-            assert_eq!(enabled_families, &declared.enabled_families);
+            assert_eq!(unknown.declared_by, "profile 'worker'");
+            assert_eq!(unknown.tool, "gamma");
+            assert_eq!(unknown.enabled_families, declared.enabled_families);
         }
         other => panic!("expected DeclaredToolUnknown, got: {other:?}"),
     }
@@ -4634,7 +4633,7 @@ async fn declared_deny_resolves_real_builtin_family_tools() {
         .err()
         .expect("a near-miss builtin name must fail");
     assert!(
-        matches!(&err, BuildAgentError::DeclaredToolUnknown { tool, .. } if tool == "task_creat"),
+        matches!(&err, BuildAgentError::DeclaredToolUnknown(unknown) if unknown.tool == "task_creat"),
         "got: {err:?}"
     );
 }
@@ -4836,7 +4835,7 @@ async fn declared_deny_rejects_external_tool_names() {
         .err()
         .expect("an external tool name must fail");
     assert!(
-        matches!(&err, BuildAgentError::DeclaredToolUnknown { tool, .. } if tool == "mcp_lookup"),
+        matches!(&err, BuildAgentError::DeclaredToolUnknown(unknown) if unknown.tool == "mcp_lookup"),
         "got: {err:?}"
     );
 }

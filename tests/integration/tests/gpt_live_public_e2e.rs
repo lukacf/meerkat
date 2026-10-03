@@ -2072,6 +2072,26 @@ fn s99_seed_followups() -> Vec<String> {
 /// positive control recalled before the summary is released.
 const S99_SEEDED_FACT: &str = "today I parked on level nine of the garage";
 
+/// Commit the follow-up text turns while no call is open, so the next open's
+/// create-time seed is those turns: the first call's spoken vault phrase
+/// (its recall after the summary release, or a delegated lookup's readout)
+/// falls outside the window, and the replacement's history probe again tests
+/// the summary gate.
+async fn s99_commit_followups(
+    live: &mut PublicLiveHarness,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for prompt in s99_seed_followups() {
+        live.rpc
+            .call(
+                "turn/start",
+                json!({"session_id": live.session_id, "prompt": prompt}),
+                120,
+            )
+            .await?;
+    }
+    Ok(())
+}
+
 fn s99_recalls_seeded_fact(text: &str) -> bool {
     let words = normalize_words(text);
     words.split(' ').any(|word| word == "nine" || word == "9")
@@ -2490,11 +2510,105 @@ fn s99_evidence(live: &PublicLiveHarness) -> Result<&Journal, Box<dyn std::error
 /// A fresh synthetic microphone-track request, matching native provider
 /// transcript AND >=100 ms decoded non-silent remote audio. Neither is a
 /// settlement signal; provider-managed bookkeeping remains the owner's job.
+/// How an S99 exchange ended: a native spoken answer, or (where allowed) a
+/// client delegation, by its provider delegation id.
+enum S99Exchange {
+    Answer(String),
+    Delegated {
+        delegation_id: String,
+        before: String,
+    },
+}
+
 async fn s99_native_exchange(
     live: &mut PublicLiveHarness,
     fixture: &str,
     matches_text: impl Fn(&str) -> bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    match s99_exchange(live, fixture, matches_text, false).await? {
+        S99Exchange::Answer(text) => Ok(text),
+        S99Exchange::Delegated { .. } => {
+            Err("S99 exchange delegated where only native voice is allowed".into())
+        }
+    }
+}
+
+/// The history probe before a summary is released. The voice model must not
+/// claim the vault phrase natively: it answers honestly that it does not
+/// know yet, or delegates a lookup to the executor, which owns the text
+/// history. A delegated lookup is a valid path and must return the exact
+/// phrase through the normal result path, voiced under the readout rule
+/// (`readout_contract`). The path each attempt took is journaled.
+async fn s99_history_probe(
+    live: &mut PublicLiveHarness,
+    phrase: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let evidence = s99_evidence(live)?.clone();
+    let channel = evidence.current_channel()?;
+    match s99_exchange(live, "history", s99_honest_unknown, true).await? {
+        S99Exchange::Answer(text) => {
+            assert!(s99_honest_unknown(&text.to_lowercase()));
+            assert!(
+                !s99_recalls_phrase(&text, phrase),
+                "the voice model claimed the vault phrase natively before the summary was released"
+            );
+            record_metric(
+                &evidence,
+                channel,
+                "S99",
+                "history_probe",
+                "path=native_unknown".to_owned(),
+            )?;
+        }
+        S99Exchange::Delegated {
+            delegation_id,
+            before,
+        } => {
+            assert!(
+                !s99_recalls_phrase(&before, phrase),
+                "the voice model claimed the vault phrase natively before delegating the lookup"
+            );
+            let deadline = Instant::now() + Duration::from_secs(120);
+            let result = loop {
+                let lines = evidence.provider_stream_lines()?;
+                if let Some(delivery) = result_deliveries(&lines)
+                    .into_iter()
+                    .find(|delivery| delivery.delegation_id == delegation_id)
+                {
+                    break delivery.text;
+                }
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "the delegated history lookup {delegation_id} delivered no result within 120 s"
+                    )
+                    .into());
+                }
+                sleep(Duration::from_millis(200)).await;
+            };
+            assert!(
+                s99_recalls_phrase(&result, phrase),
+                "the delegated history lookup returned the wrong phrase: {result:?}"
+            );
+            s99_wait_for_assistant_quiet(live).await?;
+            readout_contract(&evidence, live, channel, "S99").await?;
+            record_metric(
+                &evidence,
+                channel,
+                "S99",
+                "history_probe",
+                format!("path=delegated delegation={delegation_id}"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn s99_exchange(
+    live: &mut PublicLiveHarness,
+    fixture: &str,
+    matches_text: impl Fn(&str) -> bool,
+    allow_delegation: bool,
+) -> Result<S99Exchange, Box<dyn std::error::Error>> {
     s99_assert_unmeasured(live)?;
     let start = live.peer.events().await?.len();
     let baseline = live.peer.audio_evidence().await?;
@@ -2513,10 +2627,33 @@ async fn s99_native_exchange(
             .iter()
             .position(is_user_input)
             .map(|i| start + i);
-        assert!(
-            !events[start..].iter().any(is_client_delegation),
-            "history and correction exchanges must use native voice, not delegated text or TTS"
-        );
+        if let Some(delegation) = events[start..]
+            .iter()
+            .find(|event| is_client_delegation(event))
+        {
+            assert!(
+                allow_delegation,
+                "history and correction exchanges must use native voice, not delegated text or TTS"
+            );
+            let delegation_id = delegation["delegation"]["id"]
+                .as_str()
+                .ok_or("client delegation without an id")?
+                .to_owned();
+            let audio = live.peer.audio_evidence().await?;
+            s99_evidence(live)?.record(EvidenceRecord::ExchangeEnd {
+                exchange,
+                matched: true,
+                audio,
+            })?;
+            println!("GPT_LIVE_S99_DELEGATED fixture={fixture} delegation={delegation_id}");
+            let before = user_start
+                .map(|_| s99_answer_text(&events, start))
+                .unwrap_or_default();
+            return Ok(S99Exchange::Delegated {
+                delegation_id,
+                before,
+            });
+        }
         // The answer is what the assistant says from the question's onset.
         // Every S99 question follows assistant quiet, and rows that waited
         // behind the summary while newer speech was heard go out as quiet
@@ -2544,7 +2681,7 @@ async fn s99_native_exchange(
                 println!("GPT_LIVE_S99_IN_FLIGHT_AT_ONSET fixture={fixture} speech={in_flight:?}");
             }
             let events = live.peer.events().await?;
-            return Ok(s99_answer_text(&events, start));
+            return Ok(S99Exchange::Answer(s99_answer_text(&events, start)));
         }
         if Instant::now() >= deadline {
             // Diagnosis only (cross-scenario rate): the user spoke and the
@@ -2772,9 +2909,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     let seeded = s99_native_exchange(&mut live, "seeded_fact", s99_recalls_seeded_fact).await?;
     assert!(s99_recalls_seeded_fact(&seeded));
     s99_assert_pending(&mut live, &first_capture).await?;
-    let unknown = s99_native_exchange(&mut live, "history", s99_honest_unknown).await?;
-    assert!(s99_honest_unknown(&unknown.to_lowercase()));
-    assert!(!s99_recalls_phrase(&unknown, &phrase));
+    s99_history_probe(&mut live, &phrase).await?;
     s99_assert_pending(&mut live, &first_capture).await?;
 
     // Commit newer ordinary context through the existing source session while
@@ -2850,7 +2985,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // rides the instructions lane; the summary is the first owned thinking
     // append on the channel, prefixed, delivered after the first user
     // utterance and acknowledged.
-    assert_late_summary_seed(&evidence, 1, &phrase, true)?;
+    assert_late_summary_seed(&evidence, 1, &phrase)?;
     let owner = evidence.owner_appends()?;
     assert_eq!(
         owner.framed_summaries, 0,
@@ -2893,6 +3028,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     live.close_exact().await?;
     // S99 asserts a fresh summarizer capture on each reopen.
     s99_forget_retained_summary(&mut live)?;
+    s99_commit_followups(&mut live).await?;
     live.reopen().await?;
     let obsolete = next_summary_capture(&mut captured).await?;
     s99_assert_pending(&mut live, &obsolete).await?;
@@ -2913,14 +3049,14 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     }
     // S99 asserts a fresh summarizer capture on each reopen.
     s99_forget_retained_summary(&mut live)?;
+    s99_commit_followups(&mut live).await?;
     live.reopen().await?;
     let replacement = next_summary_capture(&mut captured).await?;
     s99_assert_pending(&mut live, &replacement).await?;
     evidence.stage(EvidenceStage::ObsoleteJobRelease)?;
     let obsolete_returned = obsolete.release().await?;
     evidence.stage(EvidenceStage::ReplacementUnknown)?;
-    let late_unknown = s99_native_exchange(&mut live, "history", s99_honest_unknown).await?;
-    assert!(!s99_recalls_phrase(&late_unknown, &phrase));
+    s99_history_probe(&mut live, &phrase).await?;
     s99_assert_pending(&mut live, &replacement).await?;
     s99_release_summary(&mut live, replacement).await?;
     evidence.stage(EvidenceStage::ReplacementRecall)?;
@@ -2939,8 +3075,8 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // pending, never spoken to); the replacement is the journal's current
     // channel.
     let replacement_channel = evidence.current_channel()?;
-    assert_late_summary_seed(&evidence, 2, &phrase, false)?;
-    assert_late_summary_seed(&evidence, replacement_channel, &phrase, false)?;
+    assert_late_summary_seed(&evidence, 2, &phrase)?;
+    assert_late_summary_seed(&evidence, replacement_channel, &phrase)?;
     assert!(
         evidence.first_owned_thinking_append(2)?.is_none(),
         "the obsolete channel was closed before any utterance, so nothing may ride its thinking lane"
@@ -4764,13 +4900,13 @@ fn assert_late_summary_delivered(
 /// conversation turns verbatim, bounded by `LIVE_STARTUP_VERBATIM_ITEMS_MAX`
 /// (`with_pending_context_after_recent`), and the startup instructions carry
 /// the history framing clause. The vault phrase is never among them: it is
-/// summary-only. On the first channel the seed is the last follow-up turns
-/// in full, with the positive-control fact (`s99_seed_followups`).
+/// summary-only. Every open follows freshly committed follow-up turns
+/// (`s99_seed_followups`, `s99_commit_followups`), so its seed is those turns
+/// in full, with the positive-control fact.
 fn assert_late_summary_seed(
     evidence: &Journal,
     channel: u32,
     phrase: &str,
-    first_channel: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let window = meerkat::experimental_gpt_live::LIVE_STARTUP_VERBATIM_ITEMS_MAX;
     let seed = evidence.session_input_seed(channel)?;
@@ -4794,16 +4930,14 @@ fn assert_late_summary_seed(
         texts.iter().all(|text| !s99_recalls_phrase(text, phrase)),
         "the vault phrase is summary-only and never in the create-time seed on channel {channel}"
     );
-    if first_channel {
-        assert_eq!(
-            seed.input_items, window,
-            "the first open seeds the newest {window} items of the follow-up turns"
-        );
-        assert!(
-            texts.iter().any(|text| text.contains(S99_SEEDED_FACT)),
-            "the positive-control fact is in the first open's seed: {texts:?}"
-        );
-    }
+    assert_eq!(
+        seed.input_items, window,
+        "each open seeds the newest {window} items of the follow-up turns (channel {channel})"
+    );
+    assert!(
+        texts.iter().any(|text| text.contains(S99_SEEDED_FACT)),
+        "the positive-control fact is in the seed of channel {channel}: {texts:?}"
+    );
     assert!(
         seed.frames_history,
         "the startup instructions must carry the history framing clause on channel {channel}"

@@ -1177,6 +1177,16 @@ them.
 
 ### Fixed
 
+- GPT Live no longer voices an invented answer from another member while a
+  request to that member is still pending (Turbo S S102 r2: "Pemberton said
+  it feels like it's around mid-afternoon" the moment the "I asked Analyst
+  Pemberton" result landed, 6.7 s before Pemberton's real answer). The
+  in-progress notice sent at every client delegation now also says that when
+  a result reports someone else was asked, their answer is not part of it:
+  the model must not state, guess, or imply it until it arrives as its own
+  update, and then reports what they actually said, correcting anything said
+  before. The result cue adds that it reports only what the result itself
+  says.
 - Generated TLA+ models applied a set insert or remove to only one branch of a
   field that a conditional update had already changed in the same transition.
   The pending value `IF c THEN a ELSE b` was spliced unparenthesized as the
@@ -1196,7 +1206,6 @@ them.
   before dispatch and the result merges into the source member, as an
   interrupted-by-close result does. Every outcome of a release attempt is
   typed and handled, so a result can no longer end a release silently.
-
 - GPT Live no longer primes the voice model to delegate questions about the
   conversation itself (Turbo S S99: after the summary release, a run
   delegated "now tell me my historical vault phrase" instead of answering it

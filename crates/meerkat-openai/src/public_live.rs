@@ -3170,7 +3170,7 @@ fn thinking_event_id(token: GptLiveAppendToken, index: usize) -> String {
 /// user request still unanswered (a held result goes out once the user's
 /// floor ends, possibly with that request open) is answered first. A genuine
 /// report made after the delivery still suppresses a second readout.
-const LIVE_RESULT_CUE: &str = "This delegation's result has just arrived; anything you said about this request before now was said before it was done. If the user's latest request is still unanswered, answer it first. Then tell the user the actual outcome of this result, unless you have already reported it since it arrived.";
+const LIVE_RESULT_CUE: &str = "This delegation's result has just arrived; anything you said about this request before now was said before it was done. If the user's latest request is still unanswered, answer it first. Then tell the user the actual outcome of this result, unless you have already reported it since it arrived. Report only what the result itself says: when it says someone else was asked, their answer is still pending.";
 
 /// The notice sent on the instructions lane at every client
 /// `session.delegation.created`, bound to that delegation: the request is in
@@ -3179,7 +3179,15 @@ const LIVE_RESULT_CUE: &str = "This delegation's result has just arrived; anythi
 /// claim). The public protocol has no way to make the result itself a turn
 /// the model must answer; delegation-bound trusted steering is the strongest
 /// lever it offers.
-const LIVE_DELEGATION_IN_PROGRESS: &str = "This delegated request is now in progress. Until its result arrives, do not say or imply that it is done and do not state its outcome; you may say that you are working on it.";
+///
+/// A request that asks another member something completes with "I asked
+/// them": the member's answer comes later, as its own update. Turbo S S102
+/// r2 voiced "Pemberton said it feels like it's around mid-afternoon" the
+/// moment the "I asked Analyst Pemberton" result landed, 6.7 s before
+/// Pemberton's real answer. The notice is in context before any result, so
+/// it carries the peer case too, with the correction once the answer
+/// arrives.
+const LIVE_DELEGATION_IN_PROGRESS: &str = "This delegated request is now in progress. Until its result arrives, do not say or imply that it is done and do not state its outcome; you may say that you are working on it. If its result says someone else was asked, their answer is not part of that result: do not state, guess, or imply what they said until their answer arrives as its own update, then tell the user what they actually said, correcting anything said before.";
 
 fn instructions_event_id(token: GptLiveAppendToken, index: usize) -> String {
     format!("meerkat-instructions-{}-{index}", token.0)
@@ -5406,6 +5414,12 @@ mod tests {
             "a genuine post-delivery report still suppresses a second readout"
         );
         assert!(
+            LIVE_RESULT_CUE.contains(
+                "Report only what the result itself says: when it says someone else was asked, their answer is still pending"
+            ),
+            "an \"I asked them\" result is not their answer (S102 r2)"
+        );
+        assert!(
             LIVE_RESULT_CUE.len() <= CONTEXT_FRAGMENT_MAX_BYTES,
             "one append"
         );
@@ -5490,6 +5504,27 @@ mod tests {
             "the model can still acknowledge the request"
         );
         assert!(LIVE_DELEGATION_IN_PROGRESS.len() <= CONTEXT_FRAGMENT_MAX_BYTES);
+    }
+
+    /// S102 r2: the delegation completed with "I asked Analyst Pemberton
+    /// what time they think it is", and the model voiced an invented answer
+    /// from Pemberton 6.7 s before the real one arrived. The notice, already
+    /// in context when such a result lands, keeps the member's answer out of
+    /// that result and asks for the correction once it arrives.
+    #[test]
+    fn the_in_progress_notice_keeps_a_peers_answer_pending_until_it_arrives() {
+        assert!(LIVE_DELEGATION_IN_PROGRESS.contains(
+            "If its result says someone else was asked, their answer is not part of that result"
+        ));
+        assert!(LIVE_DELEGATION_IN_PROGRESS.contains(
+            "do not state, guess, or imply what they said until their answer arrives as its own update"
+        ));
+        assert!(
+            LIVE_DELEGATION_IN_PROGRESS.contains(
+                "then tell the user what they actually said, correcting anything said before"
+            ),
+            "the real answer corrects an earlier claim"
+        );
     }
 
     /// Every client `session.delegation.created` makes one in-progress

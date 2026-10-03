@@ -463,8 +463,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SetPeerIngressContext`(keep_alive: Bool)
 - `NotifyDrainExited`(reason: DrainExitReason)
 - `CancelAfterBoundary`(reason: String)
-- `HoldRunStarts`
-- `ReleaseRunStarts`
 - `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<ToolName, ToolVisibilityWitness>)
 - `PublishCommittedVisibleSet`(active_filter: ToolFilter, staged_filter: ToolFilter, active_requested_deferred_names: Set<ToolName>, staged_requested_deferred_names: Set<ToolName>, active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, active_visibility_revision: u64, staged_visibility_revision: u64)
 - `Recover`
@@ -532,6 +530,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InterruptCurrentRunForRun`(run_id: RunId)
 - `StopCurrentRunForRun`(run_id: RunId)
 - `ResolveUserInterruptPublicResult`(observation: UserInterruptObservationKind, target_present: Bool, staged_promotion_busy: Bool)
+- `HoldRunStarts`
+- `ReleaseRunStarts`
 - `CancelAfterBoundaryForRun`(run_id: RunId, reason: String)
 - `AbortCancelAfterBoundaryDispatch`(dispatch_generation: u64)
 - `StageDeferredSession`(session_id: SessionId, keep_alive: Bool, has_comms_name: Bool, llm_identity: SessionLlmIdentity, machine_archived_resume_authorized: Bool)

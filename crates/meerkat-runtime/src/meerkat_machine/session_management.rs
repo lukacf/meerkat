@@ -10974,7 +10974,6 @@ Ok::<(), RuntimeDriverError>(())
             })
     }
 
-    /// Request cancellation at the next safe boundary for the currently-running turn.
     /// Hold run starts for `session_id` (#1500): until
     /// [`Self::release_run_starts`], no transition establishes a new run, so
     /// admitted input stays queued. The current run, if any, is unaffected and
@@ -11064,6 +11063,7 @@ Ok::<(), RuntimeDriverError>(())
         Ok(())
     }
 
+    /// Request cancellation at the next safe boundary for the currently-running turn.
     pub async fn cancel_after_boundary(
         &self,
         session_id: &SessionId,

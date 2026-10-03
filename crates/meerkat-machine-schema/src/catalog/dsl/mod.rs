@@ -2830,6 +2830,8 @@ runtime_internal_inputs!(
         AbandonLiveOpenAdmission,
         AbortCancelAfterBoundaryDispatch,
         CancelAfterBoundaryForRun,
+        HoldRunStarts,
+        ReleaseRunStarts,
         AbortOp,
         AcknowledgeTerminal,
         AddDirectPeerEndpoint,

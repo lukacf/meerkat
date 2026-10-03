@@ -970,6 +970,10 @@ meerkat_machine_runtime_internal_inputs!(
     CancellationLifecycle => [
         AbortCancelAfterBoundaryDispatch,
         CancelAfterBoundaryForRun,
+        // #1500: a mob Stop's run-start hold and its Resume release, applied
+        // directly by `MeerkatMachine::hold_run_starts`/`release_run_starts`.
+        HoldRunStarts,
+        ReleaseRunStarts,
         CancelNow,
         CancelRun,
         CancellationObserved,

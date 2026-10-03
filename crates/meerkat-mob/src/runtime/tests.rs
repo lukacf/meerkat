@@ -19522,6 +19522,82 @@ async fn test_stop_reports_a_stale_capability_remote_member_as_not_holdable() {
     );
 }
 
+/// #1500: after a supervisor restart, a peer-only member that binds while a
+/// Stop holds the mob gets the hold on that bind, and Resume releases it.
+///
+/// MobMachine admits a member peer rebind only while Running
+/// (`AuthorizeMemberPeerRebind`), so the one window where a bind meets the
+/// Held posture is a Stop's quiesce. The test opens it with the sealed Stop
+/// quiesce verb and binds through the post-rotation adoption path, the exact
+/// bind every other path uses. The posture comes from the restored machine
+/// state, not from anything the previous process held in memory.
+#[tokio::test]
+async fn test_a_peer_binding_during_a_stop_after_a_restart_is_held_and_resume_releases_it() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "restart-bind-during-stop-held",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let (handle, _service) =
+        create_test_mob_with_real_comms_and_storage(definition.clone(), storage.clone()).await;
+    let external =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-held-restart")).await;
+    external.advertise_run_start_hold(true);
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-held-restart"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn peer-only member");
+    crash_stop_and_release_routes(handle).await;
+    external.forget_direct_member_fence().await;
+    let (resumed, _resumed_service) = resume_test_mob_with_real_comms(storage.clone()).await;
+    assert_eq!(
+        resumed.status().await.expect("restored mob status"),
+        MobState::Running
+    );
+
+    let quiesce = resumed
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::BeginStopQuiesceForTest { reply_tx })
+        .await
+        .expect("quiesce enqueue");
+    tokio::time::timeout(Duration::from_secs(10), quiesce)
+        .await
+        .expect("quiesce answered")
+        .expect("quiesce reply")
+        .expect("begin the Stop quiesce");
+    let holds_before_bind = external.run_start_holds().await.len();
+    let bound = resumed
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::BindPeerOnlyMembersForTest {
+            reply_tx,
+        })
+        .await
+        .expect("bind enqueue");
+    tokio::time::timeout(Duration::from_secs(10), bound)
+        .await
+        .expect("bind answered")
+        .expect("bind reply")
+        .expect("bind the peer-only member during the Stop");
+    assert_eq!(
+        external.run_start_holds().await.len(),
+        holds_before_bind + 1,
+        "a bind while a Stop holds the mob delivers the hold"
+    );
+
+    resumed.stop().await.expect("finish the Stop");
+    let releases_before_resume = external.run_start_releases();
+    resumed.resume().await.expect("resume the mob");
+    assert!(
+        external.run_start_releases() > releases_before_resume,
+        "resume releases the member"
+    );
+}
+
 /// A member whose bind reply did not advertise held observation is observed
 /// single-shot (the compatibility path) and is never offered the hold; with
 /// its operation unobservable the rotation stays durably pending.

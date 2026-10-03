@@ -10884,14 +10884,12 @@ impl MobActor {
     /// otherwise. Every member bind delivers it.
     fn member_run_start_posture(&self) -> super::supervisor_bridge::MemberRunStartPosture {
         let state = self.dsl_authority.state();
-        let stopping = state.placed_completion_lifecycle_quiescing
-            && state.placed_completion_lifecycle_intent
-                == Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Stop);
-        if state.lifecycle_phase == mob_dsl::MobPhase::Stopped || stopping {
-            super::supervisor_bridge::MemberRunStartPosture::Held
-        } else {
-            super::supervisor_bridge::MemberRunStartPosture::Released
-        }
+        super::supervisor_bridge::MemberRunStartPosture::for_mob(
+            state.lifecycle_phase == mob_dsl::MobPhase::Stopped,
+            state.placed_completion_lifecycle_quiescing
+                && state.placed_completion_lifecycle_intent
+                    == Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Stop),
+        )
     }
 
     fn publish_machine_state_projection(&self) {
@@ -24799,6 +24797,11 @@ impl MobActor {
                     ticket,
                 } => {
                     self.settle_member_turn_admission(&agent_identity, ticket);
+                }
+                #[cfg(test)]
+                MobCommand::BindPeerOnlyMembersForTest { reply_tx } => {
+                    let result = self.adopt_peer_only_direct_members_after_v5_rotation().await;
+                    let _ = reply_tx.send(result);
                 }
                 #[cfg(test)]
                 MobCommand::FailNextResumeReadinessForTest { fault, reply_tx } => {

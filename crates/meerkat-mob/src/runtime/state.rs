@@ -774,6 +774,12 @@ pub(super) enum MobCommand {
         fault: ResumeReadinessFaultForTest,
         reply_tx: oneshot::Sender<()>,
     },
+    /// Test-only: bind every peer-only member through the same path the
+    /// post-rotation adoption takes, whatever the lifecycle phase (#1500).
+    #[cfg(test)]
+    BindPeerOnlyMembersForTest {
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     #[cfg(test)]
     SpawnPreparationProbe {
         agent_identity: AgentIdentity,
@@ -1945,6 +1951,8 @@ impl MobCommand {
             Self::BeginStopQuiesceForTest { .. } => "BeginStopQuiesceForTest",
             #[cfg(test)]
             Self::FailNextResumeReadinessForTest { .. } => "FailNextResumeReadinessForTest",
+            #[cfg(test)]
+            Self::BindPeerOnlyMembersForTest { .. } => "BindPeerOnlyMembersForTest",
             #[cfg(test)]
             Self::SpawnActivationCustodyProbe { .. } => "SpawnActivationCustodyProbe",
             #[cfg(test)]

@@ -7558,6 +7558,15 @@ impl MobBuilder {
             )
             .await?,
         );
+        // Resume can bind members before any actor runs (#1500): those binds
+        // deliver the restored mob's run-start posture. A Stop interrupted
+        // mid-quiesce is recovered later and published by the actor.
+        supervisor_bridge.set_member_run_start_posture(
+            super::supervisor_bridge::MemberRunStartPosture::for_mob(
+                resumed_state == MobState::Stopped,
+                false,
+            ),
+        );
         #[cfg(not(target_arch = "wasm32"))]
         let supervisor_startup_guard =
             SupervisorBridgeStartupGuard::new(Arc::clone(&supervisor_bridge));

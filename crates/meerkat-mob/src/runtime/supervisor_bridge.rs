@@ -104,6 +104,18 @@ pub(crate) enum MemberRunStartPosture {
     Released,
 }
 
+impl MemberRunStartPosture {
+    /// The one posture rule: Held while the mob is Stopped or a Stop is
+    /// quiescing it, Released otherwise.
+    pub(crate) fn for_mob(stopped: bool, stop_quiescing: bool) -> Self {
+        if stopped || stop_quiescing {
+            Self::Held
+        } else {
+            Self::Released
+        }
+    }
+}
+
 pub(crate) struct MobSupervisorBridge {
     participant_name: String,
     endpoint_config: SupervisorBridgeEndpointConfig,

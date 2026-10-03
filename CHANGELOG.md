@@ -193,40 +193,6 @@ them.
   `session_transcript_retirements`). Opening a store migrates it forward.
   Binaries from before this release refuse a v5 file, as they refuse any
   newer schema.
-
-### Security
-
-- Agent mob tools no longer accept host-only configuration from model
-  arguments. The agent `mob_create` deserialized the internal
-  `MobDefinition`, so a member with create authority could put
-  `tools.mcp_servers` (MCP server configs, including a stdio `command`, its
-  `args` and `env`) and `rust_bundles` into a profile, and child members
-  built from it would launch those servers on the host. The public paths
-  already decoded through the public contract. Now every model-facing input
-  does:
-  - `mob_create` decodes `MobDefinitionInput` through
-    `decode_public_mob_definition`.
-  - `mob_profile_create` and `mob_profile_update` decode `MobProfileInput`
-    (new `meerkat_mob_mcp::decode_public_profile`), which also closes the
-    indirect route of storing MCP server configs in a realm profile and
-    referencing it from a later `mob_create`.
-  - The `tooling` of `mob_spawn_member` and `delegate` takes an inline
-    profile as `MobProfileInput`.
-  - `mob_spawn_member`'s `initial_message`, and the `MobMcpDispatcher` spawn
-    and respawn messages, take `WireContentInput`.
-  - Two refusals apply on the agent surface only (host-facing surfaces are
-    unchanged): a definition's skill source may not be a host filesystem
-    `path` (inline skill content still works), and an image may not
-    reference a stored blob by `blob_id` (inline image bytes still work),
-    because the blob store has no fact showing the calling session may read
-    it, and a video may not reference a `uri`, which the provider would fetch
-    with the host's credentials (inline video bytes still work) (#1543).
-  Behaviour change: a model-supplied definition or profile that names an
-  internal-only field (`mcp_servers`, `rust_bundles`, `is_implicit`,
-  `session_cleanup_policy`, ...), a host-path skill source, a blob image
-  reference or a video URI is now refused with `InvalidArguments` before anything is
-  created; previously such input was accepted.
-- `meerkat_contracts::wire` now re-exports `WireImageData` and `WireVideoData`.
 - MCP OAuth login is host-driven (security batch). The native authority no
   longer binds a listener or opens a browser:
   - `meerkat_auth_core::BrowserOpener`, `meerkat_auth_core::SystemBrowserOpener`
@@ -277,6 +243,67 @@ them.
     to a binding status. The `auth/status/get` binding arm (`BindingIdParams`)
     deliberately keeps tolerating other unknown fields for compatibility; only
     the MCP target arms deny unknown fields.
+- Runtime delivery acknowledgement (#1507, fixing #1497) extends the
+  generated RuntimeDelivery machine. In `meerkat_machine_schema`:
+  `RuntimeDeliveryMachineState` gains the public field
+  `acknowledged_sequences`; `RuntimeDeliveryInput` and
+  `RuntimeDeliveryInputVariant` gain `AcknowledgeDelivery` and
+  `AdvanceAcknowledgedPrefix`; `RuntimeDeliveryEffect` and
+  `RuntimeDeliveryEffectVariant` gain `DeliveryAcknowledged`,
+  `AcknowledgedPrefixAdvanced` and `AcknowledgedPrefixAtRest`. In the
+  generated kernel `meerkat_machine_kernels::generated::runtime_delivery`:
+  `State` gains `acknowledged_sequences`; `Input` and `InputKind` gain
+  `AcknowledgeDelivery` and `AdvanceAcknowledgedPrefix`; `Effect` and
+  `EffectKind` gain `DeliveryAcknowledged`, `AcknowledgedPrefixAdvanced` and
+  `AcknowledgedPrefixAtRest`; `TransitionId` gains `AcknowledgeNextDelivery`,
+  `AcknowledgeAheadOfCursor`, `ObserveAlreadyAppliedAcknowledgement`,
+  `AdvanceOverAcknowledgedDelivery` and
+  `AdvanceAcknowledgedPrefixNothingParked`. Struct literals and exhaustive
+  matches must handle them.
+- Owner drain feedback is bound to obligation members (#1481):
+  - `meerkat_machine_schema::FeedbackFieldSource` gains `ObligationMember`.
+    Exhaustive matches must handle it.
+  - `meerkat_runtime::protocol_auth_release_oauth_flow_drain::submit_expire_o_auth_browser_flow`
+    and `submit_expire_o_auth_device_flow` take the drained `flow_id` and now
+    return `Result<AuthMachineTransition,
+    ObligationMemberFeedbackError<AuthMachineTransitionError>>` (was
+    `Result<AuthMachineTransition, AuthMachineTransitionError>`). A flow id
+    outside the obligation is refused with
+    `ObligationMemberFeedbackError::NotObligationMember`.
+
+### Security
+
+- Agent mob tools no longer accept host-only configuration from model
+  arguments. The agent `mob_create` deserialized the internal
+  `MobDefinition`, so a member with create authority could put
+  `tools.mcp_servers` (MCP server configs, including a stdio `command`, its
+  `args` and `env`) and `rust_bundles` into a profile, and child members
+  built from it would launch those servers on the host. The public paths
+  already decoded through the public contract. Now every model-facing input
+  does:
+  - `mob_create` decodes `MobDefinitionInput` through
+    `decode_public_mob_definition`.
+  - `mob_profile_create` and `mob_profile_update` decode `MobProfileInput`
+    (new `meerkat_mob_mcp::decode_public_profile`), which also closes the
+    indirect route of storing MCP server configs in a realm profile and
+    referencing it from a later `mob_create`.
+  - The `tooling` of `mob_spawn_member` and `delegate` takes an inline
+    profile as `MobProfileInput`.
+  - `mob_spawn_member`'s `initial_message`, and the `MobMcpDispatcher` spawn
+    and respawn messages, take `WireContentInput`.
+  - Two refusals apply on the agent surface only (host-facing surfaces are
+    unchanged): a definition's skill source may not be a host filesystem
+    `path` (inline skill content still works), and an image may not
+    reference a stored blob by `blob_id` (inline image bytes still work),
+    because the blob store has no fact showing the calling session may read
+    it, and a video may not reference a `uri`, which the provider would fetch
+    with the host's credentials (inline video bytes still work) (#1543).
+  Behaviour change: a model-supplied definition or profile that names an
+  internal-only field (`mcp_servers`, `rust_bundles`, `is_implicit`,
+  `session_cleanup_policy`, ...), a host-path skill source, a blob image
+  reference or a video URI is now refused with `InvalidArguments` before anything is
+  created; previously such input was accepted.
+- `meerkat_contracts::wire` now re-exports `WireImageData` and `WireVideoData`.
 
 ### Added
 
@@ -356,7 +383,17 @@ them.
   The `host_auth` docs state the host obligation: the browser context must be
   unobservable by agent tools.
 - `meerkat::AgentFactory::mcp_auth_resolver` installs the default MCP
-  credential source for factory builds. The facade re-exports `McpAuthResolver` and
+  credential source for factory builds.
+- Runtime-backed hosts (RPC, REST, MCP server) get interactive MCP auth by
+  default. Once the runtime's AuthMachine flow owner exists,
+  `build_runtime_backed_service_with_capacities` installs the native MCP
+  OAuth authority as the factory's MCP credential source (a host-supplied
+  `AgentFactory::mcp_auth_resolver` wins), and RPC and REST live `mcp/add`
+  routers use it too. A missing credential is the typed
+  `AuthorizationRequired` host status, never a browser. New:
+  `meerkat::default_mcp_auth_resolver`, `AgentFactory::has_mcp_auth_resolver`,
+  `FactoryAgentBuilder::with_mcp_auth_resolver`,
+  `meerkat_rpc::session_runtime::SessionRuntime::default_mcp_auth_resolver`. The facade re-exports `McpAuthResolver` and
   `McpAuthMode`.
 - Typed host status for MCP servers awaiting human authorization:
   `McpRouter::servers_awaiting_authorization` and

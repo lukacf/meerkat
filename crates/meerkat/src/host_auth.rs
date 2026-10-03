@@ -184,6 +184,30 @@ pub fn mcp_login_disposition_to_wire(
     }
 }
 
+/// The default MCP credential source for a runtime-backed host: the native
+/// MCP OAuth authority bound to `persistence` and the runtime's AuthMachine
+/// lease and flow owner. Agents never open a browser through it; a missing
+/// credential is the typed `AuthorizationRequired` host status. `None` when
+/// the host has no provider-auth persistence or the owner is not
+/// AuthMachine-backed.
+#[cfg(feature = "mcp")]
+pub fn default_mcp_auth_resolver(
+    persistence: Option<ProviderAuthPersistence>,
+    authority: meerkat_runtime::ProviderAuthRuntimeAuthority,
+) -> Option<Arc<dyn meerkat_mcp::McpAuthResolver>> {
+    let service = HostAuthService::new(persistence?, authority);
+    match service.mcp_oauth_authority() {
+        Ok(authority) => Some(Arc::new(authority)),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "MCP OAuth default resolver unavailable; OAuth-protected MCP servers connect without credentials"
+            );
+            None
+        }
+    }
+}
+
 /// Why a host-requested MCP target was refused. Login and status only ever
 /// address configured servers: a client-supplied name or URL is never an
 /// authority for discovery, client registration or credential storage.

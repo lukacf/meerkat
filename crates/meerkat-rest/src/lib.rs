@@ -5322,7 +5322,7 @@ async fn create_session_inner(
     // Create MCP adapter and compose with external tools.
     #[cfg(feature = "mcp")]
     let mcp_external_tools = {
-        let adapter = Arc::new(McpRouterAdapter::new(McpRouter::new()));
+        let adapter = Arc::new(McpRouterAdapter::new(session_mcp_router(state)));
         let adapter_dispatcher: Arc<dyn AgentToolDispatcher> = adapter.clone();
         let (lifecycle_tx, lifecycle_rx) = mpsc::unbounded_channel();
         let mcp_state = SessionMcpState {
@@ -7757,6 +7757,20 @@ async fn apply_mcp_boundary_to_turn_prompt(
         *turn_prompt = ContentInput::Blocks(blocks);
     }
     Ok(())
+}
+
+/// The live MCP router of one REST session. Live `mcp/add` servers use the
+/// same interactive MCP auth as factory-built sessions: stored credentials,
+/// or the typed human-authorization status. Never a browser.
+#[cfg(feature = "mcp")]
+fn session_mcp_router(state: &AppState) -> McpRouter {
+    McpRouter::new().with_mcp_auth(
+        meerkat::McpAuthMode::Interactive,
+        meerkat::default_mcp_auth_resolver(
+            Some(state.provider_auth_persistence.clone()),
+            state.runtime_adapter.provider_auth_runtime_authority(),
+        ),
+    )
 }
 
 /// Validate session existence and retrieve its MCP adapter.
@@ -15957,6 +15971,64 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 .unwrap();
             let response = app.oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn rest_session_mcp_router_gets_interactive_auth_by_default() {
+            use axum::response::IntoResponse;
+            let (state, _temp) = make_test_state().await;
+            // A standalone OAuth-demanding MCP endpoint, not a REST route
+            // (the path is not a literal so the surface scanner skips it).
+            let endpoint_path = "/mcp";
+            let app = Router::new().route(
+                endpoint_path,
+                post(|| async {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        [(
+                            "www-authenticate",
+                            r#"Bearer resource_metadata="/.well-known/oauth-protected-resource/mcp""#,
+                        )],
+                    )
+                        .into_response()
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+            let mut config = meerkat_core::mcp_config::McpServerConfig::streamable_http(
+                "guarded",
+                url,
+                std::collections::HashMap::new(),
+            );
+            if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut config.transport
+            {
+                http.oauth_account = Some("subject-7".to_owned());
+            }
+            let target = meerkat::McpServerIdentity::from_config(&config).unwrap();
+            let adapter = McpRouterAdapter::new(session_mcp_router(&state));
+            // Session build binds the session's surface handle the same way.
+            meerkat_core::AgentToolDispatcher::bind_external_tool_surface_handle(
+                &adapter,
+                Arc::new(meerkat_runtime::handles::RuntimeExternalToolSurfaceHandle::ephemeral()),
+            );
+            adapter.stage_add(config).await.unwrap();
+            adapter.apply_staged().await.unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                adapter.poll_lifecycle_actions().await.unwrap();
+                let awaiting = adapter.servers_awaiting_authorization().await;
+                if !awaiting.is_empty() {
+                    assert_eq!(awaiting, vec![target]);
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "OAuth-protected live server never reported awaiting authorization"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
         }
 
         #[tokio::test]

@@ -4245,6 +4245,20 @@ impl SessionRuntime {
         self.runtime_adapter.provider_auth_runtime_authority()
     }
 
+    /// The runtime's default MCP credential source (see
+    /// [`meerkat::default_mcp_auth_resolver`]).
+    #[cfg(feature = "mcp")]
+    pub fn default_mcp_auth_resolver(&self) -> Option<Arc<dyn meerkat::McpAuthResolver>> {
+        let persistence = match self.provider_auth_persistence() {
+            Ok(persistence) => persistence,
+            Err(error) => {
+                tracing::warn!(error = %error, "provider-auth persistence unavailable for MCP OAuth");
+                None
+            }
+        };
+        meerkat::default_mcp_auth_resolver(persistence, self.provider_auth_runtime_authority())
+    }
+
     /// Override the shared default LLM client used by this runtime.
     pub fn set_default_llm_client(&self, client: Option<Arc<dyn LlmClient>>) {
         *self
@@ -11510,7 +11524,14 @@ impl SessionRuntime {
             meerkat_core::RuntimeBuildMode::StandaloneEphemeral => {
                 meerkat::mcp::standalone_router()
             }
-        };
+        }
+        // Live `mcp/add` servers use the same interactive MCP auth as
+        // factory-built sessions: stored credentials, or the typed
+        // human-authorization status. Never a browser.
+        .with_mcp_auth(
+            meerkat::McpAuthMode::Interactive,
+            self.default_mcp_auth_resolver(),
+        );
         let adapter = Arc::new(McpRouterAdapter::new(router));
         let adapter_dispatcher: Arc<dyn AgentToolDispatcher> = adapter.clone();
         let combined = match build_config.external_tools.clone() {
@@ -14257,6 +14278,87 @@ mod tests {
 
     fn temp_factory(temp: &tempfile::TempDir) -> AgentFactory {
         AgentFactory::new(temp.path().join("sessions"))
+    }
+
+    /// An MCP endpoint that always demands OAuth.
+    #[cfg(feature = "mcp")]
+    async fn spawn_oauth_required_mcp_endpoint() -> String {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    [(
+                        "www-authenticate",
+                        r#"Bearer resource_metadata="/.well-known/oauth-protected-resource/mcp""#,
+                    )],
+                )
+                    .into_response()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        url
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn live_mcp_servers_get_interactive_auth_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = temp_factory(&temp).with_provider_auth_persistence(
+            meerkat_providers::auth_store::ProviderAuthPersistence::new(
+                Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+                Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+            ),
+        );
+        let runtime = make_runtime(factory, 2);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        assert!(runtime.default_mcp_auth_resolver().is_some());
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create session");
+        let mut config = McpServerConfig::streamable_http(
+            "guarded",
+            spawn_oauth_required_mcp_endpoint().await,
+            std::collections::HashMap::new(),
+        );
+        if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut config.transport {
+            http.oauth_account = Some("subject-7".to_owned());
+        }
+        let target = meerkat::McpServerIdentity::from_config(&config).unwrap();
+        runtime
+            .mcp_stage_add(&session_id, config)
+            .await
+            .expect("stage guarded server");
+        let adapter = runtime
+            .mcp_adapter_for_session(&session_id)
+            .await
+            .expect("session has a live MCP adapter");
+        adapter.apply_staged().await.expect("apply staged add");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            adapter.poll_lifecycle_actions().await.unwrap();
+            let awaiting = adapter.servers_awaiting_authorization().await;
+            if !awaiting.is_empty() {
+                assert_eq!(
+                    awaiting,
+                    vec![target],
+                    "the default resolver reports the typed human-authorization status"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "OAuth-protected live server never reported awaiting authorization"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     fn make_runtime(factory: AgentFactory, max_sessions: usize) -> Arc<SessionRuntime> {

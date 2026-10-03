@@ -330,39 +330,6 @@ them.
     `Result<AuthMachineTransition, AuthMachineTransitionError>`). A flow id
     outside the obligation is refused with
     `ObligationMemberFeedbackError::NotObligationMember`.
-
-### Security
-
-- Agent mob tools no longer accept host-only configuration from model
-  arguments. The agent `mob_create` deserialized the internal
-  `MobDefinition`, so a member with create authority could put
-  `tools.mcp_servers` (MCP server configs, including a stdio `command`, its
-  `args` and `env`) and `rust_bundles` into a profile, and child members
-  built from it would launch those servers on the host. The public paths
-  already decoded through the public contract. Now every model-facing input
-  does:
-  - `mob_create` decodes `MobDefinitionInput` through
-    `decode_public_mob_definition`.
-  - `mob_profile_create` and `mob_profile_update` decode `MobProfileInput`
-    (new `meerkat_mob_mcp::decode_public_profile`), which also closes the
-    indirect route of storing MCP server configs in a realm profile and
-    referencing it from a later `mob_create`.
-  - The `tooling` of `mob_spawn_member` and `delegate` takes an inline
-    profile as `MobProfileInput`.
-  - `mob_spawn_member`'s `initial_message`, and the `MobMcpDispatcher` spawn
-    and respawn messages, take `WireContentInput`.
-  - Two refusals apply on the agent surface only (host-facing surfaces are
-    unchanged): a definition's skill source may not be a host filesystem
-    `path` (inline skill content still works), and an image may not
-    reference a stored blob by `blob_id` (inline image bytes still work),
-    because the blob store has no fact showing the calling session may read
-    it, and a video may not reference a `uri`, which the provider would fetch
-    with the host's credentials (inline video bytes still work) (#1543).
-  Behaviour change: a model-supplied definition or profile that names an
-  internal-only field (`mcp_servers`, `rust_bundles`, `is_implicit`,
-  `session_cleanup_policy`, ...), a host-path skill source, a blob image
-  reference or a video URI is now refused with `InvalidArguments` before anything is
-  created; previously such input was accepted.
 - `meerkat_live::LiveAdapterHost::reserve_channel_close_observation` takes the
   close's `meerkat_core::LiveChannelCloseReason`: the path that reserves a close
   names why it closes, and the committed close publishes that reason.
@@ -399,6 +366,39 @@ them.
   `MeerkatMachineEffectVariant::*` and kernel `Input::*`, `InputKind::*`,
   `Effect::*`, `EffectKind::*`, `TransitionId::*`. Exhaustive matches must
   handle the new variants.
+
+### Security
+
+- Agent mob tools no longer accept host-only configuration from model
+  arguments. The agent `mob_create` deserialized the internal
+  `MobDefinition`, so a member with create authority could put
+  `tools.mcp_servers` (MCP server configs, including a stdio `command`, its
+  `args` and `env`) and `rust_bundles` into a profile, and child members
+  built from it would launch those servers on the host. The public paths
+  already decoded through the public contract. Now every model-facing input
+  does:
+  - `mob_create` decodes `MobDefinitionInput` through
+    `decode_public_mob_definition`.
+  - `mob_profile_create` and `mob_profile_update` decode `MobProfileInput`
+    (new `meerkat_mob_mcp::decode_public_profile`), which also closes the
+    indirect route of storing MCP server configs in a realm profile and
+    referencing it from a later `mob_create`.
+  - The `tooling` of `mob_spawn_member` and `delegate` takes an inline
+    profile as `MobProfileInput`.
+  - `mob_spawn_member`'s `initial_message`, and the `MobMcpDispatcher` spawn
+    and respawn messages, take `WireContentInput`.
+  - Two refusals apply on the agent surface only (host-facing surfaces are
+    unchanged): a definition's skill source may not be a host filesystem
+    `path` (inline skill content still works), and an image may not
+    reference a stored blob by `blob_id` (inline image bytes still work),
+    because the blob store has no fact showing the calling session may read
+    it, and a video may not reference a `uri`, which the provider would fetch
+    with the host's credentials (inline video bytes still work) (#1543).
+  Behaviour change: a model-supplied definition or profile that names an
+  internal-only field (`mcp_servers`, `rust_bundles`, `is_implicit`,
+  `session_cleanup_policy`, ...), a host-path skill source, a blob image
+  reference or a video URI is now refused with `InvalidArguments` before anything is
+  created; previously such input was accepted.
 
 ### Added
 

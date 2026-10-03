@@ -28330,11 +28330,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 disposition
             }
             guard "result_digest_present" { result_digest != "" }
-            guard "bootstrap_and_causal_tail_are_delivered" {
+            // Results follow the bootstrap summary only; queued context rows
+            // do not hold them (the ObserveLiveContextDeliveryReadiness rule).
+            guard "bootstrap_summary_is_acknowledged" {
                 !self.live_context_preparation_phase_by_channel.contains_key(channel_id)
-                || (self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
-                    && self.live_context_queued_append_by_cursor.len() == 0
-                    && !self.live_context_pending_append_by_channel.contains_key(channel_id))
+                || self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
@@ -29577,11 +29577,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id, provider_call_ref, output_kind, output_digest
             }
             guard "output_digest_present" { output_digest != "" }
-            guard "bootstrap_and_causal_tail_are_delivered" {
+            // Results follow the bootstrap summary only; queued context rows
+            // do not hold them (the ObserveLiveContextDeliveryReadiness rule).
+            guard "bootstrap_summary_is_acknowledged" {
                 !self.live_context_preparation_phase_by_channel.contains_key(channel_id)
-                || (self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
-                    && self.live_context_queued_append_by_cursor.len() == 0
-                    && !self.live_context_pending_append_by_channel.contains_key(channel_id))
+                || self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
             }
             guard "active_binding_matches" {
                 self.live_execution_phase_by_channel.get_copied(channel_id)
@@ -29856,6 +29856,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         // provider-side send is attempted. The sealed runtime bridge accepts
         // only SessionDocument/store commit authority, so surfaces cannot
         // manufacture an append obligation or infer provenance from content.
+        // Delegation results wait only for the bootstrap summary's provider
+        // acknowledgement: the summary is the history a newer result must
+        // follow. Queued context rows do not hold results. They are the
+        // user's own speech the provider already heard, replayed quietly
+        // after the summary with explicit earlier-speech framing, plus typed
+        // and runtime-work rows that ride their own generated edges. Those
+        // replays wait for a provider turn boundary, so holding results behind
+        // them would block results for as long as the user keeps speaking.
+        // AuthorizeLiveDelegationResultDelivery and
+        // AuthorizeLiveBridgeSubmission guard on the same rule
+        // ("bootstrap_summary_is_acknowledged"); readiness and authorization
+        // must never disagree.
         transition ObserveLiveContextDeliveryReadiness {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ObserveLiveContextDeliveryReadiness { session_id, channel_id }
@@ -29869,9 +29881,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                     if self.live_revoked_execution_channels.contains(channel_id) { LiveContextDeliveryReadiness::Revoked }
                     else { if self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::Failed) { LiveContextDeliveryReadiness::Failed }
                     else { if !self.live_context_preparation_phase_by_channel.contains_key(channel_id)
-                        || (self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
-                            && self.live_context_queued_append_by_cursor.len() == 0
-                            && !self.live_context_pending_append_by_channel.contains_key(channel_id))
+                        || self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
                     { LiveContextDeliveryReadiness::Ready }
                     else { LiveContextDeliveryReadiness::Pending } } }
             }

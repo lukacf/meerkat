@@ -328,6 +328,7 @@ printf '%s\n' \
   'echo "Error: Invariant NotGoalMaterialConflict is violated."' \
   'echo "Error: Invariant NotGoalMissing is violated."' \
   'echo "Error: Invariant NotAuditWitnessRefused is violated."' \
+  'echo "Error: Invariant AuditNeverDeliveredWithQueuedReplay is violated."' \
   'echo "Error: Invariant NotAuditWitnessReleasedRuns is violated."' \
   'echo "Error: Invariant NotAuditWitnessRunFinishesThenRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetiredDrainRefused is violated."' \

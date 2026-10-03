@@ -174,6 +174,25 @@ fi
 echo "running bounded run-start hold TLC audit"
 TLC_WORKERS="${tlc_workers}" "${run_start_hold_audit}" "${RUN_START_HOLD_AUDIT_MAX_STEPS:-12}"
 
+# The live-context result barrier: a delegation result on a channel with a
+# late bootstrap summary is released after the summary's provider
+# acknowledgement and only after it, never held by queued context rows (S99).
+# Readiness and the result-delivery authorization guard state the same rule;
+# when they disagreed, the release task spun on refused authorizations. A
+# hand-written audit over the same generated model drives one experimental
+# channel's summary into delivery behind a queued row, with a released
+# delegation result, and explores the summary's ACK and result authorization
+# under every generated invariant plus "a result is authorized only after the
+# summary ACK", and requires a result authorized while the row is still
+# queued. 21 steps reach the goal.
+live_result_barrier_audit="${workspace_root}/specs/machines/meerkat_machine/live_context_result_barrier_audit.sh"
+if [[ ! -x "${live_result_barrier_audit}" ]]; then
+  echo "error: live-context result barrier audit runner is missing from workspace runfiles: ${live_result_barrier_audit}" >&2
+  exit 1
+fi
+echo "running bounded live-context result barrier TLC audit"
+TLC_WORKERS="${tlc_workers}" "${live_result_barrier_audit}" "${LIVE_CONTEXT_RESULT_BARRIER_AUDIT_MAX_STEPS:-21}"
+
 # UnregisterSession against live channels (#1476): unregister is guarded on
 # every live channel being closed and its close custody settled, and then
 # clears the session's terminal context-preparation records. A third

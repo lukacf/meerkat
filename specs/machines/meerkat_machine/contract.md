@@ -16627,7 +16627,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, result_digest, disposition)
 - Guards:
   - `result_digest_present`
-  - `bootstrap_and_causal_tail_are_delivered`
+  - `bootstrap_summary_is_acknowledged`
   - `runtime_binding_matches`
   - `fence_binding_matches`
   - `generation_binding_matches`
@@ -16643,7 +16643,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, result_digest, disposition)
 - Guards:
   - `result_digest_present`
-  - `bootstrap_and_causal_tail_are_delivered`
+  - `bootstrap_summary_is_acknowledged`
   - `runtime_binding_matches`
   - `fence_binding_matches`
   - `generation_binding_matches`
@@ -16659,7 +16659,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, result_digest, disposition)
 - Guards:
   - `result_digest_present`
-  - `bootstrap_and_causal_tail_are_delivered`
+  - `bootstrap_summary_is_acknowledged`
   - `runtime_binding_matches`
   - `fence_binding_matches`
   - `generation_binding_matches`
@@ -17534,7 +17534,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeLiveBridgeSubmission`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_call_ref, output_kind, output_digest)
 - Guards:
   - `output_digest_present`
-  - `bootstrap_and_causal_tail_are_delivered`
+  - `bootstrap_summary_is_acknowledged`
   - `active_binding_matches`
   - `exact_terminal_call_matches`
   - `terminal_authorizes_projection`
@@ -17547,7 +17547,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeLiveBridgeSubmission`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_call_ref, output_kind, output_digest)
 - Guards:
   - `output_digest_present`
-  - `bootstrap_and_causal_tail_are_delivered`
+  - `bootstrap_summary_is_acknowledged`
   - `active_binding_matches`
   - `exact_terminal_call_matches`
   - `terminal_authorizes_projection`
@@ -17560,7 +17560,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeLiveBridgeSubmission`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_call_ref, output_kind, output_digest)
 - Guards:
   - `output_digest_present`
-  - `bootstrap_and_causal_tail_are_delivered`
+  - `bootstrap_summary_is_acknowledged`
   - `active_binding_matches`
   - `exact_terminal_call_matches`
   - `terminal_authorizes_projection`

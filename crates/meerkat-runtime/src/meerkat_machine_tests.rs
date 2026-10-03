@@ -413,6 +413,62 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
             operation_id,
             mm_dsl::LiveDelegationResultDisposition::OpenTurn,
         );
+        // The channel's bootstrap summary is acknowledged and a replay of the
+        // user's heard speech is still queued behind it: the result must not
+        // wait for that replay (results follow the summary only).
+        let dsl_channel = channel.to_string();
+        state.live_context_preparation_phase_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::LiveContextPreparationPhase::ProviderAcknowledged,
+        );
+        state
+            .live_context_preparation_lease_by_channel
+            .insert(dsl_channel.clone(), "lease-acknowledged".to_string());
+        state
+            .live_context_reserved_cursor_by_channel
+            .insert(dsl_channel.clone(), 0);
+        state.live_context_preparation_runtime_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+        );
+        state.live_context_preparation_fence_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::FenceToken::from_domain(fence_token),
+        );
+        state.live_context_preparation_generation_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::Generation::from_domain(generation),
+        );
+        state
+            .live_context_observation_counter_by_channel
+            .insert(dsl_channel.clone(), 0);
+        state
+            .live_context_ack_cut_by_channel
+            .insert(dsl_channel.clone(), 0);
+        state
+            .live_context_bootstrap_append_by_channel
+            .insert(dsl_channel.clone(), "bootstrap-append".to_string());
+        state
+            .live_context_bootstrap_digest_by_channel
+            .insert(dsl_channel, "bootstrap-digest".to_string());
+        let replay = "queued-replay".to_string();
+        state
+            .live_context_queued_session_by_append
+            .insert(replay.clone(), session_id.to_string());
+        state
+            .live_context_queued_cursor_by_append
+            .insert(replay.clone(), 1);
+        state
+            .live_context_queued_digest_by_append
+            .insert(replay.clone(), "replay-digest".to_string());
+        state
+            .live_context_queued_commit_token_by_append
+            .insert(replay.clone(), "replay-commit".to_string());
+        state.live_context_queued_disposition_by_append.insert(
+            replay.clone(),
+            mm_dsl::LiveContextRowDisposition::ReassertCausalTail,
+        );
+        state.live_context_queued_append_by_cursor.insert(1, replay);
         *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
             .expect("seed committed result release state");
     }
@@ -44560,6 +44616,10 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
             format!("not_found:{runtime_id}")
         }
         RuntimeDriverError::Destroyed => "destroyed".to_string(),
+        RuntimeDriverError::LiveContextBarrierRevoked {
+            session_id,
+            channel_id,
+        } => format!("live_context_barrier_revoked:{session_id}:{channel_id}"),
         RuntimeDriverError::RecoveryCorruption { reason } => {
             format!("recovery_corruption:{reason}")
         }

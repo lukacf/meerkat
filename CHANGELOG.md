@@ -2003,6 +2003,9 @@ them.
     released, and a fact inside the window is recalled at once as a positive
     control. The phrase used to sit inside the seed, so the old "unknown
     before release" probe only passed while the model ignored history it had.
+  - S105 asks its recall only after the typed correction's rows (its prompt
+    and the assistant's reply) are acknowledged in the provider conversation;
+    asked earlier, the recall raced the mirrored rows and was talked over.
   - A failed scenario (an error or a panic) closes its live channel through
     the exact close before teardown, so the provider's `session.closed`
     drains the sideband and the provider stream records every frame sent

@@ -6823,6 +6823,72 @@ fn s102_premature_claims(
         .collect()
 }
 
+/// Waits until a typed turn's canonical rows (the user prompt and the
+/// assistant's final reply, read from `session/history`) are acknowledged in
+/// the provider conversation: for each, the session-lane
+/// `session.commentary.append` carrying it and the provider's
+/// `session.commentary.appended` for that append. A question asked before
+/// then races the mirror.
+async fn wait_typed_turn_mirrored(
+    live: &mut PublicLiveHarness,
+    evidence: &Journal,
+    channel: u32,
+    prompt: &str,
+    scenario: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let history = live.rpc.session_history(json!(live.session_id), 60).await?;
+    let messages = history["messages"].as_array().cloned().unwrap_or_default();
+    let prompt_at = messages
+        .iter()
+        .rposition(|row| row.to_string().contains(prompt))
+        .ok_or_else(|| format!("{scenario}: the typed turn's prompt is not in session/history"))?;
+    let reply = messages[prompt_at + 1..]
+        .iter()
+        .rev()
+        .filter(|row| row["role"] == "block_assistant")
+        .map(assistant_row_text)
+        .find(|text| !text.trim().is_empty())
+        .ok_or_else(|| format!("{scenario}: the typed turn committed no assistant reply"))?;
+    let probe = |text: &str| -> String { text.trim().chars().take(60).collect() };
+    let probes = [probe(prompt), probe(&reply)];
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let lines = evidence.provider_stream_lines()?;
+        let acknowledged = |probe: &str| {
+            lines.iter().any(|line| match &line.entry {
+                provider_recording::Entry::ClientEvent { event }
+                    if line.channel_ordinal == channel
+                        && event["type"] == "session.commentary.append"
+                        && event["delegation_id"].is_null()
+                        && event["content"]
+                            .as_str()
+                            .is_some_and(|content| commentary_carries(content, probe)) =>
+                {
+                    let id = &event["event_id"];
+                    lines.iter().any(|ack| {
+                        ack.channel_ordinal == channel
+                            && matches!(&ack.entry, provider_recording::Entry::ServerFrame { raw }
+                                if raw["type"] == "session.commentary.appended"
+                                    && &raw["client_event_id"] == id)
+                    })
+                }
+                _ => false,
+            })
+        };
+        let pending: Vec<&String> = probes.iter().filter(|probe| !acknowledged(probe)).collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{scenario}: the typed turn's rows never reached the provider conversation within 60 s: {pending:?}"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
 /// The text blocks of one `block_assistant` history row, joined.
 fn assistant_row_text(row: &Value) -> String {
     row["blocks"]
@@ -9926,6 +9992,18 @@ async fn run_s105_fork_and_merge_parallel(
         // to reach the model; otherwise delegating the recall is a correct
         // answer to a model that has not heard the result yet.
         wait_all_result_commentaries(&mut live, "S105 after the typed correction").await?;
+        // The typed turn's rows reach the model as mirrored session rows on
+        // their own schedule. A recall asked before they land races them:
+        // the model starts speaking on the rows mid-question and the recall
+        // is talked over (verdict tree fb94711f S105 run 3).
+        wait_typed_turn_mirrored(
+            &mut live,
+            &evidence,
+            channel,
+            &s105_typed_prompt(doubled_file.as_deref().unwrap_or("the doubled-number file")),
+            "S105",
+        )
+        .await?;
         let events_before_recall = live.peer.events().await?.len();
         let (recall, answer, _, _) = native_question(
             &mut live,

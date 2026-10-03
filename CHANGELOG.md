@@ -649,6 +649,10 @@ them.
   transcript is ahead of the store. It completes when a runtime turn's
   boundary commit is acknowledged, a full persist lands, or the live actor is
   synchronized from or discarded for durable authority.
+- `meerkat_mob_mcp::live_delegation::LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE`
+  is public, so live end-to-end checks can strip the speech-transcript note
+  exactly instead of copying its wording.
+
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a

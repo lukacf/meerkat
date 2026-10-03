@@ -116,7 +116,6 @@ them.
   `meerkat_machine_schema::MachineSchemaError` gains the variant
   `InvalidInputFieldDomain { variant, field, reason }`, so exhaustive matches
   need an arm.
-
 - `meerkat::session_runtime::live_orchestration::LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS`
   and `LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY` are removed. The deferred
   close settlement no longer retries on a timer (see Fixed);
@@ -717,7 +716,6 @@ them.
     `WorkItemAdmissionInsert::{Inserted, Existing}`. It defaults to
     unsupported; the memory and SQLite stores implement it.
   - `ExternalWorkRef` stays provenance only and is never a dedupe key.
-
 - `meerkat_session::PersistentSessionService::live_authority_advanced`: a
   typed wakeup for callers refused with `SessionError::Busy` because the live
   transcript is ahead of the store. It completes when a runtime turn's
@@ -726,7 +724,6 @@ them.
 - `meerkat_mob_mcp::live_delegation::LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE`
   is public, so live end-to-end checks can strip the speech-transcript note
   exactly instead of copying its wording.
-
 - `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
   and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
   `RetainedUnattached { registration }`). The call waits only while a
@@ -789,8 +786,6 @@ them.
   through one shared projection, so no path drops it. The Python SDK already
   passes the generated overlay through on all three paths, now pinned by
   payload tests.
-
-
 - `meerkat_runtime::MeerkatMachine::wait_input_admitted_by_idempotency_key`
   waits until a live session's runtime has admitted an input for an
   idempotency key and returns its id. The driver signals every accepted
@@ -835,13 +830,6 @@ them.
   `meerkat_session::LiveChannelClosedNotPublished` (`SessionNotRunning`,
   `ActorExited`, `ActorDraining`). When a close is not published, the reason
   is logged.
-
-
-- `meerkat_runtime::MeerkatMachine::wait_input_admitted_by_idempotency_key`
-  waits until a live session's runtime has admitted an input for an
-  idempotency key and returns its id. The driver signals every accepted
-  input, so the wait is woken by the admission rather than re-reading on a
-  timer. It returns `Ok(None)` for a session without a live registration.
 - Per-profile tool deny list for mob members: `[profiles.<name>.tools]
   deny = ["mob_wire", "mob_unwire"]`. Members of the profile cannot execute
   the named tools although their families stay enabled. Denied tools stay
@@ -916,9 +904,16 @@ them.
   - A `*_marked_deprecated` finding is a deprecation, not a break: it is
     satisfied by a name under `### Deprecated`. Real breaks still need
     `### Breaking`.
-
-- **A short shell timeout is no longer consumed by one-time setup.** A foreground shell call's dispatch deadline was exactly its `timeout_secs`, measured from dispatch, so first-call setup (resolving the shell, which falls back from an absent `nu`, plus the first custodied spawn) could use up a model-chosen 1 s timeout before the command ran (Turbo S S101: a quick `ls` was cut off and retried). The shell path is now resolved when the tool is built, the command's timeout runs from its spawn as before, and the declared dispatch deadline is that timeout plus `SHELL_SETUP_FAILURE_BOUND` (30 s), a failure bound for a hanging setup.
-
+- A short shell timeout is no longer consumed by one-time setup. A
+  foreground shell call's dispatch deadline was exactly its `timeout_secs`,
+  measured from dispatch, so first-call setup (resolving the shell, which
+  falls back from an absent `nu`, plus the first custodied spawn) could use
+  up a model-chosen 1 s timeout before the command ran (Turbo S S101: a
+  quick `ls` was cut off and retried). The shell path is now resolved when
+  the tool is built, the command's timeout runs from its spawn as before,
+  and the declared dispatch deadline is that timeout plus
+  `SHELL_SETUP_FAILURE_BOUND` (30 s), a failure bound for a hanging setup
+  (#1575).
 - Reading a session whose turn is in flight no longer waits for the turn to
   end.
   - `PersistentSessionService::read` and `has_live_session` checked the live
@@ -977,7 +972,6 @@ them.
   Every acknowledged result now gets one instructions-lane cue, bound to the
   result's `delegation_id`. It is phrased to be safe either way: tell the
   user the result unless it was already told.
-
 - The runtime store test `contended_unregister_finalization_does_not_starve_runtime_worker`
   no longer fails on a loaded host. Its two 1 s wall-clock waits are replaced
   by typed handoffs. The heartbeat now fires on a test-only signal sent when
@@ -1017,7 +1011,6 @@ them.
   every live delegation's result is acknowledged `Delivered` and its
   commentary reached the peer, both before the typed correction and again
   before the recall (covering the correction's own result).
-
 - Three meerkat-mob-mcp tests no longer fail on a loaded host (#1509). They
   now assert ordering with events instead of wall-clock margins.
   `relink_past_max_run_retires_a_child_still_running` relies on the child's
@@ -1163,7 +1156,6 @@ them.
 - Turning a mob profile's `read_only` off now takes effect when its members
   resume. The declaration used to be folded into the persisted tool access
   policy, which a resume restored, so the old restriction stayed in force.
-
 - A prompt admitted to a session while its executor attachment was still
   being prepared could stay queued forever. The attachment read its queue to
   decide whether to wake its runtime loop, then handed the session mutation
@@ -1224,7 +1216,6 @@ them.
     They now wait for the server with `wait_until_ready`, and wait for the
     drain with typed waits instead of fixed sleeps. Each passes 30/30 at 10
     copies on two pinned cores.
-
 - A deferred live close settlement no longer retries on a timer. When it won
   the member turn's boundary while that turn's commit was still landing in
   the store, it slept 250 ms and tried again, at most six times, then gave up
@@ -1246,7 +1237,6 @@ them.
   gate, so the commit fails typed instead of hanging. A start or cancel that
   landed between the wait's checks and its registration could also be missed;
   the wait now re-reads both after registering.
-
 - A delivery whose caller left while it was parked behind a member's
   in-flight admission no longer runs as a ghost turn. The admission lane
   skips such a delivery by checking its reply channel, but `SubmitWork` ran
@@ -1414,8 +1404,11 @@ them.
   bridge tests derive their target versions from each domain instead of a
   literal (#1559); the queued-steer mob test waits for the steer's admission
   receipt instead of a 50 ms sleep (#1554); the barge-in recovered fixture
-  registers the session its live channel is bound to (#1510); and the
-  `meerkat-machine-schema` Bazel BUILD file is regenerated (#1515).
+  registers the session its live channel is bound to (#1510); the
+  `meerkat-machine-schema` Bazel BUILD file is regenerated (#1515); and the
+  GPT Live Turbo S S102, S104 and S106 checks assert typed delivery
+  contracts instead of wording, with the S102 harness now wiring its extra
+  member (#1539).
 - A GPT Live WebRTC session whose media track carries silence while the model
   speaks (transcripts present, decoded audio silent; about 1 in 30-40 public
   opens) no longer leaves the user in a silent call. The runtime judges the

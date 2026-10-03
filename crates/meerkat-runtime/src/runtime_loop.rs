@@ -4589,6 +4589,13 @@ impl RuntimeLoopAuthorityBinding {
     }
 
     #[cfg(any(test, feature = "test-support"))]
+    fn note_run_start_held(&self) {
+        if let Some(machine) = self.machine.upgrade() {
+            machine.note_run_start_held_park();
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     async fn run_before_queue_authority_test_hook(&self) {
         if let Some(machine) = self.machine.upgrade() {
             machine
@@ -6396,6 +6403,16 @@ async fn process_queue(
                 .await
                 {
                     Ok(crate::meerkat_machine::driver::RuntimeLoopBatchStart::Started) => {}
+                    Ok(crate::meerkat_machine::driver::RuntimeLoopBatchStart::RunStartsHeld) => {
+                        // The member's mob is stopped (#1500). Nothing was
+                        // staged; the input waits in its lane. Releasing the
+                        // hold wakes this loop.
+                        tracing::debug!(%run_id, "run starts are held; runtime loop parks");
+                        #[cfg(any(test, feature = "test-support"))]
+                        authority_binding.note_run_start_held();
+                        drop(queue_authority_guard);
+                        return false;
+                    }
                     Ok(crate::meerkat_machine::driver::RuntimeLoopBatchStart::StageRefused {
                         reason,
                         abandoned_input_ids,

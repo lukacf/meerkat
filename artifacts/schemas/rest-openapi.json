@@ -2418,6 +2418,10 @@
             "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
             "type": "boolean"
           },
+          "run_start_hold": {
+            "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
+            "type": "boolean"
+          },
           "supported_protocol_versions": {
             "default": [
               2,
@@ -2867,6 +2871,87 @@
               "operation_id",
               "expected_run_id",
               "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Hold the member's run starts for a mob Stop (#1500). A peer without\n[`BridgeCapabilities::run_start_hold`] rejects it at decode.",
+            "properties": {
+              "cancel_current_run": {
+                "default": false,
+                "description": "Cancel, at its next boundary, exactly the run the hold found current.",
+                "type": "boolean"
+              },
+              "command": {
+                "const": "hold_run_starts",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/BridgeMemberIncarnation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "protocol_version": {
+                "$ref": "#/components/schemas/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/components/schemas/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Release a run-start hold (mob Resume).",
+            "properties": {
+              "command": {
+                "const": "release_run_starts",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/BridgeMemberIncarnation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "protocol_version": {
+                "$ref": "#/components/schemas/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/components/schemas/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
             ],
             "type": "object"
           },
@@ -4597,6 +4682,79 @@
         ],
         "type": "string"
       },
+      "BridgeHeldRun": {
+        "description": "What a [`BridgeCommand::HoldRunStarts`] did to the member's run.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The member had no run.",
+            "properties": {
+              "run": {
+                "const": "no_run",
+                "type": "string"
+              }
+            },
+            "required": [
+              "run"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run was cancelled at its next boundary.",
+            "properties": {
+              "run": {
+                "const": "cancelled_at_boundary",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/components/schemas/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run ended on its own between the hold and the cancel.",
+            "properties": {
+              "run": {
+                "const": "run_ended_before_cancel",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/components/schemas/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run continues; no cancel was requested.",
+            "properties": {
+              "run": {
+                "const": "left_running",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/components/schemas/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "BridgeHostBootstrapProof": {
         "description": "Dedicated host-bind proof carrier. This is intentionally distinct from\n[`BridgeBootstrapToken`]: the raw bearer lives only in the out-of-band\nhost descriptor, while a `BindHost` command may carry only the\nrequest-bound HMAC derived from it.",
         "type": "string"
@@ -5734,6 +5892,24 @@
               "expected_member",
               "operation_id",
               "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Reply to [`BridgeCommand::HoldRunStarts`].",
+            "properties": {
+              "result": {
+                "const": "run_starts_held",
+                "type": "string"
+              },
+              "run": {
+                "$ref": "#/components/schemas/BridgeHeldRun"
+              }
+            },
+            "required": [
+              "result",
+              "run"
             ],
             "type": "object"
           },

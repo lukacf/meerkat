@@ -2782,6 +2782,7 @@ mod tests {
         for required in [
             "StageSpawnRunning",
             "CompleteSpawnRunning",
+            "CompleteSpawnStopped",
             "CompleteSpawnLateArrivalRunning",
             "CompleteSpawnLateArrivalStopped",
             "CompleteSpawnLateArrivalCompleted",

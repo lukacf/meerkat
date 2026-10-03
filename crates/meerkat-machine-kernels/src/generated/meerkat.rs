@@ -13655,6 +13655,7 @@ pub struct State {
     pub input_live_boundary_join_run: std::collections::BTreeMap<String, RunId>,
     pub input_live_boundary_join_phase: std::collections::BTreeMap<String, LiveBoundaryJoinPhase>,
     pub run_stop_requested: Option<RunId>,
+    pub run_starts_held: bool,
     pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
     pub op_completion_seq: std::collections::BTreeMap<String, u64>,
@@ -14448,6 +14449,7 @@ impl std::fmt::Debug for State {
                 &self.input_live_boundary_join_phase,
             )
             .field("run_stop_requested", &self.run_stop_requested)
+            .field("run_starts_held", &self.run_starts_held)
             .field("recovered_admitted_lanes", &self.recovered_admitted_lanes)
             .field("op_statuses", &self.op_statuses)
             .field("op_completion_seq", &self.op_completion_seq)
@@ -15658,6 +15660,10 @@ pub mod inputs {
     pub struct CancelAfterBoundary {
         pub reason: String,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HoldRunStarts {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseRunStarts {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CancelAfterBoundaryForRun {
         pub run_id: RunId,
@@ -18107,6 +18113,8 @@ pub enum Input {
     StopCurrentRunForRun(inputs::StopCurrentRunForRun),
     ResolveUserInterruptPublicResult(inputs::ResolveUserInterruptPublicResult),
     CancelAfterBoundary(inputs::CancelAfterBoundary),
+    HoldRunStarts(inputs::HoldRunStarts),
+    ReleaseRunStarts(inputs::ReleaseRunStarts),
     CancelAfterBoundaryForRun(inputs::CancelAfterBoundaryForRun),
     AbortCancelAfterBoundaryDispatch(inputs::AbortCancelAfterBoundaryDispatch),
     StagePersistentFilter(inputs::StagePersistentFilter),
@@ -18525,6 +18533,8 @@ impl Input {
                 InputKind::ResolveUserInterruptPublicResult
             }
             Self::CancelAfterBoundary(_) => InputKind::CancelAfterBoundary,
+            Self::HoldRunStarts(_) => InputKind::HoldRunStarts,
+            Self::ReleaseRunStarts(_) => InputKind::ReleaseRunStarts,
             Self::CancelAfterBoundaryForRun(_) => InputKind::CancelAfterBoundaryForRun,
             Self::AbortCancelAfterBoundaryDispatch(_) => {
                 InputKind::AbortCancelAfterBoundaryDispatch
@@ -19084,6 +19094,8 @@ pub enum InputKind {
     StopCurrentRunForRun,
     ResolveUserInterruptPublicResult,
     CancelAfterBoundary,
+    HoldRunStarts,
+    ReleaseRunStarts,
     CancelAfterBoundaryForRun,
     AbortCancelAfterBoundaryDispatch,
     StagePersistentFilter,
@@ -19605,6 +19617,16 @@ pub mod effects {
     pub struct RequestCancellationAtBoundary {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BoundaryCancelAlreadyPending {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunStartsHeld {
+        pub current_run: Option<RunId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunStartsReleased {
+        pub queued: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunStartHeld {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WakeInterrupt {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -21158,6 +21180,9 @@ pub enum Effect {
     TurnCheckCompaction(effects::TurnCheckCompaction),
     RequestCancellationAtBoundary(effects::RequestCancellationAtBoundary),
     BoundaryCancelAlreadyPending(effects::BoundaryCancelAlreadyPending),
+    RunStartsHeld(effects::RunStartsHeld),
+    RunStartsReleased(effects::RunStartsReleased),
+    RunStartHeld(effects::RunStartHeld),
     WakeInterrupt(effects::WakeInterrupt),
     CommittedVisibleSetPublished(effects::CommittedVisibleSetPublished),
     RuntimeNotice(effects::RuntimeNotice),
@@ -21418,6 +21443,9 @@ pub enum EffectKind {
     TurnCheckCompaction,
     RequestCancellationAtBoundary,
     BoundaryCancelAlreadyPending,
+    RunStartsHeld,
+    RunStartsReleased,
+    RunStartHeld,
     WakeInterrupt,
     CommittedVisibleSetPublished,
     RuntimeNotice,
@@ -22454,6 +22482,20 @@ pub enum TransitionId {
     AbortCancelAfterBoundaryDispatchRetired,
     AbortCancelAfterBoundaryDispatchStopped,
     AbortCancelAfterBoundaryDispatchDestroyed,
+    HoldRunStartsInitializing,
+    HoldRunStartsIdle,
+    HoldRunStartsAttached,
+    HoldRunStartsRunning,
+    HoldRunStartsRetired,
+    HoldRunStartsInertStopped,
+    HoldRunStartsInertDestroyed,
+    ReleaseRunStartsInitializing,
+    ReleaseRunStartsIdle,
+    ReleaseRunStartsAttached,
+    ReleaseRunStartsRunning,
+    ReleaseRunStartsRetired,
+    ReleaseRunStartsStopped,
+    ReleaseRunStartsDestroyed,
     BoundaryAppliedPublish,
     PublishCommittedVisibleSetIdle,
     PublishCommittedVisibleSetAttached,
@@ -22921,14 +22963,22 @@ pub enum TransitionId {
     ClassifyPeerResponseReplyFailedRetired,
     ClassifyPeerResponseReplyFailedStopped,
     PrepareIdle,
+    PrepareHeldIdle,
     PrepareAttached,
+    PrepareHeldAttached,
     DrainQueuedRunRetired,
+    DrainQueuedRunHeldRetired,
     StartConversationRunIdleWithBinding,
+    StartConversationRunHeldIdle,
     StartConversationRunInitializing,
+    StartConversationRunHeldInitializing,
     StartConversationRunAttached,
+    StartConversationRunHeldAttached,
     StartConversationRunRunning,
     StartImmediateAppendInitializing,
+    StartImmediateAppendHeldInitializing,
     StartImmediateAppendAttached,
+    StartImmediateAppendHeldAttached,
     StartImmediateAppendRunning,
     PrimitiveAppliedConversation,
     PrimitiveAppliedImmediateCompleted,
@@ -24805,6 +24855,7 @@ pub fn initial_state() -> State {
         input_live_boundary_join_run: Default::default(),
         input_live_boundary_join_phase: Default::default(),
         run_stop_requested: None,
+        run_starts_held: false,
         recovered_admitted_lanes: Default::default(),
         op_statuses: Default::default(),
         op_completion_seq: Default::default(),

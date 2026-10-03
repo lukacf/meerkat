@@ -126,6 +126,15 @@ struct ManagedMob {
     storage_path: Option<PathBuf>,
 }
 
+/// Structured reports a lifecycle action returns: `destroy` its cleanup
+/// report, `stop` its per-member report (#1500).
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct MobLifecycleReports {
+    pub destroy_report: Option<meerkat_mob::MobDestroyReport>,
+    pub stop_report: Option<meerkat_mob::MobStopReport>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MobMcpDestroyError {
     #[error("mob destroy incomplete: {}", destroy_report_summary(.report))]
@@ -1949,7 +1958,9 @@ impl MobMcpState {
         handle.status().await
     }
 
-    pub async fn mob_stop(&self, mob_id: &MobId) -> Result<(), MobError> {
+    /// Stop (pause) the mob, returning what the stop did to each member
+    /// (#1500).
+    pub async fn mob_stop(&self, mob_id: &MobId) -> Result<meerkat_mob::MobStopReport, MobError> {
         self.handle_for(mob_id).await?.stop().await
     }
 
@@ -1981,25 +1992,28 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
         action: WireMobLifecycleAction,
-    ) -> Result<Option<meerkat_mob::MobDestroyReport>, MobMcpDestroyError> {
+    ) -> Result<MobLifecycleReports, MobMcpDestroyError> {
         match action {
-            WireMobLifecycleAction::Stop => {
-                self.mob_stop(mob_id).await?;
-                Ok(None)
-            }
+            WireMobLifecycleAction::Stop => Ok(MobLifecycleReports {
+                stop_report: Some(self.mob_stop(mob_id).await?),
+                ..MobLifecycleReports::default()
+            }),
             WireMobLifecycleAction::Resume => {
                 self.mob_resume(mob_id).await?;
-                Ok(None)
+                Ok(MobLifecycleReports::default())
             }
             WireMobLifecycleAction::Complete => {
                 self.mob_complete(mob_id).await?;
-                Ok(None)
+                Ok(MobLifecycleReports::default())
             }
             WireMobLifecycleAction::Reset => {
                 self.mob_reset(mob_id).await?;
-                Ok(None)
+                Ok(MobLifecycleReports::default())
             }
-            WireMobLifecycleAction::Destroy => self.mob_destroy(mob_id).await.map(Some),
+            WireMobLifecycleAction::Destroy => Ok(MobLifecycleReports {
+                destroy_report: Some(self.mob_destroy(mob_id).await?),
+                ..MobLifecycleReports::default()
+            }),
         }
     }
 

@@ -7794,6 +7794,11 @@ struct LiveExternalPeerHarness {
     drop_next_authorize_response: Arc<AtomicBool>,
     reject_next_rotation: Arc<AtomicBool>,
     advertise_rotation_observe_hold: Arc<AtomicBool>,
+    /// Whether the bind reply advertises the run-start hold (#1500).
+    advertise_run_start_hold: Arc<AtomicBool>,
+    /// `cancel_current_run` of every HoldRunStarts received.
+    run_start_holds: Arc<RwLock<Vec<bool>>>,
+    run_start_releases: Arc<AtomicUsize>,
     reject_held_rotation_observes: Arc<AtomicBool>,
     held_rotation_observes: Arc<AtomicUsize>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
@@ -7922,6 +7927,19 @@ impl LiveExternalPeerHarness {
     }
 
     /// Whether the next bind reply advertises held rotation observation.
+    fn advertise_run_start_hold(&self, advertise: bool) {
+        self.advertise_run_start_hold
+            .store(advertise, Ordering::Relaxed);
+    }
+
+    async fn run_start_holds(&self) -> Vec<bool> {
+        self.run_start_holds.read().await.clone()
+    }
+
+    fn run_start_releases(&self) -> usize {
+        self.run_start_releases.load(Ordering::Relaxed)
+    }
+
     fn advertise_rotation_observe_hold(&self, advertise: bool) {
         self.advertise_rotation_observe_hold
             .store(advertise, Ordering::Relaxed);
@@ -8257,6 +8275,12 @@ async fn spawn_live_external_peer_with_transport(
     let responder_reject_next_rotation = reject_next_rotation.clone();
     let advertise_rotation_observe_hold = Arc::new(AtomicBool::new(true));
     let responder_advertise_rotation_observe_hold = advertise_rotation_observe_hold.clone();
+    let advertise_run_start_hold = Arc::new(AtomicBool::new(false));
+    let responder_advertise_run_start_hold = advertise_run_start_hold.clone();
+    let run_start_holds = Arc::new(RwLock::new(Vec::new()));
+    let responder_run_start_holds = run_start_holds.clone();
+    let run_start_releases = Arc::new(AtomicUsize::new(0));
+    let responder_run_start_releases = run_start_releases.clone();
     let reject_held_rotation_observes = Arc::new(AtomicBool::new(false));
     let responder_reject_held_rotation_observes = reject_held_rotation_observes.clone();
     let held_rotation_observes = Arc::new(AtomicUsize::new(0));
@@ -8745,6 +8769,9 @@ async fn spawn_live_external_peer_with_transport(
                                                                     rotation_observe_hold:
                                                                         responder_advertise_rotation_observe_hold
                                                                             .load(Ordering::Relaxed),
+                                                                    run_start_hold:
+                                                                        responder_advertise_run_start_hold
+                                                                            .load(Ordering::Relaxed),
                                                                     retire_member: true,
                                                                     destroy_member: true,
                                                                     wire_member: true,
@@ -8936,6 +8963,38 @@ async fn spawn_live_external_peer_with_transport(
                                             ),
                                         )
                                         .expect("revoke ack")
+                                    }
+                                }
+                                super::bridge_protocol::BridgeCommand::HoldRunStarts(payload) => {
+                                    responder_run_start_holds
+                                        .write()
+                                        .await
+                                        .push(payload.cancel_current_run);
+                                    serde_json::to_value(
+                                        super::bridge_protocol::BridgeReply::RunStartsHeld(
+                                            super::bridge_protocol::BridgeRunStartHoldResponse {
+                                                run: super::bridge_protocol::BridgeHeldRun::NoRun,
+                                            },
+                                        ),
+                                    )
+                                    .expect("run starts held")
+                                }
+                                super::bridge_protocol::BridgeCommand::ReleaseRunStarts(_) => {
+                                    // Like a real host: an unbound member refuses.
+                                    if responder_supervisor_state.read().await.is_none() {
+                                        serde_json::to_value(
+                                            super::bridge_protocol::BridgeReply::Rejected {
+                                                cause: super::bridge_protocol::BridgeRejectionCause::NotBound,
+                                                reason: "release run starts failed: not bound".to_string(),
+                                            },
+                                        )
+                                        .expect("release rejection")
+                                    } else {
+                                        responder_run_start_releases.fetch_add(1, Ordering::Relaxed);
+                                        serde_json::to_value(super::bridge_protocol::BridgeReply::Ack(
+                                            super::bridge_protocol::BridgeAck { ok: true },
+                                        ))
+                                        .expect("release ack")
                                     }
                                 }
                                 super::bridge_protocol::BridgeCommand::InterruptMember(_) => {
@@ -9484,6 +9543,9 @@ async fn spawn_live_external_peer_with_transport(
         drop_next_authorize_response,
         reject_next_rotation,
         advertise_rotation_observe_hold,
+        advertise_run_start_hold,
+        run_start_holds,
+        run_start_releases,
         reject_held_rotation_observes,
         held_rotation_observes,
         supervisor_state,
@@ -19239,6 +19301,98 @@ async fn test_rotate_supervisor_converges_with_one_held_observation() {
     );
 }
 
+/// #1500: a remote member whose host supports the run-start hold is held by
+/// Stop through its host and released by Resume; the report says it is held.
+#[tokio::test]
+async fn test_stop_holds_a_capable_remote_member_and_resume_releases_it() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "stop-holds-capable-remote-member",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    external.advertise_run_start_hold(true);
+    let identity = AgentIdentity::from("w-ext");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+
+    let report = handle.stop().await.expect("stop the mob");
+    assert_eq!(
+        report.members.get(&identity).map(|outcome| &outcome.starts),
+        Some(&crate::MemberRunStarts::Held),
+        "{report:?}"
+    );
+    assert!(
+        !external.run_start_holds().await.is_empty(),
+        "the host received the hold"
+    );
+    assert_eq!(report.not_holdable().count(), 0);
+
+    handle.resume().await.expect("resume the mob");
+    assert!(
+        external.run_start_releases() >= 1,
+        "resume released the host's hold"
+    );
+}
+
+/// #1500: a remote member whose host predates the run-start hold cannot be
+/// held; Stop reports it as not holdable instead of returning a bare Ok.
+#[tokio::test]
+async fn test_stop_reports_a_remote_member_without_the_hold_as_not_holdable() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "stop-reports-not-holdable-remote-member",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    let identity = AgentIdentity::from("w-ext");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+
+    let report = handle.stop().await.expect("stop the mob");
+    assert_eq!(
+        report.not_holdable().collect::<Vec<_>>(),
+        vec![(&identity, &crate::NotHoldableReason::PeerLacksCapability)],
+        "{report:?}"
+    );
+    assert!(
+        external.run_start_holds().await.is_empty(),
+        "a host without the capability is never sent the hold"
+    );
+}
+
 /// A member whose bind reply did not advertise held observation is observed
 /// single-shot (the compatibility path) and is never offered the hold; with
 /// its operation unobservable the rotation stays durably pending.
@@ -22797,7 +22951,7 @@ async fn test_concurrent_terminal_lifecycle_commands_observe_live_state_drift() 
 
     let stop = {
         let handle = handle.clone();
-        tokio::spawn(async move { ("stop", handle.stop().await) })
+        tokio::spawn(async move { ("stop", handle.stop().await.map(|_| ())) })
     };
     let complete = {
         let handle = handle.clone();
@@ -34630,6 +34784,13 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
         external.delivered_input_ids().await.len(),
         1,
         "peer-only direct turn should use request/ack delivery with one logical input admission"
+    );
+    // The peer was not bound at resume commit, so the run-start release the
+    // Resume owed it (#1500) was sent when it bound again, exactly once.
+    assert_eq!(
+        external.run_start_releases(),
+        1,
+        "the release owed to the unbound peer is sent on its rebind"
     );
 
     let peer_member = resumed
@@ -53740,12 +53901,12 @@ async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
         MobState::Stopped,
         "stop should transition mob to Stopped"
     );
-    // Stop notifies the orchestrator (autonomous lead) via inject (+1).
-    // Total inject count: 0 (no spawn inject) + 1 (stop notification) = 1.
+    // Stop pauses the orchestrator with the rest of the mob (#1500), so it
+    // sends no lifecycle notice; Resume notifies it.
     assert_eq!(
         service.inject_call_count(),
-        1,
-        "stop should have notified the orchestrator via inject"
+        0,
+        "stop sends the orchestrator no lifecycle notice"
     );
 
     // A fail-closed service discard can remove the exact actor while leaving
@@ -53814,7 +53975,7 @@ async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
     // contract does inject one informational coordinator notification.
     assert_eq!(
         service.inject_call_count(),
-        2,
+        1,
         "resume should add exactly one coordinator lifecycle notification"
     );
 }
@@ -55374,7 +55535,7 @@ async fn whole_crew_resume_repoint_moves_parent_owned_worker_to_successor_sessio
 }
 
 #[tokio::test]
-async fn test_stop_notifies_every_active_orchestrator_profile_member() {
+async fn test_lifecycle_notice_reaches_every_active_orchestrator_profile_member() {
     let (handle, service) = create_test_mob(sample_definition()).await;
 
     for identity in ["lead-one", "lead-two"] {
@@ -55394,14 +55555,19 @@ async fn test_stop_notifies_every_active_orchestrator_profile_member() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let baseline = service.inject_call_count();
 
-    handle.stop().await.expect("stop");
+    // Stop sends no lifecycle notice (#1500); lifecycle delivery itself
+    // still fans out to every active orchestrator-profile member.
+    handle
+        .debug_lifecycle_notification_burst(1, "lifecycle notice")
+        .await
+        .expect("lifecycle notice");
     tokio::time::timeout(Duration::from_secs(2), async {
         while service.inject_call_count() < baseline + 2 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("stop notification should reach every active orchestrator-profile member");
+    .expect("lifecycle notification should reach every active orchestrator-profile member");
 
     assert_eq!(
         service.inject_call_count(),
@@ -68312,6 +68478,41 @@ async fn test_reset_failure_from_stopped_stays_stopped() {
     );
 }
 
+/// #1500: Stop does not send the orchestrator an "is stopping" notice (its run
+/// starts are held, so it could only read it after Resume); Resume tells it
+/// the pause happened.
+#[tokio::test]
+async fn test_resume_tells_the_orchestrator_about_the_stop_and_stop_does_not() {
+    let def = sample_definition();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(def, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("lead"), AgentIdentity::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+
+    let baseline_injects = service.inject_call_count();
+    handle.stop().await.expect("stop");
+    assert_eq!(
+        service.inject_call_count(),
+        baseline_injects,
+        "Stop sends the orchestrator no lifecycle notice"
+    );
+
+    handle.resume().await.expect("resume");
+    assert_eq!(
+        service.inject_call_count(),
+        baseline_injects + 1,
+        "Resume tells the orchestrator the mob resumed"
+    );
+    handle.shutdown().await.expect("shutdown");
+}
+
 #[tokio::test]
 async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
     // Create a definition with a TurnDriven orchestrator so lifecycle
@@ -68340,14 +68541,16 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
         .await
         .expect("spawn lead");
 
-    // Make start_turn hang for 10 minutes — simulates a stuck backend.
+    // Make start_turn hang for 10 minutes (a stuck backend), then fire a
+    // lifecycle notification: it is spawned onto the JoinSet, so it becomes a
+    // lifecycle task that does not finish on its own. (Stop no longer sends
+    // one, #1500, and Resume awaits its own notice.)
     service.set_start_turn_delay_ms(600_000);
     let baseline_start_turn_calls = service.start_turn_call_count();
-
-    // Stop the mob. This fires a lifecycle notification that will hang
-    // in start_turn due to the delay. The notification is spawned onto
-    // the JoinSet, so stop itself returns immediately.
-    handle.stop().await.expect("stop");
+    handle
+        .debug_lifecycle_notification_burst(1, "lifecycle notice")
+        .await
+        .expect("fire the lifecycle notice");
     wait_for_start_turn_call_count(
         service.as_ref(),
         baseline_start_turn_calls + 1,
@@ -78869,7 +79072,7 @@ async fn mob_runtime_parity_execute_probe(
             .handle
             .stop()
             .await
-            .map(|()| summarize_mob_runtime_success(probe, "unit")),
+            .map(|_| summarize_mob_runtime_success(probe, "unit")),
         MobRuntimeParityProbeInput::Resume => fixture
             .handle
             .resume()
@@ -82716,6 +82919,284 @@ async fn dispatch_handles_bind_their_authority_lanes() {
         "dispatcher construction must preserve the exact upcall execution fence"
     );
     handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// #1500: the stop's exact-run cancel can find its run already over; that is a
+/// typed `RunEndedBeforeCancel`, never a failed stop.
+#[test]
+fn a_stop_cancel_that_finds_its_run_over_reports_it_ended() {
+    use super::provisioner::classify_stop_member_cancel;
+    use crate::MemberStopRun;
+    let run_id = meerkat_core::lifecycle::RunId::new();
+    assert_eq!(
+        classify_stop_member_cancel(Ok(true), run_id.clone()).unwrap(),
+        MemberStopRun::CancelledAtBoundary {
+            run_id: run_id.clone()
+        }
+    );
+    for ended in [
+        Ok(false),
+        Err(meerkat_runtime::RuntimeDriverError::StaleAuthority {
+            reason: "attachment replaced".to_string(),
+        }),
+        Err(meerkat_runtime::RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Idle,
+        }),
+        // The run committed back to Attached between the hold and the cancel
+        // (MobKit: stop right after a turn reached the model).
+        Err(meerkat_runtime::RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Attached,
+        }),
+    ] {
+        assert_eq!(
+            classify_stop_member_cancel(ended, run_id.clone()).unwrap(),
+            MemberStopRun::RunEndedBeforeCancel {
+                run_id: run_id.clone()
+            }
+        );
+    }
+    assert!(
+        classify_stop_member_cancel(
+            Err(meerkat_runtime::RuntimeDriverError::Internal(
+                "boom".to_string()
+            )),
+            run_id,
+        )
+        .is_err(),
+        "a real cancel failure stays an error"
+    );
+}
+
+/// #1500: a turn-driven member's running turn is not cancelled by Stop; the
+/// report names that run, and the member's run starts are held.
+#[tokio::test]
+async fn test_stop_reports_a_turn_driven_members_running_turn_left_running() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-running-at-stop");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn turn-driven lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    service.set_block_runtime_turns(true);
+    let started = service.runtime_turn_started.notified();
+    tokio::pin!(started);
+    started.as_mut().enable();
+    let member = handle.member(&identity).await.expect("member handle");
+    let turn = member
+        .start_turn(
+            ContentInput::Text("running when the stop lands".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("admit the input");
+    tokio::time::timeout(Duration::from_secs(30), started)
+        .await
+        .expect("the turn is running");
+    let running = service
+        .runtime_adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("member runtime snapshot")
+        .control
+        .current_run_id
+        .expect("the member has a current run");
+
+    let report = handle.stop().await.expect("stop the mob");
+    assert_eq!(
+        report.members.get(&identity),
+        Some(&crate::MemberStopOutcome {
+            run: crate::MemberStopRun::LeftRunning { run_id: running },
+            starts: crate::MemberRunStarts::Held,
+        }),
+        "{report:?}"
+    );
+
+    // The turn finishes normally.
+    service.set_block_runtime_turns(false);
+    service.release_runtime_turns();
+    tokio::time::timeout(Duration::from_secs(30), turn.wait())
+        .await
+        .expect("the running turn finishes")
+        .expect("its turn completes");
+}
+
+/// #1500: an input admitted to a member's runtime before a mob Stop, but not
+/// yet prepared into a run, must not start a run while the mob is Stopped.
+/// Stop is a pause: the input stays queued and runs once after Resume.
+#[tokio::test]
+async fn test_stop_holds_an_admitted_member_input_until_resume() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-held-by-stop");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn turn-driven lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    // Admit an input, then hold the member's runtime loop before it takes
+    // the input into a run: the input is queued and unprepared.
+    let (queue_gap_entered, queue_gap_release) = service
+        .runtime_adapter
+        .arm_runtime_loop_before_queue_authority_test_hook(session_id.clone());
+    let member = handle.member(&identity).await.expect("member handle");
+    let turn = member
+        .start_turn(
+            ContentInput::Text("admitted before the stop".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("admit the input");
+    tokio::time::timeout(Duration::from_secs(30), queue_gap_entered)
+        .await
+        .expect("the runtime loop reaches the queue gap")
+        .expect("queue-authority hook armed");
+
+    let report = handle.stop().await.expect("stop the mob");
+    assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+    assert_eq!(
+        report.members.get(&identity),
+        Some(&crate::MemberStopOutcome {
+            run: crate::MemberStopRun::NoRun,
+            starts: crate::MemberRunStarts::Held,
+        }),
+        "the report says the member had no run and is held: {report:?}"
+    );
+
+    // Release the loop: it parks on the hold instead of starting a run.
+    let mut parks = service.runtime_adapter.run_start_held_parks();
+    queue_gap_release
+        .send(())
+        .expect("release the runtime loop");
+    tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+        .await
+        .expect("the member's runtime loop parks on the hold")
+        .expect("park signal");
+    assert!(
+        service
+            .applied_runtime_contributing_input_ids(&session_id)
+            .await
+            .is_empty(),
+        "no run starts while the mob is Stopped"
+    );
+
+    // Resume releases the hold: the queued input runs now.
+    handle.resume().await.expect("resume the mob");
+    tokio::time::timeout(Duration::from_secs(30), turn.wait())
+        .await
+        .expect("the queued input runs after resume")
+        .expect("its turn completes");
+    // Resume runs the member's own revival turns too; the held input must
+    // have run exactly once among them.
+    let applied: Vec<_> = service
+        .applied_runtime_contributing_input_ids(&session_id)
+        .await
+        .concat();
+    let unique: std::collections::HashSet<_> = applied.iter().collect();
+    assert_eq!(
+        applied.len(),
+        unique.len(),
+        "no input runs twice: {applied:?}"
+    );
+}
+
+/// #1500: a resume that fails at an internal-error site of its readiness
+/// fan-out must leave the mob Stopped with every member held again. Resume
+/// releases the members at its begin, so a failure that skipped the re-hold
+/// would leave a Stopped mob whose members can start runs.
+async fn assert_failed_resume_readiness_reholds_members(
+    fault: super::state::ResumeReadinessFaultForTest,
+) {
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+    let identity = AgentIdentity::from("lead-reheld-after-failed-resume");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle.stop().await.expect("stop the mob");
+    assert_eq!(
+        service
+            .runtime_adapter
+            .run_starts_held_for_test(&session_id)
+            .await,
+        Some(true),
+        "stop holds the member"
+    );
+
+    let armed = handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::FailNextResumeReadinessForTest {
+            fault,
+            reply_tx,
+        })
+        .await
+        .expect("arm enqueue");
+    tokio::time::timeout(Duration::from_secs(5), armed)
+        .await
+        .expect("arm answered")
+        .expect("arm reply");
+
+    let error = handle
+        .resume()
+        .await
+        .expect_err("the injected readiness failure fails the resume");
+    assert!(
+        error.to_string().contains("injected"),
+        "the resume fails with the injected error: {error:?}"
+    );
+    assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+    assert_eq!(
+        service
+            .runtime_adapter
+            .run_starts_held_for_test(&session_id)
+            .await,
+        Some(true),
+        "the failed resume holds the member again"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_failing_to_begin_readiness_reholds_members() {
+    assert_failed_resume_readiness_reholds_members(
+        super::state::ResumeReadinessFaultForTest::BeginReadiness,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_resume_exhausting_its_readiness_ticket_reholds_members() {
+    assert_failed_resume_readiness_reholds_members(
+        super::state::ResumeReadinessFaultForTest::TicketExhausted,
+    )
+    .await;
 }
 
 // Runtime-backed tracked-turn LLM identity and terminal-event regressions.

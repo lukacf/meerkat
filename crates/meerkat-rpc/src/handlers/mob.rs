@@ -1169,9 +1169,18 @@ pub async fn handle_lifecycle(
     // `destroy` returns a structured `MobDestroyReport` only on complete
     // cleanup. Incomplete cleanup is a typed JSON-RPC error carrying that
     // report, which keeps `ok: true` reserved for fully completed destroy.
+    let mut stop_report = None;
     let destroy_report = match params.action {
         WireMobLifecycleAction::Stop => match state.mob_stop(&mob_id).await {
-            Ok(()) => None,
+            Ok(report) => {
+                stop_report = match serde_json::to_value(&report) {
+                    Ok(value) => Some(value),
+                    Err(err) => {
+                        return invalid_params(id, format!("stop report serialize: {err}"));
+                    }
+                };
+                None
+            }
             Err(err) => return mob_call_error(id, &err),
         },
         WireMobLifecycleAction::Resume => match state.mob_resume(&mob_id).await {
@@ -1210,6 +1219,7 @@ pub async fn handle_lifecycle(
             action: params.action,
             ok: true,
             destroy_report,
+            stop_report,
         },
     )
 }

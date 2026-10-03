@@ -37,6 +37,62 @@ them.
 
 ### Breaking
 
+  `TransitionId::CompleteSpawnStopped`,
+- `meerkat_mob::MobHandle::stop` returns `Result<MobStopReport, MobError>`
+  instead of `Result<(), MobError>` (#1500).
+- Generated machine types gain the run-start hold (#1500). Machine DSL changes
+  add variants to the generated MeerkatMachine, MobMachine and kernel enums,
+  shifting the discriminants and order of: `EffectKind::*`, `InputKind::*`,
+  `MeerkatMachineEffect::*`, `MeerkatMachineEffectVariant::*`,
+  `MeerkatMachineInput::*`, `MeerkatMachineInputVariant::*`,
+  `MobMachineEffect::*`, `MobMachineEffectVariant::*`, `TransitionId::*`.
+  Added variants: `Effect::HoldMemberRunStarts`,
+  `Effect::ReleaseMemberRunStarts`, `Effect::RunStartHeld`,
+  `Effect::RunStartsHeld`, `Effect::RunStartsReleased`;
+  `EffectKind::HoldMemberRunStarts`, `EffectKind::ReleaseMemberRunStarts`,
+  `EffectKind::RunStartHeld`, `EffectKind::RunStartsHeld`,
+  `EffectKind::RunStartsReleased`; `Input::HoldRunStarts`,
+  `Input::ReleaseRunStarts`; `InputKind::HoldRunStarts`,
+  `InputKind::ReleaseRunStarts`; `MeerkatMachineEffect::RunStartHeld`,
+  `MeerkatMachineEffect::RunStartsHeld`,
+  `MeerkatMachineEffect::RunStartsReleased`;
+  `MeerkatMachineEffectVariant::RunStartHeld`,
+  `MeerkatMachineEffectVariant::RunStartsHeld`,
+  `MeerkatMachineEffectVariant::RunStartsReleased`;
+  `MeerkatMachineInput::HoldRunStarts`,
+  `MeerkatMachineInput::ReleaseRunStarts`;
+  `MeerkatMachineInputVariant::HoldRunStarts`,
+  `MeerkatMachineInputVariant::ReleaseRunStarts`;
+  `MobMachineEffect::HoldMemberRunStarts`,
+  `MobMachineEffect::ReleaseMemberRunStarts`;
+  `MobMachineEffectVariant::HoldMemberRunStarts`,
+  `MobMachineEffectVariant::ReleaseMemberRunStarts`;
+  `TransitionId::BeginPlacedCompletionLifecycleQuiesceFreshStop`,
+  `TransitionId::BeginPlacedCompletionLifecycleQuiesceReplayStop`,
+  `TransitionId::DrainQueuedRunHeldRetired`,
+  `TransitionId::HoldRunStartsAttached`, `TransitionId::HoldRunStartsIdle`,
+  `TransitionId::HoldRunStartsInertDestroyed`,
+  `TransitionId::HoldRunStartsInertStopped`,
+  `TransitionId::HoldRunStartsInitializing`,
+  `TransitionId::HoldRunStartsRetired`, `TransitionId::HoldRunStartsRunning`,
+  `TransitionId::PrepareHeldAttached`, `TransitionId::PrepareHeldIdle`,
+  `TransitionId::ReleaseRunStartsAttached`,
+  `TransitionId::ReleaseRunStartsDestroyed`,
+  `TransitionId::ReleaseRunStartsIdle`,
+  `TransitionId::ReleaseRunStartsInitializing`,
+  `TransitionId::ReleaseRunStartsRetired`,
+  `TransitionId::ReleaseRunStartsRunning`,
+  `TransitionId::ReleaseRunStartsStopped`,
+  `TransitionId::StartConversationRunHeldAttached`,
+  `TransitionId::StartConversationRunHeldIdle`,
+  `TransitionId::StartConversationRunHeldInitializing`,
+  `TransitionId::StartImmediateAppendHeldAttached`,
+  `TransitionId::StartImmediateAppendHeldInitializing`. Added fields:
+  `BridgeCapabilities.run_start_hold`, `MeerkatMachineState.run_starts_held`,
+  `MobLifecycleResult.stop_report`, `State.run_starts_held`.
+- `meerkat_mob_mcp::MobMcpState::mob_stop` returns the `MobStopReport`, and
+  `mob_lifecycle_action` returns `MobLifecycleReports` (destroy and stop
+  reports) instead of `Option<MobDestroyReport>` (#1500).
 - `meerkat_sqlite::SqliteStoreError` and `meerkat_store::StoreError` gain
   `UnsupportedDatabaseFile { path, detail }`, the typed refusal for a
   database path SQLite cannot safely address by one name (#1551, see Fixed).
@@ -313,6 +369,20 @@ them.
 - `meerkat_runtime::MeerkatMachine::is_same_runtime_owner`: whether two
   handles are the same live runtime owner (clones share it; a separately
   constructed machine over the same store does not).
+- `MobStopReport` (`meerkat_mob::{MobStopReport, MemberStopOutcome,
+  MemberStopRun, MemberRunStarts, NotHoldableReason}`): what a mob Stop did to
+  each member's run (`NoRun`, `CancelledAtBoundary`, `RunEndedBeforeCancel`,
+  `LeftRunning`, `Interrupted`) and whether its run starts are held (`Held`,
+  `NotHoldable` with the reason, or `NotBound` for a member the mob cannot
+  reach right now: a placed member whose host carrier is dormant, or an
+  unbound remote peer, which is held on its next bind).
+- `meerkat_runtime::MeerkatMachine::hold_run_starts` (returns
+  `RunStartsHold { current_run }`) and `release_run_starts`.
+- Supervisor bridge: `BridgeCommand::HoldRunStarts` /
+  `BridgeCommand::ReleaseRunStarts`, `BridgeReply::RunStartsHeld`, and the
+  `BridgeCapabilities::run_start_hold` capability bit.
+- `MobProvisioner::stop_member_runtime` and `release_member_run_starts`, with
+  defaults that interrupt as before and report the member as not holdable.
 - One runtime delivery inbox per persistence bundle, with an in-process
   commit signal (#1497):
   - `meerkat::PersistenceBundle::runtime_delivery_inbox()` returns a clone of
@@ -675,6 +745,37 @@ them.
   - A REST test also pins that stopping an in-flight run
     (`POST /sessions/{id}/runs/{run_id}/stop`) reaches the interrupt without
     waiting for the run to end on its own.
+  - A spawn that completes into a Stopped mob leaves it Stopped and holds
+    its members, the new one included. Before, MobMachine's spawn completion
+    moved a Stopped mob back to Running. Only Resume leaves Stopped.
+- A mob Stop no longer lets input that was admitted to a member before the
+  stop start a run while the mob is Stopped (#1500). The stop's cancel had no
+  run to reach, the stop saw the member idle and completed, and the queued
+  input then started a run anyway; the cancel was silently dropped. Stop now
+  pauses each member:
+  - MeerkatMachine owns a run-start hold. While it is set, no transition
+    establishes a new run (Prepare, the retired drain, or a direct turn
+    start): each takes a no-op Held arm, the runtime loop parks with the input
+    still queued, and releasing the hold wakes it. The current run, its turn,
+    cancels and terminals are unaffected.
+  - Stop holds every member before any stop interrupt, and cancels exactly the
+    run an autonomous member had (`CancelAfterBoundaryForRun`). Resume
+    releases the holds; a resume that fails re-holds them.
+  - Remote members are held through their host when it advertises
+    `run_start_hold`; an older host is interrupted as before and reported as
+    not holdable.
+  - Stop no longer sends the orchestrator a "Mob is stopping." lifecycle
+    notice, which a held orchestrator could only read after Resume; the
+    existing resume notice tells it the mob resumed.
+  - A remote member that was not bound when Resume released holds gets its
+    release on its next bind, and one that was not bound when Stop held them
+    gets the hold on its next bind. A placed member whose host carrier is
+    dormant (for example after a cleanup-backed host revoke) is reported
+    `NotBound` instead of failing the Stop; MobMachine re-activates a placed
+    carrier only while Running.
+  - A spawn that completes into a Stopped mob leaves it Stopped and holds
+    its members, the new one included. Before, MobMachine's spawn completion
+    moved a Stopped mob back to Running. Only Resume leaves Stopped.
 - The runtime store test `contended_unregister_finalization_does_not_starve_runtime_worker`
   no longer fails on a loaded host. Its two 1 s wall-clock waits are replaced
   by typed handoffs. The heartbeat now fires on a test-only signal sent when

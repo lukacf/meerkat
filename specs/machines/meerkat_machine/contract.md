@@ -162,6 +162,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `input_live_boundary_join_run`: `Map<String, RunId>`
 - `input_live_boundary_join_phase`: `Map<String, LiveBoundaryJoinPhase>`
 - `run_stop_requested`: `Option<RunId>`
+- `run_starts_held`: `Bool`
 - `recovered_admitted_lanes`: `Map<String, InputLane>`
 - `op_statuses`: `Map<String, OperationStatus>`
 - `op_completion_seq`: `Map<String, u64>`
@@ -529,6 +530,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InterruptCurrentRunForRun`(run_id: RunId)
 - `StopCurrentRunForRun`(run_id: RunId)
 - `ResolveUserInterruptPublicResult`(observation: UserInterruptObservationKind, target_present: Bool, staged_promotion_busy: Bool)
+- `HoldRunStarts`
+- `ReleaseRunStarts`
 - `CancelAfterBoundaryForRun`(run_id: RunId, reason: String)
 - `AbortCancelAfterBoundaryDispatch`(dispatch_generation: u64)
 - `StageDeferredSession`(session_id: SessionId, keep_alive: Bool, has_comms_name: Bool, llm_identity: SessionLlmIdentity, machine_archived_resume_authorized: Bool)
@@ -887,6 +890,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TurnCheckCompaction`
 - `RequestCancellationAtBoundary`
 - `BoundaryCancelAlreadyPending`
+- `RunStartsHeld`(current_run: Option<RunId>)
+- `RunStartsReleased`(queued: Bool)
+- `RunStartHeld`
 - `WakeInterrupt`
 - `CommittedVisibleSetPublished`(revision: u64)
 - `RuntimeNotice`(kind: RuntimeNoticeKind, detail: String)
@@ -5211,6 +5217,90 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `dispatch_outstanding`
   - `dispatch_generation_matches`
+- To: `Destroyed`
+
+### `HoldRunStartsInitializing`
+- From: `Initializing`
+- On: `HoldRunStarts`()
+- Emits: `RunStartsHeld`
+- To: `Initializing`
+
+### `HoldRunStartsIdle`
+- From: `Idle`
+- On: `HoldRunStarts`()
+- Emits: `RunStartsHeld`
+- To: `Idle`
+
+### `HoldRunStartsAttached`
+- From: `Attached`
+- On: `HoldRunStarts`()
+- Emits: `RunStartsHeld`
+- To: `Attached`
+
+### `HoldRunStartsRunning`
+- From: `Running`
+- On: `HoldRunStarts`()
+- Emits: `RunStartsHeld`
+- To: `Running`
+
+### `HoldRunStartsRetired`
+- From: `Retired`
+- On: `HoldRunStarts`()
+- Emits: `RunStartsHeld`
+- To: `Retired`
+
+### `HoldRunStartsInertStopped`
+- From: `Stopped`
+- On: `HoldRunStarts`()
+- Emits: `RunStartsHeld`
+- To: `Stopped`
+
+### `HoldRunStartsInertDestroyed`
+- From: `Destroyed`
+- On: `HoldRunStarts`()
+- Emits: `RunStartsHeld`
+- To: `Destroyed`
+
+### `ReleaseRunStartsInitializing`
+- From: `Initializing`
+- On: `ReleaseRunStarts`()
+- Emits: `RunStartsReleased`
+- To: `Initializing`
+
+### `ReleaseRunStartsIdle`
+- From: `Idle`
+- On: `ReleaseRunStarts`()
+- Emits: `RunStartsReleased`
+- To: `Idle`
+
+### `ReleaseRunStartsAttached`
+- From: `Attached`
+- On: `ReleaseRunStarts`()
+- Emits: `RunStartsReleased`
+- To: `Attached`
+
+### `ReleaseRunStartsRunning`
+- From: `Running`
+- On: `ReleaseRunStarts`()
+- Emits: `RunStartsReleased`
+- To: `Running`
+
+### `ReleaseRunStartsRetired`
+- From: `Retired`
+- On: `ReleaseRunStarts`()
+- Emits: `RunStartsReleased`
+- To: `Retired`
+
+### `ReleaseRunStartsStopped`
+- From: `Stopped`
+- On: `ReleaseRunStarts`()
+- Emits: `RunStartsReleased`
+- To: `Stopped`
+
+### `ReleaseRunStartsDestroyed`
+- From: `Destroyed`
+- On: `ReleaseRunStarts`()
+- Emits: `RunStartsReleased`
 - To: `Destroyed`
 
 ### `BoundaryAppliedPublish`
@@ -9880,6 +9970,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `completion_correlation_settled`
+  - `run_starts_not_held`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
 
@@ -9889,8 +9980,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `completion_correlation_unsettled`
+  - `run_starts_not_held`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
+
+### `PrepareHeldIdle`
+- From: `Idle`
+- On: `Prepare`(session_id, run_id)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Idle`
 
 ### `PrepareAttached`
 - From: `Attached`
@@ -9898,6 +9998,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `completion_correlation_settled`
+  - `run_starts_not_held`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
 
@@ -9907,14 +10008,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `completion_correlation_unsettled`
+  - `run_starts_not_held`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
+
+### `PrepareHeldAttached`
+- From: `Attached`
+- On: `Prepare`(session_id, run_id)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Attached`
 
 ### `DrainQueuedRunRetired`
 - From: `Retired`
 - On: `DrainQueuedRun`(run_id)
 - Guards:
   - `completion_correlation_settled`
+  - `run_starts_not_held`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
 
@@ -9923,8 +10034,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `DrainQueuedRun`(run_id)
 - Guards:
   - `completion_correlation_unsettled`
+  - `run_starts_not_held`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
+
+### `DrainQueuedRunHeldRetired`
+- From: `Retired`
+- On: `DrainQueuedRun`(run_id)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Retired`
 
 ### `StartConversationRunIdleWithBinding`
 - From: `Idle`
@@ -9933,8 +10053,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_binding_present`
   - `turn_resettable`
   - `conversation_shape_matches_primitive`
+  - `run_starts_not_held`
 - Emits: `TurnRunStarted`
 - To: `Running`
+
+### `StartConversationRunHeldIdle`
+- From: `Idle`
+- On: `StartConversationRun`(run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Idle`
 
 ### `StartConversationRunInitializing`
 - From: `Initializing`
@@ -9942,8 +10071,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `turn_resettable`
   - `conversation_shape_matches_primitive`
+  - `run_starts_not_held`
 - Emits: `TurnRunStarted`
 - To: `Running`
+
+### `StartConversationRunHeldInitializing`
+- From: `Initializing`
+- On: `StartConversationRun`(run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Initializing`
 
 ### `StartConversationRunAttached`
 - From: `Attached`
@@ -9951,8 +10089,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `turn_resettable`
   - `conversation_shape_matches_primitive`
+  - `run_starts_not_held`
 - Emits: `TurnRunStarted`
 - To: `Running`
+
+### `StartConversationRunHeldAttached`
+- From: `Attached`
+- On: `StartConversationRun`(run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Attached`
 
 ### `StartConversationRunRunning`
 - From: `Running`
@@ -9969,16 +10116,34 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StartImmediateAppend`(run_id)
 - Guards:
   - `turn_resettable`
+  - `run_starts_not_held`
 - Emits: `TurnRunStarted`
 - To: `Running`
+
+### `StartImmediateAppendHeldInitializing`
+- From: `Initializing`
+- On: `StartImmediateAppend`(run_id)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Initializing`
 
 ### `StartImmediateAppendAttached`
 - From: `Attached`
 - On: `StartImmediateAppend`(run_id)
 - Guards:
   - `turn_resettable`
+  - `run_starts_not_held`
 - Emits: `TurnRunStarted`
 - To: `Running`
+
+### `StartImmediateAppendHeldAttached`
+- From: `Attached`
+- On: `StartImmediateAppend`(run_id)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Attached`
 
 ### `StartImmediateAppendRunning`
 - From: `Running`

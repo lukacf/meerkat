@@ -12640,6 +12640,20 @@ DisposeRemoteTurnObligationDestroyed(obligation) ==
 BeginPlacedCompletionLifecycleQuiesceFresh(intent) ==
     /\ phase = "Running"
     /\ mob_machine_adaptive_lifecycle_drained(adaptive_active_run, adaptive_active_layer, adaptive_active_members, adaptive_layer_phase, adaptive_layer_disposition)
+    /\ (intent # "Stop")
+    /\ (IF (intent # "Stop") THEN TRUE ELSE (active_run_count = 0))
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ placed_completion_lifecycle_quiescing' = TRUE
+    /\ placed_completion_lifecycle_intent' = Some(intent)
+    /\ UnchangedFrame_0f6b962ca0cb092f
+
+
+BeginPlacedCompletionLifecycleQuiesceFreshStop(intent) ==
+    /\ phase = "Running"
+    /\ mob_machine_adaptive_lifecycle_drained(adaptive_active_run, adaptive_active_layer, adaptive_active_members, adaptive_layer_phase, adaptive_layer_disposition)
+    /\ (intent = "Stop")
     /\ (IF (intent # "Stop") THEN TRUE ELSE (active_run_count = 0))
     /\ (placed_completion_lifecycle_quiescing = FALSE)
     /\ phase' = "Running"
@@ -12652,6 +12666,20 @@ BeginPlacedCompletionLifecycleQuiesceFresh(intent) ==
 BeginPlacedCompletionLifecycleQuiesceReplay(intent) ==
     /\ phase = "Running"
     /\ mob_machine_adaptive_lifecycle_drained(adaptive_active_run, adaptive_active_layer, adaptive_active_members, adaptive_layer_phase, adaptive_layer_disposition)
+    /\ (intent # "Stop")
+    /\ (IF (intent # "Stop") THEN TRUE ELSE (active_run_count = 0))
+    /\ (placed_completion_lifecycle_quiescing = TRUE)
+    /\ (IF (placed_completion_lifecycle_intent = Some(intent)) THEN TRUE ELSE (IF (placed_completion_lifecycle_intent = Some("RetireAll")) THEN TRUE ELSE (IF ((placed_completion_lifecycle_intent = Some("Stop")) /\ (IF (intent = "Reset") THEN TRUE ELSE (IF (intent = "Complete") THEN TRUE ELSE (intent = "Destroy")))) THEN TRUE ELSE (IF ((placed_completion_lifecycle_intent = Some("Reset")) /\ (IF (intent = "Stop") THEN TRUE ELSE (IF (intent = "Complete") THEN TRUE ELSE (intent = "Destroy")))) THEN TRUE ELSE ((placed_completion_lifecycle_intent = Some("Complete")) /\ (intent = "Destroy"))))))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ placed_completion_lifecycle_intent' = Some(intent)
+    /\ UnchangedFrame_9d87cd3b2713ab49
+
+
+BeginPlacedCompletionLifecycleQuiesceReplayStop(intent) ==
+    /\ phase = "Running"
+    /\ mob_machine_adaptive_lifecycle_drained(adaptive_active_run, adaptive_active_layer, adaptive_active_members, adaptive_layer_phase, adaptive_layer_disposition)
+    /\ (intent = "Stop")
     /\ (IF (intent # "Stop") THEN TRUE ELSE (active_run_count = 0))
     /\ (placed_completion_lifecycle_quiescing = TRUE)
     /\ (IF (placed_completion_lifecycle_intent = Some(intent)) THEN TRUE ELSE (IF (placed_completion_lifecycle_intent = Some("RetireAll")) THEN TRUE ELSE (IF ((placed_completion_lifecycle_intent = Some("Stop")) /\ (IF (intent = "Reset") THEN TRUE ELSE (IF (intent = "Complete") THEN TRUE ELSE (intent = "Destroy")))) THEN TRUE ELSE (IF ((placed_completion_lifecycle_intent = Some("Reset")) /\ (IF (intent = "Stop") THEN TRUE ELSE (IF (intent = "Complete") THEN TRUE ELSE (intent = "Destroy")))) THEN TRUE ELSE ((placed_completion_lifecycle_intent = Some("Complete")) /\ (intent = "Destroy"))))))
@@ -16546,10 +16574,21 @@ RetireAllCompleted ==
 
 
 CompleteSpawnRunning(agent_identity) ==
-    /\ phase = "Running" \/ phase = "Stopped"
+    /\ phase = "Running"
     /\ (pending_spawn_count > 0)
     /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE)
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ pending_spawn_count' = (pending_spawn_count) - 1
+    /\ pending_spawn_sessions' = MapRemove(pending_spawn_sessions, agent_identity)
+    /\ UnchangedFrame_4c983ae9c7aa4a6f
+
+
+CompleteSpawnStopped(agent_identity) ==
+    /\ phase = "Stopped"
+    /\ (pending_spawn_count > 0)
+    /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE)
+    /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ pending_spawn_count' = (pending_spawn_count) - 1
     /\ pending_spawn_sessions' = MapRemove(pending_spawn_sessions, agent_identity)
@@ -18185,7 +18224,9 @@ Next ==
     \/ (phase = "Completed") /\ \E obligation \in RemoteTurnObligationValues : DisposeRemoteTurnObligationCompleted(obligation)
     \/ (phase = "Destroyed") /\ \E obligation \in RemoteTurnObligationValues : DisposeRemoteTurnObligationDestroyed(obligation)
     \/ (phase = "Running") /\ \E intent \in PlacedCompletionLifecycleIntentKindValues : BeginPlacedCompletionLifecycleQuiesceFresh(intent)
+    \/ (phase = "Running") /\ \E intent \in PlacedCompletionLifecycleIntentKindValues : BeginPlacedCompletionLifecycleQuiesceFreshStop(intent)
     \/ (phase = "Running") /\ \E intent \in PlacedCompletionLifecycleIntentKindValues : BeginPlacedCompletionLifecycleQuiesceReplay(intent)
+    \/ (phase = "Running") /\ \E intent \in PlacedCompletionLifecycleIntentKindValues : BeginPlacedCompletionLifecycleQuiesceReplayStop(intent)
     \/ (phase = "Stopped") /\ \E intent \in PlacedCompletionLifecycleIntentKindValues : BeginPlacedCompletionLifecycleQuiesceStoppedFresh(intent)
     \/ (phase = "Stopped") /\ \E intent \in PlacedCompletionLifecycleIntentKindValues : BeginPlacedCompletionLifecycleQuiesceStoppedReplay(intent)
     \/ (phase = "Completed") /\ \E intent \in PlacedCompletionLifecycleIntentKindValues : BeginPlacedCompletionLifecycleQuiesceCompletedFresh(intent)
@@ -18518,7 +18559,8 @@ Next ==
     \/ RetireAllRunning
     \/ RetireAllStopped
     \/ RetireAllCompleted
-    \/ (phase = "Running" \/ phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : CompleteSpawnRunning(agent_identity)
+    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : CompleteSpawnRunning(agent_identity)
+    \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : CompleteSpawnStopped(agent_identity)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : CompleteSpawnLateArrivalRunning(agent_identity)
     \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : CompleteSpawnLateArrivalStopped(agent_identity)
     \/ (phase = "Completed") /\ \E agent_identity \in AgentIdentityValues : CompleteSpawnLateArrivalCompleted(agent_identity)

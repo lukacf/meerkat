@@ -1901,6 +1901,7 @@ class MobLifecycleResult:
     mob_id: str
     ok: bool
     destroy_report: Optional[Any] = None
+    stop_report: Optional[Any] = None
 
 
 @dataclass
@@ -4149,6 +4150,7 @@ class BridgeCapabilities:
     resolvable_providers: Optional[list[Provider]] = None
     retire_member: Optional[bool] = None
     rotation_observe_hold: Optional[bool] = None
+    run_start_hold: Optional[bool] = None
     supported_protocol_versions: Optional[list[BridgeProtocolVersion]] = None
     tracked_input_cancel: Optional[bool] = None
     unwire_member: Optional[bool] = None
@@ -7874,6 +7876,21 @@ class BridgeCommandStopMemberRun(TypedDict, total=False):
     reason: Required[str]
     supervisor: Required[BridgePeerSpec]
 
+class BridgeCommandHoldRunStarts(TypedDict, total=False):
+    cancel_current_run: NotRequired[bool]
+    command: Required[Literal['hold_run_starts']]
+    epoch: Required[int]
+    expected_member: NotRequired[Optional[BridgeMemberIncarnation]]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandReleaseRunStarts(TypedDict, total=False):
+    command: Required[Literal['release_run_starts']]
+    epoch: Required[int]
+    expected_member: NotRequired[Optional[BridgeMemberIncarnation]]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
 class BridgeCommandRetireMember(TypedDict, total=False):
     command: Required[Literal['retire_member']]
     epoch: Required[int]
@@ -8100,7 +8117,7 @@ class BridgeCommandRevokeForkedParticipant(TypedDict, total=False):
     source_member: Required[BridgeMemberIncarnation]
     supervisor: Required[BridgePeerSpec]
 
-BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant
+BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandHoldRunStarts | BridgeCommandReleaseRunStarts | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant
 
 # Outcome of a delivery attempt.
 class BridgeDeliveryOutcomeAccepted(TypedDict, total=False):
@@ -8336,6 +8353,10 @@ class BridgeReplyMemberRunStopped(TypedDict, total=False):
     receipt: Required[WireRunStopReceipt]
     result: Required[Literal['member_run_stopped']]
 
+class BridgeReplyRunStartsHeld(TypedDict, total=False):
+    result: Required[Literal['run_starts_held']]
+    run: Required[dict[str, Literal['no_run']] | dict[str, Any]]
+
 class BridgeReplyRetire(TypedDict, total=False):
     outcome: Required[dict[str, Any]]
     result: Required[Literal['retire']]
@@ -8456,7 +8477,7 @@ class BridgeReplyForkedParticipantRevoked(TypedDict, total=False):
     outcome: Required[dict[str, Any] | dict[str, Literal['pending_attached_release']] | dict[str, Literal['converged']]]
     result: Required[Literal['forked_participant_revoked']]
 
-BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked
+BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRunStartsHeld | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked
 
 # Input content that can be either a plain text string or multimodal content blocks.
 #

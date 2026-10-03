@@ -2830,6 +2830,8 @@ runtime_internal_inputs!(
         AbandonLiveOpenAdmission,
         AbortCancelAfterBoundaryDispatch,
         CancelAfterBoundaryForRun,
+        HoldRunStarts,
+        ReleaseRunStarts,
         AbortOp,
         AcknowledgeTerminal,
         AddDirectPeerEndpoint,
@@ -3223,6 +3225,7 @@ fn mob_spawn_command_plans() -> Vec<CommandPlanSchema> {
         vec![
             transition_id("StageSpawnRunning"),
             transition_id("CompleteSpawnRunning"),
+            transition_id("CompleteSpawnStopped"),
             transition_id("CompleteSpawnLateArrivalRunning"),
             transition_id("CompleteSpawnLateArrivalStopped"),
             transition_id("CompleteSpawnLateArrivalCompleted"),

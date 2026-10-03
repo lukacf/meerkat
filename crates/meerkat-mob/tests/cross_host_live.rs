@@ -2001,7 +2001,7 @@ async fn cleanup_backed_host_revoke_allows_later_stop_without_reaching_revoked_h
         "the pre-revoke barrier exact-closes the active channel once"
     );
 
-    controlling
+    let stop_report = controlling
         .handle
         .stop()
         .await
@@ -2010,6 +2010,16 @@ async fn cleanup_backed_host_revoke_allows_later_stop_without_reaching_revoked_h
         gateway.calls(),
         calls_after_revoke,
         "Stop does not attempt status/close over revoked authority"
+    );
+    // #1500: the dormant member is reported, not failed: the run-start hold
+    // cannot reach it, and nothing from the mob does until Resume.
+    assert_eq!(
+        stop_report.members.get(&identity("placed-lifecycle-live")),
+        Some(&meerkat_mob::MemberStopOutcome {
+            run: meerkat_mob::MemberStopRun::NoRun,
+            starts: meerkat_mob::MemberRunStarts::NotBound,
+        }),
+        "the dormant placed member is reported not bound: {stop_report:?}"
     );
     fixture.shutdown().await;
 }

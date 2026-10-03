@@ -1903,7 +1903,15 @@ pub(super) struct AutonomousStopInterruptIncarnation {
 
 pub(super) struct AutonomousStopInterruptTask {
     incarnation: AutonomousStopInterruptIncarnation,
-    result_rx: oneshot::Receiver<Result<Option<super::MemberSessionActivity>, MobError>>,
+    result_rx: oneshot::Receiver<
+        Result<
+            (
+                Option<super::MemberSessionActivity>,
+                super::stop_report::MemberStopOutcome,
+            ),
+            MobError,
+        >,
+    >,
 }
 
 /// One member whose exact stop interrupt succeeded, with the member
@@ -1914,6 +1922,8 @@ pub(super) struct AutonomousStopInterruptTask {
 pub(super) struct AutonomousStopInterrupted {
     incarnation: AutonomousStopInterruptIncarnation,
     activity: Option<super::MemberSessionActivity>,
+    /// What the stop did to the member's run and run starts (#1500).
+    outcome: super::stop_report::MemberStopOutcome,
 }
 
 /// One member's outcome after its stop awaited the end of its turn.
@@ -1951,10 +1961,30 @@ pub(super) struct PendingAutonomousStop {
     /// keeps stopping members after an earlier non-fatal failure and reports
     /// that failure first, exactly as the inline path did.
     prior: Result<(), MobError>,
-    reply_tx: oneshot::Sender<Result<(), MobError>>,
+    reply_tx: LifecycleReplyTx,
     /// Same-kind commands that arrived while this one was pending; they
     /// receive its result.
-    joined: Vec<oneshot::Sender<Result<(), MobError>>>,
+    joined: Vec<LifecycleReplyTx>,
+}
+
+/// Reply channel of a parked Stop or Shutdown. A Stop answers with its
+/// per-member report (#1500); a Shutdown with unit.
+pub(super) enum LifecycleReplyTx {
+    Unit(oneshot::Sender<Result<(), MobError>>),
+    Stop(oneshot::Sender<Result<super::stop_report::MobStopReport, MobError>>),
+}
+
+impl LifecycleReplyTx {
+    fn send(self, result: Result<(), MobError>, report: &super::stop_report::MobStopReport) {
+        match self {
+            Self::Unit(reply_tx) => {
+                let _ = reply_tx.send(result);
+            }
+            Self::Stop(reply_tx) => {
+                let _ = reply_tx.send(result.map(|()| report.clone()));
+            }
+        }
+    }
 }
 
 /// A joined lifecycle waiter receives the primary's result. `MobError` is
@@ -1982,17 +2012,21 @@ fn replicate_lifecycle_error_for_joined_waiter(error: &MobError) -> MobError {
 }
 
 fn send_lifecycle_result(
-    reply_tx: oneshot::Sender<Result<(), MobError>>,
-    joined: Vec<oneshot::Sender<Result<(), MobError>>>,
+    reply_tx: LifecycleReplyTx,
+    joined: Vec<LifecycleReplyTx>,
     result: Result<(), MobError>,
+    report: &super::stop_report::MobStopReport,
 ) {
     for waiter in joined {
-        let _ = waiter.send(match &result {
-            Ok(()) => Ok(()),
-            Err(error) => Err(replicate_lifecycle_error_for_joined_waiter(error)),
-        });
+        waiter.send(
+            match &result {
+                Ok(()) => Ok(()),
+                Err(error) => Err(replicate_lifecycle_error_for_joined_waiter(error)),
+            },
+            report,
+        );
     }
-    let _ = reply_tx.send(result);
+    reply_tx.send(result, report);
 }
 
 /// Bound one member's stop by the hang guard. A member still winding down
@@ -5794,6 +5828,9 @@ struct AuthorizedMobSpawnCompleted {
     generated_plan: generated_mob_command_capabilities::CommandPlanKind,
     generated_effect: generated_mob_command_capabilities::CommandPlanKind,
     agent_identity: AgentIdentity,
+    /// The completion landed in a Stopped mob, so MobMachine holds the
+    /// members' run starts again, the new member included (#1500).
+    hold_member_run_starts: bool,
 }
 
 impl AuthorizedMobSpawnStart {
@@ -7101,6 +7138,10 @@ pub(super) struct MobActor {
     /// retries re-interrupt already-quiesced peers. Cold replay may safely
     /// repeat the exact fenced interrupt.
     pub(super) autonomous_stop_interrupted: BTreeMap<AgentIdentity, AutonomousStopInterrupted>,
+    /// Per-member outcomes of the current Stop (#1500), reported on its reply.
+    pub(super) stop_member_outcomes: BTreeMap<AgentIdentity, super::stop_report::MemberStopOutcome>,
+    #[cfg(test)]
+    pub(super) resume_readiness_fault: Option<super::state::ResumeReadinessFaultForTest>,
     /// Rotating admission cursor for the bounded off-actor interrupt window.
     pub(super) autonomous_stop_interrupt_cursor: usize,
     /// The Stop or Shutdown awaiting its interrupted members' end of turn.
@@ -11006,6 +11047,33 @@ impl MobActor {
         )
     }
 
+    /// The run-start hold obligations (#1500) are machine-owned: the actor
+    /// holds members for a Stop, and releases them on Resume, only as the
+    /// generated transition says. `hold` selects which effect must (and the
+    /// other must not) be present; `None` requires neither.
+    fn require_member_run_start_effect(
+        transition: &mob_dsl::MobMachineTransition,
+        hold: Option<bool>,
+        context: &str,
+    ) -> Result<(), MobError> {
+        let holds = transition
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, mob_dsl::MobMachineEffect::HoldMemberRunStarts));
+        let releases = transition
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, mob_dsl::MobMachineEffect::ReleaseMemberRunStarts));
+        let expected = (hold == Some(true), hold == Some(false));
+        if (holds, releases) == expected {
+            Ok(())
+        } else {
+            Err(MobError::Internal(format!(
+                "MobMachine {context} produced run-start hold effects (hold: {holds}, release: {releases}) other than expected {expected:?}"
+            )))
+        }
+    }
+
     fn require_lifecycle_journal_effect(
         transition: &mob_dsl::MobMachineTransition,
         kind: mob_dsl::MobLifecycleJournalKind,
@@ -14036,6 +14104,7 @@ impl MobActor {
                 Err(MobError::LifecycleOperationPending {
                     intent: "stop's wait for its members' end of turn was torn down".to_string(),
                 }),
+                &self.current_stop_report(),
             );
         }
         self.actor_io_tasks.abort_all();
@@ -14597,12 +14666,20 @@ impl MobActor {
             .map_or((None, None), |slot| (Some(slot.spawn), slot.task))
     }
 
+    /// Close a pending spawn slot. The returned flag is MobMachine's
+    /// `HoldMemberRunStarts` for a completion into a Stopped mob, which the
+    /// caller realizes (#1500).
     fn complete_pending_spawn_slot(
         &mut self,
         spawn_ticket: u64,
         context: &'static str,
-    ) -> (Option<PendingSpawn>, Option<tokio::task::JoinHandle<()>>) {
+    ) -> (
+        Option<PendingSpawn>,
+        Option<tokio::task::JoinHandle<()>>,
+        bool,
+    ) {
         let (pending, task) = self.take_pending_spawn_slot(spawn_ticket);
+        let mut hold_member_run_starts = false;
         if pending.is_some() || task.is_some() {
             if let Some(pending) = pending.as_ref() {
                 if let Ok(completed) = self.complete_orchestrator_spawn(
@@ -14611,6 +14688,7 @@ impl MobActor {
                     context,
                 ) {
                     debug_assert_eq!(completed.agent_identity, pending.agent_identity);
+                    hold_member_run_starts = completed.hold_member_run_starts;
                 }
             }
         }
@@ -14622,7 +14700,7 @@ impl MobActor {
                 "pending spawn alignment violated after completion"
             );
         }
-        (pending, task)
+        (pending, task, hold_member_run_starts)
     }
 
     fn stage_orchestrator_spawn(
@@ -15410,11 +15488,16 @@ impl MobActor {
             }
             return Err(error);
         }
+        let hold_member_run_starts = transition
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, mob_dsl::MobMachineEffect::HoldMemberRunStarts));
         let completed = AuthorizedMobSpawnCompleted {
             generated_plan:
                 generated_mob_command_capabilities::CommandPlanKind::AuthorizedMobSpawnStart,
             generated_effect: generated_mob_command_capabilities::CommandPlanKind::SpawnEffect,
             agent_identity: agent_identity.clone(),
+            hold_member_run_starts,
         };
         debug_assert_eq!(
             completed.generated_effect,
@@ -16909,6 +16992,18 @@ impl MobActor {
         Ok(())
     }
 
+    /// A placed member whose host carrier is dormant (its host is unbound or
+    /// was revoked): no host command reaches it, and MobMachine re-activates
+    /// a placed carrier only while Running, so nothing reaches it before
+    /// Resume (#1500).
+    fn placed_member_carrier_dormant(&self, identity: &AgentIdentity) -> bool {
+        let state = self.dsl_authority.state();
+        super::member_runtime_is_host_owned(state, identity)
+            && !state.placed_carrier_binding_active_for_identity(
+                &mob_dsl::AgentIdentity::from_domain(identity),
+            )
+    }
+
     fn autonomous_stop_interrupt_incarnation(
         &self,
         entry: &RosterEntry,
@@ -17100,13 +17195,16 @@ impl MobActor {
             };
             let result = task.result_rx.try_recv();
             match result {
-                Ok(Ok(activity)) => {
+                Ok(Ok((activity, outcome))) => {
                     if let Some(task) = self.autonomous_stop_interrupts.remove(&agent_identity) {
+                        self.stop_member_outcomes
+                            .insert(agent_identity.clone(), outcome.clone());
                         self.autonomous_stop_interrupted.insert(
                             agent_identity,
                             AutonomousStopInterrupted {
                                 incarnation: task.incarnation,
                                 activity,
+                                outcome,
                             },
                         );
                     }
@@ -17183,13 +17281,15 @@ impl MobActor {
                 } else {
                     Ok(None)
                 };
+                // Hold the member's run starts and cancel exactly the run the
+                // hold found current (#1500); the outcome says which.
                 let result = match activity {
-                    Ok(activity) => converge_autonomous_stop_interrupt_result(
+                    Ok(activity) => converge_autonomous_stop_member_result(
                         provisioner
-                            .interrupt_member(&member_ref, expected_member.as_ref())
+                            .stop_member_runtime(&member_ref, expected_member.as_ref(), true)
                             .await,
                     )
-                    .map(|()| activity),
+                    .map(|outcome| (activity, outcome)),
                     Err(error) => Err(error),
                 };
                 let _ = result_tx.send(result);
@@ -17420,6 +17520,55 @@ impl MobActor {
         ))
     }
 
+    /// The current Stop's per-member report (#1500).
+    fn current_stop_report(&self) -> super::stop_report::MobStopReport {
+        super::stop_report::MobStopReport {
+            members: self.stop_member_outcomes.clone(),
+        }
+    }
+
+    /// Hold every member's run starts for a Stop (#1500), before any stop
+    /// interrupt: from here no member starts a new run from input admitted
+    /// before the stop. Each autonomous member is held again with its exact
+    /// cancel by its interrupt task, whose outcome then replaces this one.
+    async fn hold_all_member_run_starts_for_stop(&mut self) -> Result<(), MobError> {
+        let entries = {
+            let roster = self.roster.read().await;
+            roster.list().cloned().collect::<Vec<_>>()
+        };
+        let mut outcomes = BTreeMap::new();
+        for entry in &entries {
+            if self.placed_member_carrier_dormant(&entry.agent_identity) {
+                outcomes.insert(
+                    entry.agent_identity.clone(),
+                    super::stop_report::MemberStopOutcome {
+                        run: super::stop_report::MemberStopRun::NoRun,
+                        starts: super::stop_report::MemberRunStarts::NotBound,
+                    },
+                );
+                continue;
+            }
+            let incarnation = self.autonomous_stop_interrupt_incarnation(entry)?;
+            let outcome = converge_autonomous_stop_member_result(
+                self.provisioner
+                    .stop_member_runtime(
+                        &incarnation.member_ref,
+                        incarnation.expected_member.as_ref(),
+                        false,
+                    )
+                    .await,
+            )?;
+            outcomes.insert(entry.agent_identity.clone(), outcome);
+        }
+        // A retried Stop keeps the outcomes of interrupts that already
+        // completed for the same incarnation.
+        for (identity, completed) in &self.autonomous_stop_interrupted {
+            outcomes.insert(identity.clone(), completed.outcome.clone());
+        }
+        self.stop_member_outcomes = outcomes;
+        Ok(())
+    }
+
     async fn prepare_all_autonomous_member_stops(
         &mut self,
     ) -> Result<Vec<(AgentIdentity, AutonomousStopInterrupted)>, MobError> {
@@ -17548,12 +17697,12 @@ impl MobActor {
         };
         match cmd {
             MobCommand::Stop { reply_tx } if pending.kind == PendingAutonomousStopKind::Stop => {
-                pending.joined.push(reply_tx);
+                pending.joined.push(LifecycleReplyTx::Stop(reply_tx));
             }
             MobCommand::Shutdown { reply_tx }
                 if pending.kind == PendingAutonomousStopKind::Shutdown =>
             {
-                pending.joined.push(reply_tx);
+                pending.joined.push(LifecycleReplyTx::Unit(reply_tx));
             }
             cmd => {
                 if self.pending_autonomous_stop_controls.len()
@@ -17578,7 +17727,7 @@ impl MobActor {
         &mut self,
         kind: PendingAutonomousStopKind,
         prior: Result<(), MobError>,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
+        reply_tx: LifecycleReplyTx,
         targets: Option<Vec<(AgentIdentity, AutonomousStopInterrupted)>>,
     ) {
         self.pending_autonomous_stop = Some(PendingAutonomousStop {
@@ -17733,7 +17882,7 @@ impl MobActor {
             PendingAutonomousStopKind::Stop => {
                 let result = Box::pin(self.complete_stop_after_member_stops(result)).await;
                 if !self.respawn_topology_reply_withheld {
-                    send_lifecycle_result(reply_tx, joined, result);
+                    send_lifecycle_result(reply_tx, joined, result, &self.current_stop_report());
                 }
                 ActorLoopControl::ProceedBoundary
             }
@@ -17815,8 +17964,8 @@ impl MobActor {
     async fn complete_shutdown_after_member_stops(
         &mut self,
         mut result: Result<(), MobError>,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
-        joined: Vec<oneshot::Sender<Result<(), MobError>>>,
+        reply_tx: LifecycleReplyTx,
+        joined: Vec<LifecycleReplyTx>,
     ) -> ActorLoopControl {
         // Lifecycle notifications are actor-owned mechanical delivery, not
         // teardown retry anchors. A notification can be blocked in the session
@@ -17851,7 +18000,7 @@ impl MobActor {
 
         let succeeded = result.is_ok();
         if !self.respawn_topology_reply_withheld {
-            send_lifecycle_result(reply_tx, joined, result);
+            send_lifecycle_result(reply_tx, joined, result, &self.current_stop_report());
         }
         if !self.durable_uncertainty_fail_stop {
             if succeeded {
@@ -18783,6 +18932,58 @@ impl MobActor {
         self.apply_dsl_input(input(attempt), context)
     }
 
+    /// Realize MobMachine's `HoldMemberRunStarts` on a member provisioned by
+    /// a spawn that completed into a Stopped mob (#1500).
+    async fn hold_spawned_member_run_starts(&self, member_ref: &MemberRef) {
+        if let Err(error) = self
+            .provisioner
+            .stop_member_runtime(member_ref, None, false)
+            .await
+        {
+            tracing::warn!(
+                error = %error,
+                "holding a member spawned into a stopped mob failed"
+            );
+        }
+    }
+
+    /// Hold every member of a Stopped mob again (#1500): after a resume that
+    /// released the holds and then failed, so queued input still waits for a
+    /// resume that succeeds, and after a spawn completed into the Stopped mob.
+    async fn hold_member_run_starts_while_stopped(&mut self) {
+        if self.state() != MobState::Stopped {
+            return;
+        }
+        let entries = {
+            let roster = self.roster.read().await;
+            roster.list().cloned().collect::<Vec<_>>()
+        };
+        for entry in &entries {
+            if self.placed_member_carrier_dormant(&entry.agent_identity) {
+                continue;
+            }
+            let held = match self.autonomous_stop_interrupt_incarnation(entry) {
+                Ok(incarnation) => self
+                    .provisioner
+                    .stop_member_runtime(
+                        &incarnation.member_ref,
+                        incarnation.expected_member.as_ref(),
+                        false,
+                    )
+                    .await
+                    .map(|_| ()),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = held {
+                tracing::warn!(
+                    agent_identity = %entry.agent_identity,
+                    error = %error,
+                    "re-holding a member's run starts after a failed resume failed"
+                );
+            }
+        }
+    }
+
     fn finish_explicit_resume_attempt(
         &mut self,
         result: Result<(), MobError>,
@@ -18839,6 +19040,16 @@ impl MobActor {
         }
         // Re-enable checkpointers cancelled during stop.
         self.provisioner.rearm_all_checkpointers().await;
+        // Resume is what releases the run starts its Stop held (#1500). The
+        // member rebuild below needs each member's runtime to make progress,
+        // so the release comes first.
+        if let Err(error) = self.release_all_member_run_starts().await {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "resume could not release every member's run-start hold"
+            );
+        }
 
         let candidates = match self.explicit_resume_candidates().await {
             Ok(candidates) => candidates,
@@ -18849,6 +19060,7 @@ impl MobActor {
                     "settle_undispatched_resume_preparation",
                 );
                 let result = settled.and_then(|()| self.finish_explicit_resume_attempt(Err(error)));
+                self.hold_member_run_starts_while_stopped().await;
                 let _ = reply_tx.send(result);
                 return;
             }
@@ -18861,6 +19073,7 @@ impl MobActor {
                     "settle_undispatched_resume_preparation",
                 );
                 let result = settled.and_then(|()| self.finish_explicit_resume_attempt(Err(error)));
+                self.hold_member_run_starts_while_stopped().await;
                 let _ = reply_tx.send(result);
                 return;
             }
@@ -18928,6 +19141,7 @@ impl MobActor {
                 self.finish_explicit_resume_attempt(Err(MobError::LifecycleOperationPending {
                     intent: "explicit_resume superseded by lifecycle control".to_string(),
                 }));
+            self.hold_member_run_starts_while_stopped().await;
             let _ = reply_tx.send(result);
             return;
         }
@@ -18936,6 +19150,7 @@ impl MobActor {
             Err(error) => {
                 self.provisioner.cancel_all_checkpointers().await;
                 let result = self.finish_explicit_resume_attempt(Err(error));
+                self.hold_member_run_starts_while_stopped().await;
                 let _ = reply_tx.send(result);
                 return;
             }
@@ -18946,6 +19161,7 @@ impl MobActor {
             "resume_preparation_resolved_admission",
         ) {
             let result = self.finish_explicit_resume_attempt(Err(error));
+            self.hold_member_run_starts_while_stopped().await;
             let _ = reply_tx.send(result);
             return;
         }
@@ -18980,7 +19196,8 @@ impl MobActor {
                         progress,
                         reply_tx,
                     },
-                );
+                )
+                .await;
             }
         }
     }
@@ -18995,21 +19212,45 @@ impl MobActor {
             .await;
     }
 
-    fn spawn_resume_readiness_fanout(
+    async fn spawn_resume_readiness_fanout(
         &mut self,
         targets: Vec<MemberReadinessTarget>,
         progress: Option<super::state::LifecycleProgressSignal>,
         mut pending: PendingResumeLifecycle,
     ) {
-        if let Err(error) = self.apply_explicit_resume_input(
+        #[cfg(test)]
+        let fault = self.resume_readiness_fault.take();
+        #[cfg(test)]
+        let begun = if fault == Some(super::state::ResumeReadinessFaultForTest::BeginReadiness) {
+            Err(MobError::Internal(
+                "injected readiness begin failure".to_string(),
+            ))
+        } else {
+            self.apply_explicit_resume_input(
+                |attempt| mob_dsl::MobMachineInput::BeginExplicitResumeReadiness { attempt },
+                "begin_explicit_resume_readiness",
+            )
+        };
+        #[cfg(not(test))]
+        let begun = self.apply_explicit_resume_input(
             |attempt| mob_dsl::MobMachineInput::BeginExplicitResumeReadiness { attempt },
             "begin_explicit_resume_readiness",
-        ) {
+        );
+        if let Err(error) = begun {
             let result = self.finish_explicit_resume_attempt(Err(error));
+            self.hold_member_run_starts_while_stopped().await;
             let _ = pending.reply_tx.send(result);
             return;
         }
-        let ticket = match self.next_resume_lifecycle_ticket.next() {
+        let ticket = self.next_resume_lifecycle_ticket.next();
+        #[cfg(test)]
+        let ticket = match fault {
+            Some(super::state::ResumeReadinessFaultForTest::TicketExhausted) => Err(
+                MobError::Internal("injected resume ticket exhaustion".to_string()),
+            ),
+            _ => ticket,
+        };
+        let ticket = match ticket {
             Ok(ticket) => ticket,
             Err(error) => {
                 let settled = self.apply_explicit_resume_input(
@@ -19017,6 +19258,7 @@ impl MobActor {
                     "settle_undispatched_resume_readiness",
                 );
                 let result = settled.and_then(|()| self.finish_explicit_resume_attempt(Err(error)));
+                self.hold_member_run_starts_while_stopped().await;
                 let _ = pending.reply_tx.send(result);
                 return;
             }
@@ -19167,6 +19409,7 @@ impl MobActor {
             }
             self.provisioner.cancel_all_checkpointers().await;
             let result = self.finish_explicit_resume_attempt(Err(error));
+            self.hold_member_run_starts_while_stopped().await;
             let _ = reply_tx.send(result);
             return;
         }
@@ -19281,6 +19524,7 @@ impl MobActor {
             Ok(attempt) => attempt,
             Err(error) => {
                 let result = self.finish_explicit_resume_attempt(Err(error));
+                self.hold_member_run_starts_while_stopped().await;
                 let _ = reply_tx.send(result);
                 return;
             }
@@ -20633,6 +20877,13 @@ impl MobActor {
             true,
             "begin_placed_completion_lifecycle_quiesce",
         )?;
+        // Only a Stop holds members (#1500); the Stop handler realizes it
+        // before any member interrupt.
+        Self::require_member_run_start_effect(
+            &prepared.transition,
+            (intent == mob_dsl::PlacedCompletionLifecycleIntentKind::Stop).then_some(true),
+            "begin_placed_completion_lifecycle_quiesce",
+        )?;
         // The actor has already accepted the lifecycle command and processes no
         // later public command until this handler returns. Drain every mutating
         // live effect admitted before it, then prove/close the one active
@@ -20733,6 +20984,8 @@ impl MobActor {
             mob_dsl::MobLifecycleJournalKind::Resumed,
             "resume_input",
         )?;
+        // Resume releases the members its Stop held (#1500), realized below.
+        Self::require_member_run_start_effect(&prepared.transition, Some(false), "resume_input")?;
         // Store-first: a crash after this marker but before machine commit is
         // still Stopped and cannot originate work; retry reuses the latest End
         // marker and commits the prepared Resume.
@@ -20744,7 +20997,56 @@ impl MobActor {
                 "completion quiesce End is durable but Resume commit failed; actor is fail-stopping for cold recovery: {error}"
             )));
         }
+        // The mob runs again: release the run starts its Stop held (#1500),
+        // so input admitted before the stop runs now. The release at resume
+        // begin did the same; this covers members materialized by the resume.
+        // A member that cannot be released yet (a peer-only member not bound
+        // again yet) is logged per member; the committed resume stands.
+        if let Err(error) = self.release_all_member_run_starts().await {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "resume could not release every member's run-start hold"
+            );
+        }
         Ok(())
+    }
+
+    /// Release every member's run-start hold (#1500). Every member is
+    /// attempted; the first failure is reported, never swallowed, because a
+    /// member left held would keep its queued input waiting.
+    async fn release_all_member_run_starts(&mut self) -> Result<(), MobError> {
+        let entries = {
+            let roster = self.roster.read().await;
+            roster.list().cloned().collect::<Vec<_>>()
+        };
+        let mut first_error = None;
+        for entry in &entries {
+            let incarnation = match self.autonomous_stop_interrupt_incarnation(entry) {
+                Ok(incarnation) => incarnation,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            if let Err(error) = self
+                .provisioner
+                .release_member_run_starts(
+                    &incarnation.member_ref,
+                    incarnation.expected_member.as_ref(),
+                )
+                .await
+            {
+                tracing::warn!(
+                    agent_identity = %entry.agent_identity,
+                    error = %error,
+                    "releasing a member's run-start hold failed"
+                );
+                first_error.get_or_insert(error);
+            }
+        }
+        self.stop_member_outcomes.clear();
+        first_error.map_or(Ok(()), Err)
     }
 
     async fn commit_stopped_lifecycle_after_cleanup(&mut self) -> Result<(), MobError> {
@@ -24104,6 +24406,11 @@ impl MobActor {
                     self.settle_member_turn_admission(&agent_identity, ticket);
                 }
                 #[cfg(test)]
+                MobCommand::FailNextResumeReadinessForTest { fault, reply_tx } => {
+                    self.resume_readiness_fault = Some(fault);
+                    let _ = reply_tx.send(());
+                }
+                #[cfg(test)]
                 MobCommand::BeginStopQuiesceForTest { reply_tx } => {
                     let result = self
                         .begin_placed_completion_lifecycle_quiesce(
@@ -26157,11 +26464,6 @@ impl MobActor {
                         reply_tx.send(Ok(self.machine_projection_for_identity(&agent_identity)));
                 }
                 MobCommand::Stop { reply_tx } => {
-                    let stop_intent_preexisting = self
-                        .dsl_authority
-                        .state()
-                        .placed_completion_lifecycle_intent
-                        == Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Stop);
                     let result = if self.state() == MobState::Destroyed {
                         Err(self.invalid_transition_to(MobState::Stopped))
                     } else if let Err(error) = self
@@ -26188,32 +26490,26 @@ impl MobActor {
                                     {
                                         stop_result = Err(error);
                                     }
-                                    // Lifecycle delivery is a real fault, not
-                                    // best-effort: fold a failure into the stop
-                                    // result rather than swallowing it. Cleanup
-                                    // still proceeds so the mob can stop.
-                                    if stop_result.is_ok()
-                                        && !stop_intent_preexisting
-                                        && let Err(error) = self
-                                            .notify_orchestrator_lifecycle(format!(
-                                                "Mob '{}' is stopping.",
-                                                self.definition.id
-                                            ))
-                                            .await
-                                    {
-                                        tracing::warn!(
-                                            mob_id = %self.definition.id,
-                                            error = %error,
-                                            "stop encountered orchestrator lifecycle delivery error"
-                                        );
-                                        stop_result = Err(error);
-                                    }
+                                    // No "is stopping" notice to the orchestrator
+                                    // (#1500): its run starts are about to be
+                                    // held, so it could only read the notice
+                                    // after Resume, when it is stale. Resume
+                                    // tells it the pause happened instead.
                                     // Cancel checkpointer gates before stopping host loops so
                                     // in-flight saves that complete after the loop stops don't
                                     // race with subsequent external cleanup (e.g. DML deletes).
                                     if stop_result.is_ok() {
                                         self.provisioner.cancel_all_checkpointers().await;
                                     }
+                                }
+                                // Hold every member's run starts before any
+                                // interrupt (#1500): input admitted before the
+                                // stop runs only after Resume.
+                                if stop_result.is_ok()
+                                    && let Err(error) =
+                                        self.hold_all_member_run_starts_for_stop().await
+                                {
+                                    stop_result = Err(error);
                                 }
                                 if stop_result.is_ok() {
                                     match Box::pin(self.prepare_all_autonomous_member_stops())
@@ -26229,7 +26525,7 @@ impl MobActor {
                                             self.park_autonomous_stop(
                                                 PendingAutonomousStopKind::Stop,
                                                 Ok(()),
-                                                reply_tx,
+                                                LifecycleReplyTx::Stop(reply_tx),
                                                 Some(targets),
                                             );
                                             return ActorLoopControl::ProceedBoundary;
@@ -26240,7 +26536,7 @@ impl MobActor {
                                             self.park_autonomous_stop(
                                                 PendingAutonomousStopKind::Stop,
                                                 Ok(()),
-                                                reply_tx,
+                                                LifecycleReplyTx::Stop(reply_tx),
                                                 None,
                                             );
                                             return ActorLoopControl::ProceedBoundary;
@@ -26262,7 +26558,7 @@ impl MobActor {
                         }
                     };
                     if !self.respawn_topology_reply_withheld {
-                        let _ = reply_tx.send(result);
+                        let _ = reply_tx.send(result.map(|()| self.current_stop_report()));
                     }
                 }
                 MobCommand::ResumeLifecycle {
@@ -26787,7 +27083,7 @@ impl MobActor {
                                 self.park_autonomous_stop(
                                     PendingAutonomousStopKind::Shutdown,
                                     result,
-                                    reply_tx,
+                                    LifecycleReplyTx::Unit(reply_tx),
                                     Some(targets),
                                 );
                                 return ActorLoopControl::SkipBoundary;
@@ -26796,7 +27092,7 @@ impl MobActor {
                                 self.park_autonomous_stop(
                                     PendingAutonomousStopKind::Shutdown,
                                     result,
-                                    reply_tx,
+                                    LifecycleReplyTx::Unit(reply_tx),
                                     None,
                                 );
                                 return ActorLoopControl::SkipBoundary;
@@ -26810,7 +27106,7 @@ impl MobActor {
                         }
                         return Box::pin(self.complete_shutdown_after_member_stops(
                             result,
-                            reply_tx,
+                            LifecycleReplyTx::Unit(reply_tx),
                             Vec::new(),
                         ))
                         .await;
@@ -31844,13 +32140,24 @@ impl MobActor {
         }
 
         let mut pending_items = Vec::with_capacity(completions.len());
+        let mut hold_roster_run_starts = false;
         for (spawn_ticket, result) in completions {
             tracing::debug!(
                 spawn_ticket,
                 "MobActor::handle_spawn_provisioned_batch completing pending slot"
             );
-            let (pending, task_handle) =
+            let (pending, task_handle, hold_member_run_starts) =
                 self.complete_pending_spawn_slot(spawn_ticket, "spawn provisioned batch");
+            if hold_member_run_starts {
+                // A completion into a Stopped mob (#1500): hold the new
+                // member's runtime before anything finalizes it, and the
+                // roster after this batch.
+                hold_roster_run_starts = true;
+                if let Ok(receipt) = result.as_ref() {
+                    self.hold_spawned_member_run_starts(&receipt.member_ref)
+                        .await;
+                }
+            }
             let Some(pending) = pending else {
                 tracing::warn!(spawn_ticket, "received spawn completion for unknown ticket");
                 if let Some(handle) = task_handle {
@@ -32214,6 +32521,9 @@ impl MobActor {
             }
         }
 
+        if hold_roster_run_starts {
+            self.hold_member_run_starts_while_stopped().await;
+        }
         if let Err(error) = self.ensure_pending_spawn_alignment("spawn batch completion") {
             tracing::error!(
                 error = %error,
@@ -55489,6 +55799,23 @@ fn routed_effect_session_scope(effect: &mob_dsl::MobMachineEffect) -> Option<Ses
 /// disappeared before dispatch, its terminal objective already holds. Keep
 /// this convergence local to shutdown so ordinary force-cancel callers still
 /// observe the typed absence instead of receiving a false global success.
+/// [`converge_autonomous_stop_interrupt_result`] for a member stop that also
+/// reports its typed outcome: a member that vanished had no run to cancel.
+fn converge_autonomous_stop_member_result(
+    result: Result<super::stop_report::MemberStopOutcome, MobError>,
+) -> Result<super::stop_report::MemberStopOutcome, MobError> {
+    match result {
+        Err(MobError::SessionError(
+            meerkat_core::service::SessionError::NotFound { .. }
+            | meerkat_core::service::SessionError::NotRunning { .. },
+        )) => Ok(super::stop_report::MemberStopOutcome {
+            run: super::stop_report::MemberStopRun::NoRun,
+            starts: super::stop_report::MemberRunStarts::Held,
+        }),
+        result => result,
+    }
+}
+
 fn converge_autonomous_stop_interrupt_result(result: Result<(), MobError>) -> Result<(), MobError> {
     match result {
         Err(MobError::SessionError(

@@ -2215,11 +2215,16 @@ pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<JsValue, JsValu
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     // `WireMobLifecycleAction` is `Copy`; reuse it for the result envelope.
-    let destroy_report = mob_state
+    let reports = mob_state
         .mob_lifecycle_action(&id, action)
         .await
         .map_err(err_mob_destroy)?;
-    let destroy_report = destroy_report
+    let destroy_report = reports
+        .destroy_report
+        .map(|report| serde_json::to_value(&report).map_err(|e| err_str("serialize_error", e)))
+        .transpose()?;
+    let stop_report = reports
+        .stop_report
         .map(|report| serde_json::to_value(&report).map_err(|e| err_str("serialize_error", e)))
         .transpose()?;
     let result = meerkat_contracts::MobLifecycleResult {
@@ -2227,6 +2232,7 @@ pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<JsValue, JsValu
         action,
         ok: true,
         destroy_report,
+        stop_report,
     };
     let json = serde_json::to_string(&result).map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))

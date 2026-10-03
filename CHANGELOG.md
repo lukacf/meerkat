@@ -2003,6 +2003,10 @@ them.
     released, and a fact inside the window is recalled at once as a positive
     control. The phrase used to sit inside the seed, so the old "unknown
     before release" probe only passed while the model ignored history it had.
+  - S99's generated vault phrase never repeats a word back to back. The
+    recall is graded on the model's own transcript of its speech, where a
+    spoken "maple maple" is ambiguous; exact recall of all five words is
+    still required.
   - S105 asks its recall only after the typed correction's rows (its prompt
     and the assistant's reply) are acknowledged in the provider conversation;
     asked earlier, the recall raced the mirrored rows and was talked over.

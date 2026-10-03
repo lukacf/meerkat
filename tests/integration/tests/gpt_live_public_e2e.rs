@@ -2927,14 +2927,7 @@ async fn e2e_scenario_99_gpt_live_public_concurrent_context()
     // runs so provider guesses and fixture memorization cannot pass recall.
     let nonce = meerkat_core::SessionId::new();
     let digest = Sha256::digest(nonce.to_string().as_bytes());
-    let words = [
-        "amber", "badger", "copper", "falcon", "maple", "otter", "silver", "willow",
-    ];
-    let phrase = digest[..5]
-        .iter()
-        .map(|byte| words[usize::from(*byte) % words.len()])
-        .collect::<Vec<_>>()
-        .join(" ");
+    let phrase = s99_vault_phrase(&digest[..5]);
     let evidence = Journal::create(phrase)?;
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let result = timeout(
@@ -2951,6 +2944,32 @@ async fn e2e_scenario_99_gpt_live_public_concurrent_context()
     }
     result
         .map_err(|_| "S99 overall deadline expired; concurrent-context acceptance not qualified")?
+}
+
+/// The S99 vault phrase: one word per digest byte from an eight-word list,
+/// never the same word twice in a row. The recall is graded on the model's
+/// own transcript of its speech, where an adjacent repeat ("maple maple") is
+/// ambiguous when spoken and measures the transcriber, not meerkat's
+/// delivery (verdict tree fb94711f S99 run 8). A repeat moves to another
+/// word, chosen from the same byte, so the phrase stays deterministic.
+fn s99_vault_phrase(bytes: &[u8]) -> String {
+    const WORDS: [&str; 8] = [
+        "amber", "badger", "copper", "falcon", "maple", "otter", "silver", "willow",
+    ];
+    let mut previous: Option<usize> = None;
+    bytes
+        .iter()
+        .map(|byte| {
+            let byte = usize::from(*byte);
+            let mut index = byte % WORDS.len();
+            if previous == Some(index) {
+                index = (index + 1 + (byte / WORDS.len()) % (WORDS.len() - 1)) % WORDS.len();
+            }
+            previous = Some(index);
+            WORDS[index]
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
@@ -11405,6 +11424,25 @@ mod config_tests {
         assert_eq!((alignment.offset_ms, alignment.pairs), (500, 1));
         assert_eq!(super::sideband_disconnect_elapsed(&lines, 1), Some(5000));
         assert_eq!(super::sideband_disconnect_elapsed(&lines, 2), None);
+    }
+
+    /// The vault phrase has five words and never repeats a word back to
+    /// back, over every byte pair that would have (fb94711f S99 run 8).
+    #[test]
+    fn the_vault_phrase_never_repeats_a_word_back_to_back() {
+        for first in 0..=u8::MAX {
+            for second in (first % 8..=u8::MAX).step_by(8) {
+                let phrase = super::s99_vault_phrase(&[first, second, second, first, first]);
+                let words: Vec<&str> = phrase.split(' ').collect();
+                assert_eq!(words.len(), 5, "{phrase}");
+                assert!(words.windows(2).all(|pair| pair[0] != pair[1]), "{phrase}");
+            }
+        }
+        assert_eq!(
+            super::s99_vault_phrase(&[4, 6, 4, 4, 2]),
+            super::s99_vault_phrase(&[4, 6, 4, 4, 2]),
+            "the phrase is a function of the digest"
+        );
     }
 
     /// Speech that attributes an answer to the peer before the peer's reply

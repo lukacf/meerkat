@@ -926,6 +926,91 @@ struct RetainedDelegation {
     /// Source mob handle for post-close merging and owned-child retirement.
     mob_handle: Option<MobHandle>,
     source_identity: AgentIdentity,
+    /// The last authorized steer still waiting for this worker's next model
+    /// boundary. Each new steer's delivery awaits it, so one delegation's
+    /// continuations reach its worker in observation order without the
+    /// channel's observation loop waiting for any boundary. The worker's
+    /// terminal joins the chain ([`RetainedDelegation::join_steer_deliveries`]).
+    steer_delivery_chain: std::sync::Mutex<SteerDeliveryChain>,
+}
+
+/// The pending steer deliveries of one delegation, closed once the worker's
+/// terminal has joined them.
+#[derive(Default)]
+struct SteerDeliveryChain {
+    last: Option<JoinHandle<SteerDeliveryOutcome>>,
+    closed: bool,
+}
+
+impl SteerDeliveryChain {
+    /// Whether the worker's terminal has joined (and closed) the chain.
+    fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Run `delivery` after the previously chained one (FIFO). The caller
+    /// checks [`Self::is_closed`] under the same lock first.
+    fn push<F>(&mut self, delivery: F)
+    where
+        F: std::future::Future<Output = SteerDeliveryOutcome> + Send + 'static,
+    {
+        let previous = self.last.take();
+        self.last = Some(tokio::spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            delivery.await
+        }));
+    }
+
+    /// Close the chain and hand back its last delivery to join: every
+    /// earlier one finishes before it.
+    fn close(&mut self) -> Option<JoinHandle<SteerDeliveryOutcome>> {
+        self.closed = true;
+        self.last.take()
+    }
+}
+
+/// What became of one authorized steer. A delivery waits for the worker's
+/// next model boundary and the runtime reports `NotDelivered` once the
+/// worker's run ends, so every outcome is reached by the worker's terminal at
+/// the latest. A steer still pending when the channel closes keeps going: the
+/// worker outlives the channel (its result merges into the source member
+/// after close), so the continuation the user spoke still reaches it or
+/// misses its run, and is never torn mid-receipt by a cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SteerDeliveryOutcome {
+    /// The continuation reached the worker's model request at this boundary.
+    Delivered { boundary_sequence: u64 },
+    /// The worker's run ended (or its attachment was replaced) first; the
+    /// continuation stays an ordinary turn.
+    MissedRun,
+    /// The continuation had no deliverable context or the runtime faulted.
+    Failed,
+}
+
+impl RetainedDelegation {
+    /// Wait for every steer this delegation authorized. Called once the
+    /// worker's run is terminal, when each pending delivery resolves as
+    /// `MissedRun` at the latest. Returns the last delivery's outcome.
+    async fn join_steer_deliveries(&self) -> Option<SteerDeliveryOutcome> {
+        let last = {
+            let mut chain = self
+                .steer_delivery_chain
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // No steer is chained after the terminal: a continuation arriving
+            // now is an ordinary turn (see `deliver_continuation`).
+            chain.close()
+        }?;
+        match last.await {
+            Ok(outcome) => Some(outcome),
+            Err(error) => {
+                tracing::warn!(%error, operation_id = %self.operation.operation_id(), "steer delivery task ended without an outcome");
+                Some(SteerDeliveryOutcome::Failed)
+            }
+        }
+    }
 }
 
 /// One ownership-preserving handoff of an exact bounded executor result to
@@ -4173,6 +4258,17 @@ impl ExperimentalLiveDelegationCoordinator {
     /// Steer one continuation into the worker under generated steer
     /// authority, then reconcile it against its canonical commit when that
     /// lands (after an existing member's turn ends).
+    ///
+    /// The authorization runs here, in observation order. The delivery waits
+    /// for the worker's next model boundary, which a running tool call (a
+    /// shell `sleep`) holds for as long as the tool runs, so it runs in its
+    /// own task: awaiting it here stalled the channel's observation loop, and
+    /// every later delegation request queued behind one busy worker. The
+    /// task chains on the delegation's previous steer, so one delegation's
+    /// continuations still land in order. That order holds because the
+    /// channel's single observation loop calls this serially: authorization
+    /// happens before the chain lock, so concurrent callers could chain out
+    /// of authorization order.
     async fn deliver_continuation(
         &self,
         retained: Arc<RetainedDelegation>,
@@ -4199,6 +4295,11 @@ impl ExperimentalLiveDelegationCoordinator {
                 return;
             }
         };
+        // Bind the steer to the run it was authorized for: the delegation's
+        // run, active on the worker now. A delivery that runs later must not
+        // reach another run of a worker that outlives the delegation (an
+        // existing member's next queued turn), and the terminal's join must
+        // wait only on this run's boundaries.
         let worker = self
             .execution_policy
             .worker_identity(&retained.source_identity, retained.operation.operation_id());
@@ -4207,17 +4308,74 @@ impl ExperimentalLiveDelegationCoordinator {
             None => None,
         }
         .unwrap_or_else(|| retained.runtime_binding.session_id().clone());
+        let run_id = self
+            .runtime
+            .live_owner_current_run_id(&worker_session)
+            .await;
+        let coordinator = self.clone();
+        let task_retained = Arc::clone(&retained);
+        // Chain under the lock; the guard is released before any await.
+        let chained = {
+            let mut chain = retained
+                .steer_delivery_chain
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match run_id {
+                Some(run_id) if !chain.is_closed() => {
+                    let delivery = async move {
+                        coordinator
+                            .deliver_authorized_continuation(
+                                task_retained,
+                                authority,
+                                continuation,
+                                worker_session,
+                                run_id,
+                            )
+                            .await
+                    };
+                    chain.push(delivery);
+                    None
+                }
+                // No run to steer (the worker is not running), or the
+                // worker's terminal already joined its steers: the
+                // continuation stays an ordinary turn, recorded as not
+                // delivered.
+                _ => Some((authority, continuation)),
+            }
+        };
+        if let Some((authority, continuation)) = chained {
+            self.settle_authorized_continuation(
+                retained,
+                authority,
+                continuation,
+                SteerDeliveryOutcome::MissedRun,
+            )
+            .await;
+        }
+    }
+
+    /// Deliver one authorized steer at the worker's next model boundary,
+    /// record the outcome, and reconcile it at its canonical commit.
+    async fn deliver_authorized_continuation(
+        &self,
+        retained: Arc<RetainedDelegation>,
+        authority: meerkat_runtime::live_execution::LiveDelegationSteerAuthority,
+        continuation: PendingContinuation,
+        worker_session: SessionId,
+        run_id: meerkat_core::lifecycle::RunId,
+    ) -> SteerDeliveryOutcome {
         // Request-only context straight into the worker's running turn at its
         // next model boundary: no runtime input, no queue, so a continuation
         // that misses the run is NotDelivered and never becomes a turn. The
         // runtime records the contribution on that boundary's receipt.
-        let delivered = match meerkat_core::lifecycle::TurnRequestContext::new(
+        let outcome = match meerkat_core::lifecycle::TurnRequestContext::new(
             continuation_steer_text(&continuation.transcript),
         ) {
             Ok(context) => match self
                 .runtime
-                .deliver_live_owner_request_context(
+                .deliver_live_owner_request_context_into_run(
                     &worker_session,
+                    &run_id,
                     &format!("live-delegation-steer:{}", continuation.continuation_id),
                     vec![context],
                 )
@@ -4232,25 +4390,39 @@ impl ExperimentalLiveDelegationCoordinator {
                         boundary_sequence,
                         "utterance continuation delivered into its delegation's running turn"
                     );
-                    true
+                    SteerDeliveryOutcome::Delivered { boundary_sequence }
                 }
                 Ok(meerkat_runtime::live_execution::LiveOwnerContextDelivery::NotDelivered) => {
                     tracing::info!(
                         operation_id = %retained.operation.operation_id(),
                         "utterance continuation missed its worker's run; it stays an ordinary turn"
                     );
-                    false
+                    SteerDeliveryOutcome::MissedRun
                 }
                 Err(error) => {
                     tracing::warn!(%error, "utterance continuation delivery failed");
-                    false
+                    SteerDeliveryOutcome::Failed
                 }
             },
             Err(error) => {
                 tracing::warn!(%error, "utterance continuation has no deliverable context");
-                false
+                SteerDeliveryOutcome::Failed
             }
         };
+        self.settle_authorized_continuation(retained, authority, continuation, outcome)
+            .await
+    }
+
+    /// Record an authorized steer's delivery outcome on the machine and
+    /// reconcile it against its canonical commit.
+    async fn settle_authorized_continuation(
+        &self,
+        retained: Arc<RetainedDelegation>,
+        authority: meerkat_runtime::live_execution::LiveDelegationSteerAuthority,
+        continuation: PendingContinuation,
+        outcome: SteerDeliveryOutcome,
+    ) -> SteerDeliveryOutcome {
+        let delivered = matches!(outcome, SteerDeliveryOutcome::Delivered { .. });
         if let Err(error) = self
             .runtime
             .resolve_live_delegation_steer_delivery(
@@ -4263,6 +4435,7 @@ impl ExperimentalLiveDelegationCoordinator {
             tracing::warn!(%error, "steer delivery outcome was not recorded");
         }
         self.reconcile_steer_at_commit(retained, authority, continuation);
+        outcome
     }
 
     /// Reconcile one steer when its continuation's canonical row commits:
@@ -4710,6 +4883,7 @@ impl ExperimentalLiveDelegationCoordinator {
             append_lane,
             mob_handle: Some(mob_handle),
             source_identity,
+            steer_delivery_chain: std::sync::Mutex::new(SteerDeliveryChain::default()),
         });
         let Some(cancellation) = execution.cancellation_handle() else {
             let operation_id = retained.operation.operation_id().clone();
@@ -4781,16 +4955,29 @@ impl ExperimentalLiveDelegationCoordinator {
                     execution,
                 )
                 .await;
+                // The cleanup ended the worker's run; settle its steers.
+                let _ = task_retained.join_steer_deliveries().await;
                 task_coordinator
                     .remove_retained_delegation(&task_retained)
                     .await;
                 return;
             }
+            let worker_terminal = execution.await_terminal().await;
+            // The worker's run has ended, so every steer still waiting for
+            // one of its boundaries resolves now; settle them before the
+            // terminal is realized, never leaving a delivery behind it.
+            if let Some(outcome) = task_retained.join_steer_deliveries().await {
+                tracing::debug!(
+                    operation_id = %task_retained.operation.operation_id(),
+                    ?outcome,
+                    "steer deliveries settled at the worker's terminal"
+                );
+            }
             let terminal = realize_terminal(
                 task_coordinator.as_ref(),
                 &task_retained,
                 &service,
-                execution.await_terminal().await,
+                worker_terminal,
             )
             .await;
             tracing::debug!(
@@ -6097,6 +6284,70 @@ fn retain_terminal_result(
     reason = "focused invariant tests use explicit assertion messages for impossible setup and timeout failures"
 )]
 mod tests {
+
+    /// One delegation's steers land in authorization order: a later delivery
+    /// that is ready at once still waits for the earlier one to finish.
+    #[tokio::test]
+    async fn steer_deliveries_of_one_delegation_run_in_chain_order() {
+        let mut chain = SteerDeliveryChain::default();
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (release_first, first_gate) = oneshot::channel::<()>();
+        let first_order = Arc::clone(&order);
+        chain.push(async move {
+            let _ = first_gate.await;
+            first_order.lock().expect("order").push(1);
+            SteerDeliveryOutcome::Delivered {
+                boundary_sequence: 1,
+            }
+        });
+        let second_order = Arc::clone(&order);
+        chain.push(async move {
+            second_order.lock().expect("order").push(2);
+            SteerDeliveryOutcome::MissedRun
+        });
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            order.lock().expect("order").is_empty(),
+            "the second steer waits for the first"
+        );
+        let _ = release_first.send(());
+        let last = chain.close().expect("a chained delivery");
+        assert_eq!(
+            last.await.expect("delivery task"),
+            SteerDeliveryOutcome::MissedRun
+        );
+        assert_eq!(*order.lock().expect("order"), vec![1, 2]);
+    }
+
+    /// The worker's terminal joins the chain: the join waits for a steer still
+    /// pending on the run's boundary, and closes the chain so a continuation
+    /// arriving afterwards is not chained (it becomes an ordinary turn).
+    #[tokio::test]
+    async fn the_terminal_join_waits_for_a_pending_steer_and_closes_the_chain() {
+        let mut chain = SteerDeliveryChain::default();
+        let (release, gate) = oneshot::channel::<()>();
+        chain.push(async move {
+            let _ = gate.await;
+            SteerDeliveryOutcome::MissedRun
+        });
+        let last = chain.close().expect("a chained delivery");
+        assert!(chain.is_closed());
+        assert!(chain.close().is_none(), "nothing is left to join twice");
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !last.is_finished(),
+            "the join waits while the steer is pending"
+        );
+        let _ = release.send(());
+        assert_eq!(
+            last.await.expect("delivery task"),
+            SteerDeliveryOutcome::MissedRun
+        );
+    }
     use super::*;
     use meerkat_core::exact_operation::ExactOperationIdentity;
     use meerkat_core::interaction::InteractionId;
@@ -7974,6 +8225,7 @@ mod tests {
             append_lane: Arc::clone(&append_lane),
             mob_handle: None,
             source_identity: AgentIdentity::from("two-results-source"),
+            steer_delivery_chain: std::sync::Mutex::new(SteerDeliveryChain::default()),
         });
         let coordinator = ExperimentalLiveDelegationCoordinator::new(
             Arc::clone(&runtime),
@@ -8304,6 +8556,7 @@ mod tests {
             append_lane: Arc::new(Mutex::new(())),
             mob_handle: None,
             source_identity: AgentIdentity::from("exact-result-source"),
+            steer_delivery_chain: std::sync::Mutex::new(SteerDeliveryChain::default()),
         });
         let coordinator = ExperimentalLiveDelegationCoordinator::new(
             Arc::clone(&runtime),

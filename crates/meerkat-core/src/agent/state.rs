@@ -2068,6 +2068,7 @@ where
             // re-arms the stall window; the hard deadline is fixed at call
             // start. Timers route through the crate tokio alias, so this works
             // identically on wasm32 (tokio_with_wasm) and native.
+            let model_call_started = crate::time_compat::Instant::now();
             let wait_outcome = {
                 let probe_client = Arc::clone(&self.client);
                 let call_fut = request_attempt.stream_response(assistant_message_id);
@@ -2115,6 +2116,21 @@ where
                     }
                 }
             };
+            // One line per model call, attributable to its session: a slow
+            // delegated turn is otherwise indistinguishable from tool time.
+            tracing::debug!(
+                session_id = %self.session.id(),
+                turn = turn_count,
+                attempt,
+                elapsed_ms = u64::try_from(model_call_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                outcome = match &wait_outcome {
+                    LlmCallWait::Completed(Ok(_)) => "completed",
+                    LlmCallWait::Completed(Err(_)) => "error",
+                    LlmCallWait::HardTimeout { .. } => "hard_timeout",
+                    LlmCallWait::Stalled { .. } => "stalled",
+                },
+                "model call settled"
+            );
             let call_result = match wait_outcome {
                 LlmCallWait::Completed(result) => result,
                 LlmCallWait::HardTimeout { limit, source } => {
@@ -7580,6 +7596,7 @@ fn dispatch_tool_calls_boxed<T: AgentToolDispatcher + ?Sized + 'static>(
                     }
                     let effective_timeout = plan.effective_timeout();
                     tracing::debug!(
+                        session_id = ?tool_dispatch_context.origin_session_id(),
                         tool = %tc.name,
                         execution_mode = ?plan.mode(),
                         effective_deadline_ms = ?effective_timeout

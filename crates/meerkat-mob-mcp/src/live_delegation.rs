@@ -932,6 +932,29 @@ struct RetainedDelegation {
     /// channel's observation loop waiting for any boundary. The worker's
     /// terminal joins the chain ([`RetainedDelegation::join_steer_deliveries`]).
     steer_delivery_chain: std::sync::Mutex<SteerDeliveryChain>,
+    /// Cancelled when the result's channel closes. A release attempt that has
+    /// not dispatched yet (it may be waiting on the bootstrap barrier or the
+    /// delegation lane) observes it and returns
+    /// [`ResultReleaseOutcome::ClosedBeforeDispatch`], so the close never
+    /// waits on a result that can no longer be delivered.
+    close_signal: CancellationToken,
+}
+
+/// What one release attempt of a retained result came to. Every outcome is
+/// handled by the caller: none is a silent no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultReleaseOutcome {
+    /// The result reached its delivery resolution (delivered, ambiguous, or
+    /// interrupted by close) and its retained entry was settled.
+    Settled,
+    /// The channel closed before the result was dispatched: it never crossed
+    /// the provider boundary, and the closer merges it into the source.
+    ClosedBeforeDispatch,
+    /// Another attempt holds this result's delivery reservation and owns its
+    /// outcome.
+    ReservationHeld,
+    /// The result is not releasable yet, for the named reason.
+    NotReady(&'static str),
 }
 
 /// The pending steer deliveries of one delegation, closed once the worker's
@@ -4908,6 +4931,7 @@ impl ExperimentalLiveDelegationCoordinator {
             mob_handle: Some(mob_handle),
             source_identity,
             steer_delivery_chain: std::sync::Mutex::new(SteerDeliveryChain::default()),
+            close_signal: CancellationToken::new(),
         });
         let Some(cancellation) = execution.cancellation_handle() else {
             let operation_id = retained.operation.operation_id().clone();
@@ -5170,7 +5194,9 @@ impl ExperimentalLiveDelegationCoordinator {
                 .subscribe_session_machine_commits(&session_id)
                 .await;
             loop {
-                if task_retained.result.lock().await.terminal_ineligible {
+                if task_retained.result.lock().await.terminal_ineligible
+                    || task_retained.close_signal.is_cancelled()
+                {
                     break;
                 }
                 // Mark the current generation seen before the attempt, so a
@@ -5178,58 +5204,72 @@ impl ExperimentalLiveDelegationCoordinator {
                 if let Some(commits) = commits.as_mut() {
                     commits.borrow_and_update();
                 }
-                match coordinator
+                let error = match coordinator
                     .try_release_retained_result(&task_retained)
                     .await
                 {
-                    Ok(()) => break,
-                    Err(error) => {
-                        // The provider binding may be gone for good: a worker
-                        // whose terminal landed after the transport retired
-                        // but before the machine recorded the close. Once the
-                        // machine no longer holds the channel active, the
-                        // result takes the post-close path (merged into the
-                        // source member) instead of retrying forever against
-                        // a channel that will never come back.
-                        // An unreadable machine state is unknown, not
-                        // inactive: the attempt is retried, never merged.
-                        if coordinator
-                            .runtime
-                            .live_channel_activity_for_session(
-                                &session_id,
-                                task_retained.runtime_binding.channel_id(),
-                            )
-                            .await
-                            == Some(false)
-                        {
-                            coordinator
-                                .merge_result_after_channel_close(&task_retained)
-                                .await;
-                            break;
-                        }
-                        tracing::debug!(%error, %task_operation_id, "owned live result release refused; waiting for the session machine to commit");
-                        let advanced = match commits.as_mut() {
-                            Some(receiver) => receiver.changed().await.is_ok(),
-                            None => false,
-                        };
-                        if !advanced {
-                            // The runtime entry observed is gone (removed or
-                            // replaced). Follow its successor, if any. With no
-                            // entry the session holds no live channel, and no
-                            // commit will ever come, so the result takes the
-                            // post-close path.
-                            commits = coordinator
-                                .runtime
-                                .subscribe_session_machine_commits(&session_id)
-                                .await;
-                            if commits.is_none() {
-                                tracing::info!(%error, %task_operation_id, %session_id, "owned live result merges after close: the session has no runtime entry");
-                                coordinator
-                                    .merge_result_after_channel_close(&task_retained)
-                                    .await;
-                                break;
-                            }
-                        }
+                    Ok(ResultReleaseOutcome::Settled) => break,
+                    Ok(ResultReleaseOutcome::ClosedBeforeDispatch) => {
+                        // The closer (or the ineligible terminal) owns the
+                        // disposition: it merges the result into the source.
+                        tracing::debug!(%task_operation_id, "owned live result release ended: closed before dispatch");
+                        break;
+                    }
+                    Ok(ResultReleaseOutcome::ReservationHeld) => {
+                        tracing::info!(%task_operation_id, "owned live result release ended: another attempt holds the delivery reservation and owns its outcome");
+                        break;
+                    }
+                    Ok(ResultReleaseOutcome::NotReady(reason)) => reason.to_string(),
+                    Err(error) => error,
+                };
+                // The provider binding may be gone for good: a worker
+                // whose terminal landed after the transport retired
+                // but before the machine recorded the close. Once the
+                // machine no longer holds the channel active, the
+                // result takes the post-close path (merged into the
+                // source member) instead of retrying forever against
+                // a channel that will never come back.
+                // An unreadable machine state is unknown, not
+                // inactive: the attempt is retried, never merged.
+                if coordinator
+                    .runtime
+                    .live_channel_activity_for_session(
+                        &session_id,
+                        task_retained.runtime_binding.channel_id(),
+                    )
+                    .await
+                    == Some(false)
+                {
+                    coordinator
+                        .merge_result_after_channel_close(&task_retained)
+                        .await;
+                    break;
+                }
+                tracing::debug!(%error, %task_operation_id, "owned live result release refused; waiting for the session machine to commit");
+                let advanced = match commits.as_mut() {
+                    Some(receiver) => tokio::select! {
+                        biased;
+                        () = task_retained.close_signal.cancelled() => break,
+                        changed = receiver.changed() => changed.is_ok(),
+                    },
+                    None => false,
+                };
+                if !advanced {
+                    // The runtime entry observed is gone (removed or
+                    // replaced). Follow its successor, if any. With no
+                    // entry the session holds no live channel, and no
+                    // commit will ever come, so the result takes the
+                    // post-close path.
+                    commits = coordinator
+                        .runtime
+                        .subscribe_session_machine_commits(&session_id)
+                        .await;
+                    if commits.is_none() {
+                        tracing::info!(%error, %task_operation_id, %session_id, "owned live result merges after close: the session has no runtime entry");
+                        coordinator
+                            .merge_result_after_channel_close(&task_retained)
+                            .await;
+                        break;
                     }
                 }
             }
@@ -5410,16 +5450,23 @@ impl ExperimentalLiveDelegationCoordinator {
     async fn try_release_retained_result(
         &self,
         retained: &Arc<RetainedDelegation>,
-    ) -> Result<(), String> {
+    ) -> Result<ResultReleaseOutcome, String> {
         let (reservation, reconciliation, result_text, existing_release, existing_delivery) = {
             let mut result = retained.result.lock().await;
             let (Some(reconciliation), Some(result_text)) =
                 (result.reconciliation.clone(), result.result_text.clone())
             else {
-                return Ok(());
+                return Ok(ResultReleaseOutcome::NotReady(
+                    "the result has no reconciliation receipt or text yet",
+                ));
             };
+            if result.terminal_ineligible {
+                // Marked by the close (or an ineligible terminal), which owns
+                // the result's disposition.
+                return Ok(ResultReleaseOutcome::ClosedBeforeDispatch);
+            }
             let Some(reservation) = result.reserve_delivery() else {
-                return Ok(());
+                return Ok(ResultReleaseOutcome::ReservationHeld);
             };
             (
                 reservation,
@@ -5430,58 +5477,75 @@ impl ExperimentalLiveDelegationCoordinator {
             )
         };
 
-        let release = match existing_release {
-            Some(release) => release,
-            None => {
-                let release = match self
-                    .runtime
-                    .authorize_live_delegation_result_release(
-                        retained.runtime_binding.session_id(),
-                        retained.runtime_binding.runtime_id(),
-                        retained.runtime_binding.fence_token(),
-                        retained.runtime_binding.generation(),
-                        &retained.operation,
-                        &reconciliation,
-                    )
-                    .await
-                {
-                    Ok(release) => release,
-                    Err(error) => {
-                        retained.result.lock().await.release_delivery(reservation);
-                        return Err(error.to_string());
-                    }
-                };
-                retained.result.lock().await.release_authority = Some(release.clone());
-                release
-            }
+        // Everything before the dispatch can wait: on the bootstrap barrier
+        // inside the delivery authorization, and on the delegation lane. A
+        // close cancels that wait (`close_signal`): the result never crossed
+        // the provider boundary, so the closer merges it into the source and
+        // the close never waits on it.
+        let pre_dispatch = async {
+            let release = match existing_release {
+                Some(release) => release,
+                None => {
+                    let release = match self
+                        .runtime
+                        .authorize_live_delegation_result_release(
+                            retained.runtime_binding.session_id(),
+                            retained.runtime_binding.runtime_id(),
+                            retained.runtime_binding.fence_token(),
+                            retained.runtime_binding.generation(),
+                            &retained.operation,
+                            &reconciliation,
+                        )
+                        .await
+                    {
+                        Ok(release) => release,
+                        Err(error) => {
+                            retained.result.lock().await.release_delivery(reservation);
+                            return Err(error.to_string());
+                        }
+                    };
+                    retained.result.lock().await.release_authority = Some(release.clone());
+                    release
+                }
+            };
+            let delivery = match existing_delivery {
+                Some(delivery) => delivery,
+                None => {
+                    let delivery = self
+                        .runtime
+                        .authorize_live_delegation_result_delivery(&release, &result_text)
+                        .await;
+                    let delivery = match delivery {
+                        Ok(delivery) => delivery,
+                        Err(error) => {
+                            retained.result.lock().await.release_delivery(reservation);
+                            return Err(error.to_string());
+                        }
+                    };
+                    retained.result.lock().await.delivery_authority = Some(delivery.clone());
+                    delivery
+                }
+            };
+
+            // One delegation-lane append in flight per session: narration and
+            // results of every worker on this channel share this lane. The
+            // Completed sentence and the result it introduces go out under the
+            // same hold, so nothing from another worker interleaves.
+            let lane_guard = retained.append_lane.lock().await;
+            Ok::<_, String>((delivery, lane_guard))
         };
-        let delivery = match existing_delivery {
-            Some(delivery) => delivery,
-            None => {
-                let delivery = self
-                    .runtime
-                    .authorize_live_delegation_result_delivery(&release, &result_text)
-                    .await;
-                let delivery = match delivery {
-                    Ok(delivery) => delivery,
-                    Err(error) => {
-                        retained.result.lock().await.release_delivery(reservation);
-                        return Err(error.to_string());
-                    }
-                };
-                retained.result.lock().await.delivery_authority = Some(delivery.clone());
-                delivery
+        let (delivery, lane_guard) = tokio::select! {
+            biased;
+            () = retained.close_signal.cancelled() => {
+                retained.result.lock().await.release_delivery(reservation);
+                return Ok(ResultReleaseOutcome::ClosedBeforeDispatch);
             }
+            prepared = pre_dispatch => prepared?,
         };
         let ambiguity_authority = delivery.clone();
-        // One delegation-lane append in flight per session: narration and
-        // results of every worker on this channel share this lane. The
-        // Completed sentence and the result it introduces go out under the
-        // same hold, so nothing from another worker interleaves.
-        let lane_guard = retained.append_lane.lock().await;
         if retained.result.lock().await.terminal_ineligible {
             retained.result.lock().await.release_delivery(reservation);
-            return Ok(());
+            return Ok(ResultReleaseOutcome::ClosedBeforeDispatch);
         }
         self.narrate_on_held_lane(
             &NarrationSubject::from_retained(retained),
@@ -5513,7 +5577,7 @@ impl ExperimentalLiveDelegationCoordinator {
                 self.resolve_ambiguous_result_delivery(&ambiguity_authority)
                     .await;
                 self.remove_retained_delegation(retained).await;
-                return Ok(());
+                return Ok(ResultReleaseOutcome::Settled);
             }
             Ok(ExperimentalGptLiveResultDeliveryDispatch::AwaitingAcknowledgement(waiter)) => {
                 match waiter.resolve().await {
@@ -5523,7 +5587,7 @@ impl ExperimentalLiveDelegationCoordinator {
                         self.resolve_ambiguous_result_delivery(&ambiguity_authority)
                             .await;
                         self.remove_retained_delegation(retained).await;
-                        return Ok(());
+                        return Ok(ResultReleaseOutcome::Settled);
                     }
                 }
             }
@@ -5566,10 +5630,10 @@ impl ExperimentalLiveDelegationCoordinator {
             // merges into the source member as runtime work.
             retained.result.lock().await.dispatch_crossed = false;
             self.merge_result_after_channel_close(retained).await;
-            return Ok(());
+            return Ok(ResultReleaseOutcome::Settled);
         }
         self.remove_retained_delegation(retained).await;
-        Ok(())
+        Ok(ResultReleaseOutcome::Settled)
     }
 
     async fn resolve_ambiguous_result_delivery(
@@ -5770,6 +5834,12 @@ impl ExperimentalLiveDelegationCoordinator {
             // ever reached the provider. A result that crossed the boundary
             // (delivered or ambiguous) is never also merged into the source.
             retained.result.lock().await.terminal_ineligible = true;
+            // A release still waiting to dispatch (on the bootstrap barrier
+            // or the delegation lane) ends now as ClosedBeforeDispatch; only
+            // an append already in flight is awaited, and the provider close
+            // settles it as InterruptedByClose. The close never waits on a
+            // result that can no longer be delivered.
+            retained.close_signal.cancel();
             self.settle_result_delivery_task(retained.operation.operation_id())
                 .await;
             self.merge_result_after_channel_close(&retained).await;
@@ -7789,15 +7859,25 @@ mod tests {
     /// took it) is delivered as runtime work: it takes the post-close merge
     /// into the source member, and is never dropped.
     #[cfg(feature = "experimental-gpt-live-gate0-harness")]
-    #[tokio::test]
-    async fn a_result_interrupted_by_close_merges_into_the_source_member()
-    -> Result<(), Box<dyn std::error::Error>> {
+    /// A retired, projection-eligible owned-worker result retained on an
+    /// admitted live channel, ready for release (the exact-projection
+    /// fixtures).
+    struct HeldResultFixture {
+        coordinator: ExperimentalLiveDelegationCoordinator,
+        retained: Arc<RetainedDelegation>,
+        control: Arc<ExactProjectionControl>,
+        operation: ExactOperationIdentity<LiveUserTurnCorrelation>,
+        exact_result: String,
+        provider_binding: ProviderWebrtcBinding,
+    }
+
+    async fn held_result_fixture(channel: &str) -> HeldResultFixture {
         use meerkat_core::service::{
             CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionService,
         };
 
         let session_id = SessionId::new();
-        let channel_id = meerkat_core::LiveChannelId::new("live:held-result-close");
+        let channel_id = meerkat_core::LiveChannelId::new(channel);
 
         let session_service = Arc::new(meerkat_session::EphemeralSessionService::new(
             ExactProjectionTestAgentBuilder(session_id.clone()),
@@ -8064,6 +8144,7 @@ mod tests {
             mob_handle: None,
             source_identity: AgentIdentity::from("exact-result-source"),
             steer_delivery_chain: std::sync::Mutex::new(SteerDeliveryChain::default()),
+            close_signal: CancellationToken::new(),
         });
         let coordinator = ExperimentalLiveDelegationCoordinator::new(
             Arc::clone(&runtime),
@@ -8074,6 +8155,90 @@ mod tests {
             .lock()
             .await
             .insert(operation.operation_id().clone(), Arc::clone(&retained));
+        HeldResultFixture {
+            coordinator,
+            retained,
+            control,
+            operation,
+            exact_result,
+            provider_binding,
+        }
+    }
+
+    /// Close never waits on a result that has not dispatched (soak c43aa3db
+    /// S99 run 3): a release waiting before dispatch (here on the delegation
+    /// lane; in the soak inside the bootstrap-barrier wait of the delivery
+    /// authorization) ends as `ClosedBeforeDispatch` when the channel
+    /// closes, the close completes at once, and the result merges into the
+    /// source member with its exact text.
+    #[tokio::test]
+    async fn closing_the_channel_never_waits_on_an_undispatched_result() {
+        let HeldResultFixture {
+            coordinator,
+            retained,
+            operation,
+            exact_result,
+            provider_binding,
+            ..
+        } = held_result_fixture("live:held-result-undispatched").await;
+        // Another append holds the delegation lane, so the release waits
+        // before dispatch.
+        let lane = retained.append_lane.lock().await;
+        coordinator
+            .schedule_result_delivery(Arc::clone(&retained))
+            .await;
+        while !coordinator
+            .result_delivery_tasks
+            .lock()
+            .await
+            .contains_key(operation.operation_id())
+        {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            coordinator.cancel_channel_binding(&provider_binding),
+        )
+        .await
+        .expect("closing the channel never waits on a result that cannot dispatch");
+        drop(lane);
+
+        assert_eq!(
+            coordinator
+                .post_close_merges
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            vec![(operation.operation_id().to_string(), exact_result)],
+            "the undispatched result merges into the source member"
+        );
+        assert!(
+            !retained.result.lock().await.dispatch_crossed,
+            "the result never crossed the provider boundary"
+        );
+        assert!(
+            !coordinator
+                .retained
+                .lock()
+                .await
+                .contains_key(operation.operation_id()),
+            "the close retires the retained custody"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_result_interrupted_by_close_merges_into_the_source_member()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let HeldResultFixture {
+            coordinator,
+            retained,
+            control,
+            operation,
+            exact_result,
+            ..
+        } = held_result_fixture("live:held-result-close").await;
 
         control
             .interrupt_results_by_close
@@ -8595,6 +8760,7 @@ mod tests {
             mob_handle: None,
             source_identity: AgentIdentity::from("two-results-source"),
             steer_delivery_chain: std::sync::Mutex::new(SteerDeliveryChain::default()),
+            close_signal: CancellationToken::new(),
         });
         let coordinator = ExperimentalLiveDelegationCoordinator::new(
             Arc::clone(&runtime),
@@ -8926,6 +9092,7 @@ mod tests {
             mob_handle: None,
             source_identity: AgentIdentity::from("exact-result-source"),
             steer_delivery_chain: std::sync::Mutex::new(SteerDeliveryChain::default()),
+            close_signal: CancellationToken::new(),
         });
         let coordinator = ExperimentalLiveDelegationCoordinator::new(
             Arc::clone(&runtime),
